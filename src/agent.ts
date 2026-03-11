@@ -9,6 +9,24 @@ export interface ImplementationResult {
   error?: string;
 }
 
+export interface RevisionTask {
+  prNumber: number;
+  issueNumber: number;
+  feedbackSummary: string;
+}
+
+export interface RevisionResult {
+  success: boolean;
+  error?: string;
+}
+
+interface SpawnResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+}
+
 const DEFAULT_PROMPT = `You have been assigned to implement GitHub issue #{{issue_number}}.
 
 ## Issue: {{issue_title}}
@@ -32,21 +50,12 @@ function buildPrompt(issue: ActionableIssue, config: AgentConfig): string {
     .replace(/\{\{issue_body\}\}/g, issue.body);
 }
 
-export async function implementIssue(
-  issue: ActionableIssue,
+function spawnClaude(
+  prompt: string,
   config: AgentConfig,
   logger: Logger,
   abortSignal?: AbortSignal
-): Promise<ImplementationResult> {
-  const issueLogger = logger.child({ issue: issue.number, phase: "implement" });
-  issueLogger.info(`Starting implementation of #${issue.number}: ${issue.title}`);
-
-  let prompt = buildPrompt(issue, config);
-
-  if (config.skillPath) {
-    prompt = `First, read and follow the skill at ${config.skillPath}.\n\n${prompt}`;
-  }
-
+): Promise<SpawnResult> {
   const args = [
     "--print",
     prompt,
@@ -58,16 +67,15 @@ export async function implementIssue(
     args.push("--allowedTools", config.allowedTools.join(","));
   }
 
-  return new Promise<ImplementationResult>((resolve) => {
+  return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
     let stderr = "";
     let child: ChildProcess | null = null;
     let timedOut = false;
 
-    // Timeout
     const timeout = setTimeout(() => {
       timedOut = true;
-      issueLogger.warn(`Implementation timed out after ${config.maxDurationMs}ms`);
+      logger.warn(`Claude CLI timed out after ${config.maxDurationMs}ms`);
       if (child) {
         child.kill("SIGTERM");
         setTimeout(() => {
@@ -76,9 +84,8 @@ export async function implementIssue(
       }
     }, config.maxDurationMs);
 
-    // Wire external abort signal
     const onAbort = () => {
-      issueLogger.warn("Implementation aborted");
+      logger.warn("Claude CLI aborted");
       if (child) child.kill("SIGTERM");
     };
     if (abortSignal) {
@@ -99,45 +106,105 @@ export async function implementIssue(
       stderr += data.toString();
       const lines = data.toString().split("\n").filter(Boolean);
       for (const line of lines) {
-        issueLogger.debug(line);
+        logger.debug(line);
       }
     });
 
     child.on("error", (err) => {
       clearTimeout(timeout);
       if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
-      issueLogger.error(`Failed to spawn claude CLI: ${err.message}`);
-      resolve({ success: false, error: `spawn error: ${err.message}` });
+      resolve({ stdout, stderr: err.message, exitCode: -1, timedOut: false });
     });
 
     child.on("close", (code) => {
       clearTimeout(timeout);
       if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
       child = null;
-
-      if (timedOut) {
-        resolve({ success: false, error: "timed out" });
-        return;
-      }
-
-      if (code !== 0) {
-        const error = stderr.trim() || `exit code ${code}`;
-        issueLogger.error(`Claude CLI exited with code ${code}: ${error}`);
-        resolve({ success: false, error });
-        return;
-      }
-
-      // Extract PR URL from output
-      const prMatch = stdout.match(/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
-      const prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
-
-      if (prUrl) {
-        issueLogger.info(`PR created: ${prUrl}`);
-      } else {
-        issueLogger.info("Implementation completed (no PR URL found in output)");
-      }
-
-      resolve({ success: true, prUrl });
+      resolve({ stdout, stderr, exitCode: code, timedOut });
     });
   });
+}
+
+export async function implementIssue(
+  issue: ActionableIssue,
+  config: AgentConfig,
+  logger: Logger,
+  abortSignal?: AbortSignal
+): Promise<ImplementationResult> {
+  const issueLogger = logger.child({ issue: issue.number, phase: "implement" });
+  issueLogger.info(`Starting implementation of #${issue.number}: ${issue.title}`);
+
+  let prompt = buildPrompt(issue, config);
+
+  if (config.skillPath) {
+    prompt = `First, read and follow the skill at ${config.skillPath}.\n\n${prompt}`;
+  }
+
+  const result = await spawnClaude(prompt, config, issueLogger, abortSignal);
+
+  if (result.timedOut) {
+    return { success: false, error: "timed out" };
+  }
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr.trim() || `exit code ${result.exitCode}`;
+    issueLogger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
+    return { success: false, error };
+  }
+
+  const prMatch = result.stdout.match(/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
+  const prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
+
+  if (prUrl) {
+    issueLogger.info(`PR created: ${prUrl}`);
+  } else {
+    issueLogger.info("Implementation completed (no PR URL found in output)");
+  }
+
+  return { success: true, prUrl };
+}
+
+export async function reviseForPR(
+  task: RevisionTask,
+  config: AgentConfig,
+  logger: Logger,
+  abortSignal?: AbortSignal
+): Promise<RevisionResult> {
+  const revLogger = logger.child({ pr: task.prNumber, issue: task.issueNumber, phase: "revise" });
+  revLogger.info(`Starting revision of PR #${task.prNumber}`);
+
+  const prompt = `You are revising an existing pull request based on reviewer feedback.
+
+## PR #${task.prNumber} (for issue #${task.issueNumber})
+
+## Reviewer Feedback
+
+${task.feedbackSummary}
+
+## Instructions
+
+1. Check out the PR branch: \`gh pr checkout ${task.prNumber}\`
+2. Read the feedback carefully and understand what changes are needed.
+3. Make the requested changes.
+4. Commit with a clear message describing what you changed in response to the review.
+5. Push to the existing branch (\`git push\`).
+6. Do NOT create a new PR — push to the existing branch.
+7. After pushing, check out the base branch to leave the repo clean: \`git checkout ${config.featureBranch}\`
+
+Work autonomously. Do not ask questions — make reasonable decisions and proceed.`;
+
+  const result = await spawnClaude(prompt, config, revLogger, abortSignal);
+
+  if (result.timedOut) {
+    return { success: false, error: "timed out" };
+  }
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr.trim() || `exit code ${result.exitCode}`;
+    revLogger.error(`Revision failed with code ${result.exitCode}: ${error}`);
+    return { success: false, error };
+  }
+
+  revLogger.info(`Revision of PR #${task.prNumber} completed`);
+  return { success: true };
 }
