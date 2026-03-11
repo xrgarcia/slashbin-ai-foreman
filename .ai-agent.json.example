@@ -1,10 +1,28 @@
 {
-  "repoPath": ".",
-  "githubRepo": "owner/repo",
+  "repos": [
+    {
+      "name": "worker",
+      "repoPath": "../worker",
+      "githubRepo": "acme/worker",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md"
+    },
+    {
+      "name": "gateway",
+      "repoPath": "../ingest-gateway",
+      "githubRepo": "acme/ingest-gateway",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md"
+    },
+    {
+      "name": "console",
+      "repoPath": "../console",
+      "githubRepo": "acme/console",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md"
+    }
+  ],
   "triggerLabel": "approved",
-  "pollIntervalMs": 300000,
   "baseBranch": "develop",
   "featureBranch": "features",
+  "pollIntervalMs": 300000,
   "maxTurns": 30,
   "maxDurationMs": 1800000,
   "logFormat": "text",
