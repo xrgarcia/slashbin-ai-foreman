@@ -93,20 +93,36 @@ export async function runCycle(
     return null;
   }
 
-  // --- Priority 1: Check all repos for PRs needing revision ---
+  let totalProcessed = 0;
+  let lastResult: ImplementationResult | null = null;
+
+  // --- Priority 1: Drain all revisions across all repos ---
   for (const repoConfig of config.repos) {
-    const result = await tryRevision(repoConfig, logger, cycleNumber);
-    if (result) return result;
+    let result = await tryRevision(repoConfig, logger, cycleNumber);
+    while (result) {
+      totalProcessed++;
+      lastResult = result;
+      result = await tryRevision(repoConfig, logger, cycleNumber);
+    }
   }
 
-  // --- Priority 2: Check all repos for new issues to implement ---
+  // --- Priority 2: Drain all new issues across all repos ---
   for (const repoConfig of config.repos) {
-    const result = await tryImplementation(repoConfig, logger, cycleNumber);
-    if (result) return result;
+    let result = await tryImplementation(repoConfig, logger, cycleNumber);
+    while (result) {
+      totalProcessed++;
+      lastResult = result;
+      result = await tryImplementation(repoConfig, logger, cycleNumber);
+    }
   }
 
-  cycleLogger.info("No work across all repos");
-  return null;
+  if (totalProcessed === 0) {
+    cycleLogger.info("No work across all repos");
+  } else {
+    cycleLogger.info(`Cycle complete — processed ${totalProcessed} item(s)`);
+  }
+
+  return lastResult;
 }
 
 async function tryRevision(
