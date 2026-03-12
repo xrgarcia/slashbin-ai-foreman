@@ -70,7 +70,7 @@ function start() {
     cwd: __dirname,
     stdio: ["ignore", logFd, logFd],
     detached: !isWindows,
-    env: process.env,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CLAUDECODE")),
   });
 
   writeFileSync(PID_FILE, String(child.pid));
