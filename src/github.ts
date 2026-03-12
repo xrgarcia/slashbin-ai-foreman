@@ -93,6 +93,65 @@ export async function findActionableIssues(
   }
 }
 
+// --- Discover PRs needing revision (not created by daemon) ---
+
+export interface PendingRevisionIssue {
+  issueNumber: number;
+  prNumber: number;
+}
+
+export function findPendingRevisionPRs(
+  config: RepoConfig,
+  logger: Logger
+): PendingRevisionIssue[] {
+  const repo = config.githubRepo;
+  const results: PendingRevisionIssue[] = [];
+
+  try {
+    const json = gh([
+      "issue", "list",
+      "--repo", repo,
+      "--state", "open",
+      "--label", "pr pending actions",
+      "--json", "number,title",
+      "--limit", "50",
+    ], config.repoPath);
+
+    const issues: { number: number; title: string }[] = JSON.parse(json || "[]");
+
+    for (const issue of issues) {
+      // Find the linked open PR for this issue
+      try {
+        const prJson = gh([
+          "pr", "list",
+          "--repo", repo,
+          "--state", "open",
+          "--search", `${issue.number} in:body`,
+          "--json", "number",
+          "--limit", "1",
+        ], config.repoPath);
+
+        const prs: { number: number }[] = JSON.parse(prJson || "[]");
+        if (prs.length > 0) {
+          results.push({ issueNumber: issue.number, prNumber: prs[0].number });
+        } else {
+          logger.debug(`No open PR found for pending-actions issue #${issue.number}`);
+        }
+      } catch (err) {
+        logger.debug(`Failed to find PR for issue #${issue.number}`, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  } catch (err) {
+    logger.error("Failed to poll for pending revision issues", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return results;
+}
+
 // --- PR Review Polling ---
 
 export interface PRReviewFeedback {

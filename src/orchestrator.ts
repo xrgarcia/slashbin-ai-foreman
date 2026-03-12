@@ -1,9 +1,10 @@
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { findActionableIssues, commentOnPR } from "./github.js";
+import { findActionableIssues, findPendingRevisionPRs, commentOnPR } from "./github.js";
 import { implementIssue, reviseForPR, type ImplementationResult } from "./agent.js";
 import {
   trackPR,
+  getTrackedPRs,
   findNextRevision,
   markRevisionStarted,
   markRevisionComplete,
@@ -95,6 +96,18 @@ export async function runCycle(
 
   let totalProcessed = 0;
   let lastResult: ImplementationResult | null = null;
+
+  // --- Priority 0: Discover orphaned PRs needing revision ---
+  for (const repoConfig of config.repos) {
+    const pending = findPendingRevisionPRs(repoConfig, cycleLogger);
+    const prMap = getTrackedPRs(repoConfig.name);
+    for (const { issueNumber, prNumber } of pending) {
+      if (!prMap.has(prNumber)) {
+        trackPR(prNumber, issueNumber, repoConfig.githubRepo, repoConfig.name);
+        cycleLogger.info(`Discovered orphaned PR #${prNumber} for issue #${issueNumber} (${repoConfig.name})`);
+      }
+    }
+  }
 
   // --- Priority 1: Drain all revisions across all repos ---
   for (const repoConfig of config.repos) {
