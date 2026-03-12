@@ -52,6 +52,19 @@ export async function findActionableIssues(
       // Skip blocked issues
       if (labels.includes("blocked")) continue;
 
+      // Skip issues already progressed through lifecycle
+      const lifecycleLabels = [
+        "pr under review",
+        "pr approved",
+        "pr pending actions",
+        "ready for prod release",
+        "ready to close",
+      ];
+      if (lifecycleLabels.some((l) => labels.includes(l))) {
+        logger.debug(`Skipping #${issue.number} — has lifecycle label`);
+        continue;
+      }
+
       // Check for linked open PRs
       const hasLinkedPR = checkForLinkedPR(repo, issue.number, config.repoPath, logger);
       if (hasLinkedPR) {
