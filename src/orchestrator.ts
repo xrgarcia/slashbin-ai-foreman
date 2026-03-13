@@ -7,6 +7,7 @@ import {
   createPromotionPR,
 } from "./github.js";
 import { implementIssue, type ImplementationResult } from "./agent.js";
+import { reconcileRepo } from "./reconciler.js";
 import { loadRepoState, saveRepoState, setStatePath } from "./state.js";
 
 interface FailedIssue {
@@ -89,7 +90,34 @@ export async function runCycle(
   let totalProcessed = 0;
   let lastResult: ImplementationResult | null = null;
 
-  // Drain all approved issues across all repos
+  // --- Phase 0: Reconcile orphaned commits (features ahead of develop with no PR) ---
+  for (const repoConfig of config.repos) {
+    const reconLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "reconcile" });
+    try {
+      const result = reconcileRepo(repoConfig, reconLogger);
+      if (result.reconciled) {
+        reconLogger.info(
+          `Reconciled ${result.commitCount} orphaned commit(s) — PR created: ${result.prUrl}`,
+          { issues: result.issueNumbers },
+        );
+        // Mark reconciled issues as implemented so they aren't re-implemented
+        const { implemented, failed } = ensureLoaded(repoConfig.name);
+        for (const issueNum of result.issueNumbers) {
+          implemented.add(issueNum);
+          failed.delete(issueNum);
+        }
+        persist(repoConfig.name);
+        totalProcessed++;
+      }
+    } catch (err) {
+      reconLogger.error("Reconciliation failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Non-fatal — continue to implementation phase
+    }
+  }
+
+  // --- Phase 1: Drain all approved issues across all repos ---
   for (const repoConfig of config.repos) {
     let result = await tryImplementation(repoConfig, logger, cycleNumber);
     while (result) {

@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { ActionableIssue } from "./github.js";
+import { verifyPRExists } from "./github.js";
 
 export interface ImplementationResult {
   success: boolean;
@@ -166,7 +167,18 @@ export async function implementIssue(
   }
 
   if (prUrl) {
-    issueLogger.info(`PR created: ${prUrl}`);
+    // Verify the PR actually exists on GitHub
+    const verified = verifyPRExists(
+      config.githubRepo,
+      config.featureBranch,
+      config.baseBranch,
+      config.repoPath,
+    );
+    if (!verified) {
+      issueLogger.warn("PR URL found but verification failed — PR may not exist on GitHub");
+      return { success: false, error: "PR creation could not be verified" };
+    }
+    issueLogger.info(`PR created and verified: ${prUrl}`);
     return { success: true, prUrl };
   }
 
