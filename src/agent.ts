@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { ActionableIssue } from "./github.js";
@@ -142,12 +142,33 @@ export async function implementIssue(
   }
 
   const prMatch = result.stdout.match(/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
-  const prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
+  let prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
+
+  // Fallback: query GitHub directly if PR URL wasn't found in Claude's output.
+  // --print mode emits prose, not raw tool output, so the URL may not be extractable.
+  if (!prUrl) {
+    issueLogger.info("PR URL not found in output, querying GitHub as fallback");
+    const fallback = spawnSync("gh", [
+      "pr", "list",
+      "--repo", config.githubRepo,
+      "--head", config.featureBranch,
+      "--base", config.baseBranch,
+      "--state", "open",
+      "--limit", "1",
+      "--json", "url",
+      "--jq", ".[0].url",
+    ], { cwd: config.repoPath, encoding: "utf-8", timeout: 15_000 });
+    const fallbackUrl = fallback.stdout?.trim();
+    if (fallbackUrl?.startsWith("https://")) {
+      prUrl = fallbackUrl;
+      issueLogger.info(`PR found via GitHub fallback: ${prUrl}`);
+    }
+  }
 
   if (prUrl) {
     issueLogger.info(`PR created: ${prUrl}`);
   } else {
-    issueLogger.info("Implementation completed (no PR URL found in output)");
+    issueLogger.warn("Implementation completed but no PR was created or found");
   }
 
   return { success: true, prUrl };
