@@ -167,9 +167,11 @@ export async function implementIssue(
 
   if (prUrl) {
     issueLogger.info(`PR created: ${prUrl}`);
-  } else {
-    issueLogger.warn("Implementation completed but no PR was created or found");
+    return { success: true, prUrl };
   }
 
-  return { success: true, prUrl };
+  // No PR found — treat as failure so the issue gets retried.
+  // Claude may have exited cleanly without committing, pushing, or creating a PR.
+  issueLogger.error("Implementation completed (exit 0) but no PR was created or found — marking as failed");
+  return { success: false, error: "no PR created" };
 }
