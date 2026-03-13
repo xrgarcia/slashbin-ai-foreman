@@ -18,7 +18,7 @@ interface GhIssue {
   url: string;
 }
 
-function gh(args: string[], cwd: string): string {
+export function gh(args: string[], cwd: string): string {
   return execFileSync("gh", args, {
     cwd,
     encoding: "utf-8",
@@ -189,6 +189,31 @@ Automated by slashbin-ai-agent`;
     return match ? match[0] : null;
   } catch {
     return null;
+  }
+}
+
+// --- PR Verification ---
+
+export function verifyPRExists(
+  repo: string,
+  headBranch: string,
+  baseBranch: string,
+  cwd: string,
+): boolean {
+  try {
+    const json = gh([
+      "pr", "list",
+      "--repo", repo,
+      "--head", headBranch,
+      "--base", baseBranch,
+      "--state", "open",
+      "--json", "number",
+      "--limit", "1",
+    ], cwd);
+    const prs = JSON.parse(json || "[]");
+    return prs.length > 0;
+  } catch {
+    return false;
   }
 }
 
