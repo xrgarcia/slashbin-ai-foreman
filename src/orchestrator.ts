@@ -37,17 +37,17 @@ export function getAbortController(): AbortController | null {
   return abortController;
 }
 
+export interface CycleResult {
+  didWork: boolean;
+  lastImplementation: ImplementationResult | null;
+}
+
 export async function runCycle(
   config: AgentConfig,
   logger: Logger,
   cycleNumber: number
-): Promise<ImplementationResult | null> {
+): Promise<CycleResult> {
   const cycleLogger = logger.child({ cycle: cycleNumber, phase: "poll" });
-
-  if (implementing !== null) {
-    cycleLogger.info(`Busy implementing ${implementing}, skipping cycle`);
-    return null;
-  }
 
   let totalProcessed = 0;
   let lastResult: ImplementationResult | null = null;
@@ -92,7 +92,7 @@ export async function runCycle(
     cycleLogger.info(`Cycle complete — processed ${totalProcessed} item(s)`);
   }
 
-  return lastResult;
+  return { didWork: totalProcessed > 0, lastImplementation: lastResult };
 }
 
 async function tryBatchImplementation(
@@ -118,17 +118,10 @@ async function tryBatchImplementation(
     return null;
   }
 
-  // Gate: is there already an open feature PR? If so, skill already ran — wait for review.
-  const hasFeaturePR = verifyPRExists(
-    repoConfig.githubRepo,
-    repoConfig.featureBranch,
-    repoConfig.baseBranch,
-    repoConfig.repoPath,
-  );
-  if (hasFeaturePR) {
-    repoLogger.debug(`Open PR exists for ${repoConfig.featureBranch} → ${repoConfig.baseBranch} — skipping`);
-    return null;
-  }
+  // Note: we do NOT gate on an open feature PR. The features branch accumulates
+  // commits and an open PR auto-updates to include new commits. The skill handles
+  // idempotency — it skips issues already committed on features. If no open PR
+  // exists, the skill creates one. If one exists, new commits are added to it.
 
   // Invoke the skill — one Claude session implements all approved issues
   implementing = repoName;

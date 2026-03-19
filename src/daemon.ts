@@ -8,20 +8,8 @@ export interface DaemonHandle {
 
 export function startDaemon(config: AgentConfig, logger: Logger): DaemonHandle {
   let cycleNumber = 0;
-  let interval: ReturnType<typeof setInterval> | null = null;
   let stopping = false;
-
-  const run = async () => {
-    cycleNumber++;
-    try {
-      await runCycle(config, logger, cycleNumber);
-    } catch (err) {
-      logger.error("Unexpected error in cycle", {
-        cycle: cycleNumber,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
+  let sleepResolve: (() => void) | null = null;
 
   const repoNames = config.repos.map((r) => r.name).join(", ");
   logger.info("Daemon starting", {
@@ -40,11 +28,37 @@ export function startDaemon(config: AgentConfig, logger: Logger): DaemonHandle {
     });
   }
 
-  // Run first cycle immediately
-  run();
+  // Continuous loop: run cycles back-to-back when there's work, sleep only when idle
+  const loop = async () => {
+    while (!stopping) {
+      cycleNumber++;
+      try {
+        const { didWork } = await runCycle(config, logger, cycleNumber);
 
-  // Schedule subsequent cycles
-  interval = setInterval(run, config.pollIntervalMs);
+        // If cycle did work, immediately run the next cycle (no sleep)
+        if (didWork) continue;
+      } catch (err) {
+        logger.error("Unexpected error in cycle", {
+          cycle: cycleNumber,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // No work found — sleep until next poll interval (or until stopped)
+      if (!stopping) {
+        await new Promise<void>((resolve) => {
+          sleepResolve = resolve;
+          setTimeout(() => {
+            sleepResolve = null;
+            resolve();
+          }, config.pollIntervalMs);
+        });
+      }
+    }
+  };
+
+  // Start the loop (fire and forget — the loop manages its own lifecycle)
+  loop();
 
   const stop = async (): Promise<void> => {
     if (stopping) return;
@@ -52,9 +66,10 @@ export function startDaemon(config: AgentConfig, logger: Logger): DaemonHandle {
 
     logger.info("Shutting down...");
 
-    if (interval) {
-      clearInterval(interval);
-      interval = null;
+    // Wake from sleep if idle
+    if (sleepResolve) {
+      sleepResolve();
+      sleepResolve = null;
     }
 
     // If currently implementing, abort with timeout
