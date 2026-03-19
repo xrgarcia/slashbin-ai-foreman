@@ -103,8 +103,8 @@ async function main(): Promise<void> {
   if (once) {
     // Single cycle mode
     try {
-      const result = await runCycle(config, logger, 1);
-      process.exit(result?.success === false ? 1 : 0);
+      const { lastImplementation } = await runCycle(config, logger, 1);
+      process.exit(lastImplementation?.success === false ? 1 : 0);
     } catch (err) {
       logger.error("Cycle failed", {
         error: err instanceof Error ? err.message : String(err),
