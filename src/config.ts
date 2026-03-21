@@ -13,6 +13,7 @@ const repoEntrySchema = z.object({
   baseBranch: z.string().optional(),
   featureBranch: z.string().optional(),
   skillPath: z.string().optional(),
+  revisionSkillPath: z.string().optional(),
   prompt: z.string().optional(),
 });
 
@@ -24,6 +25,7 @@ const configSchema = z.object({
   baseBranch: z.string().default("develop"),
   featureBranch: z.string().default("features"),
   skillPath: z.string().optional(),
+  revisionSkillPath: z.string().optional(),
   prompt: z.string().optional(),
 
   // Multi-repo
@@ -53,6 +55,7 @@ export interface RepoConfig {
   baseBranch: string;
   featureBranch: string;
   skillPath?: string;
+  revisionSkillPath?: string;
   prompt?: string;
   maxTurns: number;
   maxDurationMs: number;
@@ -158,6 +161,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         baseBranch: entry.baseBranch ?? parsed.baseBranch,
         featureBranch: entry.featureBranch ?? parsed.featureBranch,
         skillPath: entry.skillPath,
+        revisionSkillPath: entry.revisionSkillPath,
         prompt: entry.prompt,
         ...globals,
       };
@@ -182,6 +186,7 @@ export function loadConfig(configPath?: string): AgentConfig {
       baseBranch: parsed.baseBranch,
       featureBranch: parsed.featureBranch,
       skillPath: parsed.skillPath,
+      revisionSkillPath: parsed.revisionSkillPath,
       prompt: parsed.prompt,
       ...globals,
     }];

@@ -113,7 +113,7 @@ async function main(): Promise<void> {
     }
   } else {
     // Daemon mode
-    const daemon = startDaemon(config, logger);
+    const daemon = startDaemon(config, logger, { configPath, repoFilter });
 
     const shutdown = async () => {
       await daemon.stop();

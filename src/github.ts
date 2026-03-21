@@ -21,8 +21,8 @@ export function gh(args: string[], cwd: string): string {
 
 /**
  * Gate check: are there any approved issues that haven't progressed through
- * the lifecycle? The skill handles full inventory — this just tells the
- * Foreman whether to trigger it.
+ * the lifecycle AND don't already have a PR? The skill handles full inventory
+ * — this just tells the Foreman whether to trigger it.
  */
 export function hasApprovedIssues(
   config: RepoConfig,
@@ -50,18 +50,85 @@ export function hasApprovedIssues(
       "ready to close",
     ];
 
+    // Collect actionable issues (approved, not blocked, no lifecycle label)
+    const actionable: number[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
       if (labels.includes("blocked")) continue;
       if (lifecycleLabels.some((l) => labels.includes(l))) continue;
-      // At least one actionable issue exists
-      logger.debug(`Found actionable issue #${issue.number}`);
-      return true;
+      actionable.push(issue.number);
     }
 
+    if (actionable.length === 0) return false;
+
+    // Loop detection: check if all actionable issues already have an open PR
+    // that references them. If so, skip — the Foreman already did the work.
+    const prJson = gh([
+      "pr", "list",
+      "--repo", repo,
+      "--state", "open",
+      "--base", config.baseBranch,
+      "--json", "number,title,body",
+      "--limit", "50",
+    ], config.repoPath);
+
+    const prs: { number: number; title: string; body: string }[] = JSON.parse(prJson || "[]");
+    const prText = prs.map((pr) => `${pr.title} ${pr.body}`).join(" ");
+
+    for (const issueNum of actionable) {
+      if (!prText.includes(`#${issueNum}`)) {
+        logger.debug(`Found actionable issue #${issueNum} with no linked PR`);
+        return true;
+      }
+    }
+
+    if (actionable.length > 0) {
+      logger.debug(`All ${actionable.length} actionable issue(s) already have open PRs — skipping`);
+    }
     return false;
   } catch (err) {
     logger.error("Failed to check for approved issues", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+// --- Revision Gate ---
+
+export interface PendingRevisionPR {
+  number: number;
+  url: string;
+  headRefName: string;
+}
+
+/**
+ * Gate check: are there any open PRs with "pr pending actions" label?
+ * These are PRs where the reviewer requested changes and the Foreman
+ * needs to revise the code.
+ */
+export function hasPendingRevisions(
+  config: RepoConfig,
+  logger: Logger
+): boolean {
+  try {
+    const json = gh([
+      "pr", "list",
+      "--repo", config.githubRepo,
+      "--state", "open",
+      "--label", "pr pending actions",
+      "--json", "number,url,headRefName",
+      "--limit", "100",
+    ], config.repoPath);
+
+    const prs: PendingRevisionPR[] = JSON.parse(json || "[]");
+    if (prs.length > 0) {
+      logger.debug(`Found ${prs.length} PR(s) pending revision`);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    logger.error("Failed to check for pending revisions", {
       error: err instanceof Error ? err.message : String(err),
     });
     return false;

@@ -2,11 +2,12 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import {
   hasApprovedIssues,
+  hasPendingRevisions,
   findReadyForProdIssues,
   findOpenPromotionPR,
   createPromotionPR,
 } from "./github.js";
-import { implementApprovedIssues, type ImplementationResult } from "./agent.js";
+import { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { reconcileRepo } from "./reconciler.js";
 import { verifyPRExists } from "./github.js";
 
@@ -17,10 +18,11 @@ let abortController: AbortController | null = null;
 
 // Per-repo consecutive batch failure count
 const failureCount = new Map<string, number>();
+const revisionFailureCount = new Map<string, number>();
 
 export interface OrchestratorState {
   implementing: string | null;
-  repos: Record<string, { failures: number }>;
+  repos: Record<string, { failures: number; revisionFailures: number }>;
 }
 
 export function getState(config: AgentConfig): OrchestratorState {
@@ -28,6 +30,7 @@ export function getState(config: AgentConfig): OrchestratorState {
   for (const repo of config.repos) {
     repos[repo.name] = {
       failures: failureCount.get(repo.name) ?? 0,
+      revisionFailures: revisionFailureCount.get(repo.name) ?? 0,
     };
   }
   return { implementing, repos };
@@ -71,7 +74,13 @@ export async function runCycle(
     }
   }
 
-  // --- Phase 1: Implement approved issues (one batch per repo) ---
+  // --- Phase 1: Revise PRs with pending review feedback ---
+  for (const repoConfig of config.repos) {
+    const revised = await tryRevision(repoConfig, logger, cycleNumber);
+    if (revised) totalProcessed++;
+  }
+
+  // --- Phase 2: Implement approved issues (one batch per repo) ---
   for (const repoConfig of config.repos) {
     const result = await tryBatchImplementation(repoConfig, logger, cycleNumber);
     if (result) {
@@ -80,7 +89,7 @@ export async function runCycle(
     }
   }
 
-  // --- Phase 2: Create promotion PRs for repos with ready-for-prod issues ---
+  // --- Phase 3: Create promotion PRs for repos with ready-for-prod issues ---
   for (const repoConfig of config.repos) {
     const promotionCount = tryPromotion(repoConfig, logger, cycleNumber);
     totalProcessed += promotionCount;
@@ -118,6 +127,14 @@ async function tryBatchImplementation(
     return null;
   }
 
+  // Gate: if there's a PR awaiting revision ("pr pending actions"), skip implementation.
+  // The revision phase (Phase 1) handles these — running implementation would just
+  // re-detect the same committed issues and loop without making progress.
+  if (hasPendingRevisions(repoConfig, repoLogger)) {
+    repoLogger.debug(`Skipping ${repoName} implementation — PR awaiting revision`);
+    return null;
+  }
+
   // Note: we do NOT gate on an open feature PR. The features branch accumulates
   // commits and an open PR auto-updates to include new commits. The skill handles
   // idempotency — it skips issues already committed on features. If no open PR
@@ -141,6 +158,52 @@ async function tryBatchImplementation(
     }
 
     return result;
+  } finally {
+    implementing = null;
+    abortController = null;
+  }
+}
+
+async function tryRevision(
+  repoConfig: RepoConfig,
+  logger: Logger,
+  cycleNumber: number
+): Promise<boolean> {
+  const repoName = repoConfig.name;
+  const revLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "revision" });
+
+  // Check if this repo has exceeded revision failure retries
+  const failures = revisionFailureCount.get(repoName) ?? 0;
+  if (failures >= MAX_RETRIES) {
+    revLogger.debug(`Skipping ${repoName} revision — ${failures} consecutive failures`);
+    return false;
+  }
+
+  // Gate: are there PRs with pending review feedback?
+  const hasWork = hasPendingRevisions(repoConfig, revLogger);
+  if (!hasWork) {
+    if (failures > 0) revisionFailureCount.set(repoName, 0);
+    return false;
+  }
+
+  // Invoke the revision skill
+  implementing = repoName;
+  abortController = new AbortController();
+  revLogger.info(`Triggering PR revision for ${repoName}`);
+
+  try {
+    const result = await revisePRFeedback(repoConfig, revLogger, abortController.signal);
+
+    if (result.success) {
+      revisionFailureCount.set(repoName, 0);
+      revLogger.info("PR revision succeeded");
+    } else {
+      const newCount = failures + 1;
+      revisionFailureCount.set(repoName, newCount);
+      revLogger.warn(`PR revision failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
+    }
+
+    return result.success;
   } finally {
     implementing = null;
     abortController = null;
