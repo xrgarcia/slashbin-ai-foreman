@@ -3,6 +3,11 @@ import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { verifyPRExists } from "./github.js";
 
+export interface RevisionResult {
+  success: boolean;
+  error?: string;
+}
+
 export interface ImplementationResult {
   success: boolean;
   prUrl?: string;
@@ -174,4 +179,47 @@ Work autonomously. Do not ask questions.`;
 
   logger.error("Batch implementation completed (exit 0) but no PR was created or found — marking as failed");
   return { success: false, error: "no PR created" };
+}
+
+/**
+ * Invoke Claude CLI to revise PRs that have review feedback ("pr pending actions").
+ * The revision skill reads review comments, implements fixes, and pushes.
+ */
+export async function revisePRFeedback(
+  config: RepoConfig,
+  logger: Logger,
+  abortSignal?: AbortSignal
+): Promise<RevisionResult> {
+  logger.info(`Starting PR revision for ${config.name}`);
+
+  let prompt: string;
+
+  if (config.revisionSkillPath) {
+    prompt = `Read and follow the skill at ${config.revisionSkillPath}.\n\nRevise all PRs with pending review feedback for this repository. The skill defines the full workflow — follow it exactly.`;
+  } else {
+    prompt = `Find all open PRs labeled "pr pending actions" in this repository.
+
+1. Query: gh pr list --label "pr pending actions" --state open --json number,title,url,headRefName
+2. For each PR, read all review comments: gh pr view <number> --comments
+3. Implement the requested changes on the PR's branch.
+4. Commit fixes, push to the PR branch.
+5. Remove "pr pending actions" label and add "pr under review": gh pr edit <number> --remove-label "pr pending actions" --add-label "pr under review"
+
+Work autonomously. Do not ask questions.`;
+  }
+
+  const result = await spawnClaude(prompt, config, logger, abortSignal);
+
+  if (result.timedOut) {
+    return { success: false, error: "timed out" };
+  }
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr.trim() || `exit code ${result.exitCode}`;
+    logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
+    return { success: false, error };
+  }
+
+  logger.info(`PR revision completed successfully for ${config.name}`);
+  return { success: true };
 }

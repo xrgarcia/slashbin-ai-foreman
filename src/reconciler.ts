@@ -25,44 +25,30 @@ function git(args: string[], cwd: string): string {
   }).trim();
 }
 
-function getOrphanedCommits(
+/**
+ * List remote branches matching the feature branch prefix.
+ * Feature branches are named `features-*`, not a single `features` ref.
+ */
+function getRemoteFeatureBranches(
   repoPath: string,
-  featureBranch: string,
-  baseBranch: string,
-  logger: Logger,
-): OrphanedCommit[] {
+  featureBranchPrefix: string,
+): string[] {
   try {
-    // Ensure local refs are up to date
-    git(["fetch", "origin", featureBranch, baseBranch], repoPath);
-  } catch (err) {
-    logger.warn("git fetch failed, skipping reconciliation", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-
-  try {
-    const log = git(
-      ["log", `origin/${baseBranch}..origin/${featureBranch}`, "--format=%H %s"],
+    const output = git(
+      ["branch", "-r", "--list", `origin/${featureBranchPrefix}*`],
       repoPath,
     );
-
-    if (!log) return [];
-
-    return log.split("\n").map((line) => {
-      const spaceIdx = line.indexOf(" ");
-      return {
-        hash: line.slice(0, spaceIdx),
-        message: line.slice(spaceIdx + 1),
-      };
-    });
-  } catch (err) {
-    logger.debug("Failed to get orphaned commits", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    if (!output) return [];
+    return output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.includes("->"))
+      .map((ref) => ref.replace(/^origin\//, ""));
+  } catch {
     return [];
   }
 }
+
 
 function extractIssueNumbers(commits: OrphanedCommit[]): number[] {
   const issueNums = new Set<number>();
@@ -100,6 +86,7 @@ function hasOpenPR(
 
 function createReconciliationPR(
   config: RepoConfig,
+  headBranch: string,
   issueNumbers: number[],
   commitCount: number,
   logger: Logger,
@@ -110,18 +97,18 @@ function createReconciliationPR(
 
   const title = issueNumbers.length === 1
     ? `feat: implement #${issueNumbers[0]}`
-    : `feat: implement ${commitCount} change(s) from features`;
+    : `feat: implement ${commitCount} change(s) from ${headBranch}`;
 
   const body = `## Feature PR (Reconciled)
 
 This PR was created automatically by Foreman's reconciliation phase.
-Orphaned commits were found on \`${config.featureBranch}\` with no open PR targeting \`${config.baseBranch}\`.
+Orphaned commits were found on \`${headBranch}\` with no open PR targeting \`${config.baseBranch}\`.
 
 ### Linked Issues
 ${issueList}
 
 ### Commits
-${commitCount} commit(s) on \`${config.featureBranch}\` ahead of \`${config.baseBranch}\`
+${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\`
 
 ---
 _Automated by slashbin-ai-agent (reconciler)_`;
@@ -131,7 +118,7 @@ _Automated by slashbin-ai-agent (reconciler)_`;
       "pr", "create",
       "--repo", config.githubRepo,
       "--base", config.baseBranch,
-      "--head", config.featureBranch,
+      "--head", headBranch,
       "--title", title,
       "--body", body,
     ], config.repoPath);
@@ -155,72 +142,74 @@ export function reconcileRepo(
     return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
 
-  // Check for orphaned commits
-  const orphans = getOrphanedCommits(
-    config.repoPath,
-    config.featureBranch,
-    config.baseBranch,
-    logger,
-  );
-
-  if (orphans.length === 0) {
+  // Fetch all refs first
+  try {
+    git(["fetch", "origin"], config.repoPath);
+  } catch (err) {
+    logger.warn("git fetch failed, skipping reconciliation", {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
 
-  logger.info(`Found ${orphans.length} commit(s) on ${config.featureBranch} ahead of ${config.baseBranch}`);
-
-  // Check if PR already exists
-  const existingPR = hasOpenPR(
-    config.githubRepo,
-    config.featureBranch,
-    config.baseBranch,
-    config.repoPath,
-  );
-
-  if (existingPR) {
-    logger.debug(`PR already exists: #${existingPR.number} — no reconciliation needed`);
-    return { reconciled: false, issueNumbers: [], commitCount: orphans.length };
+  // Discover feature branches matching the prefix pattern
+  const featureBranches = getRemoteFeatureBranches(config.repoPath, config.featureBranch);
+  if (featureBranches.length === 0) {
+    return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
 
-  // Extract issue numbers from commit messages
-  const issueNumbers = extractIssueNumbers(orphans);
-  logger.info(`Extracted issue numbers from commits: ${issueNumbers.join(", ") || "none"}`);
+  // Check each feature branch for orphaned commits (commits ahead of base with no PR)
+  for (const branch of featureBranches) {
+    let commits: OrphanedCommit[];
+    try {
+      const log = git(
+        ["log", `origin/${config.baseBranch}..origin/${branch}`, "--format=%H %s"],
+        config.repoPath,
+      );
+      if (!log) continue;
+      commits = log.split("\n").map((line) => {
+        const spaceIdx = line.indexOf(" ");
+        return { hash: line.slice(0, spaceIdx), message: line.slice(spaceIdx + 1) };
+      });
+    } catch {
+      continue;
+    }
 
-  // Create the missing PR
-  const prUrl = createReconciliationPR(config, issueNumbers, orphans.length, logger);
+    if (commits.length === 0) continue;
 
-  if (!prUrl) {
-    return {
-      reconciled: false,
-      issueNumbers,
-      commitCount: orphans.length,
-      error: "Failed to create reconciliation PR",
-    };
+    logger.info(`Found ${commits.length} commit(s) on ${branch} ahead of ${config.baseBranch}`);
+
+    // Check if PR already exists for this specific branch
+    const existingPR = hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    if (existingPR) {
+      logger.debug(`PR already exists for ${branch}: #${existingPR.number} — no reconciliation needed`);
+      continue;
+    }
+
+    // Extract issue numbers and create a PR for this branch
+    const issueNumbers = extractIssueNumbers(commits);
+    logger.info(`Extracted issue numbers from ${branch}: ${issueNumbers.join(", ") || "none"}`);
+
+    const prUrl = createReconciliationPR(config, branch, issueNumbers, commits.length, logger);
+    if (!prUrl) {
+      return {
+        reconciled: false, issueNumbers, commitCount: commits.length,
+        error: `Failed to create reconciliation PR for ${branch}`,
+      };
+    }
+
+    const verified = verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    if (!verified) {
+      logger.warn("PR URL returned but verification failed — PR may not exist");
+      return {
+        reconciled: false, issueNumbers, commitCount: commits.length,
+        error: "PR creation could not be verified",
+      };
+    }
+
+    logger.info(`Reconciliation PR created and verified: ${prUrl}`);
+    return { reconciled: true, prUrl, issueNumbers, commitCount: commits.length };
   }
 
-  // Verify PR was actually created
-  const verified = verifyPRExists(
-    config.githubRepo,
-    config.featureBranch,
-    config.baseBranch,
-    config.repoPath,
-  );
-
-  if (!verified) {
-    logger.warn("PR URL returned but verification failed — PR may not exist");
-    return {
-      reconciled: false,
-      issueNumbers,
-      commitCount: orphans.length,
-      error: "PR creation could not be verified",
-    };
-  }
-
-  logger.info(`Reconciliation PR created and verified: ${prUrl}`);
-  return {
-    reconciled: true,
-    prUrl,
-    issueNumbers,
-    commitCount: orphans.length,
-  };
+  return { reconciled: false, issueNumbers: [], commitCount: 0 };
 }
