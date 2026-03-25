@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { verifyPRExists } from "./github.js";
+import { verifyPRExists, checkPRHasChanges } from "./github.js";
 
 export interface RevisionResult {
   success: boolean;
@@ -105,7 +105,8 @@ export async function implementApprovedIssues(
   config: RepoConfig,
   logger: Logger,
   abortSignal?: AbortSignal,
-  priorFailureReason?: string | null
+  priorFailureReason?: string | null,
+  issueNumbers?: number[]
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
 
@@ -116,10 +117,12 @@ export async function implementApprovedIssues(
   } else if (config.prompt) {
     prompt = config.prompt;
   } else {
-    prompt = `Implement all open GitHub issues labeled "approved" in this repository.
+    const issueScope = issueNumbers && issueNumbers.length > 0
+      ? `Implement ONLY these issues: ${issueNumbers.map(n => `#${n}`).join(", ")}. Read each issue with \`gh issue view <number>\` to understand the requirements.`
+      : `Implement all open GitHub issues labeled "approved" in this repository.\n\n1. Query GitHub for approved issues: gh issue list --label approved --state open --json number,title,body,labels\n2. Prioritize by severity (S1 > security > S2+bug > ... > chore).`;
 
-1. Query GitHub for approved issues: gh issue list --label approved --state open --json number,title,body,labels
-2. Prioritize by severity (S1 > security > S2+bug > ... > chore).
+    prompt = `${issueScope}
+
 3. Implement each issue, commit with message: fix|feat|chore: <description> (#<issue-number>)
 4. Push to ${config.featureBranch} and create a PR targeting ${config.baseBranch}.
 
@@ -181,6 +184,12 @@ Work autonomously. Do not ask questions.`;
       logger.warn("PR URL found but verification failed — PR may not exist on GitHub");
       return { success: false, error: "PR creation could not be verified" };
     }
+    // Post-implementation self-check: verify the PR has actual file changes
+    const changedFiles = checkPRHasChanges(config.githubRepo, config.featureBranch, config.baseBranch, config.repoPath, logger);
+    if (changedFiles === 0) {
+      return { success: false, error: "PR exists but has no file changes" };
+    }
+
     logger.info(`PR created and verified: ${prUrl}`);
     return { success: true, prUrl };
   }

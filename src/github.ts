@@ -20,14 +20,16 @@ export function gh(args: string[], cwd: string): string {
 }
 
 /**
- * Gate check: are there any approved issues that haven't progressed through
- * the lifecycle AND don't already have a PR? The skill handles full inventory
- * — this just tells the Foreman whether to trigger it.
+ * Gate check: find approved issues that haven't progressed through
+ * the lifecycle AND don't already have a PR. Returns the uncovered
+ * issue numbers (capped to MAX_BATCH_SIZE), or empty array if none.
  */
-export function hasApprovedIssues(
+const MAX_BATCH_SIZE = 3;
+
+export function findActionableIssues(
   config: RepoConfig,
   logger: Logger
-): boolean {
+): number[] {
   const repo = config.githubRepo;
 
   try {
@@ -59,7 +61,7 @@ export function hasApprovedIssues(
       actionable.push(issue.number);
     }
 
-    if (actionable.length === 0) return false;
+    if (actionable.length === 0) return [];
 
     // Loop detection: check if all actionable issues already have a PR (open or merged)
     // that references them. If so, skip — the Foreman already did the work.
@@ -98,17 +100,22 @@ export function hasApprovedIssues(
     }
 
     if (uncovered.length > 0) {
-      logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${uncovered.map(n => `#${n}`).join(", ")}`);
-      return true;
+      const batch = uncovered.slice(0, MAX_BATCH_SIZE);
+      if (uncovered.length > MAX_BATCH_SIZE) {
+        logger.info(`Found ${uncovered.length} actionable issue(s), capping batch to ${MAX_BATCH_SIZE}: ${batch.map(n => `#${n}`).join(", ")} (${uncovered.length - MAX_BATCH_SIZE} deferred to next cycle)`);
+      } else {
+        logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${batch.map(n => `#${n}`).join(", ")}`);
+      }
+      return batch;
     }
 
     logger.info(`Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`);
-    return false;
+    return [];
   } catch (err) {
     logger.error("Failed to check for approved issues", {
       error: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    return [];
   }
 }
 
@@ -249,6 +256,47 @@ Automated by slashbin-ai-agent`;
     return match ? match[0] : null;
   } catch {
     return null;
+  }
+}
+
+// --- Post-Implementation Self-Check ---
+
+/**
+ * After a PR is created, verify it has actual file changes.
+ * Returns the count of changed files, or -1 if check fails.
+ * Logs the changed files for traceability (Second Way).
+ */
+export function checkPRHasChanges(
+  repo: string,
+  headBranch: string,
+  baseBranch: string,
+  cwd: string,
+  logger: Logger,
+): number {
+  try {
+    const json = gh([
+      "pr", "list",
+      "--repo", repo,
+      "--head", headBranch,
+      "--base", baseBranch,
+      "--state", "open",
+      "--json", "number,files",
+      "--limit", "1",
+    ], cwd);
+
+    const prs = JSON.parse(json || "[]");
+    if (prs.length === 0) return -1;
+
+    const files: { path: string }[] = prs[0].files || [];
+    if (files.length === 0) {
+      logger.warn("PR has no file changes — implementation may have failed silently");
+      return 0;
+    }
+
+    logger.info(`PR #${prs[0].number} modifies ${files.length} file(s): ${files.map((f: { path: string }) => f.path).join(", ")}`);
+    return files.length;
+  } catch {
+    return -1;
   }
 }
 

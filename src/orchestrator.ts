@@ -1,7 +1,7 @@
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import {
-  hasApprovedIssues,
+  findActionableIssues,
   hasPendingRevisions,
   findReadyForProdIssues,
   findOpenPromotionPR,
@@ -135,8 +135,8 @@ async function tryBatchImplementation(
   }
 
   // Gate: are there approved issues to implement?
-  const hasWork = hasApprovedIssues(repoConfig, repoLogger);
-  if (!hasWork) {
+  const actionableIssues = findActionableIssues(repoConfig, repoLogger);
+  if (actionableIssues.length === 0) {
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -162,7 +162,7 @@ async function tryBatchImplementation(
 
   try {
     const priorFailure = lastFailureReason.get(repoName) || null;
-    const result = await implementApprovedIssues(repoConfig, repoLogger, abortController.signal, priorFailure);
+    const result = await implementApprovedIssues(repoConfig, repoLogger, abortController.signal, priorFailure, actionableIssues);
 
     if (result.success) {
       failureCount.set(repoName, 0);
