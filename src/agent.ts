@@ -104,7 +104,8 @@ function spawnClaude(
 export async function implementApprovedIssues(
   config: RepoConfig,
   logger: Logger,
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  priorFailureReason?: string | null
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
 
@@ -125,6 +126,11 @@ export async function implementApprovedIssues(
 IMPORTANT: In PR descriptions, use "Related to #N" — NEVER use "Closes #N" or "Fixes #N". Issues are closed by the EM after production verification, not on dev merge.
 
 Work autonomously. Do not ask questions.`;
+  }
+
+  // Third Way: if a prior attempt failed, include context so Claude can adapt
+  if (priorFailureReason) {
+    prompt += `\n\nIMPORTANT — PRIOR ATTEMPT FAILED: "${priorFailureReason}". Ensure you: (1) commit changes to the ${config.featureBranch} branch, (2) push to origin, (3) create a PR targeting ${config.baseBranch} using \`gh pr create\`. If a PR already exists, push new commits to it.`;
   }
 
   const result = await spawnClaude(prompt, config, logger, abortSignal);
@@ -190,6 +196,12 @@ Work autonomously. Do not ask questions.`;
   if (existingPR) {
     logger.info("No new PR created, but existing feature PR found — treating as success (commits added to existing PR)");
     return { success: true };
+  }
+
+  // Log Claude's output tail so we can diagnose why no PR was created
+  const outputTail = result.stdout.slice(-500).trim();
+  if (outputTail) {
+    logger.warn("Claude output (last 500 chars):\n" + outputTail);
   }
 
   logger.error("Batch implementation completed (exit 0) but no PR was created or found — marking as failed");
