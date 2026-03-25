@@ -19,9 +19,13 @@ const MAX_RETRIES = 2;
 let implementing: string | null = null; // repo name, or null
 let abortController: AbortController | null = null;
 
-// Per-repo consecutive batch failure count
+// Per-repo consecutive batch failure count with cooldown
 const failureCount = new Map<string, number>();
+const failureHitMaxAt = new Map<string, number>(); // cycle when max was hit
 const revisionFailureCount = new Map<string, number>();
+
+const FAILURE_COOLDOWN_CYCLES = 3; // retry after this many idle cycles
+const lastFailureReason = new Map<string, string>(); // per-repo last failure for retry context
 
 export interface OrchestratorState {
   implementing: string | null;
@@ -118,8 +122,16 @@ async function tryBatchImplementation(
   // Check if this repo has exceeded batch failure retries
   const failures = failureCount.get(repoName) ?? 0;
   if (failures >= MAX_RETRIES) {
-    repoLogger.debug(`Skipping ${repoName} — ${failures} consecutive batch failures`);
-    return null;
+    const hitAt = failureHitMaxAt.get(repoName) ?? cycleNumber;
+    const cyclesSinceMax = cycleNumber - hitAt;
+    if (cyclesSinceMax < FAILURE_COOLDOWN_CYCLES) {
+      repoLogger.debug(`Skipping ${repoName} — ${failures} consecutive failures, cooldown ${cyclesSinceMax}/${FAILURE_COOLDOWN_CYCLES} cycles`);
+      return null;
+    }
+    // Cooldown expired — reset and retry
+    repoLogger.info(`Failure cooldown expired for ${repoName} — resetting and retrying`);
+    failureCount.set(repoName, 0);
+    failureHitMaxAt.delete(repoName);
   }
 
   // Gate: are there approved issues to implement?
@@ -149,14 +161,21 @@ async function tryBatchImplementation(
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
 
   try {
-    const result = await implementApprovedIssues(repoConfig, repoLogger, abortController.signal);
+    const priorFailure = lastFailureReason.get(repoName) || null;
+    const result = await implementApprovedIssues(repoConfig, repoLogger, abortController.signal, priorFailure);
 
     if (result.success) {
       failureCount.set(repoName, 0);
+      lastFailureReason.delete(repoName);
+      failureHitMaxAt.delete(repoName);
       repoLogger.info(`Batch implementation succeeded`, { prUrl: result.prUrl });
     } else {
-      const newCount = failures + 1;
+      const newCount = (failureCount.get(repoName) ?? 0) + 1;
       failureCount.set(repoName, newCount);
+      if (newCount >= MAX_RETRIES) {
+        failureHitMaxAt.set(repoName, cycleNumber);
+      }
+      lastFailureReason.set(repoName, result.error || "unknown");
       repoLogger.warn(`Batch implementation failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
     }
 
