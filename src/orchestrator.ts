@@ -47,9 +47,15 @@ export function getAbortController(): AbortController | null {
   return abortController;
 }
 
+export interface CycleEvent {
+  message: string;
+  level: "info" | "warn" | "error";
+}
+
 export interface CycleResult {
   didWork: boolean;
   lastImplementation: ImplementationResult | null;
+  events: CycleEvent[];
 }
 
 export async function runCycle(
@@ -61,6 +67,7 @@ export async function runCycle(
 
   let totalProcessed = 0;
   let lastResult: ImplementationResult | null = null;
+  const events: CycleEvent[] = [];
 
   // --- Phase 0: Reconcile orphaned commits (features ahead of develop with no PR) ---
   for (const repoConfig of config.repos) {
@@ -72,6 +79,7 @@ export async function runCycle(
           `Reconciled ${result.commitCount} orphaned commit(s) — PR created: ${result.prUrl}`,
           { issues: result.issueNumbers },
         );
+        events.push({ message: `Reconciled ${repoConfig.name} — PR: ${result.prUrl}`, level: "info" });
         totalProcessed++;
       }
     } catch (err) {
@@ -84,12 +92,15 @@ export async function runCycle(
   // --- Phase 1: Revise PRs with pending review feedback ---
   for (const repoConfig of config.repos) {
     const revised = await tryRevision(repoConfig, logger, cycleNumber);
-    if (revised) totalProcessed++;
+    if (revised) {
+      events.push({ message: `Revised PR on ${repoConfig.name} (review feedback)`, level: "info" });
+      totalProcessed++;
+    }
   }
 
   // --- Phase 2: Implement approved issues (one batch per repo) ---
   for (const repoConfig of config.repos) {
-    const result = await tryBatchImplementation(repoConfig, logger, cycleNumber);
+    const result = await tryBatchImplementation(repoConfig, logger, cycleNumber, events);
     if (result) {
       totalProcessed++;
       lastResult = result;
@@ -99,6 +110,9 @@ export async function runCycle(
   // --- Phase 3: Create promotion PRs for repos with ready-for-prod issues ---
   for (const repoConfig of config.repos) {
     const promotionCount = tryPromotion(repoConfig, logger, cycleNumber);
+    if (promotionCount > 0) {
+      events.push({ message: `Promotion PR created on ${repoConfig.name} (develop → main)`, level: "info" });
+    }
     totalProcessed += promotionCount;
   }
 
@@ -108,13 +122,14 @@ export async function runCycle(
     cycleLogger.info(`Cycle complete — processed ${totalProcessed} item(s)`);
   }
 
-  return { didWork: totalProcessed > 0, lastImplementation: lastResult };
+  return { didWork: totalProcessed > 0, lastImplementation: lastResult, events };
 }
 
 async function tryBatchImplementation(
   repoConfig: RepoConfig,
   logger: Logger,
-  cycleNumber: number
+  cycleNumber: number,
+  events?: CycleEvent[]
 ): Promise<ImplementationResult | null> {
   const repoName = repoConfig.name;
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
@@ -141,6 +156,9 @@ async function tryBatchImplementation(
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
   }
+
+  // Emit event: issues picked up
+  events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoName}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
 
   // Gate: if there's a PR awaiting revision ("pr pending actions"), skip implementation.
   // The revision phase (Phase 1) handles these — running implementation would just
@@ -169,6 +187,7 @@ async function tryBatchImplementation(
       lastFailureReason.delete(repoName);
       failureHitMaxAt.delete(repoName);
       repoLogger.info(`Batch implementation succeeded`, { prUrl: result.prUrl });
+      events?.push({ message: `Feature PR on ${repoName}: ${result.prUrl || "(commits added)"}`, level: "info" });
     } else {
       const newCount = (failureCount.get(repoName) ?? 0) + 1;
       failureCount.set(repoName, newCount);
@@ -177,6 +196,7 @@ async function tryBatchImplementation(
       }
       lastFailureReason.set(repoName, result.error || "unknown");
       repoLogger.warn(`Batch implementation failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
+      events?.push({ message: `Implementation failed on ${repoName}: ${result.error}`, level: "error" });
     }
 
     return result;

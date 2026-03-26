@@ -107,14 +107,12 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       activeConfig = reloadConfig();
 
       try {
-        const { didWork, lastImplementation } = await runCycle(activeConfig, logger, cycleNumber);
+        const { didWork, events } = await runCycle(activeConfig, logger, cycleNumber);
 
-        // Emit status to Discord bridge (only when something happened)
-        if (bridge && didWork) {
-          if (lastImplementation?.success) {
-            bridge.sendStatus(`**FOREMAN:** PR created — ${lastImplementation.prUrl || "(reconciled)"}`, "info");
-          } else if (lastImplementation && !lastImplementation.success) {
-            bridge.sendStatus(`**FOREMAN:** Implementation failed — ${lastImplementation.error}`, "error");
+        // Emit all cycle events to Discord bridge
+        if (bridge && events.length > 0) {
+          for (const event of events) {
+            bridge.sendStatus(`**FOREMAN:** ${event.message}`, event.level);
           }
         }
 
