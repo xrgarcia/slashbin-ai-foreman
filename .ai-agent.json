@@ -55,6 +55,13 @@
       "githubRepo": "xrgarcia/cmneb_portal",
       "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
       "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md"
+    },
+    {
+      "name": "cli",
+      "repoPath": "../slashbin-cli",
+      "githubRepo": "xrgarcia/slashbin-cli",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
+      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md"
     }
   ],
   "triggerLabel": "approved",
