@@ -375,6 +375,60 @@ Automated by slashbin-ai-agent`;
   }
 }
 
+/**
+ * Count files that differ between base and head branches.
+ * Returns -1 if the check fails. Used as a precondition for promotion PRs
+ * so the Foreman never opens a no-op PR when develop is ahead of main
+ * only by sync merge commits with no file diff.
+ */
+export function countBranchDiffFiles(
+  repo: string,
+  base: string,
+  head: string,
+  cwd: string,
+  logger: Logger,
+): number {
+  try {
+    const json = gh([
+      "api",
+      `repos/${repo}/compare/${base}...${head}`,
+      "--jq", "{ahead: .ahead_by, files: (.files // [] | length)}",
+    ], cwd);
+    const parsed = JSON.parse(json || "{}") as { ahead?: number; files?: number };
+    return typeof parsed.files === "number" ? parsed.files : -1;
+  } catch (err) {
+    logger.warn(`countBranchDiffFiles failed for ${repo} (${base}...${head}): ${err instanceof Error ? err.message : String(err)}`);
+    return -1;
+  }
+}
+
+/**
+ * Strip the `ready for prod release` label from issues once a promotion PR
+ * has been created for them. Prevents a race with the EM verification script:
+ * after a promotion PR merges, the Foreman's next poll would otherwise still
+ * see the label (EM strips it only at close time, 1-2 min later) and create
+ * a phantom follow-up promotion PR.
+ */
+export function stripReadyForProdLabel(
+  repo: string,
+  issueNumbers: number[],
+  cwd: string,
+  logger: Logger,
+): void {
+  for (const num of issueNumbers) {
+    try {
+      gh([
+        "issue", "edit", String(num),
+        "--repo", repo,
+        "--remove-label", "ready for prod release",
+      ], cwd);
+      logger.info(`Stripped "ready for prod release" from #${num} — promotion PR owns it now`);
+    } catch (err) {
+      logger.warn(`Failed to strip "ready for prod release" from #${num}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 export function createPromotionPR(
   repo: string,
   baseBranch: string,
