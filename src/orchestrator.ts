@@ -5,9 +5,11 @@ import {
   hasPendingRevisions,
   findPendingRevisions,
   transitionRevisionLabels,
+  transitionImplementationLabels,
   findReadyForProdIssues,
   findOpenPromotionPR,
   createPromotionPR,
+  updatePromotionPR,
   checkBranchDrift,
   findOpenSyncPR,
   createSyncPR,
@@ -16,6 +18,7 @@ import {
 import { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { reconcileRepo } from "./reconciler.js";
 import { verifyPRExists } from "./github.js";
+import { loadRepoState, saveRepoState } from "./state.js";
 
 const MAX_RETRIES = 2;
 
@@ -156,9 +159,21 @@ async function tryBatchImplementation(
   }
 
   // Gate: are there approved issues to implement?
-  const actionableIssues = findActionableIssues(repoConfig, repoLogger);
+  let actionableIssues = findActionableIssues(repoConfig, repoLogger);
   if (actionableIssues.length === 0) {
     // Reset failure count when there's no work (issues were resolved externally)
+    if (failures > 0) failureCount.set(repoName, 0);
+    return null;
+  }
+
+  // Filter out issues already tracked as implemented in persistent state.
+  // This prevents infinite loops where the Foreman re-implements the same
+  // issues because the PR check in findActionableIssues didn't match.
+  const repoState = loadRepoState(repoName);
+  const alreadyImplemented = new Set(repoState.implemented);
+  actionableIssues = actionableIssues.filter((n) => !alreadyImplemented.has(n));
+  if (actionableIssues.length === 0) {
+    repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
   }
@@ -192,7 +207,20 @@ async function tryBatchImplementation(
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
       failureHitMaxAt.delete(repoName);
-      repoLogger.info(`Batch implementation succeeded`, { prUrl: result.prUrl });
+
+      // Persist implemented issue numbers to prevent re-implementation loops
+      const updatedState = loadRepoState(repoName);
+      for (const issueNum of actionableIssues) {
+        if (!updatedState.implemented.includes(issueNum)) {
+          updatedState.implemented.push(issueNum);
+        }
+      }
+      saveRepoState(repoName, updatedState);
+
+      // Add "pr under review" label so EM knows PRs are ready for review
+      transitionImplementationLabels(repoConfig.githubRepo, actionableIssues, repoConfig.repoPath, repoLogger);
+
+      repoLogger.info(`Batch implementation succeeded — tracked ${actionableIssues.map(n => `#${n}`).join(", ")} in state`, { prUrl: result.prUrl });
       events?.push({ message: `Feature PR on ${repoConfig.githubRepo}: ${result.prUrl || "(commits added to existing PR)"}`, level: "info" });
     } else {
       const newCount = (failureCount.get(repoName) ?? 0) + 1;
@@ -291,10 +319,29 @@ function tryPromotion(
 
   promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
-  // Don't create a duplicate promotion PR
+  // Check if a promotion PR already exists
   const existingPR = findOpenPromotionPR(repoConfig.githubRepo, "main", repoConfig.repoPath);
   if (existingPR) {
-    promoLogger.warn(`Promotion PR already open — #${existingPR.number}: ${existingPR.url}`);
+    // Check if the PR body is missing any current ready-for-prod issues
+    const listedIssues = new Set(
+      (existingPR.body.match(/#(\d+)/g) || []).map((m) => parseInt(m.slice(1), 10))
+    );
+    const missingIssues = issues.filter((i) => !listedIssues.has(i.number));
+
+    if (missingIssues.length > 0) {
+      const updated = updatePromotionPR(
+        repoConfig.githubRepo, existingPR.number, issues, repoConfig.repoPath
+      );
+      if (updated) {
+        promoLogger.info(
+          `Updated promotion PR #${existingPR.number} — added ${missingIssues.length} issue(s): ${missingIssues.map((i) => `#${i.number}`).join(", ")}`
+        );
+      } else {
+        promoLogger.warn(`Failed to update promotion PR #${existingPR.number}`);
+      }
+    } else {
+      promoLogger.info(`Promotion PR #${existingPR.number} already includes all ${issues.length} issue(s)`);
+    }
     return null;
   }
 

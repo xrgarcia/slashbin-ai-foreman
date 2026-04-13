@@ -77,7 +77,7 @@ function spawnClaude(
       stderr += data.toString();
       const lines = data.toString().split("\n").filter(Boolean);
       for (const line of lines) {
-        logger.debug(line);
+        logger.warn(`[claude stderr] ${line}`);
       }
     });
 
@@ -143,7 +143,9 @@ Work autonomously. Do not ask questions.`;
   }
 
   if (result.exitCode !== 0) {
-    const error = result.stderr.trim() || `exit code ${result.exitCode}`;
+    const stderrMsg = result.stderr.trim();
+    const stdoutTail = result.stdout.trim().slice(-500);
+    const error = stderrMsg || stdoutTail || `exit code ${result.exitCode}`;
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
     return { success: false, error };
   }
@@ -264,7 +266,9 @@ Work autonomously. Do not ask questions.`;
   }
 
   if (result.exitCode !== 0) {
-    const error = result.stderr.trim() || `exit code ${result.exitCode}`;
+    const stderrMsg = result.stderr.trim();
+    const stdoutTail = result.stdout.trim().slice(-500);
+    const error = stderrMsg || stdoutTail || `exit code ${result.exitCode}`;
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
     return { success: false, error };
   }
