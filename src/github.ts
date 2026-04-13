@@ -252,6 +252,30 @@ export function transitionRevisionLabels(
   }
 }
 
+/**
+ * Transition issue labels after successful implementation:
+ * add "pr under review" so the EM knows a PR is ready for review.
+ */
+export function transitionImplementationLabels(
+  repo: string,
+  issueNumbers: number[],
+  cwd: string,
+  logger: Logger,
+): void {
+  for (const num of issueNumbers) {
+    try {
+      gh([
+        "issue", "edit", String(num),
+        "--repo", repo,
+        "--add-label", "pr under review",
+      ], cwd);
+      logger.info(`Added "pr under review" to issue #${num} after implementation`);
+    } catch (err) {
+      logger.warn(`Failed to add "pr under review" on #${num}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 // --- Promotion PR Creation ---
 
 export interface PromotionIssue {
@@ -286,6 +310,7 @@ export function findReadyForProdIssues(
 export interface OpenPromotionPR {
   number: number;
   url: string;
+  body: string;
 }
 
 export function findOpenPromotionPR(
@@ -300,7 +325,7 @@ export function findOpenPromotionPR(
       "--state", "open",
       "--base", baseBranch,
       "--head", "develop",
-      "--json", "number,url",
+      "--json", "number,url,body",
       "--limit", "1",
     ], cwd);
 
@@ -308,6 +333,45 @@ export function findOpenPromotionPR(
     return prs.length > 0 ? prs[0] : null;
   } catch {
     return null;
+  }
+}
+
+export function updatePromotionPR(
+  repo: string,
+  prNumber: number,
+  issues: PromotionIssue[],
+  cwd: string,
+): boolean {
+  const issueList = issues
+    .map((i) => `- #${i.number}: ${i.title}`)
+    .join("\n");
+
+  const title = issues.length === 1
+    ? `release: ${issues[0].title}`
+    : `release: promote ${issues.length} changes to production`;
+
+  const body = `## Production Promotion
+
+### Issues included
+${issueList}
+
+---
+Automated by slashbin-ai-agent`;
+
+  try {
+    gh([
+      "pr", "edit", String(prNumber),
+      "--repo", repo,
+      "--title", title,
+      "--body", body,
+    ], cwd);
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Log stderr if available from execFileSync
+    const stderr = (err as { stderr?: string }).stderr ?? "";
+    console.error(`updatePromotionPR failed: ${msg}${stderr ? ` | stderr: ${stderr}` : ""}`);
+    return false;
   }
 }
 

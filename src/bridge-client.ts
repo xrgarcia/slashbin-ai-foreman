@@ -122,10 +122,16 @@ export class BridgeClient {
   }
 
   sendStatus(text: string, level: "info" | "warn" | "error" = "info"): void {
-    if (!this.connected || !this.ws) return;
+    if (!this.connected || !this.ws) {
+      this.logger.warn("Cannot send status — bridge not connected", { text: text.slice(0, 100) });
+      return;
+    }
     try {
       this.ws.send(JSON.stringify({ type: "status", text, level }));
-    } catch { /* ignore — will reconnect */ }
+      this.logger.debug("Status sent to Discord bridge", { text: text.slice(0, 100), level });
+    } catch (err) {
+      this.logger.warn("Failed to send status to Discord bridge", { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   sendResponse(channelId: string, text: string, replyTo?: string): void {

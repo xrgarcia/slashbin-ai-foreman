@@ -67,7 +67,7 @@
   "triggerLabel": "approved",
   "baseBranch": "develop",
   "featureBranch": "features",
-  "pollIntervalMs": 300000,
+  "pollIntervalMs": 120000,
   "maxTurns": 50,
   "maxDurationMs": 1800000,
   "logFormat": "text",
