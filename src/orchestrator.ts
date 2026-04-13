@@ -13,6 +13,8 @@ import {
   checkBranchDrift,
   findOpenSyncPR,
   createSyncPR,
+  countBranchDiffFiles,
+  stripReadyForProdLabel,
   type PendingRevisionInfo,
 } from "./github.js";
 import { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";
@@ -367,6 +369,24 @@ function tryPromotion(
     }
   }
 
+  // Guard: confirm develop actually has file changes main is missing before
+  // creating the promotion PR. develop can be "ahead" of main by 1+ commits
+  // purely from sync merge commits (main → develop) that carry no file diff.
+  // In that case an issue still labeled `ready for prod release` (because the
+  // EM verification script hasn't stripped it yet) would trigger a phantom
+  // no-op promotion PR — the ping-pong bug.
+  const diffFiles = countBranchDiffFiles(repoConfig.githubRepo, "main", "develop", repoConfig.repoPath, promoLogger);
+  if (diffFiles === 0) {
+    promoLogger.info(
+      `Skipping promotion — develop has no file changes vs main despite ${issues.length} ready-for-prod issue(s). ` +
+      `Likely a race with EM verification stripping labels after a recent promotion merged. Labels will clear on next verify cycle.`
+    );
+    return null;
+  }
+  if (diffFiles < 0) {
+    promoLogger.warn("Could not compute branch diff — proceeding with promotion PR creation (best effort)");
+  }
+
   const prUrl = createPromotionPR(
     repoConfig.githubRepo,
     "main",
@@ -378,6 +398,16 @@ function tryPromotion(
     promoLogger.info(`Promotion PR created: ${prUrl}`, {
       issues: issues.map((i) => i.number),
     });
+    // Strip the `ready for prod release` label now that the promotion PR
+    // owns these issues. Prevents the Foreman from treating the same issues
+    // as still-to-promote on its next cycle (which races with the EM
+    // verification script that normally strips labels at close time).
+    stripReadyForProdLabel(
+      repoConfig.githubRepo,
+      issues.map((i) => i.number),
+      repoConfig.repoPath,
+      promoLogger,
+    );
     return "promoted";
   } else {
     promoLogger.warn("Failed to create promotion PR");
