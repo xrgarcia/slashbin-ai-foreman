@@ -33,6 +33,8 @@ export class BridgeClient {
   private commandHandler: CommandHandler | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
+  private pendingMessages: { text: string; level: "info" | "warn" | "error" }[] = [];
+  private static readonly MAX_PENDING = 50;
 
   constructor(config: BridgeConfig, logger: Logger) {
     this.config = config;
@@ -69,6 +71,7 @@ export class BridgeClient {
       }));
 
       this.logger.info("Connected to Discord bridge");
+      this.flushPending();
     });
 
     this.ws.on("message", (raw) => {
@@ -123,14 +126,33 @@ export class BridgeClient {
 
   sendStatus(text: string, level: "info" | "warn" | "error" = "info"): void {
     if (!this.connected || !this.ws) {
-      this.logger.warn("Cannot send status — bridge not connected", { text: text.slice(0, 100) });
+      if (this.pendingMessages.length < BridgeClient.MAX_PENDING) {
+        this.pendingMessages.push({ text, level });
+        this.logger.warn("Bridge not connected — queued status for delivery on reconnect", { text: text.slice(0, 100), pending: this.pendingMessages.length });
+      } else {
+        this.logger.warn("Bridge not connected and queue full — dropping status", { text: text.slice(0, 100) });
+      }
       return;
     }
     try {
       this.ws.send(JSON.stringify({ type: "status", text, level }));
       this.logger.debug("Status sent to Discord bridge", { text: text.slice(0, 100), level });
     } catch (err) {
-      this.logger.warn("Failed to send status to Discord bridge", { error: err instanceof Error ? err.message : String(err) });
+      this.connected = false;
+      if (this.pendingMessages.length < BridgeClient.MAX_PENDING) {
+        this.pendingMessages.push({ text, level });
+      }
+      this.logger.warn("Send failed — message requeued, forcing reconnect", { error: err instanceof Error ? err.message : String(err) });
+      try { this.ws?.close(); } catch { /* triggers reconnect via close handler */ }
+    }
+  }
+
+  private flushPending(): void {
+    if (this.pendingMessages.length === 0) return;
+    const queued = this.pendingMessages.splice(0);
+    this.logger.info(`Flushing ${queued.length} queued status message(s)`);
+    for (const msg of queued) {
+      this.sendStatus(msg.text, msg.level);
     }
   }
 
