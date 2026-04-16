@@ -34,6 +34,10 @@ function spawnClaude(
     "--dangerously-skip-permissions",
   ];
 
+  if (config.model) {
+    args.push("--model", config.model);
+  }
+
   if (config.allowedTools.length > 0) {
     args.push("--allowedTools", config.allowedTools.join(","));
   }
