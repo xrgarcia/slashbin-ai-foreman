@@ -15,6 +15,7 @@ const repoEntrySchema = z.object({
   skillPath: z.string().optional(),
   revisionSkillPath: z.string().optional(),
   prompt: z.string().optional(),
+  model: z.string().optional(),
 });
 
 const configSchema = z.object({
@@ -57,6 +58,7 @@ export interface RepoConfig {
   skillPath?: string;
   revisionSkillPath?: string;
   prompt?: string;
+  model?: string;
   maxTurns: number;
   maxDurationMs: number;
   allowedTools: string[];
@@ -163,6 +165,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         skillPath: entry.skillPath,
         revisionSkillPath: entry.revisionSkillPath,
         prompt: entry.prompt,
+        model: entry.model,
         ...globals,
       };
     });
