@@ -82,7 +82,14 @@ npm run dev        # Watch mode (auto-reload on source changes)
 
 ## Configuration
 
-Create `.ai-agent.json` in your repo root, or use environment variables. Env vars take precedence.
+Copy `.ai-agent.example.json` to `.ai-agent.json` and customize. Env vars override file values.
+
+```bash
+cp .ai-agent.example.json .ai-agent.json
+# Edit .ai-agent.json with your repo paths, GitHub org, and any per-repo overrides
+```
+
+`.ai-agent.json` is gitignored — your runtime config stays local and never enters version control. Use the example file as a template; commit changes to it (not to your real `.ai-agent.json`) when you want to update the documented shape.
 
 ### Single-repo mode
 

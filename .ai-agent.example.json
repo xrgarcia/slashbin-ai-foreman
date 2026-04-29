@@ -1,0 +1,36 @@
+{
+  "repos": [
+    {
+      "name": "console",
+      "repoPath": "../my-console",
+      "githubRepo": "your-org/my-console",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
+      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md"
+    },
+    {
+      "name": "api",
+      "repoPath": "../my-api",
+      "githubRepo": "your-org/my-api",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
+      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "name": "big-feature-repo",
+      "repoPath": "../my-monolith",
+      "githubRepo": "your-org/my-monolith",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
+      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md",
+      "maxTurns": 60,
+      "maxDurationMs": 3000000
+    }
+  ],
+  "triggerLabel": "approved",
+  "baseBranch": "develop",
+  "featureBranch": "features",
+  "pollIntervalMs": 300000,
+  "maxTurns": 30,
+  "maxDurationMs": 1800000,
+  "logFormat": "text",
+  "logLevel": "info"
+}
