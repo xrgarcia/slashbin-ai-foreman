@@ -107,7 +107,7 @@ For a single repo, set fields at the root level:
 
 ### Multi-repo mode
 
-Use the `repos` array to manage multiple repos in a single daemon. Each repo can override `skillPath`, `revisionSkillPath`, `baseBranch`, and `featureBranch`:
+Use the `repos` array to manage multiple repos in a single daemon. Each repo entry may override any of: `triggerLabel`, `baseBranch`, `featureBranch`, `skillPath`, `revisionSkillPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs`. Anything not specified on the entry falls back to the top-level value (or its default).
 
 ```json
 {
@@ -125,13 +125,33 @@ Use the `repos` array to manage multiple repos in a single daemon. Each repo can
       "githubRepo": "org/my-api",
       "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
       "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md"
+    },
+    {
+      "name": "big-feature-repo",
+      "repoPath": "../my-monolith",
+      "githubRepo": "org/my-monolith",
+      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
+      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md",
+      "maxTurns": 60,
+      "maxDurationMs": 3000000
     }
   ],
   "triggerLabel": "approved",
   "pollIntervalMs": 120000,
-  "maxTurns": 50
+  "maxTurns": 30,
+  "maxDurationMs": 1800000
 }
 ```
+
+In the example above, `console` and `api` get the top-level `maxTurns: 30` and `maxDurationMs: 1800000`. `big-feature-repo` overrides both to allow longer Claude sessions for larger features in that repo only.
+
+**Resolution order** for `maxTurns` / `maxDurationMs` (and `triggerLabel`, `baseBranch`, `featureBranch`):
+
+1. Per-repo entry value (most specific)
+2. Top-level `.ai-agent.json` value (or `AI_AGENT_*` env var, which overrides the file value)
+3. Built-in default
+
+Existing configs that don't specify per-repo overrides continue to behave identically — the top-level values still apply to every repo. Per-repo overrides are additive and optional.
 
 ### Discord notifications (optional)
 

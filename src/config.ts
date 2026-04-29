@@ -16,6 +16,8 @@ const repoEntrySchema = z.object({
   revisionSkillPath: z.string().optional(),
   prompt: z.string().optional(),
   model: z.string().optional(),
+  maxTurns: z.coerce.number().int().positive().optional(),
+  maxDurationMs: z.coerce.number().int().positive().optional(),
 });
 
 const configSchema = z.object({
@@ -133,10 +135,9 @@ export function loadConfig(configPath?: string): AgentConfig {
 
   const parsed = configSchema.parse(cleaned);
 
-  // Global settings shared by all repos
+  // Global settings shared by all repos (used as fallback when a per-repo entry
+  // doesn't specify its own value)
   const globals = {
-    maxTurns: parsed.maxTurns,
-    maxDurationMs: parsed.maxDurationMs,
     allowedTools: [...parsed.allowedTools],
   };
 
@@ -166,6 +167,8 @@ export function loadConfig(configPath?: string): AgentConfig {
         revisionSkillPath: entry.revisionSkillPath,
         prompt: entry.prompt,
         model: entry.model,
+        maxTurns: entry.maxTurns ?? parsed.maxTurns,
+        maxDurationMs: entry.maxDurationMs ?? parsed.maxDurationMs,
         ...globals,
       };
     });
@@ -191,6 +194,8 @@ export function loadConfig(configPath?: string): AgentConfig {
       skillPath: parsed.skillPath,
       revisionSkillPath: parsed.revisionSkillPath,
       prompt: parsed.prompt,
+      maxTurns: parsed.maxTurns,
+      maxDurationMs: parsed.maxDurationMs,
       ...globals,
     }];
   }
