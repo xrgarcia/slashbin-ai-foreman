@@ -30,7 +30,7 @@ import {
   type PendingRevisionInfo,
 } from "./github.js";
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, type ImplementationResult, type RevisionResult } from "./agent.js";
-import { reconcileRepo, checkLocalBranchDivergence } from "./reconciler.js";
+import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch } from "./reconciler.js";
 import {
   verifyPRExists,
   findStuckMergedIssues,
@@ -960,6 +960,22 @@ async function tryBatchImplementation(
   // commits and an open PR auto-updates to include new commits. The skill handles
   // idempotency — it skips issues already committed on features. If no open PR
   // exists, the skill creates one. If one exists, new commits are added to it.
+
+  // Bring `features` up to `develop` before the session builds on it.
+  //
+  // The implement skill's Phase 0 only pulls `features` — nothing has ever
+  // merged the base branch in. Dependabot lands on the base, so without this
+  // the session builds and boots a tree missing every bump since the last
+  // feature merge. Fast-forward only: an in-flight feature PR (features ahead)
+  // is the normal state and is left alone, and a true divergence is reported
+  // rather than resolved. See fastForwardFeatureBranch for the full rationale.
+  const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger);
+  if (ffOutcome === "diverged") {
+    repoLogger.warn(
+      `Skipping ${repoName} implementation — ${repoConfig.featureBranch} diverged from ${repoConfig.baseBranch}; implementing on it would build an unknown tree`,
+    );
+    return null;
+  }
 
   // Invoke the skill — one Claude session implements all approved issues
   const runAbort = new AbortController();
