@@ -129,6 +129,94 @@ export function checkLocalBranchDivergence(
   }
 }
 
+export type FastForwardOutcome =
+  | "advanced"       // features moved up to base; origin updated
+  | "already-current"
+  | "work-in-flight" // features carries commits base lacks — nothing to do, not a fault
+  | "diverged"       // both sides have unique commits — a human decides
+  | "unknown";       // a git call failed; caller must not infer anything
+
+/**
+ * Fast-forward the shared feature branch onto its base, and push.
+ *
+ * Why this exists: the implement skill's Phase 0 is `checkout features` +
+ * `pull origin features`. Nothing has ever brought the base branch INTO
+ * `features`. Dependabot PRs merge straight into the base, so the tree an
+ * implement session builds and boots is missing every dependency bump landed
+ * since the last feature merge. Measured 2026-09-10 across all twenty managed
+ * repos: `features` was 0 ahead of base in every one, and behind by 3 to 300
+ * commits; on `jerky_event_processor` the one file that actually differed was
+ * `package-lock.json` (brace-expansion 2.1.3 vs 2.1.4).
+ *
+ * That matters more since 2026-09-07 (36c8f03), when `tryMergeDependencyPR` was
+ * deleted and a dependency upgrade started going through an implement session
+ * precisely so that something builds and STARTS the app. A session that boots a
+ * 300-commit-stale tree does not prove what that change intended.
+ *
+ * FAST-FORWARD ONLY, deliberately (owner decision 2026-09-10):
+ * - `--ff-only` cannot rewrite history and cannot invent a merge commit, so it
+ *   is safe to run on a branch the daemon shares with its own working clone.
+ * - When `features` is genuinely ahead (a feature PR is in flight, the normal
+ *   mid-cycle state) the fast-forward is impossible and that is NOT a fault —
+ *   the branch is doing its job. Report `work-in-flight` and let the session
+ *   proceed; forcing it would discard unmerged commits.
+ * - True divergence is the only failure, and it is reported rather than
+ *   resolved. Auto-resolving is how a shared clone gets polluted, which is the
+ *   documented cause of the "diverged from origin/features" dead-zone.
+ *
+ * Never force-pushes. Never resolves a conflict.
+ */
+export function fastForwardFeatureBranch(
+  config: RepoConfig,
+  logger: Logger,
+): FastForwardOutcome {
+  const { repoPath, baseBranch, featureBranch } = config;
+  if (!baseBranch || !featureBranch || baseBranch === featureBranch) {
+    return "already-current";
+  }
+
+  try {
+    git(["fetch", "origin", baseBranch, featureBranch, "--quiet"], repoPath);
+
+    const ahead = parseInt(
+      git(["rev-list", "--count", `origin/${baseBranch}..origin/${featureBranch}`], repoPath),
+      10,
+    );
+    const behind = parseInt(
+      git(["rev-list", "--count", `origin/${featureBranch}..origin/${baseBranch}`], repoPath),
+      10,
+    );
+    if (Number.isNaN(ahead) || Number.isNaN(behind)) return "unknown";
+
+    if (ahead > 0 && behind > 0) {
+      logger.warn(
+        `${featureBranch} has diverged from ${baseBranch} (${ahead} ahead, ${behind} behind) — not fast-forwarding. A human decides this one.`,
+        { repo: config.name, ahead, behind },
+      );
+      return "diverged";
+    }
+    if (ahead > 0) return "work-in-flight";
+    if (behind === 0) return "already-current";
+
+    // Strictly behind: a fast-forward is exactly what is wanted.
+    git(["checkout", featureBranch], repoPath);
+    git(["merge", "--ff-only", `origin/${baseBranch}`], repoPath);
+    git(["push", "origin", featureBranch], repoPath);
+    logger.info(
+      `Fast-forwarded ${featureBranch} onto ${baseBranch} (+${behind} commit(s)) before implementing`,
+      { repo: config.name, commits: behind },
+    );
+    return "advanced";
+  } catch (err) {
+    const failure = formatGitError(err);
+    logger.warn(`Could not fast-forward ${featureBranch} onto ${baseBranch}`, {
+      repo: config.name,
+      ...failure,
+    });
+    return "unknown";
+  }
+}
+
 /**
  * List remote branches matching the feature branch prefix.
  * Feature branches are named `features-*`, not a single `features` ref.
