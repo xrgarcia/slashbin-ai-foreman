@@ -1,9 +1,17 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, createWriteStream, type WriteStream } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, createWriteStream, type WriteStream } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
+
+const FOREMAN_OVERRIDES = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  ".claude",
+  "system-prompt-overrides.md"
+);
 
 /**
  * Describe a non-zero exit WITHOUT letting stderr impersonate the root cause.
@@ -296,6 +304,20 @@ function spawnClaudeWithOptions(
     "--max-turns", String(opts.maxTurns),
     "--dangerously-skip-permissions",
   ];
+
+  // Overrides for the harness defaults that fight how a non-interactive builder
+  // has to behave (.claude/system-prompt-overrides.md in THIS repo).
+  //
+  // Resolved from this file's own location, never from cwd: every run happens
+  // inside a service-repo checkout, so a cwd-relative lookup would silently find
+  // nothing on every cycle and the flag would never be passed.
+  //
+  // This only APPENDS. It does not outrank the default prompt by any mechanism —
+  // later and more specific text is persuasion, not precedence. Anything that must
+  // not happen belongs in a PreToolUse hook that blocks.
+  if (existsSync(FOREMAN_OVERRIDES)) {
+    args.push("--append-system-prompt-file", FOREMAN_OVERRIDES);
+  }
 
   if (opts.streamJson) {
     args.push("--output-format", "stream-json", "--verbose");
