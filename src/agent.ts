@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
+import { checkoutPathFor } from "./review-checkout.js";
 
 const FOREMAN_OVERRIDES = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -842,6 +843,10 @@ export async function reviewOpenPRs(
   const prompt = `Read and follow the skill at ${agentConfig.reviewSkillPath}.
 
 Review the open feature PRs for the repository \`${repoConfig.githubRepo}\` ONLY. Treat this as the skill's repo-scoped mode (equivalent to \`--repo ${repoConfig.githubRepo}\`): scope every step — inventory, review, merge, verify — to that single repository, and use the full \`owner/repo\` slug \`${repoConfig.githubRepo}\` for all GitHub operations (do not rely on a short repo alias).
+
+WORKING COPY — use this one, do not make your own:
+A checkout of \`${repoConfig.githubRepo}\` is already prepared and fetched for you at \`${checkoutPathFor(agentConfig, repoConfig)}\`. Read the code there: \`git -C <that path> checkout <branch>\`, \`git -C <that path> diff\`, and so on. It is reused across runs, so its \`node_modules\` is usually already installed.
+Do NOT \`git clone\` this repo anywhere else, and do NOT clone into \`/tmp\` for any reason. \`/tmp\` here is a RAM filesystem with a hard limit on the NUMBER of files, and a repo plus its \`node_modules\` consumes tens of thousands of them; improvised review clones exhausted that limit on 2026-09-12 and left every agent on the box unable to run a single command, including the ones needed to clean it up. If you need a second working tree, use \`git -C <that path> worktree add\` inside that same directory — it shares the object store instead of duplicating it.
 
 Follow the skill exactly and act autonomously — do NOT ask questions or wait for confirmation:
 - Do NOT run healthchecks up front. A healthcheck verifies a deployment; a review that requests changes deploys nothing. Run them only in post-merge verification (skill Phase 5, via \`npm run verify\`), against a merge this run actually made.

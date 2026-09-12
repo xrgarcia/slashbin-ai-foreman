@@ -47,6 +47,7 @@ import {
 } from "./github.js";
 import type { ReviewTrailer } from "./agent.js";
 import { loadRepoState, saveRepoState } from "./state.js";
+import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
 
 const MAX_RETRIES = 2;
 
@@ -1331,6 +1332,11 @@ async function tryReview(
   // it is precisely the case a pre-run snapshot cannot see.
   const reviewStartedAt = new Date().toISOString();
 
+  // The session reads the code from here rather than cloning one for itself.
+  // Prepared before the run so it is warm on arrival; see review-checkout.ts
+  // for why an unmanaged clone per review took the whole box down.
+  const checkoutPath = prepareReviewCheckout(config, repoConfig, reviewLogger);
+
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
   reviewLogger.info(`Triggering review for ${repoName} — PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")}), transcript: ${transcriptPath}`);
@@ -1413,6 +1419,26 @@ async function tryReview(
     return false;
   } finally {
     activeRuns.delete(repoName);
+
+    // Hand the checkout back if nothing else is queued for this repo. In
+    // `finally` for the same reason as the label repair below: a run that threw
+    // or was killed still leaves the directory behind, and that is precisely the
+    // case that accumulated 140 of them.
+    //
+    // Queued = work that would bring a session straight back here: approved
+    // issues waiting to be built, plus any PR still awaiting review. Counted
+    // AFTER the run, so a review that just merged the last PR sees an empty
+    // queue and releases, while a repo mid-batch keeps its node_modules.
+    if (checkoutPath) {
+      try {
+        const stillApproved = findAllApprovedActionableIssues(repoConfig, reviewLogger).length;
+        const stillToReview = findPRsNeedingReview(repoConfig, config.reviewerLogin, reviewLogger) ? 1 : 0;
+        releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
+      } catch (err) {
+        // Never let bookkeeping fail the phase. The nightly sweep is the backstop.
+        reviewLogger.debug(`Checkout release check skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     // Undo any revocation of the EM outcome-gate. In `finally` on purpose: a run
     // that threw or was aborted may still have written labels before it died.
