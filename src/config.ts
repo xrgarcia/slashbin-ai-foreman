@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 
 // --- Schemas ---
@@ -88,6 +89,24 @@ const configSchema = z.object({
   reviewEnabled: z.boolean().default(false),
   reviewSkillPath: z.string().default(".claude/skills/review-all-prs/SKILL.md"),
   reviewModel: z.string().optional(),
+  // Where the review session finds the service repo's code.
+  //
+  // The session's cwd is the EM repo, so it does NOT have the code it is
+  // reviewing, and nothing ever told it where to get it. Left to improvise,
+  // every run `git clone`d into /tmp under a name it invented (sbc1006, js520,
+  // jerky_shipping_rev, cli-review-2 …) and never removed it. /tmp here is a
+  // tmpfs with a HARD CAP of 1,048,576 inodes; a review clone plus its
+  // node_modules is 40k-95k of them, and 140 such clones exhausted the cap on
+  // 2026-09-12 — at 84% of BYTES, so every `df -h` looked healthy. Once inodes
+  // are gone no agent can run at all, because Claude Code creates an output
+  // file before each command; two Foreman runs failed that morning purely
+  // because their sessions could not write.
+  //
+  // So: one managed checkout per repo, on the root filesystem (66M inodes)
+  // rather than the tmpfs, at a path the Foreman owns and can therefore also
+  // delete. Reused across cycles — the expensive part is node_modules, not the
+  // clone — and removed when the repo's queue empties (see releaseReviewCheckout).
+  reviewCheckoutRoot: z.string().default("~/.foreman/review-checkouts"),
   // The review skill is long-running (it polls Railway deploys during dev verify),
   // so it gets a much larger turn/duration budget than implement/revise.
   reviewMaxTurns: z.coerce.number().int().positive().default(200),
@@ -177,6 +196,7 @@ export interface AgentConfig {
   emRepoPath?: string;
   reviewSkillPath: string;
   reviewModel?: string;
+  reviewCheckoutRoot: string;
   reviewMaxTurns: number;
   reviewMaxDurationMs: number;
   reviewAllowedTools: string[];
@@ -243,6 +263,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
+    reviewCheckoutRoot: process.env.AI_AGENT_REVIEW_CHECKOUT_ROOT ?? fileConfig.reviewCheckoutRoot,
     reviewMaxTurns: process.env.AI_AGENT_REVIEW_MAX_TURNS ?? fileConfig.reviewMaxTurns,
     reviewMaxDurationMs: process.env.AI_AGENT_REVIEW_MAX_DURATION_MS ?? fileConfig.reviewMaxDurationMs,
     reviewAllowedTools: fileConfig.reviewAllowedTools,
@@ -348,6 +369,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
+    reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),
     reviewMaxTurns: parsed.reviewMaxTurns,
     reviewMaxDurationMs: parsed.reviewMaxDurationMs,
     reviewAllowedTools: [...parsed.reviewAllowedTools],
