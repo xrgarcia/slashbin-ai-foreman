@@ -35,6 +35,7 @@ import {
   verifyPRExists,
   findStuckMergedIssues,
   findIssuesMergedToBase,
+  planFailedReviewOutcome,
   transitionToReadyForProd,
   findIssuesStillUnderReview,
   resolveDeadZone,
@@ -1343,7 +1344,10 @@ async function tryReview(
   events?.push({ message: `Reviewing ${repoConfig.githubRepo} PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
 
   try {
-    const result = await reviewOpenPRs(repoConfig, config, reviewLogger, runAbort.signal, transcriptPath);
+    const result = await reviewOpenPRs(
+      repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
+      `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
+    );
 
     if (result.success) {
       reviewFailureCount.set(repoName, 0);
@@ -1411,10 +1415,50 @@ async function tryReview(
       return true;
     }
 
+    // --- The run failed. Did it fail before or AFTER doing the work? --------
+    // Ask GitHub, not the trailer: a run killed at the wall may never have
+    // emitted one. `planFailedReviewOutcome` holds the rule and the incident
+    // behind it (#41).
+    const plan = planFailedReviewOutcome(
+      findIssuesMergedToBase(repoConfig, candidate.issueNumbers, reviewLogger),
+      findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
+    );
+
+    if (plan.workLanded) {
+      reviewLogger.warn(
+        `Review run on ${repoName} ended with "${result.error}" AFTER merging PR #${plan.mergedPrs.join(", #")} — ` +
+        `the work landed and the run outlived it. Reconciling labels now rather than leaving the dead zone.`,
+        { mergedPrs: plan.mergedPrs, toReconcile: plan.toReconcile },
+      );
+
+      const unresolved = plan.toReconcile.length > 0 && config.reviewLabelReconcile
+        ? reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events)
+        : plan.toReconcile;
+
+      if (unresolved.length > 0) {
+        reviewLogger.error(
+          `Review post-condition UNRESOLVED on ${repoName} after a failed run: issue(s) #${unresolved.join(", #")} ` +
+          `— dead-zone recovery will re-verify`,
+          { mergedPrs: plan.mergedPrs, unresolved },
+        );
+      }
+
+      // Reset rather than increment: the next cycle would find the PR merged and
+      // nothing to review, so charging a failure only walks the repo toward its
+      // backoff for work that succeeded.
+      reviewFailureCount.set(repoName, 0);
+      reviewFailureHitMaxAt.delete(repoName);
+      events?.push({
+        message: `⚠️ ${repoConfig.githubRepo} — review of PR #${plan.mergedPrs.join(", #")} merged, then ran past its budget (${result.error}). Labels reconciled; not counted as a failed review.`,
+        level: "warn",
+      });
+      return true;
+    }
+
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
     if (newCount >= MAX_RETRIES) reviewFailureHitMaxAt.set(repoName, cycleNumber);
-    reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
+    reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
     return false;
   } finally {

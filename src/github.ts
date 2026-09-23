@@ -2389,3 +2389,59 @@ export function getReferencedIssuesFromOpenPR(
   }
 }
 
+
+/**
+ * Decide, with no I/O, what a FAILED review run actually earned.
+ *
+ * Split out from `tryReview` for the same reason as `planEmGateRestore`: the
+ * rule is the part worth pinning, and the `gh` calls around it are not.
+ *
+ * A review run that dies is not automatically a review that achieved nothing.
+ * On 2026-09-22 one merged `jerky_skuvault_service#362`, verified it, then spent
+ * its remaining 52 minutes polling a backfill that needed longer than the budget
+ * it was never told about. The wall-clock kill reported `Review failed (1/2):
+ * timed out`, skipped every post-condition check — they all lived inside the
+ * success branch — and left the issue dead-zoned for 55 minutes. The merge had
+ * already happened; the retry had nothing to retry. Issue #41.
+ *
+ * So the question is not "did the process exit cleanly" but "did the work land":
+ *
+ *  - Nothing merged → a plain failure. Charge the retry, exactly as before.
+ *  - Something merged → the work landed and the run outlived it. Reconcile the
+ *    labels this cycle instead of waiting for the dead-zone sweep, and do NOT
+ *    charge a retry: the next cycle would find the PR merged and no work to do.
+ *
+ * `stillUnderReview` is asked for separately because a run can merge AND label
+ * correctly before dying — in which case there is nothing left to reconcile and
+ * only the retry accounting changes.
+ */
+export interface FailedReviewPlan {
+  /** True when at least one of the run's issues reached the base branch. */
+  workLanded: boolean;
+  /** PRs the run merged, deduped, ascending. */
+  mergedPrs: number[];
+  /** Merged issues still sitting at `pr under review` — the labels to repair. */
+  toReconcile: number[];
+  /** Whether this run counts against the review retry/backoff counter. */
+  chargeRetry: boolean;
+}
+
+export function planFailedReviewOutcome(
+  mergedRefs: { issueNumber: number; prNumber: number }[],
+  stillUnderReview: number[],
+): FailedReviewPlan {
+  if (mergedRefs.length === 0) {
+    return { workLanded: false, mergedPrs: [], toReconcile: [], chargeRetry: true };
+  }
+
+  const mergedIssues = new Set(mergedRefs.map((m) => m.issueNumber));
+  return {
+    workLanded: true,
+    mergedPrs: [...new Set(mergedRefs.map((m) => m.prNumber))].sort((a, b) => a - b),
+    // Only issues we can actually tie to a merge. An issue still under review
+    // whose PR never merged is CORRECTLY under review, and relabeling it would
+    // be the same overreach the dead-zone guard exists to prevent.
+    toReconcile: stillUnderReview.filter((n) => mergedIssues.has(n)),
+    chargeRetry: false,
+  };
+}

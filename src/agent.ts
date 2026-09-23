@@ -285,6 +285,13 @@ interface SpawnOptions {
    * post-hoc debugging. The directory is created if needed.
    */
   transcriptPath?: string;
+  /**
+   * What this run was working on, for the timeout line. `Claude CLI timed out
+   * after 3600000ms` with nothing else on it reads as a daemon fault; the owner
+   * read exactly that as "the merge did not happen" on 2026-09-22 (issue #41),
+   * when in fact the run had merged the PR 55 minutes earlier.
+   */
+  runLabel?: string;
 }
 
 /**
@@ -371,7 +378,10 @@ function spawnClaudeWithOptions(
 
     const timeout = setTimeout(() => {
       timedOut = true;
-      logger.warn(`Claude CLI timed out after ${opts.maxDurationMs}ms`);
+      logger.warn(
+        `Claude CLI timed out after ${opts.maxDurationMs}ms` +
+        (opts.runLabel ? ` — ${opts.runLabel}` : ""),
+      );
       if (child) {
         child.kill("SIGTERM");
         setTimeout(() => {
@@ -829,6 +839,7 @@ export async function reviewOpenPRs(
   logger: Logger,
   abortSignal?: AbortSignal,
   transcriptPath?: string,
+  runLabel?: string,
 ): Promise<ReviewResult> {
   const emToken = process.env.EM_GITHUB_TOKEN;
   if (!emToken) {
@@ -839,6 +850,9 @@ export async function reviewOpenPRs(
   }
 
   logger.info(`Starting review for ${repoConfig.name} (${repoConfig.githubRepo}) — cwd=${agentConfig.emRepoPath}`);
+
+  const { minutes: reviewBudgetMinutes, deadlineIso: reviewDeadlineIso } =
+    reviewBudget(agentConfig.reviewMaxDurationMs);
 
   const prompt = `Read and follow the skill at ${agentConfig.reviewSkillPath}.
 
@@ -863,6 +877,14 @@ Ending your turn ends the process. Anything still running is killed at that inst
 - The merge is irreversible and the labeling is not automatic. Once you merge a PR you MUST, in the same turn, finish verification and set the issue's labels. If you cannot finish, say so explicitly in your final message rather than stopping quietly.
 - If a step genuinely cannot complete (verification times out, a deploy never settles), do NOT stall — record the outcome, label the issue \`pr pending actions\`, and emit the trailer with \`deploy=FAILURE\`. A reported failure is recoverable; silence is not.
 
+WALL-CLOCK BUDGET — you have ${reviewBudgetMinutes} minutes, until ${reviewDeadlineIso}.
+The process is SIGTERMed at that instant. You get no warning and no chance to write anything, so nothing you were partway through survives.
+
+- Check the clock before you start anything that polls. If the thing you are watching will not finish in the time you have LEFT, it does not fit in this run — and starting it anyway spends the rest of your budget to learn what you already knew.
+- A criterion that converges on its own schedule — a backfill sweeping historical rows, a deploy that settles when it settles, an index build — is the case this rule exists for. Do NOT poll it to the wall. Take the measurement you can take now, finish the labeling, and emit \`hold=<reason>\` on that PR's trailer line (see below).
+- A held issue is visible and recoverable: the Foreman leaves it alone and reports it as held, and the EM resolves it when the criterion can be checked. A run killed mid-poll is none of those things — it is recorded as a plain failure, and the review and merge it already completed are thrown away.
+- This does NOT license ending your turn to "wait". Holding is a decision you record and report; waiting is stopping and hoping. Never do the second.
+
 If there are no open feature PRs awaiting review for this repo, that is a clean no-op — say so and emit exactly \`FOREMAN_REVIEW none\` as your final line.
 
 IMPORTANT — status trailer: After you finish, end your output with one line per PR you acted on, in EXACTLY this format (nothing after the last one):
@@ -871,7 +893,7 @@ FOREMAN_REVIEW pr=#<number> verdict=<APPROVE|REQUEST_CHANGES> merged=<yes|no> de
 
 Rules for the trailer: \`merged=yes\` only if you actually merged the PR to the base branch. \`deploy=SUCCESS\`/\`deploy=FAILURE\` reflects the post-merge deployment+verification result for that merge (use \`deploy=NA\` when nothing was merged, or when the repo has no deployment to verify, e.g. a docs/CLI/npm-package repo). Emit one trailer line for every PR you reviewed this run.
 
-OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`pr under review\` (e.g. an acceptance criterion cannot be observed yet), append \`hold=<short-reason-slug>\` to that PR's trailer line:
+OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`pr under review\`, append \`hold=<short-reason-slug>\` to that PR's trailer line. Two cases qualify: an acceptance criterion cannot be observed YET (nothing has happened that would let you check it), or it cannot be observed IN TIME (it is converging, but not inside the budget above). Both are decisions; both belong in the trailer rather than in a poll loop:
 
 FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-not-observable-until-0300z
 
@@ -894,6 +916,7 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
       maxDurationMs: agentConfig.reviewMaxDurationMs,
       streamJson: true,
       transcriptPath,
+      runLabel: runLabel ?? `review of ${repoConfig.githubRepo}`,
     },
     logger,
     abortSignal
@@ -973,4 +996,29 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
     logger.info(`Review for ${repoConfig.name}: clean no-op (no PRs awaiting review)`);
   }
   return { success: true, summary, statusLine, trailers };
+}
+
+/**
+ * Render a review run's wall-clock budget as the two facts the run needs: how
+ * long it has, and the instant it dies.
+ *
+ * Exists as its own function because the ceiling was enforced and never
+ * disclosed. On 2026-09-22 a review of `jerky_skuvault_service#362` finished its
+ * work at 22:11, then polled a backfill that needed ~75 minutes to converge
+ * until the 60-minute kill; a completed review and merge was recorded as
+ * `Review failed: timed out`. Nothing in its prompt named a number, so it had no
+ * way to know the poll could not fit. Issue #41.
+ *
+ * The absolute deadline matters more than the duration: an agent tens of minutes
+ * into a run cannot subtract elapsed time it never measured, but it can compare
+ * a timestamp against the clock.
+ */
+export function reviewBudget(
+  maxDurationMs: number,
+  now: Date = new Date(),
+): { minutes: number; deadlineIso: string } {
+  return {
+    minutes: Math.round(maxDurationMs / 60_000),
+    deadlineIso: new Date(now.getTime() + maxDurationMs).toISOString(),
+  };
 }
