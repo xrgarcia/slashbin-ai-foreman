@@ -94,16 +94,26 @@ test("the trailer carries an optional issue scope", () => {
 
 test("a scoped skip narrows skippedIssues to the named issue", () => {
   const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
-  assert.match(block, /skippedIssues: scoped \? \[named\] : \(issueNumbers \?\? \[\]\)/,
+  assert.match(block, /skippedIssues: named !== undefined \? \[named\] : \(issueNumbers \?\? \[\]\)/,
     "a scoped trailer must narrow the skip; unscoped must still cover the batch");
 });
 
-test("an issue scope naming something outside the batch is not trusted", () => {
+// In skill mode the prompt never interpolates the batch (agent.ts skillPath
+// branch) -- the agent runs the skill's own `gh issue list --label approved` and
+// selects from it, which is strictly WIDER than issueNumbers, because the batch
+// was already filtered by the implemented cache and by the skip back-off while
+// those issues stay open and `approved` on GitHub. So an out-of-batch scope is
+// routine. Widening the skip to the batch over it would reintroduce the exact
+// starvation the scope exists to prevent.
+test("an out-of-batch issue scope is honoured, not widened to the batch", () => {
   const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
+  assert.ok(!/skippedIssues: scoped/.test(block),
+    "the scope must not depend on batch membership");
   assert.match(block, /includes\(named\)/,
-    "the named issue must be checked against the batch — otherwise a typo silently skips nothing");
-  assert.ok(/logger\.warn/.test(block.slice(block.indexOf("includes(named)"))),
-    "an out-of-batch scope must be visible, not silently widened");
+    "an out-of-batch scope should still be reported, so the case stays observable");
+  const afterCheck = block.slice(block.indexOf("includes(named)"));
+  assert.ok(!/logger\.warn/.test(afterCheck),
+    "an out-of-batch scope is expected in skill mode — warning on it trains operators to ignore warnings");
 });
 
 test("the agent is told to include the issue scope", () => {
