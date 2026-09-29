@@ -677,12 +677,15 @@ async function runRepoCycle(
   //    they accumulate with no path forward at all. The issue puts them through
   //    the implement session — which builds, boots the app and smoke-tests it —
   //    instead of a CI rollup that only ever proved the code compiles. Filed
-  //    pre-approved, so it enters this repo's queue with no human step. ---
+  //    pre-approved on a repo that opts in (slashbin.io repos), so it enters
+  //    the queue with no human step; bare everywhere else. ---
   if (repoConfig.baseBranch !== "main") {
     const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
     if (filed) {
       events.push({
-        message: `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`,
+        message: repoConfig.dependencyPreApproved
+          ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+          : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
         level: "info",
       });
       processed++;
@@ -1592,7 +1595,8 @@ function tryFileDependencyBatchIssue(
   const changes = prs.map((p) => describeDependencyPR(p.number, p.title));
   const { title, body } = buildDependencyBatchIssue(featureBranch, changes);
   const number = createDependencyBatchIssue(
-    repoConfig.githubRepo, repoConfig.repoPath, title, body, repoConfig.triggerLabel, depLogger,
+    repoConfig.githubRepo, repoConfig.repoPath, title, body,
+    repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, depLogger,
   );
   if (number === null) return null;
 
@@ -1600,7 +1604,9 @@ function tryFileDependencyBatchIssue(
   depLogger.info(
     `Filed dependency batch issue #${number} for ${prs.length} PR(s) on ${bases.join("/")}` +
     (majors > 0 ? ` — ${majors} major` : "") +
-    ` — filed with "${repoConfig.triggerLabel}", queued to build`,
+    (repoConfig.dependencyPreApproved
+      ? ` — filed with "${repoConfig.triggerLabel}", queued to build`
+      : ` — awaiting "${repoConfig.triggerLabel}"`),
   );
   return number;
 }

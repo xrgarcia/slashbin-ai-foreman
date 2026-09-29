@@ -2193,7 +2193,8 @@ export function isMajorBump(from: string, to: string): boolean {
  * other change — including the implement session that actually builds it, starts
  * the app and smoke-tests it, which is the step a CI-rollup merge never did.
  *
- * Filed WITH the trigger label — see `createDependencyBatchIssue` for why.
+ * Filed with the trigger label only on a pre-approved repo — see
+ * `createDependencyBatchIssue`.
  */
 export function buildDependencyBatchIssue(
   featureBranch: string,
@@ -2288,21 +2289,24 @@ export function findOpenDependencyBatchIssue(
 
 /**
  * The `gh` argv that files a batch issue. Pure and exported because the label
- * on it is the whole behaviour: drop `--label` and every batch stalls unapproved
- * again, silently, exactly as it did from 2026-09-07 to 2026-09-29.
+ * on it is the whole behaviour, in both directions: drop it on a pre-approved
+ * repo and that repo's batches stall unapproved again (as every repo's did from
+ * 2026-09-07 to 2026-09-29); add it on a repo the owner never pre-approved and
+ * the Foreman flies work nobody authorized. `label` is null for the latter.
  */
 export function dependencyBatchIssueCreateArgs(
   repo: string,
   title: string,
   body: string,
-  triggerLabel: string,
+  label: string | null,
 ): string[] {
-  return ["issue", "create", "--repo", repo, "--title", title, "--body", body, "--label", triggerLabel];
+  const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];
+  return label ? [...args, "--label", label] : args;
 }
 
 /**
- * File one dependency-batch issue, already carrying `triggerLabel`. Returns its
- * number, or null if `gh` refused.
+ * File one dependency-batch issue — carrying `label` when the repo is
+ * pre-approved, bare otherwise. Returns its number, or null if `gh` refused.
  *
  * **Pre-authorized (owner decision, 2026-09-29).** From 2026-09-07 these were
  * filed WITHOUT the trigger label so the owner would approve each batch by hand.
@@ -2317,17 +2321,22 @@ export function dependencyBatchIssueCreateArgs(
  * deploys to dev, and nothing reaches `main` without the EM outcome gate. This
  * is maintenance on existing code — the class of work the Foreman may approve
  * for itself (slashbin-ai-foreman#37) — never a new feature or a spec change.
+ *
+ * **Scoped per repo (same day, owner correction).** The authorization covers
+ * slashbin.io repos only; a customer's repo is the customer's call. It is an
+ * opt-in `dependencyPreApproved` flag on the repo's config, default off, so a
+ * newly onboarded repo can never inherit it by omission.
  */
 export function createDependencyBatchIssue(
   repo: string,
   cwd: string,
   title: string,
   body: string,
-  triggerLabel: string,
+  label: string | null,
   logger?: Logger,
 ): number | null {
   try {
-    const out = gh(dependencyBatchIssueCreateArgs(repo, title, body, triggerLabel), cwd);
+    const out = gh(dependencyBatchIssueCreateArgs(repo, title, body, label), cwd);
     const m = /\/issues\/(\d+)/.exec(out);
     return m ? parseInt(m[1], 10) : null;
   } catch (err) {
