@@ -21,6 +21,7 @@ import {
   isMajorBump,
   buildDependencyBatchIssue,
   DEPENDENCY_BATCH_TITLE_PREFIX,
+  dependencyBatchIssueCreateArgs,
 } from "../dist/github.js";
 
 // --- Title parsing. All four shapes were observed live on 2026-09-07. --------
@@ -144,4 +145,24 @@ test("the feature branch name is taken from config, never hardcoded", () => {
   assert.match(title, /on `wip`/);
   assert.ok(body.includes("`wip`"));
   assert.ok(!body.includes("`features`"));
+});
+
+// --- Pre-authorization (owner decision, 2026-09-29) --------------------------
+//
+// From 2026-09-07 batches were filed without the trigger label and waited for a
+// hand approval that never came: six sat open 22 days, and each one blocked the
+// next, so no Dependabot PR — security updates included — reached a session.
+// The label on the create call is the entire fix; this pins it.
+
+test("a batch issue is filed carrying the trigger label", () => {
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", "approved");
+  const i = args.indexOf("--label");
+  assert.ok(i >= 0, "no --label on the create call — the batch would stall unapproved");
+  assert.equal(args[i + 1], "approved");
+});
+
+test("the label comes from config, never hardcoded", () => {
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", "go");
+  assert.equal(args[args.indexOf("--label") + 1], "go");
+  assert.ok(!args.includes("approved"));
 });

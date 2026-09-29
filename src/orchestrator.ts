@@ -676,12 +676,13 @@ async function runRepoCycle(
   //    branch. Phase 4b deliberately refuses to merge those, so without this
   //    they accumulate with no path forward at all. The issue puts them through
   //    the implement session — which builds, boots the app and smoke-tests it —
-  //    instead of a CI rollup that only ever proved the code compiles. ---
+  //    instead of a CI rollup that only ever proved the code compiles. Filed
+  //    pre-approved, so it enters this repo's queue with no human step. ---
   if (repoConfig.baseBranch !== "main") {
     const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
     if (filed) {
       events.push({
-        message: `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
+        message: `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`,
         level: "info",
       });
       processed++;
@@ -1591,7 +1592,7 @@ function tryFileDependencyBatchIssue(
   const changes = prs.map((p) => describeDependencyPR(p.number, p.title));
   const { title, body } = buildDependencyBatchIssue(featureBranch, changes);
   const number = createDependencyBatchIssue(
-    repoConfig.githubRepo, repoConfig.repoPath, title, body, depLogger,
+    repoConfig.githubRepo, repoConfig.repoPath, title, body, repoConfig.triggerLabel, depLogger,
   );
   if (number === null) return null;
 
@@ -1599,7 +1600,7 @@ function tryFileDependencyBatchIssue(
   depLogger.info(
     `Filed dependency batch issue #${number} for ${prs.length} PR(s) on ${bases.join("/")}` +
     (majors > 0 ? ` — ${majors} major` : "") +
-    ` — awaiting "${repoConfig.triggerLabel}"`,
+    ` — filed with "${repoConfig.triggerLabel}", queued to build`,
   );
   return number;
 }
