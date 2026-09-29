@@ -2193,8 +2193,7 @@ export function isMajorBump(from: string, to: string): boolean {
  * other change — including the implement session that actually builds it, starts
  * the app and smoke-tests it, which is the step a CI-rollup merge never did.
  *
- * Filed WITHOUT the trigger label. The owner approves it like any other work;
- * for a major bump that approval is the point.
+ * Filed WITH the trigger label — see `createDependencyBatchIssue` for why.
  */
 export function buildDependencyBatchIssue(
   featureBranch: string,
@@ -2288,20 +2287,47 @@ export function findOpenDependencyBatchIssue(
 }
 
 /**
- * File one dependency-batch issue. Returns its number, or null if `gh` refused.
+ * The `gh` argv that files a batch issue. Pure and exported because the label
+ * on it is the whole behaviour: drop `--label` and every batch stalls unapproved
+ * again, silently, exactly as it did from 2026-09-07 to 2026-09-29.
+ */
+export function dependencyBatchIssueCreateArgs(
+  repo: string,
+  title: string,
+  body: string,
+  triggerLabel: string,
+): string[] {
+  return ["issue", "create", "--repo", repo, "--title", title, "--body", body, "--label", triggerLabel];
+}
+
+/**
+ * File one dependency-batch issue, already carrying `triggerLabel`. Returns its
+ * number, or null if `gh` refused.
  *
- * No trigger label: capture is not approval (`CLAUDE.md`, "`approved` Is Flight,
- * Not Filing"). The owner applies it.
+ * **Pre-authorized (owner decision, 2026-09-29).** From 2026-09-07 these were
+ * filed WITHOUT the trigger label so the owner would approve each batch by hand.
+ * None was ever approved: six sat open for 22 days, and because an open batch
+ * blocks the next one, every Dependabot PR opened after them — security updates
+ * included — never reached a session at all. A gate nobody operates is not a
+ * gate, it is a stall.
+ *
+ * Standing authorization is safe here because the flight carries its own
+ * checks: the session drops any bump that fails to build or boot, the review
+ * phase reviews the resulting `features → develop` PR like any other, the merge
+ * deploys to dev, and nothing reaches `main` without the EM outcome gate. This
+ * is maintenance on existing code — the class of work the Foreman may approve
+ * for itself (slashbin-ai-foreman#37) — never a new feature or a spec change.
  */
 export function createDependencyBatchIssue(
   repo: string,
   cwd: string,
   title: string,
   body: string,
+  triggerLabel: string,
   logger?: Logger,
 ): number | null {
   try {
-    const out = gh(["issue", "create", "--repo", repo, "--title", title, "--body", body], cwd);
+    const out = gh(dependencyBatchIssueCreateArgs(repo, title, body, triggerLabel), cwd);
     const m = /\/issues\/(\d+)/.exec(out);
     return m ? parseInt(m[1], 10) : null;
   } catch (err) {
