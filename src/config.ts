@@ -21,6 +21,11 @@ const repoEntrySchema = z.object({
   maxDurationMs: z.coerce.number().int().positive().optional(),
   // Per-repo opt-out for the review phase (falls back to the global default).
   reviewEnabled: z.boolean().optional(),
+  // Owner standing authorization: file this repo's dependency batch issue
+  // already carrying the trigger label. Opt-in per repo, default OFF — owner
+  // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
+  // the batch unapproved, as before, and nothing builds until a human approves.
+  dependencyPreApproved: z.boolean().optional(),
 });
 
 const configSchema = z.object({
@@ -170,6 +175,8 @@ export interface RepoConfig {
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
+  // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
+  dependencyPreApproved: boolean;
 }
 
 /**
@@ -313,6 +320,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         maxTurns: entry.maxTurns ?? parsed.maxTurns,
         maxDurationMs: entry.maxDurationMs ?? parsed.maxDurationMs,
         reviewEnabled: entry.reviewEnabled ?? parsed.reviewEnabled,
+        dependencyPreApproved: entry.dependencyPreApproved ?? false,
         ...globals,
       };
     });
@@ -342,6 +350,7 @@ export function loadConfig(configPath?: string): AgentConfig {
       maxTurns: parsed.maxTurns,
       maxDurationMs: parsed.maxDurationMs,
       reviewEnabled: parsed.reviewEnabled,
+      dependencyPreApproved: false,
       ...globals,
     }];
   }
