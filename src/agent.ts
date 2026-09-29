@@ -207,11 +207,21 @@ export interface ImplementationResult {
  * trailer is a declaration; the heuristic in detectSkipSignal is a guess, and a
  * guess does not get to pre-empt the evidence.
  */
-function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string } {
+function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number } {
   const structured = stdout.match(/FOREMAN_RESULT:\s*skipped(?:\s+reason="([^"]*)")?/i);
-  return structured
-    ? { skipped: true, reason: structured[1] || "no reason given" }
-    : { skipped: false };
+  if (!structured) return { skipped: false };
+  // An OPTIONAL `issue=<N>` scopes the skip to the one issue the agent stopped
+  // on. Without it the skip applies to the whole batch we handed over, which is
+  // right when the agent judged the batch as a whole and wrong when it stopped
+  // on one spec — and `implement-approved-issues` selects exactly ONE issue per
+  // invocation, so unscoped there means every other approved issue in the repo
+  // gets backed off 30m..24h for a defect in a spec it never read.
+  const scoped = stdout.match(/FOREMAN_RESULT:\s*skipped[^\n]*?\bissue="?#?(\d+)"?/i);
+  return {
+    skipped: true,
+    reason: structured[1] || "no reason given",
+    issue: scoped ? Number(scoped[1]) : undefined,
+  };
 }
 
 function detectSkipSignal(stdout: string): { skipped: boolean; reason?: string } {
@@ -552,7 +562,7 @@ Work autonomously. Do not ask questions.`;
   // end its output with a single line `FOREMAN_RESULT: skipped reason="<text>"`
   // so the orchestrator can distinguish a deliberate no-op from a failed
   // implementation attempt and back off accordingly.
-  prompt += `\n\nIMPORTANT — Skip protocol: If after reading an issue you conclude that the issue body explicitly directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification, etc.), do NOT create an empty PR or guess at a fix. Instead, end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped reason="<one-line explanation>"\n\nThis tells the Foreman to back off rather than re-queue the issue every cycle. If at least one issue in the batch IS implementable, implement those normally and only skip the rest in your written conclusion (no trailer needed when at least one PR was created).`;
+  prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nThis tells the Foreman to back off on THAT issue rather than re-queue it every cycle. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
 
   // Third Way: if a prior attempt failed, include context so Claude can adapt
   if (priorFailureReason) {
@@ -599,12 +609,26 @@ Work autonomously. Do not ask questions.`;
         `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
       );
     } else {
-      logger.info(`Implementation skipped by declaration — ${declaredSkip.reason}`);
+      // Scope the skip when the agent named an issue, so one unbuildable spec
+      // cannot back off the issues behind it. An `issue=` naming something we
+      // never handed over is ignored rather than trusted.
+      const named = declaredSkip.issue;
+      const scoped = named !== undefined && (issueNumbers ?? []).includes(named);
+      if (named !== undefined && !scoped) {
+        logger.warn(
+          `Agent declared a skip for issue #${named}, which was not in this batch ` +
+          `(${(issueNumbers ?? []).map((n) => `#${n}`).join(", ") || "none"}) — ignoring the scope and skipping the batch`,
+        );
+      }
+      logger.info(
+        `Implementation skipped by declaration — ${declaredSkip.reason}` +
+        (scoped ? ` (scoped to #${named})` : ""),
+      );
       return {
         success: false,
         skipped: true,
         skipReason: declaredSkip.reason,
-        skippedIssues: issueNumbers ?? [],
+        skippedIssues: scoped ? [named] : (issueNumbers ?? []),
         error: `skipped: ${declaredSkip.reason}`,
       };
     }

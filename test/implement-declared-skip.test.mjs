@@ -68,3 +68,47 @@ test("the fuzzy heuristic still exists, downstream", () => {
   assert.match(agent, /detectDeclaredSkip\(stdout\)/,
     "detectSkipSignal should delegate its structured half rather than duplicating the regex");
 });
+
+// --- A skip on one issue must not take the batch with it -------------------
+//
+// Found by second-pass.mjs on Slashbin-Ingest-Gateway#138, 2026-09-28, while
+// reviewing a skills:publish commit. The trailer had no issue scope, so
+// `skippedIssues: issueNumbers ?? []` marked every issue in the batch skipped
+// whenever the agent declared one. orchestrator.ts then writes a skip record per
+// issue and filters each out for backoffWindowFor(skipCount) — 30m rising to 24h.
+//
+// `implement-approved-issues` selects exactly ONE issue per invocation while the
+// orchestrator hands it the whole actionable set, so a single unusable spec took
+// every issue behind it off the board for a defect in a spec it never read.
+
+test("the trailer carries an optional issue scope", () => {
+  const detector = agent.slice(
+    agent.indexOf("function detectDeclaredSkip"),
+    agent.indexOf("function detectSkipSignal"),
+  );
+  assert.match(detector, /issue=/,
+    "detectDeclaredSkip must parse the issue scope, or a scoped trailer is silently unscoped");
+  assert.match(detector, /issue\?: number/,
+    "the scope must be surfaced on the return type, not parsed and dropped");
+});
+
+test("a scoped skip narrows skippedIssues to the named issue", () => {
+  const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
+  assert.match(block, /skippedIssues: scoped \? \[named\] : \(issueNumbers \?\? \[\]\)/,
+    "a scoped trailer must narrow the skip; unscoped must still cover the batch");
+});
+
+test("an issue scope naming something outside the batch is not trusted", () => {
+  const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
+  assert.match(block, /includes\(named\)/,
+    "the named issue must be checked against the batch — otherwise a typo silently skips nothing");
+  assert.ok(/logger\.warn/.test(block.slice(block.indexOf("includes(named)"))),
+    "an out-of-batch scope must be visible, not silently widened");
+});
+
+test("the agent is told to include the issue scope", () => {
+  assert.match(agent, /FOREMAN_RESULT: skipped issue=/,
+    "the prompt must show the scoped form, or agents keep emitting the batch-wide one");
+  assert.match(agent, /Always include/,
+    "the prompt must say the scope is required, not merely available");
+});
