@@ -207,19 +207,30 @@ export interface ImplementationResult {
  * trailer is a declaration; the heuristic in detectSkipSignal is a guess, and a
  * guess does not get to pre-empt the evidence.
  */
-function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number } {
-  const structured = stdout.match(/FOREMAN_RESULT:\s*skipped(?:\s+reason="([^"]*)")?/i);
-  if (!structured) return { skipped: false };
+// Exported for tests: the field parse is what broke, so it is tested by calling.
+export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number } {
+  // Find the trailer LINE first, then read its fields off it, so the fields may
+  // appear in any order. The previous shape — `skipped(?:\s+reason="...")?` —
+  // only bound `reason` when it immediately followed `skipped`, so the moment the
+  // documented format grew an `issue=` field in front of it the reason silently
+  // became "no reason given". That is not cosmetic: the reason is persisted as
+  // state.skipped[n].reason and is the ONLY input to isResolvedTransientSkip,
+  // which recognises a transient divergence solely by matching the agent's own
+  // wording. A dropped reason turns a self-clearing skip into a 24h back-off.
+  const line = stdout.match(/FOREMAN_RESULT:\s*skipped[^\n]*/i);
+  if (!line) return { skipped: false };
+  const trailer = line[0];
+  const reason = trailer.match(/\breason="([^"]*)"/i);
   // An OPTIONAL `issue=<N>` scopes the skip to the one issue the agent stopped
   // on. Without it the skip applies to the whole batch we handed over, which is
   // right when the agent judged the batch as a whole and wrong when it stopped
   // on one spec — and `implement-approved-issues` selects exactly ONE issue per
   // invocation, so unscoped there means every other approved issue in the repo
   // gets backed off 30m..24h for a defect in a spec it never read.
-  const scoped = stdout.match(/FOREMAN_RESULT:\s*skipped[^\n]*?\bissue="?#?(\d+)"?/i);
+  const scoped = trailer.match(/\bissue="?#?(\d+)"?/i);
   return {
     skipped: true,
-    reason: structured[1] || "no reason given",
+    reason: reason ? reason[1] : "no reason given",
     issue: scoped ? Number(scoped[1]) : undefined,
   };
 }

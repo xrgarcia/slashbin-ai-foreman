@@ -112,3 +112,57 @@ test("the agent is told to include the issue scope", () => {
   assert.match(agent, /Always include/,
     "the prompt must say the scope is required, not merely available");
 });
+
+// --- The trailer's fields must parse in either order -----------------------
+//
+// second-pass.mjs on Slashbin-Ingest-Gateway#138, 2026-09-28. The parse was
+// `skipped(?:\s+reason="([^"]*)")?`, which binds `reason` ONLY when it directly
+// follows `skipped`. Documenting the scoped form as
+// `skipped issue=123 reason="..."` therefore dropped every reason to the literal
+// "no reason given" — and the reason is the sole input to
+// isResolvedTransientSkip, so a self-clearing divergence skip would have become
+// a back-off rising to 24h.
+//
+// These call the real function rather than grepping the source, because the
+// defect was in what the regex MATCHED, which source text cannot show.
+
+test("reason and issue parse regardless of field order", async () => {
+  const { detectDeclaredSkip } = await import("../dist/agent.js");
+
+  const scopedFirst = detectDeclaredSkip(
+    'FOREMAN_RESULT: skipped issue=427 reason="cited path does not exist"',
+  );
+  assert.equal(scopedFirst.skipped, true);
+  assert.equal(scopedFirst.issue, 427);
+  assert.equal(scopedFirst.reason, "cited path does not exist",
+    "reason must parse when issue= comes first — this is the documented order");
+
+  const reasonFirst = detectDeclaredSkip(
+    'FOREMAN_RESULT: skipped reason="cited path does not exist" issue=427',
+  );
+  assert.equal(reasonFirst.issue, 427);
+  assert.equal(reasonFirst.reason, "cited path does not exist");
+});
+
+test("the legacy unscoped trailer still parses and stays batch-wide", async () => {
+  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const legacy = detectDeclaredSkip('FOREMAN_RESULT: skipped reason="investigation only"');
+  assert.equal(legacy.skipped, true);
+  assert.equal(legacy.reason, "investigation only");
+  assert.equal(legacy.issue, undefined,
+    "an unscoped trailer must not acquire a scope, or it would narrow a batch judgement");
+});
+
+test("a reason on a later line is NOT swept into the trailer", async () => {
+  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const spread = detectDeclaredSkip('FOREMAN_RESULT: skipped issue=5\nreason="on the next line"');
+  assert.equal(spread.issue, 5);
+  assert.equal(spread.reason, "no reason given",
+    "the parse is line-scoped on purpose — prose after the trailer must not become the reason");
+});
+
+test("no trailer at all is not a skip", async () => {
+  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  assert.equal(detectDeclaredSkip("I decided to skip this issue entirely.").skipped, false,
+    "prose must not reach the pre-PR check — that is detectSkipSignal's job, downstream");
+});
