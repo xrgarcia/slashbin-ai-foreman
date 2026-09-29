@@ -621,25 +621,36 @@ Work autonomously. Do not ask questions.`;
       );
     } else {
       // Scope the skip when the agent named an issue, so one unbuildable spec
-      // cannot back off the issues behind it. An `issue=` naming something we
-      // never handed over is ignored rather than trusted.
+      // cannot back off the issues behind it.
+      //
+      // A named issue is TRUSTED even when it is not in `issueNumbers`, and that
+      // is deliberate. In skill mode the prompt never interpolates the batch
+      // (see the skillPath branch below): the agent runs the skill's own
+      // `gh issue list --label approved` and selects by the skill's priority
+      // table, which is strictly WIDER than what we tracked — the batch was
+      // already filtered by the `implemented` cache and by the escalating skip
+      // back-off, while those issues stay open and `approved` on GitHub and so
+      // remain visible to the agent. So "not in the batch" is an ordinary
+      // outcome, not a mistake, and widening to the batch on account of it would
+      // reintroduce exactly the starvation the scope exists to prevent. The
+      // agent naming one issue is strictly more information than the batch list.
       const named = declaredSkip.issue;
-      const scoped = named !== undefined && (issueNumbers ?? []).includes(named);
-      if (named !== undefined && !scoped) {
-        logger.warn(
-          `Agent declared a skip for issue #${named}, which was not in this batch ` +
-          `(${(issueNumbers ?? []).map((n) => `#${n}`).join(", ") || "none"}) — ignoring the scope and skipping the batch`,
+      if (named !== undefined && !(issueNumbers ?? []).includes(named)) {
+        logger.info(
+          `Skip names #${named}, which was outside the tracked batch ` +
+          `(${(issueNumbers ?? []).map((n) => `#${n}`).join(", ") || "none"}) — ` +
+          `expected in skill mode, where the agent selects from its own query. Honouring the scope.`,
         );
       }
       logger.info(
         `Implementation skipped by declaration — ${declaredSkip.reason}` +
-        (scoped ? ` (scoped to #${named})` : ""),
+        (named !== undefined ? ` (scoped to #${named})` : " (batch-wide — no issue= in the trailer)"),
       );
       return {
         success: false,
         skipped: true,
         skipReason: declaredSkip.reason,
-        skippedIssues: scoped ? [named] : (issueNumbers ?? []),
+        skippedIssues: named !== undefined ? [named] : (issueNumbers ?? []),
         error: `skipped: ${declaredSkip.reason}`,
       };
     }
