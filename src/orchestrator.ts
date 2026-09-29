@@ -338,6 +338,23 @@ export function getActiveRunRepos(): string[] {
   return [...activeRuns.keys()];
 }
 
+/**
+ * Set once a shutdown starts. Every phase that would spawn a NEW session checks
+ * it first, so a draining daemon finishes what is running and starts nothing.
+ *
+ * Without it the drain never converged: on 2026-09-29 a restart asked to stop at
+ * 15:53, and at 16:21 a repo whose review had just finished went straight on to
+ * start an implement session in the same pass — work begun inside the drain
+ * window and then cut off when the window elapsed, leaving a half-built branch.
+ */
+let shutdownRequested = false;
+export function requestShutdown(): void {
+  shutdownRequested = true;
+}
+export function isShutdownRequested(): boolean {
+  return shutdownRequested;
+}
+
 /** Abort every in-flight run. Only for a shutdown whose drain window elapsed —
  *  this destroys work in progress. */
 export function abortAllRuns(): void {
@@ -645,8 +662,13 @@ async function runRepoCycle(
     );
   }
 
+  // Phases 1-3 each spawn a Claude session. None may START once a shutdown is
+  // under way — see `shutdownRequested`.
+  if (shutdownRequested) return { processed, lastImplementation, events };
+
   // --- Phase 1: Review open feature PRs (invokes the EM /review-all-prs skill) ---
   if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
+  if (shutdownRequested) return { processed, lastImplementation, events };
 
   // --- Phase 2: Revise PRs with pending review feedback ---
   const revisionInfo = await tryRevision(repoConfig, base, cycleNumber, events);
@@ -654,6 +676,8 @@ async function runRepoCycle(
     events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
     processed++;
   }
+
+  if (shutdownRequested) return { processed, lastImplementation, events };
 
   // --- Phase 3: Implement approved issues (one batch per repo) ---
   const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
