@@ -176,3 +176,29 @@ test("no trailer at all is not a skip", async () => {
   assert.equal(detectDeclaredSkip("I decided to skip this issue entirely.").skipped, false,
     "prose must not reach the pre-PR check — that is detectSkipSignal's job, downstream");
 });
+
+// slashbin-ai-foreman#49: an agent that NAMED the trailer in prose, while
+// deliberately not emitting it, was booked as a batch-wide skip — twice — and
+// three approved issues backed off for 1h, then 2h. The text is from the
+// 2026-10-01T19:34:55Z Slashbin-console implement log.
+test("prose that names the trailer is not a declaration", async () => {
+  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const prose =
+    "To unblock, PR #1175 needs a review and a merge into `develop`.\n\n" +
+    "I left off the `FOREMAN_RESULT: skipped` line on purpose. No single issue is at fault, " +
+    "and a line without `issue=` would hold every approved issue for up to 24 hours.\n";
+  assert.equal(detectDeclaredSkip(prose).skipped, false,
+    "only a line that STARTS with the trailer declares a skip");
+});
+
+test("a real trailer after prose still parses, and the last one wins", async () => {
+  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const out = detectDeclaredSkip(
+    "Commented on #9 with what would unblock it.\n\n" +
+    "FOREMAN_RESULT: skipped issue=8 reason=\"superseded\"\n" +
+    "FOREMAN_RESULT: skipped issue=9 reason=\"cited path does not exist\"\n",
+  );
+  assert.equal(out.skipped, true);
+  assert.equal(out.issue, 9);
+  assert.equal(out.reason, "cited path does not exist");
+});

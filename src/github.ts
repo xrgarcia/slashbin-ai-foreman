@@ -404,7 +404,7 @@ export function findAllApprovedActionableIssues(
 /**
  * Gate check: find approved issues that haven't progressed through
  * the lifecycle AND don't already have a PR. Returns the uncovered
- * issue numbers (capped to MAX_BATCH_SIZE), or empty array if none.
+ * issue numbers (capped by `capBatch` unless `opts.uncapped`), or empty array if none.
  */
 const MAX_BATCH_SIZE = 3;
 
@@ -468,9 +468,37 @@ export function extractImplementedIssues(opts: {
   return Array.from(found).sort((a, b) => a - b);
 }
 
+/**
+ * Cap an ordered list of buildable issues to one cycle's batch.
+ *
+ * The orchestrator calls this AFTER its state and skip back-off filters. Capping
+ * first let backed-off issues take every slot, the back-off filter then emptied
+ * the batch, and eligible approved issues starved for the whole back-off window
+ * (slashbin-ai-foreman#49).
+ */
+export function capBatch(issues: number[], config: RepoConfig, logger: Logger): number[] {
+  // Greenfield detection: if repo has very few tracked files, limit to 1 issue
+  // The skill implements one-at-a-time anyway, but a focused prompt is more reliable
+  let effectiveBatchSize = MAX_BATCH_SIZE;
+  try {
+    const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
+    if (fileCount < 10) {
+      effectiveBatchSize = 1;
+      logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);
+    }
+  } catch { /* ignore — use default batch size */ }
+
+  const batch = issues.slice(0, effectiveBatchSize);
+  if (issues.length > effectiveBatchSize) {
+    logger.info(`Capping batch to ${effectiveBatchSize} of ${issues.length} buildable issue(s): ${batch.map(n => `#${n}`).join(", ")} (${issues.length - batch.length} deferred to next cycle)`);
+  }
+  return batch;
+}
+
 export function findActionableIssues(
   config: RepoConfig,
-  logger: Logger
+  logger: Logger,
+  opts: { uncapped?: boolean } = {}
 ): number[] {
   const repo = config.githubRepo;
 
@@ -538,24 +566,11 @@ export function findActionableIssues(
       // Sort ascending so lowest issue numbers (dependencies) come first
       uncovered.sort((a, b) => a - b);
 
-      // Greenfield detection: if repo has very few tracked files, limit to 1 issue
-      // The skill implements one-at-a-time anyway, but a focused prompt is more reliable
-      let effectiveBatchSize = MAX_BATCH_SIZE;
-      try {
-        const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
-        if (fileCount < 10) {
-          effectiveBatchSize = 1;
-          logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);
-        }
-      } catch { /* ignore — use default batch size */ }
-
-      const batch = uncovered.slice(0, effectiveBatchSize);
-      if (uncovered.length > MAX_BATCH_SIZE) {
-        logger.info(`Found ${uncovered.length} actionable issue(s), capping batch to ${MAX_BATCH_SIZE}: ${batch.map(n => `#${n}`).join(", ")} (${uncovered.length - MAX_BATCH_SIZE} deferred to next cycle)`);
-      } else {
-        logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${batch.map(n => `#${n}`).join(", ")}`);
+      if (opts.uncapped) {
+        logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${uncovered.map(n => `#${n}`).join(", ")}`);
+        return uncovered;
       }
-      return batch;
+      return capBatch(uncovered, config, logger);
     }
 
     logger.info(`Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`);
