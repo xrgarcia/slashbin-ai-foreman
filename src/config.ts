@@ -39,8 +39,14 @@ const repoEntrySchema = z.object({
   triggerLabel: z.string().optional(),
   baseBranch: z.string().optional(),
   featureBranch: z.string().optional(),
+  // A repo-relative SKILL.md, or "builtin:" for the generic skill shipped in
+  // this package's skills/ directory (see resolveSkill in agent.ts).
   skillPath: z.string().optional(),
   revisionSkillPath: z.string().optional(),
+  // Optional repo-relative file appended to the implement / revise prompt after
+  // the skill — operator rules on top of a built-in skill without forking it.
+  skillOverlayPath: z.string().optional(),
+  revisionSkillOverlayPath: z.string().optional(),
   prompt: z.string().optional(),
   model: z.string().optional(),
   maxTurns: z.coerce.number().int().positive().optional(),
@@ -68,6 +74,8 @@ const configSchema = z.object({
   featureBranch: z.string().default("features"),
   skillPath: z.string().optional(),
   revisionSkillPath: z.string().optional(),
+  skillOverlayPath: z.string().optional(),
+  revisionSkillOverlayPath: z.string().optional(),
   prompt: z.string().optional(),
 
   // Multi-repo
@@ -237,8 +245,13 @@ export interface RepoConfig {
   triggerLabel: string;
   baseBranch: string;
   featureBranch: string;
+  /** Repo-relative skill path, or "builtin:" for the skill shipped in skills/. */
   skillPath?: string;
   revisionSkillPath?: string;
+  /** Repo-relative file appended to the implement prompt after the skill. */
+  skillOverlayPath?: string;
+  /** Repo-relative file appended to the revise prompt after the skill. */
+  revisionSkillOverlayPath?: string;
   prompt?: string;
   model?: string;
   maxTurns: number;
@@ -346,6 +359,9 @@ export function loadConfig(configPath?: string): AgentConfig {
     issueCacheTtlMs: process.env.AI_AGENT_ISSUE_CACHE_TTL_MS ?? fileConfig.issueCacheTtlMs,
     issueSnapshotLimit: process.env.AI_AGENT_ISSUE_SNAPSHOT_LIMIT ?? fileConfig.issueSnapshotLimit,
     skillPath: process.env.AI_AGENT_SKILL_PATH ?? fileConfig.skillPath,
+    revisionSkillPath: fileConfig.revisionSkillPath,
+    skillOverlayPath: fileConfig.skillOverlayPath,
+    revisionSkillOverlayPath: fileConfig.revisionSkillOverlayPath,
     prompt: process.env.AI_AGENT_PROMPT ?? fileConfig.prompt,
     baseBranch: process.env.AI_AGENT_BASE_BRANCH ?? fileConfig.baseBranch,
     featureBranch: process.env.AI_AGENT_FEATURE_BRANCH ?? fileConfig.featureBranch,
@@ -412,6 +428,8 @@ export function loadConfig(configPath?: string): AgentConfig {
         featureBranch: entry.featureBranch ?? parsed.featureBranch,
         skillPath: entry.skillPath,
         revisionSkillPath: entry.revisionSkillPath,
+        skillOverlayPath: entry.skillOverlayPath,
+        revisionSkillOverlayPath: entry.revisionSkillOverlayPath,
         prompt: entry.prompt,
         model: entry.model ?? parsed.model,
         maxTurns: entry.maxTurns ?? parsed.maxTurns,
@@ -444,6 +462,8 @@ export function loadConfig(configPath?: string): AgentConfig {
       featureBranch: parsed.featureBranch,
       skillPath: parsed.skillPath,
       revisionSkillPath: parsed.revisionSkillPath,
+      skillOverlayPath: parsed.skillOverlayPath,
+      revisionSkillOverlayPath: parsed.revisionSkillOverlayPath,
       prompt: parsed.prompt,
       model: parsed.model,
       maxTurns: parsed.maxTurns,

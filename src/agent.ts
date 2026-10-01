@@ -303,6 +303,62 @@ const IMAGE_HANDLING_INSTRUCTIONS = `IMAGE HANDLING: If an issue body or PR revi
 
 The Authorization header is required for private-repo URLs (github.com/.../raw/...) and harmless for public CDN URLs (github.com/user-attachments/...). If a fetch fails, log a warning and proceed with the text spec — do not abort the implementation.`;
 
+/**
+ * The generic skills shipped with the Foreman, selected per repo with
+ * `skillPath: "builtin:"` / `revisionSkillPath: "builtin:"`. Resolved from this
+ * file's own location (like FOREMAN_OVERRIDES), never from cwd — the session
+ * runs inside the managed repo, where `skills/` means something else or nothing.
+ * Kept out of `.claude/skills/` so Claude Code does not offer them as
+ * user-invocable skills in a session opened on the Foreman itself.
+ */
+export const BUILTIN_SKILL = "builtin:";
+const FOREMAN_SKILLS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills");
+
+type PromptPart = { ok: true; text: string } | { ok: false; error: string };
+
+/**
+ * The opening instruction for a skill-mode prompt. A repo-local path is handed
+ * to the session to read, exactly as before. `builtin:` inlines the bundled
+ * SKILL.md instead of pointing at it: the text the session follows is then the
+ * text this Foreman build shipped with, wherever the package is installed.
+ */
+function skillInstruction(config: RepoConfig, skillPath: string, builtin: "implement" | "revise"): PromptPart {
+  if (skillPath !== BUILTIN_SKILL) return { ok: true, text: `Read and follow the skill at ${skillPath}.` };
+  const file = join(FOREMAN_SKILLS_DIR, builtin, "SKILL.md");
+  try {
+    const body = readFileSync(file, "utf8").trim();
+    // The built-in skill is the same text for every repo, so the per-repo
+    // facts it cannot carry are stated here. Labels are not among them: they
+    // reach the session as FOREMAN_TRIGGER_LABEL / FOREMAN_LIFECYCLE_LABELS.
+    return {
+      ok: true,
+      text: `Follow the skill below — the Foreman's built-in skills/${builtin}/SKILL.md.\n\n` +
+        `Repository: ${config.githubRepo}. Feature branch: ${config.featureBranch}. ` +
+        `Pull requests target: ${config.baseBranch}.\n\n` +
+        `===== SKILL =====\n${body}\n===== END SKILL =====`,
+    };
+  } catch (err) {
+    return { ok: false, error: `built-in ${builtin} skill unreadable at ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * A configured overlay, read relative to the managed repo. Configured but
+ * unreadable is a failure for this work item — running the skill without the
+ * operator's rules would be a partial application, so the caller does not
+ * launch Claude at all.
+ */
+function readOverlay(config: RepoConfig, overlayPath: string | undefined, field: string): PromptPart {
+  if (!overlayPath) return { ok: true, text: "" };
+  const file = resolve(config.repoPath, overlayPath);
+  try {
+    const body = readFileSync(file, "utf8").trim();
+    return { ok: true, text: `\n\n===== REPO OVERLAY (${overlayPath}) — applies on top of the skill above =====\n${body}\n===== END OVERLAY =====` };
+  } catch (err) {
+    return { ok: false, error: `${field} ${overlayPath} unreadable at ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 interface SpawnOptions {
   /** Working directory for the claude process. */
   cwd: string;
@@ -691,10 +747,21 @@ export async function implementApprovedIssues(
   // directions: the trailer is only honoured when the branch really did not move.
   const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
+  // Resolve the skill and the overlay before anything is launched: either one
+  // configured but unreadable fails this item with Claude never started.
+  const skill = config.skillPath ? skillInstruction(config, config.skillPath, "implement") : null;
+  const overlay = readOverlay(config, config.skillOverlayPath, "skillOverlayPath");
+  for (const part of [skill, overlay]) {
+    if (part && !part.ok) {
+      logger.error(`Implementation not started for ${config.name}: ${part.error}`);
+      return { success: false, error: part.error };
+    }
+  }
+
   let prompt: string;
 
-  if (config.skillPath) {
-    prompt = `Read and follow the skill at ${config.skillPath}.\n\nImplement all approved issues for this repository. The skill defines the full workflow — follow it exactly.\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+  if (config.skillPath && skill?.ok) {
+    prompt = `${skill.text}\n\nImplement all approved issues for this repository. The skill defines the full workflow — follow it exactly.\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else if (config.prompt) {
     // Custom user prompt — don't auto-modify (backward compat). Users who want
     // image handling in a custom prompt should include their own instructions.
@@ -715,6 +782,8 @@ ${IMAGE_HANDLING_INSTRUCTIONS}
 
 Work autonomously. Do not ask questions.`;
   }
+
+  if (overlay.ok) prompt += overlay.text;
 
   // Skip-signaling protocol: an issue body may explicitly direct the agent NOT
   // to implement (e.g., investigation-first, blocked on external verification).
@@ -933,10 +1002,19 @@ export async function revisePRFeedback(
   // re-reviewed — Slashbin-console#843 sat in exactly that deadlock.
   const noCommitNote = `\n\nIF NO CODE CHANGE IS NEEDED: do not invent one. Say so on its own line, as the LAST line of your output:\n\n  FOREMAN_REVISION no-commit reason=<one line: why the branch is already correct>\n\nWithout that trailer, a run that pushes nothing is treated as a failed revision — which is the correct default, because a silent no-op and a deliberate one look identical from outside.`;
 
+  const skill = config.revisionSkillPath ? skillInstruction(config, config.revisionSkillPath, "revise") : null;
+  const overlay = readOverlay(config, config.revisionSkillOverlayPath, "revisionSkillOverlayPath");
+  for (const part of [skill, overlay]) {
+    if (part && !part.ok) {
+      logger.error(`Revision not started for ${config.name}: ${part.error}`);
+      return { success: false, error: part.error };
+    }
+  }
+
   let prompt: string;
 
-  if (config.revisionSkillPath) {
-    prompt = `Read and follow the skill at ${config.revisionSkillPath}.\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${labelNote}${noCommitNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+  if (config.revisionSkillPath && skill?.ok) {
+    prompt = `${skill.text}\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${labelNote}${noCommitNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else {
     prompt = `Revise PR #${prNumber || "(find open PRs with review feedback)"} in this repository.
 
@@ -952,6 +1030,8 @@ ${IMAGE_HANDLING_INSTRUCTIONS}
 
 Work autonomously. Do not ask questions.`;
   }
+
+  if (overlay.ok) prompt += overlay.text;
 
   const transcriptPath = phaseTranscriptPath("revise", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
