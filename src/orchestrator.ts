@@ -8,6 +8,10 @@ import {
   hasPendingRevisions,
   findPendingRevisions,
   findPRsNeedingReview,
+  getPRCheckVerdict,
+  countCiBouncesSinceReview,
+  bounceForRedCI,
+  MAX_CI_BOUNCES,
   transitionRevisionLabels,
   transitionImplementationLabels,
   getReferencedIssuesFromOpenPR,
@@ -1349,6 +1353,24 @@ async function tryReview(
   if (!candidate) {
     if (failures > 0) reviewFailureCount.set(repoName, 0);
     return false;
+  }
+
+  // CI gate: never spend a review session on a PR its own CI already rejects.
+  const checks = getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
+  if (checks.state === "pending") {
+    reviewLogger.info(`PR #${candidate.prNumber} CI still running (${checks.pending.join(", ")}) — review waits for it`);
+    return false;
+  }
+  if (checks.state === "failing") {
+    const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, config.reviewerLogin, reviewLogger);
+    if (bounces < MAX_CI_BOUNCES) {
+      const names = checks.failing.map((f) => f.name).join(", ");
+      bounceForRedCI(repoConfig, candidate.prNumber, candidate.issueNumbers, checks, reviewLogger);
+      reviewLogger.info(`PR #${candidate.prNumber} CI red (${names}) — sent back to revise without a review (bounce ${bounces + 1}/${MAX_CI_BOUNCES})`);
+      events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: CI red (${names}) — sent back to the builder before review`, level: "info" });
+      return true;
+    }
+    reviewLogger.warn(`PR #${candidate.prNumber} CI still red after ${bounces} bounce(s) — reviewing anyway so a reviewer sees it`);
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
