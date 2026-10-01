@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { loadConfig, defaultLifecycleLabels } from "../dist/config.js";
 import {
   configureIssueCache,
-  findAllApprovedActionableIssues,
+  GitHubIssueConnector,
   transitionImplementationLabels,
   resolveDeadZone,
 } from "../dist/github.js";
@@ -141,7 +141,7 @@ test("a trigger label that is also a lifecycle label is refused at load", () => 
 
 // --- The daemon writes and reads the configured names --------------------------
 
-test("actionable set excludes the CONFIGURED lifecycle labels, not the defaults", () => {
+test("actionable set excludes the CONFIGURED lifecycle labels, not the defaults", async () => {
   const c = load({ lifecycleLabels: CUSTOM });
   resetGh([
     issue(1, "approved", "in-review"),
@@ -149,7 +149,8 @@ test("actionable set excludes the CONFIGURED lifecycle labels, not the defaults"
     issue(3, "approved"),
     issue(4, "approved", "shipped"),
   ]);
-  assert.deepEqual(findAllApprovedActionableIssues(c.repos[0], logger), [2, 3]);
+  const items = await new GitHubIssueConnector().selectEligible(c.repos[0], logger);
+  assert.deepEqual(items.map((w) => w.issueNumber), [2, 3]);
 });
 
 test("implementation applies the configured under-review label", () => {

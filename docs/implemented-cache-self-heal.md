@@ -33,12 +33,12 @@ implement cycle, forever ("self-locked", "manual EM cleanup every cycle").
 ## Correct model
 
 **Invariant:** `implemented[N]` ⟺ a PR that delivers N exists (open or
-merged). `findActionableIssues` already computes the authoritative negation
+merged). `GitHubIssueConnector.selectWork` already computes the authoritative negation
 of this (approved issues with **no** linked open/merged PR) — it is the same
 check the orchestrator trusts to decide what to implement.
 
 **Self-heal:** each cycle, reconcile the cache to the invariant. Any N that
-is BOTH still returned by `findActionableIssues` (no delivering PR per the
+is BOTH still returned by `GitHubIssueConnector.selectWork` (no delivering PR per the
 live check) AND present in `repoState.implemented` is provably stale → prune
 it, persist, log, let it re-implement. The dead-zone becomes
 unrepresentable: an issue cannot remain `implemented` while the live

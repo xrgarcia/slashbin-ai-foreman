@@ -26,8 +26,11 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
    (labels settled → no same-cycle race). See **Review phase** below.
 3. **Revise** — for issues labeled `pr pending actions` with an open feature PR, invoke
    the revision skill to address review feedback. Prioritized over new implementation.
-4. **Implement** — pick up `approved` issues with no delivering PR and invoke the
-   implementation skill; on success label the issue `pr under review`.
+4. **Implement** — the work source (`WorkSourceAdapter`; GitHub issues via
+   `GitHubIssueConnector`) offers every `approved` issue with no delivering PR; the
+   implementation skill is handed all of them (less backed-off ones) to choose from by
+   priority, while the Foreman's own per-issue bookkeeping uses a capped ascending batch
+   (`discoveryBatch`); on success label the issue `pr under review`.
 5. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
 6. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
    with `dependencyPreApproved`).
@@ -93,7 +96,8 @@ src/
 ├── cli.ts           # CLI entry point (--once, --repo, --help, --version)
 ├── config.ts        # Zod-validated config from .ai-agent.json + env vars
 ├── logger.ts        # Structured logging (JSON/text, levels, child contexts)
-├── github.ts        # gh-CLI helpers (issues, PRs, labels, branch drift, review gate)
+├── adapters.ts      # WorkSourceAdapter / WorkItem — the work-source seam (no source-specific code)
+├── github.ts        # gh-CLI helpers (issues, PRs, labels, branch drift, review gate) + GitHubIssueConnector
 ├── agent.ts         # Spawns claude CLI (implement / revise / review)
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
