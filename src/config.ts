@@ -78,6 +78,12 @@ const configSchema = z.object({
   // without the cascade the only way to move the fleet is to edit all 20 entries.
   model: z.string().optional(),
   allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "Bash", "Glob", "Grep"]),
+  // MCP client config handed to implement/revise sessions (`--mcp-config`), so a
+  // builder can check its assumptions against real data before it builds instead
+  // of learning them at review. Every server in it is added to the builder's
+  // allowed tools — so put READ-ONLY servers in it and nothing else. Optional and
+  // inert when unset or when the file does not exist. Additive + OSS-safe.
+  builderMcpConfig: z.string().optional(),
   logFormat: z.enum(["json", "text"]).default("text"),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
@@ -172,6 +178,8 @@ export interface RepoConfig {
   maxTurns: number;
   maxDurationMs: number;
   allowedTools: string[];
+  /** Absolute path of the builder MCP config, when one is configured. */
+  builderMcpConfig?: string;
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
@@ -262,6 +270,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxDurationMs: process.env.AI_AGENT_MAX_DURATION_MS ?? fileConfig.maxDurationMs,
     model: process.env.AI_AGENT_MODEL ?? fileConfig.model,
     allowedTools: fileConfig.allowedTools,
+    builderMcpConfig: process.env.AI_AGENT_BUILDER_MCP_CONFIG ?? fileConfig.builderMcpConfig,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
     repos: fileConfig.repos,
@@ -289,6 +298,7 @@ export function loadConfig(configPath?: string): AgentConfig {
   // doesn't specify its own value)
   const globals = {
     allowedTools: [...parsed.allowedTools],
+    builderMcpConfig: parsed.builderMcpConfig ? resolve(parsed.builderMcpConfig) : undefined,
   };
 
   let repos: RepoConfig[];

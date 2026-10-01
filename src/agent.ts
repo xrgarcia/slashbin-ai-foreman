@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, createWriteStream, type WriteStream } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, createWriteStream, type WriteStream } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentConfig, RepoConfig } from "./config.js";
@@ -293,6 +293,8 @@ interface SpawnOptions {
   ghToken?: string;
   model?: string;
   allowedTools: string[];
+  /** MCP client config to load (`--mcp-config`); each server it names is allowed. */
+  mcpConfig?: string;
   maxTurns: number;
   maxDurationMs: number;
   /**
@@ -313,6 +315,22 @@ interface SpawnOptions {
    * when in fact the run had merged the PR 55 minutes earlier.
    */
   runLabel?: string;
+}
+
+/**
+ * Server names in an MCP client config. Names only — the file carries bearer
+ * tokens and nothing from it but the keys is ever logged. A missing or
+ * unreadable file yields none, which leaves the session exactly as before.
+ */
+export function mcpServerNames(path: string, logger: Logger): string[] {
+  if (!existsSync(path)) return [];
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8")) as { mcpServers?: Record<string, unknown> };
+    return Object.keys(data.mcpServers ?? {}).filter((n) => /^[\w-]+$/.test(n));
+  } catch {
+    logger.warn(`Builder MCP config at ${path} is unreadable — running the builder without it`);
+    return [];
+  }
 }
 
 /**
@@ -356,8 +374,17 @@ function spawnClaudeWithOptions(
     args.push("--model", opts.model);
   }
 
-  if (opts.allowedTools.length > 0) {
-    args.push("--allowedTools", opts.allowedTools.join(","));
+  const allowedTools = [...opts.allowedTools];
+  if (opts.mcpConfig) {
+    const servers = mcpServerNames(opts.mcpConfig, logger);
+    if (servers.length > 0) {
+      args.push("--mcp-config", opts.mcpConfig);
+      allowedTools.push(...servers.map((s) => `mcp__${s}`));
+    }
+  }
+
+  if (allowedTools.length > 0) {
+    args.push("--allowedTools", allowedTools.join(","));
   }
 
   let transcript: WriteStream | null = null;
@@ -473,6 +500,7 @@ function spawnClaude(
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       model: config.model,
       allowedTools: config.allowedTools,
+      mcpConfig: config.builderMcpConfig,
       maxTurns: config.maxTurns,
       maxDurationMs: config.maxDurationMs,
       transcriptPath,
