@@ -102,6 +102,12 @@ const configSchema = z.object({
   // EM's MCP servers, npm scripts, and context/docs. It runs under the EM GitHub
   // token for EM-account review attribution.
   emRepoPath: z.string().optional(),
+  // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
+  // review is offered to it FIRST — Codex judges, its code posts and merges.
+  // It exits 3 when Codex cannot take the review and nothing was written; the
+  // review phase then runs the Claude /review-all-prs session exactly as
+  // before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
+  techLeadPath: z.string().optional(),
   reviewEnabled: z.boolean().default(false),
   reviewSkillPath: z.string().default(".claude/skills/review-all-prs/SKILL.md"),
   reviewModel: z.string().optional(),
@@ -218,6 +224,8 @@ export interface AgentConfig {
   // emRepoPath is the absolute path to the EM repo whose /review-all-prs skill
   // we invoke. Undefined when review is disabled everywhere.
   emRepoPath?: string;
+  /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
+  techLeadPath?: string;
   reviewSkillPath: string;
   reviewModel?: string;
   reviewCheckoutRoot: string;
@@ -287,6 +295,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     repos: fileConfig.repos,
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
+    techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
@@ -399,6 +408,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     logFormat: parsed.logFormat,
     logLevel: parsed.logLevel,
     emRepoPath,
+    techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
     reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),

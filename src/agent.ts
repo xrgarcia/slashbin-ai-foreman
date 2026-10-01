@@ -1179,6 +1179,78 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
 }
 
 /**
+ * Offer one PR's review to the Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427)
+ * before spending a Claude session on it.
+ *
+ * The Tech Lead judges on Codex inside a read-only sandbox and does the writes in
+ * its own code; it emits the same FOREMAN_REVIEW trailer this phase already
+ * parses, so every post-condition and label reconcile below applies unchanged.
+ *
+ * Exit 3 is its "I could not take this, and I wrote NOTHING" signal (Codex signed
+ * out, out of allowance, timed out, or a path it does not cover). That returns
+ * `{ fallback: true }` and the caller runs `reviewOpenPRs` as before — a review
+ * never waits on Codex. Any other non-zero exit is an ordinary failure: it may
+ * have written, so it is NOT retried on Claude in the same cycle.
+ */
+export async function reviewViaTechLead(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<ReviewResult | { fallback: true; reason: string }> {
+  const techLead = agentConfig.techLeadPath;
+  if (!techLead) return { fallback: true, reason: "techLeadPath not configured" };
+  if (!process.env.EM_GITHUB_TOKEN) {
+    return { success: false, error: "EM_GITHUB_TOKEN not set — refusing to run review without EM-account attribution" };
+  }
+  const args = [join(techLead, "bin/tech-lead.mjs"), "review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
+  logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead (Codex)`);
+
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolveRun) => {
+    const child = spawn("node", args, {
+      cwd: techLead,
+      env: { ...process.env, TECH_LEAD_EM_REPO: agentConfig.emRepoPath ?? "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "", timedOut = false;
+    const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath)) : null;
+    child.stdout.on("data", (b) => { stdout += b; log?.write(b); });
+    child.stderr.on("data", (b) => { stderr += b; log?.write(b); });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, agentConfig.reviewMaxDurationMs);
+    const onAbort = () => child.kill("SIGTERM");
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      log?.end();
+      resolveRun({ code, stdout, stderr, timedOut });
+    });
+  });
+
+  if (out.code === 3) {
+    const reason = out.stdout.trim().split("\n").pop() || "Codex unavailable";
+    logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — falling back to the Claude review`);
+    return { fallback: true, reason };
+  }
+  if (out.timedOut) return { success: false, error: "Tech Lead review timed out" };
+  if (out.code !== 0) {
+    return { success: false, error: `Tech Lead review failed (exit ${out.code}): ${(out.stderr || out.stdout).trim().slice(-400)}` };
+  }
+
+  const trailers = parseReviewTrailerRecords(out.stdout);
+  const declaredNoOp = REVIEW_NOOP_SENTINEL.test(out.stdout);
+  if (trailers.length === 0 && !declaredNoOp) {
+    return { success: false, error: "Tech Lead exited 0 without a FOREMAN_REVIEW trailer — outcome unknown; check the issue labels", trailers };
+  }
+  const statusLine = formatReviewTrailers(trailers);
+  const summary = out.stdout.trim().slice(0, SUMMARY_DISPLAY_LIMIT);
+  logger.info(`Tech Lead review of ${repoConfig.githubRepo} PR #${prNumber}: ${statusLine || "no-op"}`);
+  return { success: true, summary, statusLine, trailers };
+}
+
+/**
  * Render a review run's wall-clock budget as the two facts the run needs: how
  * long it has, and the instant it dies.
  *
