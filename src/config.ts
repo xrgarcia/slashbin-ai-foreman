@@ -6,6 +6,32 @@ import { execSync } from "node:child_process";
 
 // --- Schemas ---
 
+// The issue labels that carry a PR through its lifecycle after the trigger label
+// starts it. The defaults ARE the names Slashbin's fleet runs on, so a config
+// without `lifecycleLabels` behaves exactly as before. These five literals are the
+// only place the names are written down: everything else reads them from config,
+// and the implement/revise/review sessions receive them as FOREMAN_LIFECYCLE_LABELS.
+//
+// Global, never per repo. The phases hand work to each other by label — review
+// reads what implement wrote, revise reads what review wrote — so two repos with
+// different names would be one fleet speaking two protocols. `triggerLabel` stays
+// separate for the opposite reason: it selects work, and it does cascade per repo.
+const lifecycleLabelsSchema = z.object({
+  // Implement/revise opened or updated a PR; the review phase picks it up.
+  prUnderReview: z.string().min(1).default("pr under review"),
+  // Review asked for changes (or CI is red); the revise phase picks it up.
+  prPendingActions: z.string().min(1).default("pr pending actions"),
+  // Merged and verified in dev; awaiting the EM outcome-gate.
+  prApproved: z.string().min(1).default("pr approved"),
+  // The EM outcome-gate's signature — authorizes production. The daemon never
+  // applies it on its own judgement (see resolveDeadZone, transitionToReadyForProd);
+  // it only puts back one a review run removed (restoreEmGate).
+  readyForProd: z.string().min(1).default("ready for prod release"),
+  // Promoted; awaiting the close. Read here only to keep such issues out of the
+  // actionable set.
+  readyToClose: z.string().min(1).default("ready to close"),
+});
+
 const repoEntrySchema = z.object({
   name: z.string(),
   repoPath: z.string(),
@@ -166,9 +192,24 @@ const configSchema = z.object({
   // GitHub login the review runs as — used by the freshness guard to detect a
   // review already posted for the current PR head (avoids re-review loops).
   reviewerLogin: z.string().default("slashbin-engineering-manager"),
+
+  // prefault, not default: zod 4 returns a `default` value without parsing it, so
+  // an omitted block would arrive as {} with none of the five names filled in.
+  lifecycleLabels: lifecycleLabelsSchema.prefault({}),
 });
 
 // --- Types ---
+
+/** Configured names of the five lifecycle labels. See `lifecycleLabelsSchema`. */
+export type LifecycleLabels = Readonly<z.infer<typeof lifecycleLabelsSchema>>;
+
+/**
+ * The lifecycle labels a config that omits `lifecycleLabels` resolves to. Built
+ * from the schema, so it cannot drift from the defaults `loadConfig` applies.
+ */
+export function defaultLifecycleLabels(): LifecycleLabels {
+  return Object.freeze(lifecycleLabelsSchema.parse({}));
+}
 
 /**
  * Fully resolved per-repo config. Contains both repo-specific settings and
@@ -196,6 +237,8 @@ export interface RepoConfig {
   reviewEnabled: boolean;
   // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
   dependencyPreApproved: boolean;
+  /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
+  lifecycleLabels: LifecycleLabels;
 }
 
 /**
@@ -234,6 +277,7 @@ export interface AgentConfig {
   reviewAllowedTools: string[];
   reviewerLogin: string;
   reviewLabelReconcile: boolean;
+  lifecycleLabels: LifecycleLabels;
 }
 
 // --- Helpers ---
@@ -305,6 +349,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewAllowedTools: fileConfig.reviewAllowedTools,
     reviewerLogin: fileConfig.reviewerLogin,
     reviewLabelReconcile: process.env.AI_AGENT_REVIEW_LABEL_RECONCILE ?? fileConfig.reviewLabelReconcile,
+    lifecycleLabels: fileConfig.lifecycleLabels,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -316,9 +361,11 @@ export function loadConfig(configPath?: string): AgentConfig {
 
   // Global settings shared by all repos (used as fallback when a per-repo entry
   // doesn't specify its own value)
+  const lifecycleLabels: LifecycleLabels = Object.freeze({ ...parsed.lifecycleLabels });
   const globals = {
     allowedTools: [...parsed.allowedTools],
     builderMcpConfig: parsed.builderMcpConfig ? resolve(parsed.builderMcpConfig) : undefined,
+    lifecycleLabels,
   };
 
   let repos: RepoConfig[];
@@ -396,6 +443,22 @@ export function loadConfig(configPath?: string): AgentConfig {
     );
   }
 
+  // Fail fast on a label that means two things. The phases tell work apart by
+  // label alone, so two lifecycle states sharing a name are one state, and a
+  // trigger label that is also a lifecycle label excludes every issue it selects.
+  const names = Object.values(lifecycleLabels);
+  if (new Set(names).size !== names.length) {
+    throw new Error(`lifecycleLabels must be five distinct names; got ${JSON.stringify(lifecycleLabels)}`);
+  }
+  for (const r of repos) {
+    if (names.includes(r.triggerLabel)) {
+      throw new Error(
+        `triggerLabel "${r.triggerLabel}" for repo "${r.name}" is also a lifecycle label — ` +
+        "an issue carrying it would be selected and excluded at once, so nothing would ever build.",
+      );
+    }
+  }
+
   return Object.freeze({
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
@@ -417,5 +480,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewAllowedTools: [...parsed.reviewAllowedTools],
     reviewerLogin: parsed.reviewerLogin,
     reviewLabelReconcile: parsed.reviewLabelReconcile,
+    lifecycleLabels,
   });
 }

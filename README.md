@@ -139,6 +139,28 @@ For a single repo, set fields at the root level:
 | `allowedTools` | — | `["Read","Write","Edit","Bash","Glob","Grep"]` | Tools the CLI can use |
 | `logFormat` | `AI_AGENT_LOG_FORMAT` | `text` | `json` or `text` |
 | `logLevel` | `AI_AGENT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `lifecycleLabels` | — | see below | Names of the five labels that move a PR through its lifecycle. Top-level only — every repo shares one set |
+
+#### Lifecycle labels
+
+Set any subset; the rest keep their defaults. The five names must be distinct, and none may equal a repo's `triggerLabel` — the config fails to load otherwise.
+
+```json
+{
+  "lifecycleLabels": {
+    "prUnderReview": "pr under review",
+    "prPendingActions": "pr pending actions",
+    "prApproved": "pr approved",
+    "readyForProd": "ready for prod release",
+    "readyToClose": "ready to close"
+  }
+}
+```
+
+Every Claude session the daemon spawns (implement, revise, review) gets the names in its environment, so a skill can use the configured names in place of its own literals:
+
+- `FOREMAN_TRIGGER_LABEL`: the repo's `triggerLabel`, e.g. for `gh issue list --label "$FOREMAN_TRIGGER_LABEL"`
+- `FOREMAN_LIFECYCLE_LABELS`: the five names as a JSON object with the keys above
 
 ### GitHub API budget
 
