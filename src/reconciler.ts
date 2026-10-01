@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { gh, verifyPRExists, transitionImplementationLabels } from "./github.js";
+import { gh, verifyPRExists } from "./github.js";
 
 export interface ReconciliationResult {
   reconciled: boolean;
@@ -493,20 +493,12 @@ export function reconcileRepo(
 
     logger.info(`Reconciliation PR created and verified: ${prUrl}`);
 
-    // Apply `pr under review` to each linked issue. The implement phase normally
-    // does this after a successful PR open, but reconciler PRs are recovery for
-    // orphan commits left by an implementer that crashed (e.g. max-turns) before
-    // labeling — without this, the Review phase's gate (`findPRsNeedingReview`)
-    // never sees the PR and it sits dead-zoned indefinitely.
-    if (issueNumbers.length > 0) {
-      transitionImplementationLabels(
-        config.githubRepo,
-        issueNumbers,
-        config.repoPath,
-        config.lifecycleLabels,
-        logger,
-      );
-    }
+    // Reporting the linked issues `new → inReview` is the CALLER's job, through
+    // its work source (`runReconcileStage` does it right after this returns).
+    // Reconciler PRs are recovery for orphan commits left by an implementer that
+    // crashed (e.g. max-turns) before reporting — without that report the Review
+    // phase's gate (`findPRsNeedingReview`) never sees the PR and it sits
+    // dead-zoned indefinitely. A direct caller of this export must report too.
     return {
       reconciled: true, prUrl, issueNumbers, commitCount: commits.length,
       ...(rejected.length > 0 ? { rejected } : {}),

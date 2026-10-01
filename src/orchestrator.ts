@@ -2,7 +2,8 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import type { WorkSourceAdapter } from "./adapters.js";
+import type { WorkItem, WorkSourceAdapter } from "./adapters.js";
+import { workSourceFor } from "./work-source.js";
 import {
   GitHubIssueConnector,
   discoveryBatch,
@@ -13,8 +14,6 @@ import {
   countCiBouncesSinceReview,
   bounceForRedCI,
   MAX_CI_BOUNCES,
-  transitionRevisionLabels,
-  transitionImplementationLabels,
   getReferencedIssuesFromOpenPR,
   findReadyForProdIssues,
   findOpenPromotionPR,
@@ -44,14 +43,10 @@ import {
   findStuckMergedIssues,
   findIssuesMergedToBase,
   planFailedReviewOutcome,
-  transitionToReadyForProd,
   findIssuesStillUnderReview,
-  resolveDeadZone,
-  transitionReviewOutcomeLabel,
   findRevokedEmGates,
   restoreEmGate,
   findOrphanedLifecycleIssues,
-  releaseOrphanedLifecycle,
   type ReviewOutcome,
 } from "./github.js";
 import type { ReviewTrailer } from "./agent.js";
@@ -59,6 +54,11 @@ import { loadRepoState, saveRepoState } from "./state.js";
 import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
 
 const MAX_RETRIES = 2;
+
+/** The work item a repo-scoped issue number names. */
+function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {
+  return { issueNumber, repo: repoConfig.githubRepo };
+}
 
 // Agent runs in flight, keyed by repo name. Repos progress CONCURRENTLY (one
 // queue per service — see runCycle), so "the" in-flight run stopped being a
@@ -235,13 +235,14 @@ export function labelFromTrailer(t: ReviewTrailer): ReviewOutcome | null {
  *
  * Returns the issues still stuck after reconciliation — the genuine dead zone.
  */
-function reconcileReviewOutcomeLabels(
+async function reconcileReviewOutcomeLabels(
   repoConfig: RepoConfig,
   stuck: number[],
   trailers: ReviewTrailer[],
   logger: Logger,
   events?: CycleEvent[],
-): number[] {
+): Promise<number[]> {
+  const workSource = workSourceFor(repoConfig);
   const merged = findIssuesMergedToBase(repoConfig, stuck, logger);
   const byIssue = new Map(merged.map((m) => [m.issueNumber, m]));
   const unresolved: number[] = [];
@@ -277,7 +278,8 @@ function reconcileReviewOutcomeLabels(
       unresolved.push(issueNumber);
       continue;
     }
-    if (transitionReviewOutcomeLabel(repoConfig, issueNumber, outcome, logger)) {
+    const to = outcome === "prApproved" ? "approved" : "changesRequested";
+    if (await workSource.reportState(itemOf(repoConfig, issueNumber), "inReview", to, repoConfig, logger)) {
       events?.push({
         message: `${repoConfig.githubRepo} #${issueNumber} — review merged PR #${ref.prNumber} without labeling; reconciled to "${repoConfig.lifecycleLabels[outcome]}" from its own trailer`,
         level: outcome === "prApproved" ? "info" : "warn",
@@ -465,17 +467,26 @@ export async function runRepoPass(
  * zones. Returns how many items it processed. Never throws — each half catches
  * its own failure, as it did when this was inline Phase 0.
  */
-function runReconcileStage(
+async function runReconcileStage(
   repoConfig: RepoConfig,
   config: AgentConfig,
   base: Logger,
   events: CycleEvent[],
-): number {
+): Promise<number> {
   let processed = 0;
   const reconLogger = base.child({ phase: "reconcile" });
+  const workSource = workSourceFor(repoConfig);
   try {
     const result = reconcileRepo(repoConfig, reconLogger);
     if (result.reconciled) {
+      // reconcileRepo opened a PR for orphaned commits; report its linked items
+      // as in review so the Review phase's gate sees it. Immediately after the
+      // PR is verified, as when the reconciler wrote the label itself.
+      for (const n of result.issueNumbers) {
+        const item = itemOf(repoConfig, n);
+        if (result.prUrl) await workSource.reportPrLink(item, result.prUrl, repoConfig, reconLogger);
+        await workSource.reportState(item, "new", "inReview", repoConfig, reconLogger);
+      }
       reconLogger.info(
         `Reconciled ${result.commitCount} orphaned commit(s) — PR created: ${result.prUrl}`,
         { issues: result.issueNumbers },
@@ -577,7 +588,10 @@ function runReconcileStage(
           s.prNumber,
           reconLogger,
         );
-        if (verdict !== "indeterminate" && resolveDeadZone(repoConfig, s.issueNumber, verdict, reconLogger)) {
+        if (verdict !== "indeterminate" && await workSource.reportState(
+          itemOf(repoConfig, s.issueNumber), "unknown", verdict === "pass" ? "approved" : "changesRequested",
+          repoConfig, reconLogger,
+        )) {
           const label = labels[verdict === "pass" ? "prApproved" : "prPendingActions"];
           events.push({
             message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone auto-recovered: re-verification ${verdict.toUpperCase()} → labeled "${label}" (PR #${s.prNumber} was merged with the issue left at "${labels.prUnderReview}")`,
@@ -624,7 +638,7 @@ function runReconcileStage(
     // return it to the queue. Safe precisely BECAUSE nothing merged —
     // re-implementing cannot duplicate work that was never done.
     for (const num of findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
-      if (releaseOrphanedLifecycle(repoConfig, num, reconLogger)) {
+      if (await workSource.reportState(itemOf(repoConfig, num), "unknown", "queued", repoConfig, reconLogger)) {
         events.push({
           message: `${repoConfig.githubRepo} #${num} released back to the implement queue — it carried a lifecycle label but no PR covers it and nothing merged, so the work never landed.`,
           level: "warn",
@@ -712,7 +726,7 @@ async function runRepoCycle(
     switch (stage.type) {
       // --- Reconcile orphaned commits (features ahead of develop with no PR) and dead zones ---
       case "reconcile":
-        processed += runReconcileStage(repoConfig, config, base, events);
+        processed += await runReconcileStage(repoConfig, config, base, events);
         break;
 
       // --- Review open feature PRs (invokes the configured review skill). The
@@ -1049,7 +1063,7 @@ async function tryBatchImplementation(
   //     reached (Slashbin-console#1154, 2026-10-01). Everything the
   //     Foreman does per issue keeps using it: the run gate, the inline
   //     prompt, a batch-wide skip, the labeling fallback.
-  const workSource: WorkSourceAdapter = new GitHubIssueConnector();
+  const workSource: WorkSourceAdapter = workSourceFor(repoConfig);
   const offered = (await workSource.selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
   let handOff = offered;
   if (offered.length === 0) {
@@ -1193,6 +1207,9 @@ async function tryBatchImplementation(
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
 
   try {
+    // Tell the source the Foreman is starting on its batch, before the session.
+    for (const n of actionableIssues) await workSource.claim(itemOf(repoConfig, n), repoConfig, repoLogger);
+
     const priorFailure = lastFailureReason.get(repoName) || null;
     const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, handOff)
       .catch(reportLaunchThrew);
@@ -1285,10 +1302,13 @@ async function tryBatchImplementation(
       }
       saveRepoState(repoName, updatedState);
 
-      // Add the `prUnderReview` label so EM knows PRs are ready for review
-      transitionImplementationLabels(
-        repoConfig.githubRepo, issuesActuallyImplemented, repoConfig.repoPath, repoConfig.lifecycleLabels, repoLogger,
-      );
+      // Report each implemented item in review (on GitHub: the `prUnderReview`
+      // label) so the EM knows the PR is ready. One item at a time, in order.
+      for (const n of issuesActuallyImplemented) {
+        const item = itemOf(repoConfig, n);
+        if (result.prUrl) await workSource.reportPrLink(item, result.prUrl, repoConfig, repoLogger);
+        await workSource.reportState(item, "new", "inReview", repoConfig, repoLogger);
+      }
 
       repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")} in state`, { prUrl: result.prUrl });
       events?.push({ message: `Feature PR on ${repoConfig.githubRepo}: ${result.prUrl || "(commits added to existing PR)"}`, level: "info" });
@@ -1323,7 +1343,9 @@ async function tryBatchImplementation(
       const alreadyMerged = findIssuesMergedToBase(repoConfig, skippedSet, repoLogger);
       if (alreadyMerged.length > 0) {
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
-        transitionToReadyForProd(repoConfig, mergedNums, repoLogger);
+        for (const n of mergedNums) {
+          await workSource.reportState(itemOf(repoConfig, n), "new", "approved", repoConfig, repoLogger);
+        }
         repoLogger.info(
           `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels.prApproved}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
         );
@@ -1352,6 +1374,9 @@ async function tryBatchImplementation(
         };
       }
       saveRepoState(repoName, updatedState);
+      // The agent declined these; the source hears why. On GitHub this writes
+      // nothing — the agent posts its own skip comment.
+      for (const n of skippedSet) await workSource.reportBlocked(itemOf(repoConfig, n), reason, repoConfig, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
@@ -1467,13 +1492,10 @@ async function tryRevision(
       // Transition issue labels: `prPendingActions` → `prUnderReview`
       // The orchestrator owns this because the skill runs in the service repo
       // and may not have the right context to find the issue labels.
-      transitionRevisionLabels(
-        repoConfig.githubRepo,
-        pending.issueNumbers,
-        repoConfig.repoPath,
-        repoConfig.lifecycleLabels,
-        revLogger,
-      );
+      const workSource = workSourceFor(repoConfig);
+      for (const n of pending.issueNumbers) {
+        await workSource.reportState(itemOf(repoConfig, n), "changesRequested", "inReview", repoConfig, revLogger);
+      }
 
       revLogger.info("PR revision succeeded");
       return pending;
@@ -1502,6 +1524,11 @@ async function tryRevision(
             `STOPPED retrying it${issues ? ` (issues ${issues})` : ""}. It needs a human. Last failure: ${result.error ?? "unknown"}`,
           level: "error",
         });
+        const workSource = workSourceFor(repoConfig);
+        const blocked = `Revision retries exhausted on PR #${pending.pr.number}: ${result.error ?? "unknown"}`;
+        for (const n of pending.issueNumbers) {
+          await workSource.reportBlocked(itemOf(repoConfig, n), blocked, repoConfig, revLogger);
+        }
       }
     }
 
@@ -1556,6 +1583,12 @@ async function tryReview(
     if (failures > 0) reviewFailureCount.set(repoName, 0);
     return false;
   }
+  const workSource = workSourceFor(repoConfig);
+  // Orphan adoption: the implement report never landed for these. Report them
+  // in review now, before anything else touches the PR.
+  for (const n of candidate.adopted) {
+    await workSource.reportState(itemOf(repoConfig, n), "new", "inReview", repoConfig, reviewLogger);
+  }
 
   // CI gate: never spend a review session on a PR its own CI already rejects.
   const checks = getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
@@ -1567,7 +1600,10 @@ async function tryReview(
     const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
     if (bounces < MAX_CI_BOUNCES) {
       const names = checks.failing.map((f) => f.name).join(", ");
-      bounceForRedCI(repoConfig, candidate.prNumber, candidate.issueNumbers, checks, reviewLogger);
+      bounceForRedCI(repoConfig, candidate.prNumber, checks);
+      for (const n of candidate.issueNumbers) {
+        await workSource.reportState(itemOf(repoConfig, n), "inReview", "changesRequested", repoConfig, reviewLogger);
+      }
       reviewLogger.info(`PR #${candidate.prNumber} CI red (${names}) — sent back to revise without a review (bounce ${bounces + 1}/${MAX_CI_BOUNCES})`);
       events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: CI red (${names}) — sent back to the builder before review`, level: "info" });
       return true;
@@ -1650,7 +1686,7 @@ async function tryReview(
           // from a fresh deploy poll was spending minutes to recompute an answer
           // we were holding.
           const unresolved = config.reviewLabelReconcile
-            ? reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, reviewLogger, events)
+            ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, reviewLogger, events)
             : stuck;
 
           if (!config.reviewLabelReconcile && stuck.length > 0) {
@@ -1697,7 +1733,7 @@ async function tryReview(
       );
 
       const unresolved = plan.toReconcile.length > 0 && config.reviewLabelReconcile
-        ? reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events)
+        ? await reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events)
         : plan.toReconcile;
 
       if (unresolved.length > 0) {

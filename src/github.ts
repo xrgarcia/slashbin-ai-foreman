@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
-import type { WorkItem, WorkSourceAdapter } from "./adapters.js";
+import type { PriorState, WorkItem, WorkSourceAdapter, WorkState } from "./adapters.js";
 import type { Logger } from "./logger.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "./upstream-backoff.js";
 
@@ -457,11 +457,251 @@ export function discoveryBatch(config: RepoConfig, offered: number[], logger: Lo
  * bookkeeping (label widening after a run, the review checkout's queue count),
  * not part of the adapter contract.
  *
+ * Reporting is issue labels. `reportState` writes exactly the `gh issue edit`
+ * each transition wrote before it moved behind the adapter. `claim`,
+ * `reportPrLink` and `reportBlocked` write nothing on GitHub: the PR body's
+ * `Related to #N` already carries the link and the implement agent writes the
+ * skip comment itself — a write here would change what GitHub sees.
+ *
+ * Never sets `ready for prod release`: that label is the EM outcome-gate's
+ * signature (separation of duties, 2026-07-27), and `WorkState` has no member
+ * that maps to it. Putting a gate back that a review removed (`restoreEmGate`)
+ * is code-host logic and stays outside the connector.
+ *
  * Stateless: construct one where it is used.
  */
 export class GitHubIssueConnector implements WorkSourceAdapter {
   async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
     return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
+  }
+
+  async claim(_item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {}
+
+  async reportPrLink(_item: WorkItem, _prUrl: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {}
+
+  async reportBlocked(_item: WorkItem, _reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {}
+
+  async reportState(
+    item: WorkItem,
+    from: PriorState,
+    to: WorkState,
+    repoConfig: RepoConfig,
+    logger: Logger,
+  ): Promise<boolean> {
+    const n = item.issueNumber;
+    switch (`${from}→${to}`) {
+      case "new→inReview": return this.implementationDone(repoConfig, n, logger);
+      case "changesRequested→inReview": return this.revisionDone(repoConfig, n, logger);
+      case "inReview→approved": return this.reviewOutcome(repoConfig, n, "prApproved", logger);
+      case "inReview→changesRequested": return this.reviewOutcome(repoConfig, n, "prPendingActions", logger);
+      case "new→approved": return this.alreadyMerged(repoConfig, n, logger);
+      case "unknown→approved": return this.deadZoneResolve(repoConfig, n, "pass", logger);
+      case "unknown→changesRequested": return this.deadZoneResolve(repoConfig, n, "fail", logger);
+      case "unknown→queued": return this.orphanRelease(repoConfig, n, logger);
+      default:
+        logger.warn(`GitHub work source: no transition ${String(from)} → ${String(to)} for #${n} — nothing written`);
+        return false;
+    }
+  }
+
+  /**
+   * After a successful implementation (or a reconciliation PR): add
+   * `prUnderReview` so the EM knows a PR is ready for review.
+   */
+  private implementationDone(config: RepoConfig, num: number, logger: Logger): boolean {
+    const labels = config.lifecycleLabels;
+    try {
+      gh([
+        "issue", "edit", String(num),
+        "--repo", config.githubRepo,
+        "--add-label", labels.prUnderReview,
+      ], config.repoPath);
+      logger.info(`Added "${labels.prUnderReview}" to issue #${num} after implementation`);
+      return true;
+    } catch (err) {
+      logger.warn(`Failed to add "${labels.prUnderReview}" on #${num}: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /** After a successful revision: remove `prPendingActions`, add `prUnderReview`. */
+  private revisionDone(config: RepoConfig, num: number, logger: Logger): boolean {
+    const labels = config.lifecycleLabels;
+    try {
+      gh([
+        "issue", "edit", String(num),
+        "--repo", config.githubRepo,
+        "--remove-label", labels.prPendingActions,
+        "--add-label", labels.prUnderReview,
+      ], config.repoPath);
+      logger.info(`Transitioned issue #${num} labels: "${labels.prPendingActions}" → "${labels.prUnderReview}"`);
+      return true;
+    } catch (err) {
+      logger.warn(`Failed to transition labels on #${num}: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Move an issue out of `pr under review` into a review outcome: the outcome
+   * its own review run reported (written immediately after that run), or
+   * `pr pending actions` when red CI bounces the PR back to revise.
+   *
+   * Why the post-review write exists at all: the merge is performed by code, but
+   * the record of what the merge MEANT was left to the review agent to remember to
+   * write. Measured over 7 days (2026-07-29 → 08-04): 53 merges, 12 issues left
+   * mislabeled — ~23%. In the worked example (slashbin-io-worker#575) the agent
+   * merged, verified, reported `verdict=APPROVE merged=yes deploy=SUCCESS`, named
+   * the target label 24 times in its own output, and never executed the write.
+   *
+   * Sibling of the dead-zone resolve, which repairs the same state a cycle later
+   * from a FRESH verification. This one needs no re-verification because the
+   * verdict is the one the review just produced.
+   *
+   * Never applies `ready for prod release`: `outcome` names a lifecycle KEY, not a
+   * label, and the type admits only the two review outcomes.
+   */
+  private reviewOutcome(config: RepoConfig, issueNumber: number, outcome: ReviewOutcome, logger: Logger): boolean {
+    const { prUnderReview } = config.lifecycleLabels;
+    const nextLabel = config.lifecycleLabels[outcome];
+    try {
+      gh([
+        "issue", "edit", String(issueNumber),
+        "--repo", config.githubRepo,
+        "--remove-label", prUnderReview,
+        "--add-label", nextLabel,
+      ], config.repoPath);
+      logger.info(`Transitioned issue #${issueNumber} labels: "${prUnderReview}" → "${nextLabel}"`);
+      return true;
+    } catch (err) {
+      logger.warn(
+        `Failed to transition labels on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * TERMINAL transition (slashbin-ai-foreman#32): the issue's work is already
+   * merged to the base branch. Strip the trigger label so the issue permanently
+   * leaves the actionable set, and add `pr approved` — meaning "implemented and
+   * merged, awaiting the EM outcome-gate."
+   *
+   * It must NOT be `ready for prod release`: that label authorizes production.
+   * Granting it here would let the Foreman authorize its own release.
+   *
+   * Stripping `triggerLabel` is the load-bearing half: without it the issue stays
+   * "actionable" forever and the Foreman burns a full Claude session every
+   * back-off window concluding there is nothing to do.
+   */
+  private alreadyMerged(config: RepoConfig, num: number, logger: Logger): boolean {
+    try {
+      gh([
+        "issue", "edit", String(num),
+        "--repo", config.githubRepo,
+        "--remove-label", config.triggerLabel,
+        "--add-label", config.lifecycleLabels.prApproved,
+      ], config.repoPath);
+      logger.info(
+        `Terminal transition on #${num}: removed "${config.triggerLabel}", added "${config.lifecycleLabels.prApproved}" (work already merged to ${config.baseBranch})`,
+      );
+      return true;
+    } catch (err) {
+      logger.warn(
+        `Failed terminal transition on #${num}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Move a dead-zoned issue out of `pr under review` once a FRESH verification has
+   * produced a verdict: `pr approved` on PASS, `pr pending actions` on FAIL.
+   *
+   * Deliberately never applies `ready for prod release` — the most this can do is
+   * restore the issue to the state a healthy review run would have left it in.
+   */
+  private deadZoneResolve(config: RepoConfig, issueNumber: number, verdict: "pass" | "fail", logger: Logger): boolean {
+    const { prUnderReview, prPendingActions } = config.lifecycleLabels;
+    const nextLabel = config.lifecycleLabels[verdict === "pass" ? "prApproved" : "prPendingActions"];
+    try {
+      // Remove only what is actually present. `gh` errors on removing an absent
+      // label, and since the dead zone covers `pr pending actions` as well as
+      // `pr under review`, a hard `--remove-label` of `prUnderReview` would throw
+      // on exactly the issues the widened detector catches.
+      dropIssueSnapshot(config.githubRepo);
+      const issue = getOpenIssues(config.githubRepo, config.repoPath, logger)
+        .find((i) => i.number === issueNumber);
+      if (!issue) {
+        logger.debug(`Dead-zone resolve skipped for #${issueNumber} — no longer open`);
+        return false;
+      }
+
+      const args = ["issue", "edit", String(issueNumber), "--repo", config.githubRepo];
+      const stripped: string[] = [];
+      for (const l of [prUnderReview, prPendingActions]) {
+        // Never strip the label we are about to add — that is a no-op edit that
+        // reads as a transition.
+        if (l !== nextLabel && hasLabel(issue, l)) {
+          args.push("--remove-label", l);
+          stripped.push(l);
+        }
+      }
+      if (!hasLabel(issue, nextLabel)) args.push("--add-label", nextLabel);
+      // Kept exactly as it was before the move behind the adapter (byte-for-byte
+      // GitHub behaviour). NOTE: the base argv is 5 long, so this never fires and
+      // an already-resolved issue gets a flagless `gh issue edit` that fails into
+      // the catch below — still `false`, but via a failed call, not no call.
+      if (args.length === 4) {
+        logger.debug(`Dead-zone resolve on #${issueNumber} is already in the target state`);
+        return false;
+      }
+
+      gh(args, config.repoPath);
+      logger.info(
+        `Dead-zone resolved on #${issueNumber}: removed ${stripped.map((s) => `"${s}"`).join(", ") || "(nothing)"}, ` +
+        `added "${nextLabel}" (re-verification ${verdict.toUpperCase()})`,
+      );
+      return true;
+    } catch (err) {
+      logger.warn(
+        `Failed to resolve dead zone on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Return an orphaned issue to the implement queue by stripping whichever
+   * lifecycle label is stranding it. The trigger label (`approved`) is left alone
+   * — it is still authorized, it just never got built.
+   */
+  private orphanRelease(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+    try {
+      dropIssueSnapshot(config.githubRepo);
+      const issue = getOpenIssues(config.githubRepo, config.repoPath, logger)
+        .find((i) => i.number === issueNumber);
+      if (!issue) return false;
+
+      const args = ["issue", "edit", String(issueNumber), "--repo", config.githubRepo];
+      // `gh` errors when removing a label that is not present, so only remove what is.
+      for (const l of [config.lifecycleLabels.prUnderReview, config.lifecycleLabels.prPendingActions]) {
+        if (hasLabel(issue, l)) args.push("--remove-label", l);
+      }
+      if (args.length === 5) return false; // nothing to strip — state changed under us
+
+      gh(args, config.repoPath);
+      logger.warn(
+        `Released orphaned issue #${issueNumber} back to the implement queue — it carried a lifecycle label ` +
+        `but no open PR covers it and nothing merged, so the work never landed.`,
+      );
+      return true;
+    } catch (err) {
+      logger.warn(
+        `Failed to release orphaned issue #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -663,6 +903,12 @@ export interface ReviewCandidate {
   prNumber: number;
   prUrl: string;
   issueNumbers: number[];
+  /**
+   * The subset of `issueNumbers` adopted by the orphan fallback — the ones the
+   * caller must report `new → inReview` for. Empty on the normal path, where
+   * every issue already carries `pr under review`.
+   */
+  adopted: number[];
 }
 
 /**
@@ -680,10 +926,11 @@ export interface ReviewCandidate {
  * Self-heal fallback: when no issue carries `pr under review` but an open feature
  * PR exists, the implement phase opened the PR but never applied the label (the
  * transition step swallows errors, and the process can die between `gh pr create`
- * and `transitionImplementationLabels`). GitHub — the actual open PR — is the
+ * and the implement stage's `new → inReview` report). GitHub — the actual open PR — is the
  * source of truth for whether review is needed; the label is a tracking artifact.
- * `adoptOrphanedReviewCandidate` finds linked issues from the PR title/body,
- * applies `pr under review` to them, and returns the candidate so the review runs
+ * `adoptOrphanedReviewCandidate` finds linked issues from the PR title/body and
+ * returns them as `adopted` — the caller reports them `new → inReview` through
+ * the work source (on GitHub: `pr under review`) — so the review runs
  * this cycle instead of hanging forever waiting for a label that never lands.
  *
  * Returns null when there's nothing to review.
@@ -723,7 +970,7 @@ export function findPRsNeedingReview(
     logger.info(
       `${config.name}: PR #${pr.number} needs review (issues: ${reviewable.map((i) => `#${i.number}`).join(", ")})`,
     );
-    return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number) };
+    return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [] };
   } catch (err) {
     logger.error("Failed to check for PRs needing review", {
       error: err instanceof Error ? err.message : String(err),
@@ -736,9 +983,10 @@ export function findPRsNeedingReview(
  * Fallback for `findPRsNeedingReview`: an open feature PR exists but no linked
  * issue carries `pr under review`. The implement phase opened the PR then failed
  * (silently) to apply the label — or crashed between `gh pr create` and
- * `transitionImplementationLabels`. Recover by extracting linked issue refs from
- * the PR title/body, applying `pr under review` to those that still carry the
- * trigger label, and returning a candidate so the review runs this cycle.
+ * the `new → inReview` report. Recover by extracting linked issue refs from
+ * the PR title/body, returning those that still carry the trigger label as
+ * `adopted` (the caller reports them `new → inReview`), and returning a
+ * candidate so the review runs this cycle.
  *
  * Safety filters (only adopt issues we clearly own):
  *  - OPEN state
@@ -787,16 +1035,7 @@ function adoptOrphanedReviewCandidate(
       if (!names.has(config.triggerLabel)) continue;
       if (names.has(prPendingActions)) continue;
       if (names.has(readyForProd)) continue;
-      try {
-        gh([
-          "issue", "edit", String(num),
-          "--repo", config.githubRepo,
-          "--add-label", prUnderReview,
-        ], config.repoPath);
-        logger.warn(`${config.name}: adopted orphaned issue #${num} → PR #${pr.number} (implement phase never applied "${prUnderReview}")`);
-      } catch (err) {
-        logger.warn(`${config.name}: failed to add "${prUnderReview}" on adopted #${num}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      logger.warn(`${config.name}: adopted orphaned issue #${num} → PR #${pr.number} (implement phase never applied "${prUnderReview}")`);
       adopted.push(num);
     } catch (err) {
       logger.debug(`${config.name}: could not inspect referenced #${num}: ${err instanceof Error ? err.message : String(err)}`);
@@ -808,7 +1047,7 @@ function adoptOrphanedReviewCandidate(
   }
 
   logger.info(`${config.name}: adopted orphaned PR #${pr.number} for review (issues: ${adopted.map((n) => `#${n}`).join(", ")})`);
-  return { prNumber: pr.number, prUrl: pr.url, issueNumbers: adopted };
+  return { prNumber: pr.number, prUrl: pr.url, issueNumbers: adopted, adopted };
 }
 
 export interface MergedIssueRef {
@@ -895,46 +1134,6 @@ export function findIssuesMergedToBase(
       repo: config.githubRepo,
     });
     return [];
-  }
-}
-
-/**
- * TERMINAL transition (slashbin-ai-foreman#32): the issue's work is already merged
- * to the base branch. Strip the trigger label so the issue permanently leaves the
- * actionable set, and add `pr approved` — meaning "implemented and merged, awaiting
- * the EM outcome-gate."
- *
- * It must NOT be `ready for prod release`: that label is the EM outcome-gate's
- * signature and authorizes production. Granting it here would let the Foreman
- * authorize its own release (separation of duties, 2026-07-27).
- *
- * Stripping `triggerLabel` is the load-bearing half: without it the issue stays
- * "actionable" forever and the Foreman burns a full Claude session every back-off
- * window concluding there is nothing to do. Uses `config.triggerLabel` rather than
- * a hard-coded `approved` — the trigger label is configurable (OSS), and so is the
- * label it adds (`lifecycleLabels.prApproved`).
- */
-export function transitionToReadyForProd(
-  config: RepoConfig,
-  issueNumbers: number[],
-  logger: Logger,
-): void {
-  for (const num of issueNumbers) {
-    try {
-      gh([
-        "issue", "edit", String(num),
-        "--repo", config.githubRepo,
-        "--remove-label", config.triggerLabel,
-        "--add-label", config.lifecycleLabels.prApproved,
-      ], config.repoPath);
-      logger.info(
-        `Terminal transition on #${num}: removed "${config.triggerLabel}", added "${config.lifecycleLabels.prApproved}" (work already merged to ${config.baseBranch})`,
-      );
-    } catch (err) {
-      logger.warn(
-        `Failed terminal transition on #${num}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 }
 
@@ -1138,43 +1337,6 @@ export function findOrphanedLifecycleIssues(
 }
 
 /**
- * Return an orphaned issue to the implement queue by stripping whichever
- * lifecycle label is stranding it. The trigger label (`approved`) is left alone
- * — it is still authorized, it just never got built.
- */
-export function releaseOrphanedLifecycle(
-  config: RepoConfig,
-  issueNumber: number,
-  logger: Logger,
-): boolean {
-  try {
-    dropIssueSnapshot(config.githubRepo);
-    const issue = getOpenIssues(config.githubRepo, config.repoPath, logger)
-      .find((i) => i.number === issueNumber);
-    if (!issue) return false;
-
-    const args = ["issue", "edit", String(issueNumber), "--repo", config.githubRepo];
-    // `gh` errors when removing a label that is not present, so only remove what is.
-    for (const l of [config.lifecycleLabels.prUnderReview, config.lifecycleLabels.prPendingActions]) {
-      if (hasLabel(issue, l)) args.push("--remove-label", l);
-    }
-    if (args.length === 5) return false; // nothing to strip — state changed under us
-
-    gh(args, config.repoPath);
-    logger.warn(
-      `Released orphaned issue #${issueNumber} back to the implement queue — it carried a lifecycle label ` +
-      `but no open PR covers it and nothing merged, so the work never landed.`,
-    );
-    return true;
-  } catch (err) {
-    logger.warn(
-      `Failed to release orphaned issue #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return false;
-  }
-}
-
-/**
  * POST-CONDITION CHECK for a finished review run: of `issueNumbers`, which are
  * still pinned at `pr under review` with no lifecycle label beyond it?
  *
@@ -1222,57 +1384,6 @@ export function findIssuesStillUnderReview(
 
 /** The two lifecycle states a review can end in, as `LifecycleLabels` keys. */
 export type ReviewOutcome = "prApproved" | "prPendingActions";
-
-/**
- * Move an issue out of `pr under review` into the outcome label its own review
- * run reported, immediately after that run — the deterministic write that closes
- * the gap this whole lifecycle used to leave open.
- *
- * Why this exists at all: the merge is performed by code, but the record of what
- * the merge MEANT was left to the review agent to remember to write. Measured over
- * 7 days (2026-07-29 → 08-04): 53 merges, 12 issues left mislabeled — ~23%. In the
- * worked example (slashbin-io-worker#575) the agent merged, verified, reported
- * `verdict=APPROVE merged=yes deploy=SUCCESS`, named the target label 24 times in
- * its own output, and never executed the write. The Foreman parsed that trailer,
- * logged it, and did nothing with it.
- *
- * Sibling of `resolveDeadZone`, which repairs the same state a cycle later from a
- * FRESH verification. This one is the first line of defense and needs no
- * re-verification because the verdict is the one the review just produced. Kept
- * separate rather than merged with it: the two differ in where their verdict comes
- * from, and that provenance is exactly what a reader needs to trust either one.
- *
- * Never applies `ready for prod release` — that label is the EM outcome-gate's
- * signature and stays a human act (separation of duties, 2026-07-27). `outcome`
- * names a lifecycle KEY, not a label, so no caller can hand it that label: the
- * type admits only the two review outcomes.
- */
-export function transitionReviewOutcomeLabel(
-  config: RepoConfig,
-  issueNumber: number,
-  outcome: ReviewOutcome,
-  logger: Logger,
-): boolean {
-  const { prUnderReview } = config.lifecycleLabels;
-  const nextLabel = config.lifecycleLabels[outcome];
-  try {
-    gh([
-      "issue", "edit", String(issueNumber),
-      "--repo", config.githubRepo,
-      "--remove-label", prUnderReview,
-      "--add-label", nextLabel,
-    ], config.repoPath);
-    logger.info(
-      `Reconciled outcome label on #${issueNumber}: "${prUnderReview}" → "${nextLabel}" (from the review run's own trailer)`,
-    );
-    return true;
-  } catch (err) {
-    logger.warn(
-      `Failed to reconcile outcome label on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return false;
-  }
-}
 
 export interface TimelineLabelEvent {
   event?: string;
@@ -1458,67 +1569,6 @@ export function restoreEmGate(
     logger.warn(`restoreEmGate failed for ${config.githubRepo}: ${err instanceof Error ? err.message : String(err)}`);
   }
   return restored;
-}
-
-/**
- * Move a dead-zoned issue out of `pr under review` once a FRESH verification has
- * produced a verdict: `pr approved` on PASS, `pr pending actions` on FAIL.
- *
- * Deliberately never applies `ready for prod release` — that label is the EM
- * outcome-gate's signature and stays a human act (separation of duties, same
- * rule the review prompt enforces). The most this can do is restore the issue to
- * the state a healthy review run would have left it in.
- */
-export function resolveDeadZone(
-  config: RepoConfig,
-  issueNumber: number,
-  verdict: "pass" | "fail",
-  logger: Logger,
-): boolean {
-  const { prUnderReview, prPendingActions } = config.lifecycleLabels;
-  const nextLabel = config.lifecycleLabels[verdict === "pass" ? "prApproved" : "prPendingActions"];
-  try {
-    // Remove only what is actually present. `gh` errors on removing an absent
-    // label, and since the dead zone now covers `pr pending actions` as well as
-    // `pr under review`, a hard `--remove-label` of `prUnderReview` would throw
-    // on exactly the issues the widened detector just started catching — the
-    // recovery would fail for the new case while looking like a gh outage.
-    dropIssueSnapshot(config.githubRepo);
-    const issue = getOpenIssues(config.githubRepo, config.repoPath, logger)
-      .find((i) => i.number === issueNumber);
-    if (!issue) {
-      logger.debug(`Dead-zone resolve skipped for #${issueNumber} — no longer open`);
-      return false;
-    }
-
-    const args = ["issue", "edit", String(issueNumber), "--repo", config.githubRepo];
-    const stripped: string[] = [];
-    for (const l of [prUnderReview, prPendingActions]) {
-      // Never strip the label we are about to add — that is a no-op edit that
-      // reads as a transition.
-      if (l !== nextLabel && hasLabel(issue, l)) {
-        args.push("--remove-label", l);
-        stripped.push(l);
-      }
-    }
-    if (!hasLabel(issue, nextLabel)) args.push("--add-label", nextLabel);
-    if (args.length === 4) {
-      logger.debug(`Dead-zone resolve on #${issueNumber} is already in the target state`);
-      return false;
-    }
-
-    gh(args, config.repoPath);
-    logger.info(
-      `Dead-zone resolved on #${issueNumber}: removed ${stripped.map((s) => `"${s}"`).join(", ") || "(nothing)"}, ` +
-      `added "${nextLabel}" (re-verification ${verdict.toUpperCase()})`,
-    );
-    return true;
-  } catch (err) {
-    logger.warn(
-      `Failed to resolve dead zone on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return false;
-  }
 }
 
 /**
@@ -1713,89 +1763,21 @@ export function ciBounceComment(verdict: CheckVerdict): string {
 }
 
 /**
- * Send a red-CI PR back to revise: comment the failing checks on the PR, then
- * move each linked issue `pr under review` → `pr pending actions`, which is the
- * label the revise phase picks up.
+ * Send a red-CI PR back to revise: comment the failing checks on the PR. The
+ * caller then reports each linked work item `inReview → changesRequested`
+ * through its work source (on GitHub: `pr under review` → `pr pending actions`,
+ * the label the revise phase picks up). The comment is PR-level and stays here.
  */
 export function bounceForRedCI(
   config: RepoConfig,
   prNumber: number,
-  issueNumbers: number[],
   verdict: CheckVerdict,
-  logger: Logger,
 ): void {
   gh([
     "pr", "comment", String(prNumber),
     "--repo", config.githubRepo,
     "--body", ciBounceComment(verdict),
   ], config.repoPath);
-  for (const num of issueNumbers) {
-    try {
-      gh([
-        "issue", "edit", String(num),
-        "--repo", config.githubRepo,
-        "--remove-label", config.lifecycleLabels.prUnderReview,
-        "--add-label", config.lifecycleLabels.prPendingActions,
-      ], config.repoPath);
-      logger.info(
-        `Transitioned issue #${num} labels: "${config.lifecycleLabels.prUnderReview}" → ` +
-        `"${config.lifecycleLabels.prPendingActions}" (CI red on PR #${prNumber})`,
-      );
-    } catch (err) {
-      logger.warn(`Failed to bounce labels on #${num}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-}
-
-/**
- * Transition issue labels after successful revision:
- * remove `prPendingActions`, add `prUnderReview`.
- */
-export function transitionRevisionLabels(
-  repo: string,
-  issueNumbers: number[],
-  cwd: string,
-  labels: LifecycleLabels,
-  logger: Logger,
-): void {
-  for (const num of issueNumbers) {
-    try {
-      gh([
-        "issue", "edit", String(num),
-        "--repo", repo,
-        "--remove-label", labels.prPendingActions,
-        "--add-label", labels.prUnderReview,
-      ], cwd);
-      logger.info(`Transitioned issue #${num} labels: "${labels.prPendingActions}" → "${labels.prUnderReview}"`);
-    } catch (err) {
-      logger.warn(`Failed to transition labels on #${num}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-}
-
-/**
- * Transition issue labels after successful implementation:
- * add `prUnderReview` so the EM knows a PR is ready for review.
- */
-export function transitionImplementationLabels(
-  repo: string,
-  issueNumbers: number[],
-  cwd: string,
-  labels: LifecycleLabels,
-  logger: Logger,
-): void {
-  for (const num of issueNumbers) {
-    try {
-      gh([
-        "issue", "edit", String(num),
-        "--repo", repo,
-        "--add-label", labels.prUnderReview,
-      ], cwd);
-      logger.info(`Added "${labels.prUnderReview}" to issue #${num} after implementation`);
-    } catch (err) {
-      logger.warn(`Failed to add "${labels.prUnderReview}" on #${num}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
 }
 
 // --- Promotion PR Creation ---

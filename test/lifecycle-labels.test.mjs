@@ -19,8 +19,6 @@ import { loadConfig, defaultLifecycleLabels } from "../dist/config.js";
 import {
   configureIssueCache,
   GitHubIssueConnector,
-  transitionImplementationLabels,
-  resolveDeadZone,
 } from "../dist/github.js";
 import { reviewOpenPRs } from "../dist/agent.js";
 import { createLogger } from "../dist/logger.js";
@@ -153,21 +151,24 @@ test("actionable set excludes the CONFIGURED lifecycle labels, not the defaults"
   assert.deepEqual(items.map((w) => w.issueNumber), [2, 3]);
 });
 
-test("implementation applies the configured under-review label", () => {
+test("implementation applies the configured under-review label", async () => {
   const c = load({ lifecycleLabels: CUSTOM });
   resetGh();
-  transitionImplementationLabels("example/acceptance", [7], tmp, c.lifecycleLabels, logger);
+  const item = { issueNumber: 7, repo: "example/acceptance" };
+  assert.equal(await new GitHubIssueConnector().reportState(item, "new", "inReview", c.repos[0], logger), true);
   const [call] = ghCalls();
   assert.deepEqual(call, ["issue", "edit", "7", "--repo", "example/acceptance", "--add-label", "in-review"]);
 });
 
-test("dead-zone recovery writes configured names and never the production gate", () => {
+test("dead-zone recovery writes configured names and never the production gate", async () => {
   // Separation of duties survives the rename: the most a recovery may do is the
   // state a healthy review would have left — never `readyForProd`.
   const c = load({ lifecycleLabels: CUSTOM });
   for (const [verdict, added] of [["pass", "dev-verified"], ["fail", "changes-requested"]]) {
     resetGh([issue(9, "approved", "in-review")]);
-    assert.equal(resolveDeadZone(c.repos[0], 9, verdict, logger), true, verdict);
+    const to = verdict === "pass" ? "approved" : "changesRequested";
+    assert.equal(await new GitHubIssueConnector().reportState(
+      { issueNumber: 9, repo: "example/acceptance" }, "unknown", to, c.repos[0], logger), true, verdict);
     const edit = ghCalls().find((a) => a[0] === "issue" && a[1] === "edit");
     assert.deepEqual(edit, ["issue", "edit", "9", "--repo", "example/acceptance",
       "--remove-label", "in-review", "--add-label", added], verdict);
