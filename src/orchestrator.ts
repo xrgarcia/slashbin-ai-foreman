@@ -1204,19 +1204,29 @@ async function tryRevision(
   const repoName = repoConfig.name;
   const revLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "revision" });
 
-  // Check if this repo has exceeded revision failure retries
   const failures = revisionFailureCount.get(repoName) ?? 0;
-  if (failures >= MAX_RETRIES) {
-    revLogger.debug(`Skipping ${repoName} revision — ${failures} consecutive failures`);
-    return null;
-  }
 
   // Gate: are there issues with pending review feedback + an open feature PR?
+  //
+  // This runs BEFORE the exhausted-retries skip, on purpose. The reset below is
+  // the only way an exhausted counter clears short of a daemon restart, and it
+  // used to sit after the skip — unreachable once the cap was hit. Slashbin-io-docs
+  // PR #411 (2026-10-01) failed revision twice on the account's session limit,
+  // exhausted, and then deadlocked the whole repo: revision skipped forever, and
+  // implement is gated on "no pending revision", so #412 could not build either.
+  // Clearing `pr pending actions` for one pass now resets it, as the comment on
+  // `revisionEscalated` always claimed.
   const pending = findPendingRevisions(repoConfig, revLogger);
   if (!pending) {
     if (failures > 0) revisionFailureCount.set(repoName, 0);
     revisionEscalated.delete(repoName);
     consecutiveNoCommit.delete(repoName);
+    return null;
+  }
+
+  // Check if this repo has exceeded revision failure retries
+  if (failures >= MAX_RETRIES) {
+    revLogger.debug(`Skipping ${repoName} revision — ${failures} consecutive failures`);
     return null;
   }
 
