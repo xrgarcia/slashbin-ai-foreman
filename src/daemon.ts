@@ -4,6 +4,7 @@ import type { Logger } from "./logger.js";
 import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
 import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
 import { configureIssueCache } from "./github.js";
+import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 
 export interface DaemonOptions {
   configPath?: string;
@@ -47,6 +48,17 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
     snapshotLimit: config.issueSnapshotLimit,
+  });
+
+  // One daemon-wide back-off per upstream (GitHub rate limit, Claude session
+  // limit). Every transition is logged AND sent once to Discord — never per repo.
+  configureUpstreamBackoff({
+    baseMs: activeConfig.upstreamBackoffBaseMs,
+    capMs: activeConfig.upstreamBackoffCapMs,
+    notify: (text, level) => {
+      logger.warn(text);
+      bridge?.sendStatus(`**FOREMAN:** ${text}`, level);
+    },
   });
 
   // A TTL at or above the poll interval means a cycle can be served entirely
@@ -144,6 +156,19 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     const run = async (): Promise<void> => {
       const repoLogger = logger.child({ repo: repoName });
       while (!stopping && !loopStopping) {
+        // GitHub is backing off: wait for the module's probe to clear it rather
+        // than spin. Raced against `wake` so stop() still ends the loop at once.
+        if (isUpstreamBlocked("github")) {
+          await Promise.race([
+            whenUpstreamClear("github"),
+            new Promise<void>((resolve) => {
+              wake = resolve;
+            }),
+          ]);
+          wake = null;
+          continue;
+        }
+
         // Re-resolve from the live config each pass so a hot-reloaded setting
         // (branches, budgets, reviewEnabled) applies without a restart. A repo
         // dropped from the config ends its own loop.
@@ -164,6 +189,12 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
             }
           }
         } catch (err) {
+          // A pass cut short by the GitHub back-off is expected, and the back-off
+          // module has already announced it once — no per-repo message.
+          if (err instanceof UpstreamBackoffError) {
+            repoLogger.debug("Repo pass cut short by the GitHub back-off", { error: err.message });
+            continue;
+          }
           // Never let one repo's failure end its loop — that would take the
           // service permanently off the fleet with no signal beyond silence.
           repoLogger.error("Repo pass failed", {

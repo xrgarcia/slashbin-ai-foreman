@@ -6,6 +6,7 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
 import { checkoutPathFor } from "./review-checkout.js";
+import { isUpstreamBlocked } from "./upstream-backoff.js";
 
 const FOREMAN_OVERRIDES = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -75,6 +76,11 @@ export interface RevisionResult {
   noCommit?: boolean;
   /** The reason given on the trailer. Present only when `noCommit` is true. */
   noCommitReason?: string;
+  /**
+   * The run was refused by the Claude session limit, not failed on its merits.
+   * The orchestrator reports it to the upstream back-off and charges no retry.
+   */
+  upstreamLimit?: UpstreamLimit;
 }
 
 /**
@@ -123,6 +129,11 @@ export interface ReviewResult {
   // The same trailers, structured, so the orchestrator can check the run's
   // post-condition (did the issues it claims to have merged actually advance?).
   trailers?: ReviewTrailer[];
+  /**
+   * The run was refused by the Claude session limit, not failed on its merits.
+   * The orchestrator reports it to the upstream back-off and charges no retry.
+   */
+  upstreamLimit?: UpstreamLimit;
 }
 
 /**
@@ -190,6 +201,11 @@ export interface ImplementationResult {
   skipReason?: string;
   // Issues the agent decided to skip. Empty/undefined when no skip was detected.
   skippedIssues?: number[];
+  /**
+   * The run was refused by the Claude session limit, not failed on its merits.
+   * The orchestrator reports it to the upstream back-off and charges no retry.
+   */
+  upstreamLimit?: UpstreamLimit;
 }
 
 // Detect a deliberate skip in the agent's output. Two signals, in order of
@@ -551,6 +567,95 @@ export function extractStreamResult(stdout: string): string | undefined {
   return undefined;
 }
 
+/** A Claude refusal on the account session limit, as read from a failed run. */
+export interface UpstreamLimit {
+  reason: string;
+  /** The reset the refusal stated, resolved to epoch ms; absent when unparseable. */
+  resetAtMs?: number;
+}
+
+/**
+ * Classify a FAILED run as a Claude session-limit refusal, or `undefined`.
+ *
+ * Two arms, one per output mode (2026-10-01 journal: 294 of 294 review hits on
+ * the first, 97 of 97 implement/revise hits on the second):
+ *  - stream-json (review): the last `"type":"result"` event has
+ *    `is_error: true` and `api_error_status: 429`.
+ *  - plain text (implement, revise): no result event, and the trimmed stdout
+ *    starts with "You've hit your" and mentions a limit.
+ * A bare "session limit" substring anywhere is NOT enough — prose can carry it.
+ */
+export function detectUpstreamLimit(stdout: string): UpstreamLimit | undefined {
+  const lines = stdout.split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let evt: { type?: unknown; is_error?: unknown; api_error_status?: unknown; result?: unknown };
+    try {
+      evt = JSON.parse(lines[i]);
+    } catch {
+      continue; // not a JSON line — keep scanning
+    }
+    if (!evt || evt.type !== "result") continue;
+    if (evt.is_error !== true || evt.api_error_status !== 429) return undefined;
+    const reason = typeof evt.result === "string" && evt.result.trim() ? evt.result.trim() : "Claude API 429";
+    return { reason, resetAtMs: parseClaudeReset(reason) };
+  }
+  const text = stdout.trim();
+  if (/^You(?:'|\u2019)ve hit your/.test(text) && /limit/i.test(text)) {
+    const reason = text.split("\n")[0].slice(0, 300);
+    return { reason, resetAtMs: parseClaudeReset(text) };
+  }
+  return undefined;
+}
+
+/**
+ * `resets 12:10pm (America/Chicago)` → the next occurrence of that wall-clock
+ * time in that zone, as epoch ms. Resolved through Intl (not a fixed offset) so
+ * DST is honoured. Unparseable text or an unknown zone → undefined.
+ */
+export function parseClaudeReset(text: string, now = Date.now()): number | undefined {
+  const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i.exec(text);
+  if (!m) return undefined;
+  let hour = Number(m[1]) % 12;
+  if (m[3].toLowerCase() === "pm") hour += 12;
+  const minute = m[2] ? Number(m[2]) : 0;
+  if (minute > 59) return undefined;
+  const zone = m[4].trim();
+  try {
+    const today = zonedParts(now, zone);
+    for (let dayOffset = 0; dayOffset <= 1; dayOffset++) {
+      const at = zonedWallToUtc(today.year, today.month, today.day + dayOffset, hour, minute, zone);
+      if (at > now) return at;
+    }
+  } catch {
+    // RangeError on an unknown time zone
+  }
+  return undefined;
+}
+
+function zonedParts(ms: number, zone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(ms);
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  return { year: get("year"), month: get("month"), day: get("day"), hour: get("hour"), minute: get("minute"), second: get("second") };
+}
+
+/** Offset (ms) of `zone` from UTC at instant `ms`. */
+function zoneOffset(ms: number, zone: string): number {
+  const p = zonedParts(ms, zone);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return asUtc - Math.floor(ms / 1000) * 1000;
+}
+
+/** The UTC instant whose wall-clock in `zone` reads the given fields (day may overflow). */
+function zonedWallToUtc(year: number, month: number, day: number, hour: number, minute: number, zone: string): number {
+  const guess = Date.UTC(year, month - 1, day, hour, minute);
+  const first = guess - zoneOffset(guess, zone);
+  const second = guess - zoneOffset(first, zone);
+  return second;
+}
+
 /**
  * Invoke Claude CLI to implement all approved issues for a repo.
  * The skill (SKILL.md) owns inventory, prioritization, implementation,
@@ -619,7 +724,7 @@ Work autonomously. Do not ask questions.`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
   }
 
   // A DECLARED skip, with no new commits, is authoritative — and it has to be
@@ -688,8 +793,9 @@ Work autonomously. Do not ask questions.`;
   const prMatch = result.stdout.match(/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
   let prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
 
-  // Fallback: query GitHub directly for an open feature PR
-  if (!prUrl) {
+  // Fallback: query GitHub directly for an open feature PR. This spawn is
+  // outside runGh, so it has to honour the GitHub back-off itself.
+  if (!prUrl && !isUpstreamBlocked("github")) {
     logger.info("PR URL not found in output, querying GitHub as fallback");
     const fallback = spawnSync("gh", [
       "pr", "list",
@@ -842,7 +948,7 @@ Work autonomously. Do not ask questions.`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
   }
 
   // Post-revision self-check: confirm Claude actually pushed commits to the
@@ -1003,7 +1109,7 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Review Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
   }
 
   // Parse from the FULL result text; truncate only for display. The trailer is

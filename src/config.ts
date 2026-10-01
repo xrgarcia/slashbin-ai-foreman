@@ -57,6 +57,11 @@ const configSchema = z.object({
   // .ai-agent.json keeps working with no new key (the first window is unchanged;
   // only repeat skips of the SAME issue back off further). slashbin-ai-foreman#32.
   skipBackoffMs: z.coerce.number().int().positive().default(1_800_000),
+  // Daemon-wide back-off when an upstream (GitHub rate limit, Claude session
+  // limit) refuses work: the Nth consecutive window is base * 2^(N-1), capped.
+  // See src/upstream-backoff.ts. Additive: defaults 2 min base, 60 min cap.
+  upstreamBackoffBaseMs: z.coerce.number().int().positive().default(120_000),
+  upstreamBackoffCapMs: z.coerce.number().int().positive().default(3_600_000),
   // How long a repo's open-issue snapshot stays warm. The discovery phases each
   // used to run their own `gh issue list` against the same repo — six GraphQL
   // requests per repo per cycle, which at 20 repos on a 60s poll blew GitHub's
@@ -198,6 +203,10 @@ export interface AgentConfig {
   maxConcurrentRepos: number;
   /** Base window for the escalating per-issue skip back-off (default 30 min). */
   skipBackoffMs: number;
+  /** First window of the daemon-wide upstream-limit back-off (default 2 min). */
+  upstreamBackoffBaseMs: number;
+  /** Ceiling for the upstream-limit back-off window (default 60 min). */
+  upstreamBackoffCapMs: number;
   /** How long a repo's open-issue snapshot stays warm (default 30s; 0 disables). */
   issueCacheTtlMs: number;
   /** Page cap for the open-issue snapshot (default 500). */
@@ -260,6 +269,8 @@ export function loadConfig(configPath?: string): AgentConfig {
     pollIntervalMs: process.env.AI_AGENT_POLL_INTERVAL_MS ?? fileConfig.pollIntervalMs,
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
     skipBackoffMs: process.env.AI_AGENT_SKIP_BACKOFF_MS ?? fileConfig.skipBackoffMs,
+    upstreamBackoffBaseMs: process.env.AI_AGENT_UPSTREAM_BACKOFF_BASE_MS ?? fileConfig.upstreamBackoffBaseMs,
+    upstreamBackoffCapMs: process.env.AI_AGENT_UPSTREAM_BACKOFF_CAP_MS ?? fileConfig.upstreamBackoffCapMs,
     issueCacheTtlMs: process.env.AI_AGENT_ISSUE_CACHE_TTL_MS ?? fileConfig.issueCacheTtlMs,
     issueSnapshotLimit: process.env.AI_AGENT_ISSUE_SNAPSHOT_LIMIT ?? fileConfig.issueSnapshotLimit,
     skillPath: process.env.AI_AGENT_SKILL_PATH ?? fileConfig.skillPath,
@@ -381,6 +392,8 @@ export function loadConfig(configPath?: string): AgentConfig {
     pollIntervalMs: parsed.pollIntervalMs,
     maxConcurrentRepos: parsed.maxConcurrentRepos,
     skipBackoffMs: parsed.skipBackoffMs,
+    upstreamBackoffBaseMs: parsed.upstreamBackoffBaseMs,
+    upstreamBackoffCapMs: parsed.upstreamBackoffCapMs,
     issueCacheTtlMs: parsed.issueCacheTtlMs,
     issueSnapshotLimit: parsed.issueSnapshotLimit,
     logFormat: parsed.logFormat,

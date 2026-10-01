@@ -34,6 +34,7 @@ import {
   type PendingRevisionInfo,
 } from "./github.js";
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, type ImplementationResult, type RevisionResult } from "./agent.js";
+import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
 import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch } from "./reconciler.js";
 import {
   verifyPRExists,
@@ -853,6 +854,16 @@ function backoffWindowFor(skipCount: number | undefined, baseMs: number): number
   return Math.min(baseMs * 2 ** exp, SKIP_BACKOFF_MAX_MS);
 }
 
+/**
+ * A Claude launch that threw is reported as a non-limit result, so a half-open
+ * probe is never left out forever. Every launch that returns is reported by its
+ * phase directly after the call, ahead of every return.
+ */
+function reportLaunchThrew(err: unknown): never {
+  reportClaudeResult(false);
+  throw err;
+}
+
 async function tryBatchImplementation(
   repoConfig: RepoConfig,
   config: AgentConfig,
@@ -863,6 +874,10 @@ async function tryBatchImplementation(
   const repoName = repoConfig.name;
   const skipBackoffMs = config.skipBackoffMs;
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
+
+  // Claude is backing off (or its one half-open probe is already out): no
+  // per-repo events — the back-off module has already said so, once.
+  if (isUpstreamBlocked("claude")) return null;
 
   // Check if this repo has exceeded batch failure retries
   const failures = failureCount.get(repoName) ?? 0;
@@ -1012,13 +1027,16 @@ async function tryBatchImplementation(
   }
 
   // Invoke the skill — one Claude session implements all approved issues
+  if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
 
   try {
     const priorFailure = lastFailureReason.get(repoName) || null;
-    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues);
+    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues)
+      .catch(reportLaunchThrew);
+    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
 
     if (result.success) {
       failureCount.set(repoName, 0);
@@ -1179,6 +1197,9 @@ async function tryBatchImplementation(
       repoLogger.info(`Batch implementation skipped by agent: ${reason} (issues: ${skippedSet.map(n => `#${n}`).join(", ")})`);
       events?.push({ message: `Implementation skipped on ${repoConfig.githubRepo}: ${reason}`, level: "info" });
     } else {
+      // An upstream limit refused the run (or a swallowed GitHub back-off made
+      // it look failed) — not a defect, so it charges no retry.
+      if (result.upstreamLimit || isUpstreamBlocked("github")) return null;
       const newCount = (failureCount.get(repoName) ?? 0) + 1;
       failureCount.set(repoName, newCount);
       if (newCount >= MAX_RETRIES) {
@@ -1203,6 +1224,8 @@ async function tryRevision(
 ): Promise<PendingRevisionInfo | null> {
   const repoName = repoConfig.name;
   const revLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "revision" });
+
+  if (isUpstreamBlocked("claude")) return null;
 
   const failures = revisionFailureCount.get(repoName) ?? 0;
 
@@ -1231,6 +1254,7 @@ async function tryRevision(
   }
 
   // Invoke the revision skill with specific PR and issue context
+  if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
   revLogger.info(`Triggering PR revision for ${repoName} — PR #${pending.pr.number}, issues: ${pending.issueNumbers.map(n => `#${n}`).join(", ")}`);
@@ -1239,7 +1263,8 @@ async function tryRevision(
     const result = await revisePRFeedback(
       repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers,
-    );
+    ).catch(reportLaunchThrew);
+    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
 
     if (result.success) {
       revisionFailureCount.set(repoName, 0);
@@ -1290,6 +1315,8 @@ async function tryRevision(
       revLogger.info("PR revision succeeded");
       return pending;
     } else {
+      // An upstream limit refused the run — not a defect, so it charges no retry.
+      if (result.upstreamLimit || isUpstreamBlocked("github")) return null;
       const newCount = failures + 1;
       revisionFailureCount.set(repoName, newCount);
       revLogger.warn(`PR revision failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
@@ -1344,6 +1371,8 @@ async function tryReview(
   const repoName = repoConfig.name;
   const reviewLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "review" });
 
+  if (isUpstreamBlocked("claude")) return false;
+
   // Failure back-off with cooldown (mirrors the implement phase).
   const failures = reviewFailureCount.get(repoName) ?? 0;
   if (failures >= MAX_RETRIES) {
@@ -1393,6 +1422,10 @@ async function tryReview(
   // it is precisely the case a pre-run snapshot cannot see.
   const reviewStartedAt = new Date().toISOString();
 
+  // Claim the launch (the one half-open probe, when Claude is recovering)
+  // before any checkout work or "Reviewing" event.
+  if (!tryAcquire("claude")) return false;
+
   // The session reads the code from here rather than cloning one for itself.
   // Prepared before the run so it is warm on arrival; see review-checkout.ts
   // for why an unmanaged clone per review took the whole box down.
@@ -1407,7 +1440,8 @@ async function tryReview(
     const result = await reviewOpenPRs(
       repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
       `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
-    );
+    ).catch(reportLaunchThrew);
+    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
 
     if (result.success) {
       reviewFailureCount.set(repoName, 0);
@@ -1515,6 +1549,10 @@ async function tryReview(
       return true;
     }
 
+    // An upstream limit refused the run — not a defect, so it charges no retry.
+    // After the reconciliation above, so a review that merged and then hit the
+    // limit still settles its labels.
+    if (result.upstreamLimit || isUpstreamBlocked("github")) return false;
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
     if (newCount >= MAX_RETRIES) reviewFailureHitMaxAt.set(repoName, cycleNumber);

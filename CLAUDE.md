@@ -69,9 +69,11 @@ repo), written after every change and loaded on startup so the daemon survives r
   (investigation-only, blocked-on-external-verification); cleared on success or after
   the back-off window. Some transient skip reasons are re-checked and admitted early.
 - `failed` / failure counters — per-repo consecutive-failure counts with cooldown
-  (after `MAX_RETRIES` failures, skip the repo for `FAILURE_COOLDOWN_CYCLES`).
+  (after `MAX_RETRIES` failures, skip the repo for `FAILURE_COOLDOWN_CYCLES`). A run refused by
+  an upstream limit (GitHub rate limit, Claude session limit) is never charged.
 
-In-memory only: `implementing` mutex (reset on restart — safe).
+In-memory only: `implementing` mutex and the upstream back-off state (both reset on
+restart — safe).
 
 ## Architecture
 
@@ -82,6 +84,7 @@ src/
 ├── logger.ts        # Structured logging (JSON/text, levels, child contexts)
 ├── github.ts        # gh-CLI helpers (issues, PRs, labels, branch drift, review gate)
 ├── agent.ts         # Spawns claude CLI (implement / revise / review)
+├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
 ├── state.ts         # Disk persistence (.agent-state.json)
 ├── orchestrator.ts  # 6-phase cycle, failure cooldowns, label transitions

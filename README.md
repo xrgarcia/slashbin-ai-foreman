@@ -125,6 +125,8 @@ For a single repo, set fields at the root level:
 | `triggerLabel` | `AI_AGENT_TRIGGER_LABEL` | `approved` | Label that triggers implementation |
 | `pollIntervalMs` | `AI_AGENT_POLL_INTERVAL_MS` | `300000` (5 min) | Poll interval in milliseconds |
 | `issueCacheTtlMs` | `AI_AGENT_ISSUE_CACHE_TTL_MS` | `30000` (30 s) | How long a repo's open-issue snapshot stays warm. Keep it **below** `pollIntervalMs`. `0` disables caching. See [GitHub API budget](#github-api-budget) |
+| `upstreamBackoffBaseMs` | `AI_AGENT_UPSTREAM_BACKOFF_BASE_MS` | `120000` (2 min) | First window of the daemon-wide back-off when GitHub (rate limit) or Claude (session limit) refuses work. Doubles per consecutive window. Each transition is logged and sent once to Discord |
+| `upstreamBackoffCapMs` | `AI_AGENT_UPSTREAM_BACKOFF_CAP_MS` | `3600000` (60 min) | Ceiling for that back-off window |
 | `issueSnapshotLimit` | `AI_AGENT_ISSUE_SNAPSHOT_LIMIT` | `500` | Max open issues fetched per snapshot. Must exceed a repo's open-issue count; truncation is logged |
 | `skillPath` | `AI_AGENT_SKILL_PATH` | — | Claude Code skill for implementation |
 | `revisionSkillPath` | — | — | Claude Code skill for PR revision |
