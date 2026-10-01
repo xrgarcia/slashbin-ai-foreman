@@ -1452,7 +1452,14 @@ export async function reviewViaTechLead(
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolveRun) => {
     const child = spawn("node", args, {
       cwd: techLead,
-      env: { ...process.env, TECH_LEAD_EM_REPO: agentConfig.emRepoPath ?? "" },
+      // The configured label names, exactly as every Claude session gets them
+      // (spawnClaudeWithOptions), so the Tech Lead never writes a hardcoded name.
+      env: {
+        ...process.env,
+        TECH_LEAD_EM_REPO: agentConfig.emRepoPath ?? "",
+        ...(repoConfig.triggerLabel ? { FOREMAN_TRIGGER_LABEL: repoConfig.triggerLabel } : {}),
+        ...(repoConfig.lifecycleLabels ? { FOREMAN_LIFECYCLE_LABELS: JSON.stringify(repoConfig.lifecycleLabels) } : {}),
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "", stderr = "", timedOut = false;
