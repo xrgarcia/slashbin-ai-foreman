@@ -55,3 +55,11 @@ test("unset techLeadPath is a fallback, so the default config is unchanged", asy
   const r = await reviewViaTechLead(repo, { reviewMaxDurationMs: 1000 }, 5, logger);
   assert.equal(r.fallback, true);
 });
+
+test("the configured label names reach the Tech Lead as they reach Claude", async () => {
+  const cfg = fakeTechLead('console.log(`labels ${process.env.FOREMAN_TRIGGER_LABEL} ${process.env.FOREMAN_LIFECYCLE_LABELS}`); process.exit(3);');
+  const labelled = { ...repo, triggerLabel: "go", lifecycleLabels: { prUnderReview: "in-review", prPendingActions: "needs-changes" } };
+  const r = await reviewViaTechLead(labelled, cfg, 5, logger);
+  assert.equal(r.fallback, true);
+  assert.match(r.reason, /labels go \{"prUnderReview":"in-review","prPendingActions":"needs-changes"\}/);
+});
