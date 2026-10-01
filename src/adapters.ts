@@ -12,11 +12,32 @@ export interface WorkItem {
 }
 
 /**
- * Where the Foreman's work comes from. The implement stage asks the source
- * which items to build this pass and hands exactly those to the agent — the
- * skill no longer chooses. GitHub issues are the first connector
- * (`GitHubIssueConnector` in github.ts); this module must stay free of any
- * source-specific code so another connector can import it alone.
+ * The states the Foreman itself may move a work item into. There is no
+ * ready-for-release and no done member, on purpose: the release gate is the
+ * EM outcome-gate's signature (separation of duties, 2026-07-27) and closing
+ * an item is the EM's act after prod verification. A connector refuses any
+ * target outside this set.
+ */
+export type WorkState = "queued" | "inReview" | "changesRequested" | "approved";
+
+/**
+ * What the caller believes the item's state is before the report. `unknown`
+ * tells the connector to read the current state first and move only what is
+ * actually there (dead-zone recovery, orphan release).
+ */
+export type PriorState = "new" | "inReview" | "changesRequested" | "unknown";
+
+/**
+ * Where the Foreman's work comes from, and where it reports progress on that
+ * work. The implement stage asks the source which items to build this pass
+ * and hands exactly those to the agent; every later change to an item's
+ * state goes back through the same source. GitHub issues are the first
+ * connector (`GitHubIssueConnector` in github.ts); this module must stay free
+ * of any source-specific code so another connector can import it alone.
+ *
+ * PR-level operations (open / merge / review a PR, PR labels and comments,
+ * branch sync, promotion) are code-host work, not work-source reporting, and
+ * stay outside this interface.
  */
 export interface WorkSourceAdapter {
   selectWork(
@@ -24,4 +45,26 @@ export interface WorkSourceAdapter {
     config: AgentConfig,
     logger: Logger,
   ): Promise<WorkItem[]>;
+
+  /** The Foreman is starting work on `item`. */
+  claim(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+
+  /** The PR that delivers `item` exists at `prUrl`. */
+  reportPrLink(item: WorkItem, prUrl: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+
+  /**
+   * Move `item` from `from` to `to`. Resolves `true` when the source recorded
+   * a change, `false` when it wrote nothing (already there, no longer open, a
+   * failed write, or a pair it does not support). Never throws.
+   */
+  reportState(
+    item: WorkItem,
+    from: PriorState,
+    to: WorkState,
+    repoConfig: RepoConfig,
+    logger: Logger,
+  ): Promise<boolean>;
+
+  /** The Foreman cannot proceed on `item`; `reason` says why. */
+  reportBlocked(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
 }

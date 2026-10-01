@@ -25,7 +25,7 @@ const lifecycleLabelsSchema = z.object({
   // Merged and verified in dev; awaiting the EM outcome-gate.
   prApproved: z.string().min(1).default("pr approved"),
   // The EM outcome-gate's signature — authorizes production. The daemon never
-  // applies it on its own judgement (see resolveDeadZone, transitionToReadyForProd);
+  // applies it on its own judgement (see GitHubIssueConnector.reportState);
   // it only puts back one a review run removed (restoreEmGate).
   readyForProd: z.string().min(1).default("ready for prod release"),
   // Promoted; awaiting the close. Read here only to keep such issues out of the
