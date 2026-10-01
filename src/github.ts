@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "./upstream-backoff.js";
 
 const GH_MAX_ATTEMPTS = 3;
 const GH_BACKOFF_MS = [1000, 3000, 9000];
@@ -50,12 +51,16 @@ function isRateLimitGhError(err: unknown): boolean {
     blob.includes("api rate limit already exceeded") ||
     blob.includes("api rate limit exceeded") ||
     blob.includes("secondary rate limit") ||
-    blob.includes("was submitted too quickly")
+    blob.includes("was submitted too quickly") ||
+    blob.includes("http 429")
   );
 }
 
 /** execFileSync gh with retry+backoff on transient (network/5xx/timeout) failures. */
 function runGh(args: string[], cwd: string, token: string): string {
+  // A limit is account-wide: while GitHub is backing off, spawning gh only
+  // spends more of a spent quota. The module's own probe decides when to resume.
+  if (isUpstreamBlocked("github")) throw new UpstreamBackoffError("GitHub back-off active");
   let lastErr: unknown;
   for (let attempt = 1; attempt <= GH_MAX_ATTEMPTS; attempt++) {
     try {
@@ -72,6 +77,8 @@ function runGh(args: string[], cwd: string, token: string): string {
         // Deliberately not retried: the budget is already gone. Name it loudly
         // and once, then let the caller's own error path handle the cycle.
         console.warn(`[gh] RATE LIMIT EXHAUSTED — GitHub API quota is spent, skipping: gh ${args.slice(0, 3).join(" ")}`);
+        const { message, stderr } = formatGhError(err);
+        signalUpstreamLimit("github", stderr.split("\n")[0] || message.split("\n")[0]);
         throw err;
       }
       if (attempt < GH_MAX_ATTEMPTS && isTransientGhError(err)) {
