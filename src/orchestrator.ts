@@ -33,7 +33,7 @@ import {
   stripReadyForProdLabel,
   type PendingRevisionInfo,
 } from "./github.js";
-import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, type ImplementationResult, type RevisionResult } from "./agent.js";
+import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
 import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch } from "./reconciler.js";
 import {
@@ -1437,10 +1437,18 @@ async function tryReview(
   events?.push({ message: `Reviewing ${repoConfig.githubRepo} PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
 
   try {
-    const result = await reviewOpenPRs(
-      repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
-      `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
-    ).catch(reportLaunchThrew);
+    // EM#427: the Tech Lead (Codex) takes the review first when configured; on
+    // its "wrote nothing" exit the Claude review below runs exactly as before.
+    const viaTechLead = config.techLeadPath
+      ? await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
+          .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }))
+      : { fallback: true as const, reason: "not configured" };
+    const result = "fallback" in viaTechLead
+      ? await reviewOpenPRs(
+          repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
+          `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
+        ).catch(reportLaunchThrew)
+      : viaTechLead;
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
 
     if (result.success) {
