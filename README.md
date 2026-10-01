@@ -264,6 +264,13 @@ The Foreman delegates work by invoking Claude Code skills on each service repo. 
 
 The Foreman passes the issue context to Claude and instructs it to read and follow the skill. The skill defines the repo-specific implementation workflow — how to branch, test, and structure the PR.
 
+The Foreman, not the skill, decides what to build. Its work source (`WorkSourceAdapter`
+in `src/adapters.ts`; GitHub issues via `GitHubIssueConnector`) offers every eligible item,
+and the implement prompt names all of them, less any the Foreman is backing off, as
+`Implement exactly these work items, and no others: #<n>, …`. The skill picks among them by
+priority. A repo-local skill that runs its own `gh issue list` gets the same issues back; the
+built-in skill takes its list from the prompt alone.
+
 ### Built-in skills
 
 Set either field to `builtin:` to use the generic skills that ship with the Foreman

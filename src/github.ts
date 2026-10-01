@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import type { LifecycleLabels, RepoConfig } from "./config.js";
+import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
+import type { WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { Logger } from "./logger.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "./upstream-backoff.js";
 
@@ -346,60 +347,7 @@ function formatGhError(err: unknown): GhFailure {
   };
 }
 
-/**
- * Return all `approved` open issues in the repo that have not yet
- * progressed through the lifecycle (no `pr under review` / `pr approved` /
- * `pr pending actions` / `ready for prod release` / `ready to close`
- * label, not `blocked`). This is the same filter `findActionableIssues`
- * applies BEFORE the PR-uncovered cross-check + batch cap — i.e. the
- * full set of issues that the implementation skill might pick this cycle.
- *
- * Used by the orchestrator's labeling step to widen the intersection of
- * "issues referenced by the new PR" with "issues that should accept
- * `pr under review`": the canonical skill makes its OWN selection from
- * the entire approved set (priority + smaller-scope-first), which can
- * differ from the Foreman's discovery batch (PR-uncovered subset, capped
- * at MAX_BATCH_SIZE). Without this widening, when the skill picks an
- * approved issue that wasn't in the discovery batch, the resulting PR
- * gets a real merge but no `pr under review` label, leaving the EM with
- * no signal. (slashbin-ai-foreman#18)
- *
- * Returns [] on any gh failure (treat as "nothing to widen to" rather
- * than throwing — the caller already has the discovery batch as a
- * fallback, and a labeling miss is recoverable).
- */
-export function findAllApprovedActionableIssues(
-  config: RepoConfig,
-  logger: Logger,
-): number[] {
-  const repo = config.githubRepo;
-  try {
-    const issues = getOpenIssues(repo, config.repoPath, logger)
-      .filter((i) => hasLabel(i, config.triggerLabel));
-
-    const lifecycleLabelValues = Object.values(config.lifecycleLabels);
-
-    const actionable: number[] = [];
-    for (const issue of issues) {
-      const labels = issue.labels.map((l) => l.name);
-      if (labels.includes("blocked")) continue;
-      if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
-      actionable.push(issue.number);
-    }
-    return actionable;
-  } catch (err) {
-    logger.warn("findAllApprovedActionableIssues failed; returning [] (labeling will fall back to discovery batch)", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-}
-
-/**
- * Gate check: find approved issues that haven't progressed through
- * the lifecycle AND don't already have a PR. Returns the uncovered
- * issue numbers (capped to MAX_BATCH_SIZE), or empty array if none.
- */
+/** Most issues in the Foreman's own per-pass discovery batch (see discoveryBatch). */
 const MAX_BATCH_SIZE = 3;
 
 /**
@@ -462,19 +410,99 @@ export function extractImplementedIssues(opts: {
   return Array.from(found).sort((a, b) => a - b);
 }
 
-export function findActionableIssues(
-  config: RepoConfig,
-  logger: Logger
-): number[] {
-  const repo = config.githubRepo;
+/**
+ * The Foreman's own discovery batch, cut from the work a source offered:
+ * ascending (lowest numbers — dependencies — first), capped at MAX_BATCH_SIZE,
+ * 1 on a greenfield repo. This is what the orchestrator acts on per issue
+ * (run gate, inline prompt, batch-wide skip, labeling fallback). It is NOT what
+ * a skill is handed: a skill chooses by priority across every offered item,
+ * and capping that list would hide a high-priority issue behind three older ones.
+ */
+export function discoveryBatch(config: RepoConfig, offered: number[], logger: Logger): number[] {
+  if (offered.length === 0) return [];
+  // Sort ascending so lowest issue numbers (dependencies) come first
+  const uncovered = [...offered].sort((a, b) => a - b);
 
+  // Greenfield detection: if repo has very few tracked files, limit to 1 issue
+  // The skill implements one-at-a-time anyway, but a focused prompt is more reliable
+  let effectiveBatchSize = MAX_BATCH_SIZE;
   try {
-    const issues = getOpenIssues(repo, config.repoPath, logger)
+    const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
+    if (fileCount < 10) {
+      effectiveBatchSize = 1;
+      logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);
+    }
+  } catch { /* ignore — use default batch size */ }
+
+  const batch = uncovered.slice(0, effectiveBatchSize);
+  if (uncovered.length > MAX_BATCH_SIZE) {
+    logger.info(`Found ${uncovered.length} actionable issue(s), capping batch to ${MAX_BATCH_SIZE}: ${batch.map(n => `#${n}`).join(", ")} (${uncovered.length - MAX_BATCH_SIZE} deferred to next cycle)`);
+  } else {
+    logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${batch.map(n => `#${n}`).join(", ")}`);
+  }
+  return batch;
+}
+
+/**
+ * GitHub issues as a work source — the first `WorkSourceAdapter` connector.
+ *
+ * `selectWork` is everything this source offers the implement stage: open
+ * issues carrying the trigger label, not `blocked`, in no lifecycle state,
+ * implemented by no open or merged PR — uncapped, in `gh issue list` order.
+ * The orchestrator cuts its own capped `discoveryBatch` from it, and hands the
+ * whole offer (less backed-off issues) to a skill.
+ *
+ * `selectEligible` is the same filter WITHOUT the PR cross-check and the cap —
+ * every issue a session could still be asked to build. It is GitHub-specific
+ * bookkeeping (label widening after a run, the review checkout's queue count),
+ * not part of the adapter contract.
+ *
+ * Stateless: construct one where it is used.
+ */
+export class GitHubIssueConnector implements WorkSourceAdapter {
+  async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
+    return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
+  }
+
+  /**
+   * Return all trigger-labelled open issues in the repo that have not yet
+   * progressed through the lifecycle (no configured lifecycle label, not
+   * `blocked`). This is the filter `selectWork` applies BEFORE the
+   * PR-uncovered cross-check + batch cap — i.e. the full set of issues the
+   * implementation skill might still be asked to build.
+   *
+   * Used by the orchestrator's labeling step to widen the intersection of
+   * "issues referenced by the new PR" with "issues that should accept
+   * `pr under review`": a repo-local skill makes its OWN selection from the
+   * entire approved set (priority + smaller-scope-first), which can differ
+   * from the discovery batch (PR-uncovered subset, capped at MAX_BATCH_SIZE).
+   * Without this widening, when the skill picks an approved issue that wasn't
+   * in the discovery batch, the resulting PR gets a real merge but no
+   * `pr under review` label, leaving the EM with no signal.
+   * (slashbin-ai-foreman#18)
+   *
+   * Returns [] on any gh failure (treat as "nothing to widen to" rather
+   * than throwing — the caller already has the discovery batch as a
+   * fallback, and a labeling miss is recoverable).
+   */
+  async selectEligible(repoConfig: RepoConfig, logger: Logger): Promise<WorkItem[]> {
+    try {
+      return this.eligible(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
+    } catch (err) {
+      logger.warn("selectEligible failed; returning [] (labeling will fall back to discovery batch)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  /** Trigger-labelled, not `blocked`, no lifecycle label. Throws on gh failure. */
+  private eligible(config: RepoConfig, logger: Logger): number[] {
+    const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
       .filter((i) => hasLabel(i, config.triggerLabel));
 
     const lifecycleLabelValues = Object.values(config.lifecycleLabels);
 
-    // Collect actionable issues (approved, not blocked, no lifecycle label)
     const actionable: number[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
@@ -482,77 +510,69 @@ export function findActionableIssues(
       if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
       actionable.push(issue.number);
     }
+    return actionable;
+  }
 
-    if (actionable.length === 0) return [];
+  /**
+   * Gate check: eligible issues that don't already have a PR. Returns every
+   * uncovered issue number, in the order `gh issue list` returned them (the
+   * order a self-selecting skill saw), or [] if none or on any failure.
+   */
+  private selectUncovered(config: RepoConfig, logger: Logger): number[] {
+    const repo = config.githubRepo;
 
-    // Loop detection: check if all actionable issues already have a PR (open or merged)
-    // that references them. If so, skip — the Foreman already did the work.
-    // Check both open and merged PRs to catch issues where the PR was already merged
-    // but the issue label wasn't updated.
-    const openPrs = findOpenPrs(repo, config.repoPath, { base: config.baseBranch, limit: 50 });
+    try {
+      const actionable = this.eligible(config, logger);
 
-    const mergedPrJson = gh([
-      "pr", "list",
-      "--repo", repo,
-      "--state", "merged",
-      "--base", config.baseBranch,
-      "--json", "number,title,body",
-      "--limit", "20",
-    ], config.repoPath);
+      if (actionable.length === 0) return [];
 
-    const mergedPrs: { number: number; title: string; body: string }[] = JSON.parse(mergedPrJson || "[]");
-    const allPrs = [...openPrs, ...mergedPrs];
+      // Loop detection: check if all actionable issues already have a PR (open or merged)
+      // that references them. If so, skip — the Foreman already did the work.
+      // Check both open and merged PRs to catch issues where the PR was already merged
+      // but the issue label wasn't updated.
+      const openPrs = findOpenPrs(repo, config.repoPath, { base: config.baseBranch, limit: 50 });
 
-    // An issue is "covered" only if some PR IMPLEMENTS it (close/relate keyword,
-    // or `(#N)` in the title) — NOT merely mentions it in body prose. The old
-    // bare-`#N` test over concatenated title+body orphaned issues that a sibling
-    // PR's body referenced (e.g. a schema PR body saying "tracked separately in
-    // #3" made #3 look covered, so it was never implemented). (slashbin-ai-foreman#28)
-    const covered = new Set<number>();
-    for (const pr of allPrs) {
-      for (const n of extractImplementedIssues({ title: pr.title, body: pr.body })) {
-        covered.add(n);
-      }
-    }
+      const mergedPrJson = gh([
+        "pr", "list",
+        "--repo", repo,
+        "--state", "merged",
+        "--base", config.baseBranch,
+        "--json", "number,title,body",
+        "--limit", "20",
+      ], config.repoPath);
 
-    const uncovered: number[] = [];
-    for (const issueNum of actionable) {
-      if (!covered.has(issueNum)) {
-        uncovered.push(issueNum);
-      }
-    }
+      const mergedPrs: { number: number; title: string; body: string }[] = JSON.parse(mergedPrJson || "[]");
+      const allPrs = [...openPrs, ...mergedPrs];
 
-    if (uncovered.length > 0) {
-      // Sort ascending so lowest issue numbers (dependencies) come first
-      uncovered.sort((a, b) => a - b);
-
-      // Greenfield detection: if repo has very few tracked files, limit to 1 issue
-      // The skill implements one-at-a-time anyway, but a focused prompt is more reliable
-      let effectiveBatchSize = MAX_BATCH_SIZE;
-      try {
-        const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
-        if (fileCount < 10) {
-          effectiveBatchSize = 1;
-          logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);
+      // An issue is "covered" only if some PR IMPLEMENTS it (close/relate keyword,
+      // or `(#N)` in the title) — NOT merely mentions it in body prose. The old
+      // bare-`#N` test over concatenated title+body orphaned issues that a sibling
+      // PR's body referenced (e.g. a schema PR body saying "tracked separately in
+      // #3" made #3 look covered, so it was never implemented). (slashbin-ai-foreman#28)
+      const covered = new Set<number>();
+      for (const pr of allPrs) {
+        for (const n of extractImplementedIssues({ title: pr.title, body: pr.body })) {
+          covered.add(n);
         }
-      } catch { /* ignore — use default batch size */ }
-
-      const batch = uncovered.slice(0, effectiveBatchSize);
-      if (uncovered.length > MAX_BATCH_SIZE) {
-        logger.info(`Found ${uncovered.length} actionable issue(s), capping batch to ${MAX_BATCH_SIZE}: ${batch.map(n => `#${n}`).join(", ")} (${uncovered.length - MAX_BATCH_SIZE} deferred to next cycle)`);
-      } else {
-        logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${batch.map(n => `#${n}`).join(", ")}`);
       }
-      return batch;
-    }
 
-    logger.info(`Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`);
-    return [];
-  } catch (err) {
-    logger.error("Failed to check for approved issues", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
+      const uncovered: number[] = [];
+      for (const issueNum of actionable) {
+        if (!covered.has(issueNum)) {
+          uncovered.push(issueNum);
+        }
+      }
+
+      if (uncovered.length > 0) return uncovered;
+
+      logger.info(`Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`);
+      return [];
+    } catch (err) {
+      logger.error("Failed to check for approved issues", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
   }
 }
 
@@ -595,7 +615,7 @@ export function findPendingRevisions(
     // called off, and revise must honour it rather than press on.
     //
     // But silent is wrong. The issue keeps `pr pending actions`, so
-    // `findActionableIssues` skips it too, and it belongs to no phase at all.
+    // `GitHubIssueConnector.selectWork` skips it too, and it belongs to no phase at all.
     // Deliberately stopped and accidentally stranded produced the identical
     // observation — nothing — until this line existed. Say which one it is.
     const withheld = pendingActions.filter((i) => !hasLabel(i, config.triggerLabel));
@@ -1044,7 +1064,7 @@ export function findStuckMergedIssues(
  *   | pr under review     | tryReview | findStuckMerged  | HERE             |
  *   | pr pending actions  | tryRevise | findStuckMerged  | HERE             |
  *
- * The lifecycle label is what makes it invisible: `findActionableIssues` skips
+ * The lifecycle label is what makes it invisible: `GitHubIssueConnector.selectWork` skips
  * ANY issue carrying one, so an issue whose PR vanished keeps its `approved`
  * label, is never re-implemented, is never reviewed, and produces no log line
  * above `debug`. It simply stops existing as far as the pipeline is concerned.

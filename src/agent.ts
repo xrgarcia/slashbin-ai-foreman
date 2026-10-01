@@ -733,7 +733,19 @@ function zonedWallToUtc(year: number, month: number, day: number, hour: number, 
 }
 
 /**
- * Invoke Claude CLI to implement all approved issues for a repo.
+ * The hand-off line: the work items the source selected, as the only work the
+ * session may do. One sentence, so a skill can quote it back.
+ */
+export function workItemsLine(issueNumbers: number[]): string {
+  return `Implement exactly these work items, and no others: ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
+}
+
+/**
+ * Invoke Claude CLI to implement the selected work items for a repo.
+ *
+ * `issueNumbers` is the Foreman's capped discovery batch: the inline prompt's
+ * scope and what a batch-wide skip backs off. `handOff` is the uncapped list a
+ * skill chooses from; it defaults to `issueNumbers`.
  * The skill (SKILL.md) owns inventory, prioritization, implementation,
  * and PR creation. Foreman just triggers and detects the result.
  */
@@ -742,7 +754,8 @@ export async function implementApprovedIssues(
   logger: Logger,
   abortSignal?: AbortSignal,
   priorFailureReason?: string | null,
-  issueNumbers?: number[]
+  issueNumbers?: number[],
+  handOff?: number[],
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
 
@@ -765,7 +778,20 @@ export async function implementApprovedIssues(
   let prompt: string;
 
   if (config.skillPath && skill?.ok) {
-    prompt = `${skill.text}\n\nImplement all approved issues for this repository. The skill defines the full workflow — follow it exactly.\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+    // The work source chose the batch; the session builds from it and nothing
+    // else, so an item from a source the skill cannot query is still built.
+    // A repo-local skill that runs its own `gh issue list` gets these same
+    // GitHub issues back, so it is told to pick and order within the batch as
+    // it always has — the batch only takes away issues outside it.
+    //
+    // `handOff` is every item the source offered (less backed-off ones), not
+    // the capped `issueNumbers` batch: the skill picks by priority across all
+    // of them, as it did when it ran its own query. Without one, the batch.
+    const items = handOff && handOff.length > 0 ? handOff : issueNumbers;
+    const scope = items && items.length > 0
+      ? `${workItemsLine(items)} If the skill runs its own issue query, it returns these same issues: choose and order among them as the skill directs, but take nothing outside this list.`
+      : `Implement all approved issues for this repository.`;
+    prompt = `${skill.text}\n\n${scope} The skill defines the full workflow — follow it exactly.\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else if (config.prompt) {
     // Custom user prompt — don't auto-modify (backward compat). Users who want
     // image handling in a custom prompt should include their own instructions.
@@ -846,22 +872,21 @@ Work autonomously. Do not ask questions.`;
       // cannot back off the issues behind it.
       //
       // A named issue is TRUSTED even when it is not in `issueNumbers`, and that
-      // is deliberate. In skill mode the prompt never interpolates the batch
-      // (see the skillPath branch below): the agent runs the skill's own
-      // `gh issue list --label approved` and selects by the skill's priority
-      // table, which is strictly WIDER than what we tracked — the batch was
-      // already filtered by the `implemented` cache and by the escalating skip
-      // back-off, while those issues stay open and `approved` on GitHub and so
-      // remain visible to the agent. So "not in the batch" is an ordinary
-      // outcome, not a mistake, and widening to the batch on account of it would
-      // reintroduce exactly the starvation the scope exists to prevent. The
-      // agent naming one issue is strictly more information than the batch list.
+      // is deliberate. The prompt names the batch, but a repo-local skill still
+      // runs its own `gh issue list` first, and that query is strictly WIDER
+      // than the batch — the batch was already filtered by the `implemented`
+      // cache and by the escalating skip back-off, while those issues stay open
+      // and trigger-labelled on GitHub and so remain visible to the agent. So
+      // "not in the batch" is an ordinary outcome, not a mistake, and widening
+      // to the batch on account of it would reintroduce exactly the starvation
+      // the scope exists to prevent. The agent naming one issue is strictly
+      // more information than the batch list.
       const named = declaredSkip.issue;
       if (named !== undefined && !(issueNumbers ?? []).includes(named)) {
         logger.info(
           `Skip names #${named}, which was outside the tracked batch ` +
           `(${(issueNumbers ?? []).map((n) => `#${n}`).join(", ") || "none"}) — ` +
-          `expected in skill mode, where the agent selects from its own query. Honouring the scope.`,
+          `possible in skill mode, where a repo-local skill also runs its own query. Honouring the scope.`,
         );
       }
       logger.info(

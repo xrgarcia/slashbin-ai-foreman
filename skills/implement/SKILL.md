@@ -1,5 +1,5 @@
 ---
-description: Implement ONE labelled GitHub issue (highest priority) per invocation, with passing checks, in its own PR
+description: Implement ONE of the work items the Foreman selected (highest priority) per invocation, with passing checks, in its own PR
 ---
 
 # Implement Issues (Foreman built-in)
@@ -57,15 +57,14 @@ you finish. You only read them.
 
 ## Phase 1: Inventory
 
-1. List the open issues carrying the trigger label:
-
-   ```
-   gh issue list --label "$FOREMAN_TRIGGER_LABEL" --state open --json number,title,body,labels
-   ```
-
-2. If none are found, report that there is nothing to implement and stop.
-3. Read each candidate in full: `gh issue view <number>`.
-4. Select exactly ONE issue by the Phase 2 priority rules. Do not loop — the Foreman
+1. The prompt that carried this skill names the work the Foreman selected for this run,
+   in one line: `Implement exactly these work items, and no others: #<n>, #<n>.` That
+   list is your whole inventory. Do not query for more issues: the Foreman has already
+   left out what is blocked, already in review, already covered by a pull request, or
+   backed off, and its work source may not be this repository's issue list at all.
+2. If the prompt names no work items, report that there is nothing to implement and stop.
+3. Read each named item in full: `gh issue view <number>`.
+4. Select exactly ONE of them by the Phase 2 priority rules. Do not loop — the Foreman
    invokes you again next cycle for the next issue.
 
 ## Phase 2: Analysis & Ordering
@@ -201,5 +200,5 @@ fails, note it and continue with the text.
 
 - Never modify tests to make code pass.
 - One issue, one commit, one PR. Each commit leaves the checks passing.
-- Only implement issues carrying `$FOREMAN_TRIGGER_LABEL` — refuse any other.
+- Only implement work items the prompt names — refuse any other.
 - An issue meant for a different repository or service is skipped, with a comment.

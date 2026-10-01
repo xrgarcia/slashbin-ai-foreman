@@ -2,9 +2,10 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import type { WorkSourceAdapter } from "./adapters.js";
 import {
-  findActionableIssues,
-  findAllApprovedActionableIssues,
+  GitHubIssueConnector,
+  discoveryBatch,
   hasPendingRevisions,
   findPendingRevisions,
   findPRsNeedingReview,
@@ -612,7 +613,7 @@ function runReconcileStage(
     // issue AND nothing merged. The PR was closed unmerged, or an implement run
     // wrote the label and died before opening one.
     //
-    // This is the invisible one. `findActionableIssues` skips any issue carrying
+    // This is the invisible one. `GitHubIssueConnector.selectWork` skips any issue carrying
     // a lifecycle label, `tryReview` needs an open PR, `findPendingRevisions`
     // needs an open PR and returns null at DEBUG level when there is none — so
     // the issue keeps its `approved` label, is owned by no phase, and produces
@@ -1035,9 +1036,21 @@ async function tryBatchImplementation(
     failureHitMaxAt.delete(repoName);
   }
 
-  // Gate: are there approved issues to implement?
-  let actionableIssues = findActionableIssues(repoConfig, repoLogger);
-  if (actionableIssues.length === 0) {
+  // Gate: are there approved issues to implement? The work source offers
+  // every eligible item, uncapped. Two lists are cut from that offer:
+  //   - `handOff` — the offer less the state filters below. This is what a
+  //     skill is told to build. Uncapped, because a skill chooses by priority
+  //     across all of it: capping would hide an S1 behind three older issues.
+  //   - `actionableIssues` — the Foreman's own discovery batch (ascending,
+  //     capped at MAX_BATCH_SIZE) less the same filters. Everything the
+  //     Foreman does per issue keeps using it: the run gate, the inline
+  //     prompt, a batch-wide skip, the labeling fallback.
+  const workSource: WorkSourceAdapter = new GitHubIssueConnector();
+  const offered = (await workSource.selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
+  const discovered = discoveryBatch(repoConfig, offered, repoLogger);
+  let handOff = offered;
+  const batchLeft = () => discovered.filter((n) => handOff.includes(n));
+  if (discovered.length === 0) {
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1045,16 +1058,16 @@ async function tryBatchImplementation(
 
   // Filter out issues already tracked as implemented in persistent state.
   // This prevents infinite loops where the Foreman re-implements the same
-  // issues because the PR check in findActionableIssues didn't match.
+  // issues because the work source's PR check didn't match.
   const repoState = loadRepoState(repoName);
 
   // Self-heal the `implemented` cache (slashbin-ai-foreman #16/#18/#540 family).
   //
   // Invariant: `implemented[N]` must mean "a PR that delivers N exists".
-  // `findActionableIssues` already authoritatively returns only approved
+  // `selectWork` already authoritatively returns only approved
   // issues with NO linked PR (open or merged) — it is the same check the
   // orchestrator trusts to decide what to implement. So any N that is BOTH
-  // still in `actionableIssues` (no delivering PR per the live check) AND in
+  // still in the offer (no delivering PR per the live check) AND in
   // `repoState.implemented` is a stale, dead-zoned entry: a prior run recorded
   // it without producing a delivering PR (PR creation failed, or its commit
   // rode a foreign PR on the shared `features` branch). Left alone it is
@@ -1063,10 +1076,10 @@ async function tryBatchImplementation(
   //
   // This cannot reintroduce the re-implement loop the cache guards against:
   // that loop is "PR exists but the linkage check missed it" — here the same
-  // linkage check (findActionableIssues) reports NO PR, so there is nothing to
+  // linkage check (selectWork) reports NO PR, so there is nothing to
   // loop on; true loops remain bounded by failureCount/cooldown + skip back-off.
   // Additive only — no state shape / .ai-agent.json / branch-model change.
-  const staleImplemented = repoState.implemented.filter((n) => actionableIssues.includes(n));
+  const staleImplemented = repoState.implemented.filter((n) => handOff.includes(n));
   if (staleImplemented.length > 0) {
     repoLogger.warn(
       `Self-heal: pruning ${staleImplemented.length} stale 'implemented' entr${staleImplemented.length === 1 ? "y" : "ies"} with no delivering PR — re-implementable: ${staleImplemented.map((n) => `#${n}`).join(", ")}`,
@@ -1078,8 +1091,8 @@ async function tryBatchImplementation(
   }
 
   const alreadyImplemented = new Set(repoState.implemented);
-  actionableIssues = actionableIssues.filter((n) => !alreadyImplemented.has(n));
-  if (actionableIssues.length === 0) {
+  handOff = handOff.filter((n) => !alreadyImplemented.has(n));
+  if (batchLeft().length === 0) {
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1101,7 +1114,7 @@ async function tryBatchImplementation(
   const now = Date.now();
   const stillBackedOff: { n: number; reason: string }[] = [];
   const resolvedTransient: { n: number; reason: string }[] = [];
-  actionableIssues = actionableIssues.filter((n) => {
+  handOff = handOff.filter((n) => {
     const entry = skippedMap[n];
     if (!entry) return true;
     const age = now - new Date(entry.lastSkippedAt).getTime();
@@ -1130,9 +1143,13 @@ async function tryBatchImplementation(
       `Backing off ${stillBackedOff.length} previously-skipped issue(s): ${stillBackedOff.map(({ n, reason }) => `#${n} (${reason.split("\n")[0].slice(0, 100)})`).join("; ")}`,
     );
   }
+  const actionableIssues = batchLeft();
   if (actionableIssues.length === 0) {
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
+  }
+  if (handOff.length > actionableIssues.length) {
+    repoLogger.info(`Handing the skill ${handOff.length} work item(s) to choose from: ${handOff.map((n) => `#${n}`).join(", ")}`);
   }
 
   // Emit event: issues picked up
@@ -1175,7 +1192,7 @@ async function tryBatchImplementation(
 
   try {
     const priorFailure = lastFailureReason.get(repoName) || null;
-    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues)
+    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, handOff)
       .catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
 
@@ -1216,7 +1233,7 @@ async function tryBatchImplementation(
         repoConfig.repoPath,
         repoLogger,
       );
-      const allActionable = findAllApprovedActionableIssues(repoConfig, repoLogger);
+      const allActionable = (await new GitHubIssueConnector().selectEligible(repoConfig, repoLogger)).map((w) => w.issueNumber);
       const labelingCandidates = Array.from(new Set([...actionableIssues, ...allActionable]));
       const matched = referencedAll
         ? labelingCandidates.filter((n) => referencedAll.includes(n))
@@ -1725,7 +1742,7 @@ async function tryReview(
     // queue and releases, while a repo mid-batch keeps its node_modules.
     if (checkoutPath) {
       try {
-        const stillApproved = findAllApprovedActionableIssues(repoConfig, reviewLogger).length;
+        const stillApproved = (await new GitHubIssueConnector().selectEligible(repoConfig, reviewLogger)).length;
         const stillToReview = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
         releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
       } catch (err) {

@@ -98,9 +98,8 @@ test("a scoped skip narrows skippedIssues to the named issue", () => {
     "a scoped trailer must narrow the skip; unscoped must still cover the batch");
 });
 
-// In skill mode the prompt never interpolates the batch (agent.ts skillPath
-// branch) -- the agent runs the skill's own `gh issue list --label approved` and
-// selects from it, which is strictly WIDER than issueNumbers, because the batch
+// In skill mode the prompt names the batch, but a repo-local skill still runs
+// its own `gh issue list` first, which is strictly WIDER than issueNumbers, because the batch
 // was already filtered by the implemented cache and by the skip back-off while
 // those issues stay open and `approved` on GitHub. So an out-of-batch scope is
 // routine. Widening the skip to the batch over it would reintroduce the exact

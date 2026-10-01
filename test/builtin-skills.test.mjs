@@ -115,6 +115,23 @@ test("a repo-local skillPath produces the same prompt opening as before", async 
   assert.ok(!prompt.includes("===== SKILL ====="));
 });
 
+// The work source selects; the session is handed exactly that batch. A
+// repo-local skill still runs its own query, so the line must not contradict it.
+test("skill mode hands the selected work items to the session", async () => {
+  const line = "Implement exactly these work items, and no others: #4, #9.";
+  for (const skillPath of [".claude/skills/implement-approved-issues/SKILL.md", "builtin:"]) {
+    const { prompt } = await promptOf(() => implementApprovedIssues(repo({ skillPath }), logger, undefined, null, [4, 9]));
+    assert.ok(prompt.includes(line), `${skillPath}: the batch is not in the prompt`);
+    assert.ok(!prompt.includes("Implement all approved issues"), `${skillPath}: the prompt still widens to every approved issue`);
+  }
+});
+
+test("the built-in implement skill takes its batch from the prompt, not a query", () => {
+  const text = readFileSync(join(root, "skills/implement/SKILL.md"), "utf8");
+  assert.ok(!/gh issue list/.test(text), "the built-in skill still selects its own work");
+  assert.match(text, /Implement exactly these work items, and no others/);
+});
+
 test("the shipped skills name no label and no operator", () => {
   const dir = join(root, "skills");
   const files = readdirSync(dir).map((d) => join(dir, d, "SKILL.md"));
