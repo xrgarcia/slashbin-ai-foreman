@@ -2626,6 +2626,44 @@ export function getReferencedIssuesFromOpenPR(
 
 
 /**
+ * The work in flight a custom stage runs against: the open feature → base PR,
+ * its head, and the issues it implements (same reading as
+ * getReferencedIssuesFromOpenPR). `null` when no such PR is open. Throws when
+ * the lookup itself fails — a stage that gates must not read "could not look"
+ * as "nothing to check".
+ */
+export function findOpenFeaturePR(
+  config: RepoConfig,
+): { number: number; headSha: string; issueNumbers: number[] } | null {
+  const json = gh([
+    "pr", "list",
+    "--repo", config.githubRepo,
+    "--head", config.featureBranch,
+    "--base", config.baseBranch,
+    "--state", "open",
+    "--json", "number,title,body,commits,headRefOid",
+    "--limit", "1",
+  ], config.repoPath);
+  const prs = JSON.parse(json || "[]") as Array<{
+    number: number; title?: string; body?: string; headRefOid?: string;
+    commits?: { messageHeadline?: string; messageBody?: string }[];
+  }>;
+  if (prs.length === 0) return null;
+  const pr = prs[0];
+  const commits = pr.commits || [];
+  return {
+    number: pr.number,
+    headSha: pr.headRefOid || "",
+    issueNumbers: extractImplementedIssues({
+      title: pr.title || "",
+      body: pr.body || "",
+      commitHeadlines: commits.map((c) => c.messageHeadline || ""),
+      commitBodies: commits.map((c) => c.messageBody || ""),
+    }),
+  };
+}
+
+/**
  * Decide, with no I/O, what a FAILED review run actually earned.
  *
  * Split out from `tryReview` for the same reason as `planEmGateRestore`: the

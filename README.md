@@ -28,10 +28,10 @@ The Foreman shines when you have **more approved work than time to implement**. 
 
 ## What the Foreman does
 
-Each poll cycle runs six phases across every configured repo:
+Each poll cycle runs these stages, in this order, across every configured repo (the order is configurable — see [Pipeline stages](#pipeline-stages)):
 
 ```
-Reconciliation → Review → Revision → Implementation → Branch Sync → Promotion
+Reconcile → Review → Revise → Implement → Branch Sync → Dependabot → Promote
 ```
 
 1. **Reconcile** — detects orphaned commits on the features branch with no PR and creates one
@@ -39,7 +39,8 @@ Reconciliation → Review → Revision → Implementation → Branch Sync → Pr
 3. **Revise** — finds PRs with pending review feedback and revises them (prioritized over new work)
 4. **Implement** — picks up approved issues and invokes the repo's implementation skill via Claude Code (up to 3 issues per cycle; 1 in greenfield repos)
 5. **Branch Sync** — merges main → develop to keep branches aligned after promotions
-6. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`
+6. **Dependabot** — files one issue covering the open Dependabot PRs on the working branches, so they go through the implement session (filed with the trigger label when the repo sets `dependencyPreApproved`)
+7. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`
 
 - **Poll interval is configurable** — default 5 minutes (`pollIntervalMs` in config)
 - **Multi-repo** — manages multiple repos in a single daemon, each with its own skill paths and config
@@ -282,6 +283,59 @@ the skill is never run without it.
   "skillOverlayPath": "docs/foreman-overlay.md" }
 ```
 
+## Pipeline stages
+
+`stages` sets which stages a repo pass runs and in what order. Omitted, it is the
+seven built-ins in the order above — an existing config runs unchanged:
+
+```json
+{ "stages": [
+  { "type": "reconcile" }, { "type": "review" }, { "type": "revise" }, { "type": "implement" },
+  { "type": "branch-sync" }, { "type": "dependabot" }, { "type": "promote" }
+] }
+```
+
+Leave a built-in out and it never runs; reorder them and you give up what the
+default order guarantees (review before implement, so review only sees PRs
+labeled in an earlier pass; promote last, so it sees labels this pass just set).
+Each stage may appear once. The review stage needs `reviewSkillPath` for every
+`reviewEnabled` repo only when `review` is in `stages`.
+
+### Custom stages
+
+A custom stage is `{ "id": "<name>", "skillPath": "<SKILL.md>" }`. It is kept
+deliberately small:
+
+- **When it runs.** When the pass reaches it and the repo has an open
+  `featureBranch → baseBranch` PR. No open PR: no session, and the pass continues.
+- **What it gets.** One Claude session per repo, in the managed repo, under
+  `FOREMAN_GITHUB_TOKEN`, with the implement session's model, tools, MCP config
+  and budget. The prompt names the skill, the PR, its head and the issues it
+  implements; the same facts arrive as env — `FOREMAN_STAGE_ID`,
+  `FOREMAN_STAGE_REPO`, `FOREMAN_STAGE_BASE_BRANCH`, `FOREMAN_STAGE_FEATURE_BRANCH`,
+  `FOREMAN_STAGE_PR`, `FOREMAN_STAGE_ISSUES` (JSON array), `FOREMAN_STAGE_HEAD_SHA` —
+  next to `FOREMAN_TRIGGER_LABEL` / `FOREMAN_LIFECYCLE_LABELS`. A relative
+  `skillPath` resolves against the repo. Anything the stage should change
+  (comments, labels) its skill does; the Foreman does nothing with the work items.
+- **What its outcome means.** The session ends with `FOREMAN_STAGE pass` or
+  `FOREMAN_STAGE blocked reason="…"`. `pass` lets the later stages run. `blocked`,
+  or a run with no verdict line (timed out, crashed, forgot), stops every later
+  stage for that repo. The verdict holds until the feature branch head moves, so
+  the same code is not re-checked every poll; a restart re-runs it once. A run
+  refused by an upstream limit gives no verdict and is retried next pass, with
+  later stages held meanwhile.
+
+A blocking stage belongs **after** `revise` and `implement`: a fix pushed by
+revise is what moves the head and re-runs the check.
+
+```json
+{ "stages": [
+  { "type": "reconcile" }, { "type": "review" }, { "type": "revise" }, { "type": "implement" },
+  { "id": "security", "skillPath": ".claude/skills/security-scan/SKILL.md" },
+  { "type": "branch-sync" }, { "type": "dependabot" }, { "type": "promote" }
+] }
+```
+
 ## Review phase (opt-in)
 
 The Review phase closes the loop between Implementation and Revision by invoking a
@@ -414,7 +468,8 @@ src/
 ├── github.ts          # GitHub API (polling, PRs, labels, dual-token ops)
 ├── agent.ts           # Claude Code CLI spawner
 ├── reviewer.ts        # PR review feedback handler
-├── orchestrator.ts    # 6-phase cycle, failure cooldowns, state tracking
+├── stages.ts          # Stage schema, default order, dispatch loop
+├── orchestrator.ts    # Stage pass per repo, failure cooldowns, state tracking
 ├── state.ts           # Persistent state management
 ├── daemon.ts          # Poll loop, graceful shutdown, Discord bridge
 ├── bridge-client.ts   # WebSocket client for Discord notifications
