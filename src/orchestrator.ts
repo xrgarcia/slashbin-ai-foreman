@@ -4,6 +4,7 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import {
   findActionableIssues,
+  capBatch,
   findAllApprovedActionableIssues,
   hasPendingRevisions,
   findPendingRevisions,
@@ -895,7 +896,9 @@ async function tryBatchImplementation(
   }
 
   // Gate: are there approved issues to implement?
-  let actionableIssues = findActionableIssues(repoConfig, repoLogger);
+  // Uncapped: the batch cap is applied below, after the state and back-off
+  // filters, so a backed-off issue never holds a slot (slashbin-ai-foreman#49).
+  let actionableIssues = findActionableIssues(repoConfig, repoLogger, { uncapped: true });
   if (actionableIssues.length === 0) {
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
@@ -993,6 +996,7 @@ async function tryBatchImplementation(
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
   }
+  actionableIssues = capBatch(actionableIssues, repoConfig, repoLogger);
 
   // Emit event: issues picked up
   events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoConfig.githubRepo}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
