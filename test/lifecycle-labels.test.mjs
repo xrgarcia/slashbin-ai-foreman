@@ -177,7 +177,8 @@ test("dead-zone recovery writes configured names and never the production gate",
 // --- The spawned session is told the names ----------------------------------------
 
 test("every claude session receives FOREMAN_TRIGGER_LABEL and FOREMAN_LIFECYCLE_LABELS", async () => {
-  const c = load({ triggerLabel: "build-me", lifecycleLabels: { prUnderReview: "in-review" } });
+  // reviewSkillPath has no default since EM#425; the review session needs one.
+  const c = load({ triggerLabel: "build-me", reviewSkillPath: "review/SKILL.md", lifecycleLabels: { prUnderReview: "in-review" } });
   const result = await reviewOpenPRs(c.repos[0], c, logger);
   assert.equal(result.success, true, result.error);
   const env = JSON.parse(readFileSync(CLAUDE_ENV, "utf8"));

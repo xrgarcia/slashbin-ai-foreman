@@ -271,9 +271,12 @@ config keeps the original five-phase behavior unchanged.
 It differs from Implementation/Revision in three ways, because review is a
 decision-layer workflow rather than an in-repo edit:
 
-- **Runs in a separate review repo.** The review skill is invoked with its working
-  directory set to `emRepoPath`, not the service repo — so it has the reviewer's own
-  tooling (MCP servers, verification scripts, context docs) available.
+- **Runs in a separate review repo — optionally.** With `emRepoPath` set, the review
+  skill is invoked with its working directory set to that repo, not the service repo —
+  so it has the reviewer's own tooling (MCP servers, verification scripts, context
+  docs) available. Without it, the session runs in the repo's managed review checkout
+  (`reviewCheckoutRoot/<name>`), so a review skill shipped inside the service repo
+  needs no second repo.
 - **Runs under a separate token.** Reviews and merges are attributed to the account
   behind `EM_GITHUB_TOKEN` (distinct from `FOREMAN_GITHUB_TOKEN`), keeping the
   reviewer identity separate from the implementer identity.
@@ -342,18 +345,19 @@ it has an open `featureBranch → baseBranch` PR, and there is no review by
 `reviewerLogin` newer than the PR's latest commit (a freshness guard against
 re-review loops).
 
-Review config keys (all optional; global, with a per-repo `reviewEnabled` override):
+Review config keys (global; `reviewEnabled`, `reviewSkillPath` and `reviewerLogin`
+can also be set per repo, and a per-repo value wins):
 
 | Key | Default | Description |
 |---|---|---|
 | `reviewEnabled` | `false` | Enable the Review phase (per-repo override supported) |
-| `emRepoPath` | — | Working dir for the review skill (the review repo). Required when enabled |
-| `reviewSkillPath` | `.claude/skills/review-all-prs/SKILL.md` | Review skill, relative to `emRepoPath` |
+| `emRepoPath` | — | Working dir for the review skill (the review repo). Optional; unset = the repo's review checkout |
+| `reviewSkillPath` | — | Review skill. **Required for every review-enabled repo** (startup fails otherwise). Absolute, `~/…`, or relative to the session's working dir (`emRepoPath` when set, else the repo's review checkout) |
 | `reviewModel` | — | Model override for review runs (independent of `model`) |
 | `reviewMaxTurns` | `200` | Max turns (review + verify is long-running) |
 | `reviewMaxDurationMs` | `3600000` (60 min) | Max review duration |
 | `reviewAllowedTools` | broad MCP + shell set | Tool surface for the review skill |
-| `reviewerLogin` | `slashbin-engineering-manager` | GitHub login the review runs as (freshness guard) |
+| `reviewerLogin` | — | GitHub login the review runs as (freshness guard). Unset = a verdict by any reviewer counts as current |
 | `reviewLabelReconcile` | `true` | Set the outcome label from the run's own trailer when the skill merged without labeling. Env: `AI_AGENT_REVIEW_LABEL_RECONCILE` |
 
 Requires `EM_GITHUB_TOKEN` in the environment when enabled.

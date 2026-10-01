@@ -1394,7 +1394,7 @@ async function tryReview(
   }
 
   // Gate: is there an open feature PR awaiting EM review?
-  const candidate = findPRsNeedingReview(repoConfig, config.reviewerLogin, reviewLogger);
+  const candidate = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
   if (!candidate) {
     if (failures > 0) reviewFailureCount.set(repoName, 0);
     return false;
@@ -1407,7 +1407,7 @@ async function tryReview(
     return false;
   }
   if (checks.state === "failing") {
-    const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, config.reviewerLogin, reviewLogger);
+    const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
     if (bounces < MAX_CI_BOUNCES) {
       const names = checks.failing.map((f) => f.name).join(", ");
       bounceForRedCI(repoConfig, candidate.prNumber, candidate.issueNumbers, checks, reviewLogger);
@@ -1588,7 +1588,7 @@ async function tryReview(
     if (checkoutPath) {
       try {
         const stillApproved = findAllApprovedActionableIssues(repoConfig, reviewLogger).length;
-        const stillToReview = findPRsNeedingReview(repoConfig, config.reviewerLogin, reviewLogger) ? 1 : 0;
+        const stillToReview = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
         releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
       } catch (err) {
         // Never let bookkeeping fail the phase. The nightly sweep is the backstop.
