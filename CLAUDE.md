@@ -6,12 +6,17 @@ merged work — across many repos from a single process.
 
 ## Cycle
 
-Each poll cycle runs six phases across every configured repo. Phases run in this
-order so labels set in one phase are consumed by the right phase next cycle:
+Each poll cycle runs the configured `stages` across every configured repo
+(`src/stages.ts`; README "Pipeline stages"). Omitted, they are the seven built-ins
+in this order, so labels set in one phase are consumed by the right phase next cycle:
 
 ```
-Reconcile → Review → Revise → Implement → Branch Sync → Promote
+Reconcile → Review → Revise → Implement → Branch Sync → Dependabot → Promote
 ```
+
+A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
+one Claude session on that skill against the open feature PR. A custom stage that
+reports `blocked` or no verdict stops the later stages for that repo's pass.
 
 1. **Reconcile** — detect orphaned commits on the feature branch with no PR; open one.
 2. **Review** *(opt-in, `reviewEnabled`)* — for repos with an open feature PR whose
@@ -24,9 +29,11 @@ Reconcile → Review → Revise → Implement → Branch Sync → Promote
 4. **Implement** — pick up `approved` issues with no delivering PR and invoke the
    implementation skill; on success label the issue `pr under review`.
 5. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
-6. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues.
+6. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
+   with `dependencyPreApproved`).
+7. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues.
 
-Priority within a cycle is encoded by phase order. Only one Claude session runs at a
+Priority within a cycle is encoded by stage order. Only one Claude session runs at a
 time (`implementing` mutex) for git-state safety.
 
 ## Review phase
@@ -91,7 +98,8 @@ src/
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
 ├── state.ts         # Disk persistence (.agent-state.json)
-├── orchestrator.ts  # 6-phase cycle, failure cooldowns, label transitions
+├── stages.ts        # Stage schema, default order, dispatch loop
+├── orchestrator.ts  # Stage pass per repo, failure cooldowns, label transitions
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
 └── index.ts         # Public API exports
 ```
@@ -111,7 +119,8 @@ src/
   reconciles labels/state.
 - **One Claude session at a time** — resource + git-state safety.
 - **Phase order is the priority order** — reconcile and review settle prior-cycle state
-  before new implementation starts.
+  before new implementation starts. The default `stages` keeps it; a config that
+  reorders the built-ins gives that up.
 - **Additive, opt-in config** — new capabilities (e.g. Review) default off so existing
   `.ai-agent.json` files keep working unchanged.
 - **Disk persistence** — `.agent-state.json` survives restarts; the daemon resumes where

@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
+import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 
 // --- Schemas ---
 
@@ -65,7 +66,7 @@ const repoEntrySchema = z.object({
   dependencyPreApproved: z.boolean().optional(),
 });
 
-const configSchema = z.object({
+export const configSchema = z.object({
   // Single-repo fields (backward compat — ignored when repos[] is provided)
   repoPath: z.string().default("."),
   githubRepo: z.string().optional(),
@@ -218,6 +219,13 @@ const configSchema = z.object({
   // prefault, not default: zod 4 returns a `default` value without parsing it, so
   // an omitted block would arrive as {} with none of the five names filled in.
   lifecycleLabels: lifecycleLabelsSchema.prefault({}),
+
+  // The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the
+  // seven built-ins in today's order, so an existing .ai-agent.json runs exactly
+  // as before. A custom stage is `{ id, skillPath }`: one Claude session on that
+  // skill when the pass reaches it. Global, never per repo — the stages hand
+  // work to each other by label, one pipeline for the fleet.
+  stages: stagesSchema,
 });
 
 // --- Types ---
@@ -311,6 +319,8 @@ export interface AgentConfig {
   reviewerLogin?: string;
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
+  /** The stages each repo pass runs, in order. Defaults to the seven built-ins. */
+  stages: readonly StageEntry[];
 }
 
 // --- Helpers ---
@@ -386,6 +396,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewerLogin: fileConfig.reviewerLogin,
     reviewLabelReconcile: process.env.AI_AGENT_REVIEW_LABEL_RECONCILE ?? fileConfig.reviewLabelReconcile,
     lifecycleLabels: fileConfig.lifecycleLabels,
+    stages: fileConfig.stages,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -480,7 +491,10 @@ export function loadConfig(configPath?: string): AgentConfig {
   const emRepoPath = parsed.emRepoPath ? resolve(parsed.emRepoPath) : undefined;
 
   // Fail fast on misconfiguration: review enabled for a repo with no skill to run.
-  const unskilled = repos.filter((r) => r.reviewEnabled && !r.reviewSkillPath);
+  // Only when the review stage is configured at all — without it `reviewEnabled`
+  // selects nothing, so there is no session to need a skill.
+  const stages: readonly StageEntry[] = Object.freeze(parsed.stages.map((s) => Object.freeze({ ...s })));
+  const unskilled = hasStage(stages, "review") ? repos.filter((r) => r.reviewEnabled && !r.reviewSkillPath) : [];
   if (unskilled.length > 0) {
     throw new Error(
       `reviewEnabled is true for repo(s) ${unskilled.map((r) => `"${r.name}"`).join(", ")} but no reviewSkillPath is set for them. ` +
@@ -526,5 +540,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewerLogin: parsed.reviewerLogin,
     reviewLabelReconcile: parsed.reviewLabelReconcile,
     lifecycleLabels,
+    stages,
   });
 }

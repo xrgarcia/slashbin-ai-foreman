@@ -31,9 +31,11 @@ import {
   tryMergeSyncPR,
   countBranchDiffFiles,
   stripReadyForProdLabel,
+  findOpenFeaturePR,
   type PendingRevisionInfo,
 } from "./github.js";
-import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, type ImplementationResult, type RevisionResult } from "./agent.js";
+import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
+import { dispatchStages, isCustomStage, type CustomStage, type StageResult } from "./stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
 import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch } from "./reconciler.js";
 import {
@@ -458,39 +460,17 @@ export async function runRepoPass(
 }
 
 /**
- * One full pass over ONE repo: reconcile -> review -> revise -> implement ->
- * sync -> promote.
- *
- * Phase order within a repo is load-bearing and unchanged. Review runs before
- * implement so it only acts on PRs labeled in a PRIOR pass (a PR created by
- * this pass waits for the next one, avoiding a same-cycle GitHub-consistency
- * race). Promote runs last so it sees labels this pass just set.
- *
- * What changed is that this is now the unit of concurrency. Repos no longer
- * queue behind each other: a 30-minute build on one service used to block the
- * other nineteen, because the old shape was six sequential loops over all
- * repos and every phase awaited each one in turn.
+ * The reconcile stage: orphaned commits, rejected branches, and the three dead
+ * zones. Returns how many items it processed. Never throws — each half catches
+ * its own failure, as it did when this was inline Phase 0.
  */
-async function runRepoCycle(
+function runReconcileStage(
   repoConfig: RepoConfig,
   config: AgentConfig,
-  logger: Logger,
-  cycleNumber: number,
-): Promise<RepoCycleResult> {
-  const events: CycleEvent[] = [];
+  base: Logger,
+  events: CycleEvent[],
+): number {
   let processed = 0;
-  let lastImplementation: ImplementationResult | null = null;
-
-  const repoCycle = (repoCycleCounter.get(repoConfig.name) ?? 0) + 1;
-  repoCycleCounter.set(repoConfig.name, repoCycle);
-  // The phase helpers use the cycle number for per-repo failure cooldowns
-  // ("retry after N idle cycles"), so they must count THIS repo's passes. With
-  // independent per-repo loops a fleet-wide counter no longer maps to a repo's
-  // own turns, and a cooldown measured in someone else's cycles is arbitrary.
-  cycleNumber = repoCycle;
-  const base = logger.child({ cycle: cycleNumber, repoCycle, repo: repoConfig.name });
-
-  // --- Phase 0: Reconcile orphaned commits (features ahead of develop with no PR) ---
   const reconLogger = base.child({ phase: "reconcile" });
   try {
     const result = reconcileRepo(repoConfig, reconLogger);
@@ -670,71 +650,229 @@ async function runRepoCycle(
     );
   }
 
-  // Phases 1-3 each spawn a Claude session. None may START once a shutdown is
-  // under way — see `shutdownRequested`.
-  if (shutdownRequested) return { processed, lastImplementation, events };
+  return processed;
+}
 
-  // --- Phase 1: Review open feature PRs (invokes the EM /review-all-prs skill) ---
-  if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
-  if (shutdownRequested) return { processed, lastImplementation, events };
+/**
+ * One full pass over ONE repo: the configured `stages`, in order. By default
+ * reconcile -> review -> revise -> implement -> branch-sync -> dependabot ->
+ * promote; a config may drop, reorder, or add custom skill stages.
+ *
+ * Phase order within a repo is load-bearing, and the default keeps it. Review
+ * runs before implement so it only acts on PRs labeled in a PRIOR pass (a PR
+ * created by this pass waits for the next one, avoiding a same-cycle
+ * GitHub-consistency race). Promote runs last so it sees labels this pass just
+ * set. A config that reorders the built-ins gives those guarantees up.
+ *
+ * A stage that returns `blocked` or `failed` ends the pass: no later stage runs
+ * for this repo until the next pass. Only custom stages return those (see
+ * StageOutcome) — the built-ins keep their own failure counters, as before.
+ *
+ * What changed is that this is now the unit of concurrency. Repos no longer
+ * queue behind each other: a 30-minute build on one service used to block the
+ * other nineteen, because the old shape was six sequential loops over all
+ * repos and every phase awaited each one in turn.
+ */
+async function runRepoCycle(
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  logger: Logger,
+  cycleNumber: number,
+): Promise<RepoCycleResult> {
+  const events: CycleEvent[] = [];
+  let processed = 0;
+  let lastImplementation: ImplementationResult | null = null;
 
-  // --- Phase 2: Revise PRs with pending review feedback ---
-  const revisionInfo = await tryRevision(repoConfig, base, cycleNumber, events);
-  if (revisionInfo) {
-    events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
-    processed++;
-  }
+  const repoCycle = (repoCycleCounter.get(repoConfig.name) ?? 0) + 1;
+  repoCycleCounter.set(repoConfig.name, repoCycle);
+  // The phase helpers use the cycle number for per-repo failure cooldowns
+  // ("retry after N idle cycles"), so they must count THIS repo's passes. With
+  // independent per-repo loops a fleet-wide counter no longer maps to a repo's
+  // own turns, and a cooldown measured in someone else's cycles is arbitrary.
+  cycleNumber = repoCycle;
+  const base = logger.child({ cycle: cycleNumber, repoCycle, repo: repoConfig.name });
 
-  if (shutdownRequested) return { processed, lastImplementation, events };
+  // The stages run in the configured order (default: reconcile, review, revise,
+  // implement, branch-sync, dependabot, promote — see BUILTIN_STAGES). Each
+  // built-in below is the phase that used to be called here by name, unchanged.
+  const dispatched = await dispatchStages(config.stages, async (stage): Promise<StageResult> => {
+    // Review, revise, implement and custom stages each spawn a Claude session.
+    // None may START once a shutdown is under way — see `shutdownRequested`.
+    // The pass ends there, as it did when the phases were inline.
+    const spawnsClaude = isCustomStage(stage) || stage.type === "review" || stage.type === "revise" || stage.type === "implement";
+    if (spawnsClaude && shutdownRequested) return { outcome: "stop", reason: "shutdown requested" };
 
-  // --- Phase 3: Implement approved issues (one batch per repo) ---
-  const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
-  if (implResult) {
-    processed++;
-    lastImplementation = implResult;
-  }
-
-  // --- Phase 4: Reconcile branch drift (main → develop) for any repo with
-  //    post-promotion merge commits. Runs independently of promotion work so
-  //    drift is cleared even when no ready-for-prod issues exist. ---
-  if (!(repoConfig.baseBranch === "main" && repoConfig.featureBranch === "main")) {
-    if (trySyncDrift(repoConfig, base, cycleNumber)) {
-      events.push({ message: `Branch sync on ${repoConfig.githubRepo} (main → develop) — merged`, level: "info" });
-      processed++;
+    if (isCustomStage(stage)) {
+      const r = await tryCustomStage(repoConfig, stage, base, events);
+      if (r.ran) processed++;
+      return r;
     }
-  }
 
-  // --- Phase 4c: File ONE issue for the Dependabot PRs aimed at the feature
-  //    branch. Phase 4b deliberately refuses to merge those, so without this
-  //    they accumulate with no path forward at all. The issue puts them through
-  //    the implement session — which builds, boots the app and smoke-tests it —
-  //    instead of a CI rollup that only ever proved the code compiles. Filed
-  //    pre-approved on a repo that opts in (slashbin.io repos), so it enters
-  //    the queue with no human step; bare everywhere else. ---
-  if (repoConfig.baseBranch !== "main") {
-    const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
-    if (filed) {
-      events.push({
-        message: repoConfig.dependencyPreApproved
-          ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
-          : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
-        level: "info",
-      });
-      processed++;
+    switch (stage.type) {
+      // --- Reconcile orphaned commits (features ahead of develop with no PR) and dead zones ---
+      case "reconcile":
+        processed += runReconcileStage(repoConfig, config, base, events);
+        break;
+
+      // --- Review open feature PRs (invokes the configured review skill). The
+      //    outcome-label reconcile (reviewLabelReconcile) runs inside tryReview. ---
+      case "review":
+        if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
+        break;
+
+      // --- Revise PRs with pending review feedback ---
+      case "revise": {
+        const revisionInfo = await tryRevision(repoConfig, base, cycleNumber, events);
+        if (revisionInfo) {
+          events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
+          processed++;
+        }
+        break;
+      }
+
+      // --- Implement approved issues (one batch per repo) ---
+      case "implement": {
+        const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
+        if (implResult) {
+          processed++;
+          lastImplementation = implResult;
+        }
+        break;
+      }
+
+      // --- Reconcile branch drift (main → develop) for any repo with
+      //    post-promotion merge commits. Runs independently of promotion work so
+      //    drift is cleared even when no ready-for-prod issues exist. ---
+      case "branch-sync":
+        if (!(repoConfig.baseBranch === "main" && repoConfig.featureBranch === "main")) {
+          if (trySyncDrift(repoConfig, base, cycleNumber)) {
+            events.push({ message: `Branch sync on ${repoConfig.githubRepo} (main → develop) — merged`, level: "info" });
+            processed++;
+          }
+        }
+        break;
+
+      // --- File ONE issue for the Dependabot PRs aimed at the feature
+      //    branch. Nothing in the pipeline merges those (see findDependencyPRs), so without this
+      //    they accumulate with no path forward at all. The issue puts them through
+      //    the implement session — which builds, boots the app and smoke-tests it —
+      //    instead of a CI rollup that only ever proved the code compiles. Filed
+      //    pre-approved on a repo that opts in (dependencyPreApproved), so it enters
+      //    the queue with no human step; bare everywhere else. ---
+      case "dependabot":
+        if (repoConfig.baseBranch !== "main") {
+          const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
+          if (filed) {
+            events.push({
+              message: repoConfig.dependencyPreApproved
+                ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+                : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
+              level: "info",
+            });
+            processed++;
+          }
+        }
+        break;
+
+      // --- Create promotion PRs for repos with ready-for-prod issues. Never
+      //    applies the ready-for-prod label itself (separation of duties). ---
+      case "promote": {
+        const promotionResult = tryPromotion(repoConfig, base, cycleNumber);
+        if (promotionResult === "promoted") {
+          events.push({ message: `Promotion PR created on ${repoConfig.githubRepo} (develop → main)`, level: "info" });
+          processed++;
+        } else if (promotionResult === "synced") {
+          events.push({ message: `Branch sync on ${repoConfig.githubRepo} (main → develop) — merged, promotion will follow`, level: "info" });
+          processed++;
+        }
+        break;
+      }
     }
-  }
+    return { outcome: "ok" };
+  });
 
-  // --- Phase 5: Create promotion PRs for repos with ready-for-prod issues ---
-  const promotionResult = tryPromotion(repoConfig, base, cycleNumber);
-  if (promotionResult === "promoted") {
-    events.push({ message: `Promotion PR created on ${repoConfig.githubRepo} (develop → main)`, level: "info" });
-    processed++;
-  } else if (promotionResult === "synced") {
-    events.push({ message: `Branch sync on ${repoConfig.githubRepo} (main → develop) — merged, promotion will follow`, level: "info" });
-    processed++;
+  if (dispatched.stoppedAt && dispatched.stoppedAt.outcome !== "stop") {
+    const { stage, outcome, reason } = dispatched.stoppedAt;
+    base.debug(`Pass stopped at stage "${stage}" (${outcome}${reason ? `: ${reason}` : ""}) — later stages skipped this pass`);
   }
 
   return { processed, lastImplementation, events };
+}
+
+/**
+ * A custom stage's last verdict per repo, keyed `<repo>\0<stage id>`, with the
+ * feature-branch head it was reached on. A verdict stands until that head moves:
+ * the pass loop polls every minute, and re-running the same skill on the same
+ * code each time would spend a session per poll to learn nothing new. In memory
+ * only — a restart re-runs each stage once.
+ */
+const customStageVerdicts = new Map<string, { headSha: string; outcome: "ok" | "blocked" | "failed"; reason?: string }>();
+
+/**
+ * Run one custom stage for one repo: a single Claude session on the stage's
+ * skill (runCustomStage), against the open feature PR. Nothing in flight → `ok`
+ * with no session, so a pass with no open PR reaches the stages after it.
+ *
+ * Goes through the same gates as the other Claude phases: the upstream
+ * back-off (`tryAcquire` / `reportClaudeResult`), the per-repo abort
+ * controller, and the shutdown check in the dispatch loop. A run the upstream
+ * refused is `blocked` without a verdict (not remembered, retried next pass).
+ */
+async function tryCustomStage(
+  repoConfig: RepoConfig,
+  stage: CustomStage,
+  logger: Logger,
+  events: CycleEvent[],
+): Promise<StageResult & { ran: boolean }> {
+  const stageLogger = logger.child({ phase: `stage:${stage.id}` });
+  if (isUpstreamBlocked("github") || isUpstreamBlocked("claude")) {
+    return { outcome: "blocked", reason: "upstream back-off", ran: false };
+  }
+
+  let pr: ReturnType<typeof findOpenFeaturePR>;
+  try {
+    pr = findOpenFeaturePR(repoConfig);
+  } catch (err) {
+    // Could not look is not "nothing to check": hold the later stages this pass.
+    return { outcome: "blocked", reason: `work in flight unreadable: ${err instanceof Error ? err.message : String(err)}`, ran: false };
+  }
+  if (!pr) return { outcome: "ok", ran: false };
+
+  const key = `${repoConfig.name}\0${stage.id}`;
+  const prior = customStageVerdicts.get(key);
+  if (prior && prior.headSha === pr.headSha) {
+    return { outcome: prior.outcome, reason: prior.reason, ran: false };
+  }
+
+  if (!tryAcquire("claude")) return { outcome: "blocked", reason: "upstream back-off", ran: false };
+  const runAbort = new AbortController();
+  activeRuns.set(repoConfig.name, runAbort);
+  try {
+    const result = await runCustomStage(
+      repoConfig, stage,
+      { prNumber: pr.number, issueNumbers: pr.issueNumbers, headSha: pr.headSha },
+      stageLogger, runAbort.signal,
+    ).catch(reportLaunchThrew);
+    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    if (result.upstreamLimit) return { outcome: "blocked", reason: result.upstreamLimit.reason, ran: false };
+
+    const outcome = result.verdict === "pass" ? "ok" : result.verdict;
+    customStageVerdicts.set(key, { headSha: pr.headSha, outcome, reason: result.reason });
+    const where = `${repoConfig.githubRepo} PR #${pr.number}`;
+    if (outcome === "ok") {
+      stageLogger.info(`Stage "${stage.id}" passed on ${where}`);
+      events.push({ message: `Stage "${stage.id}" passed on ${where}`, level: "info" });
+    } else {
+      stageLogger.warn(`Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"} — later stages held until ${repoConfig.featureBranch} moves`);
+      events.push({
+        message: `${outcome === "blocked" ? "⛔" : "⚠️"} Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"}. Later stages are held for this repo until \`${repoConfig.featureBranch}\` moves.`,
+        level: outcome === "blocked" ? "warn" : "error",
+      });
+    }
+    return { outcome, reason: result.reason, ran: true };
+  } finally {
+    activeRuns.delete(repoConfig.name);
+  }
 }
 
 /**
