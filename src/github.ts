@@ -670,7 +670,7 @@ export interface ReviewCandidate {
  */
 export function findPRsNeedingReview(
   config: RepoConfig,
-  reviewerLogin: string,
+  reviewerLogin: string | undefined,
   logger: Logger,
 ): ReviewCandidate | null {
   try {
@@ -696,7 +696,7 @@ export function findPRsNeedingReview(
     const pr = prs[0];
 
     if (hasFreshReview(config, pr.number, reviewerLogin, logger)) {
-      logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin} review — skipping re-review`);
+      logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin ?? "reviewer"} review — skipping re-review`);
       return null;
     }
 
@@ -728,7 +728,7 @@ export function findPRsNeedingReview(
  */
 function adoptOrphanedReviewCandidate(
   config: RepoConfig,
-  reviewerLogin: string,
+  reviewerLogin: string | undefined,
   logger: Logger,
 ): ReviewCandidate | null {
   const prs: { number: number; url: string; title: string; body: string }[] = findOpenPrs(
@@ -1502,6 +1502,15 @@ export function resolveDeadZone(
 }
 
 /**
+ * Whether a review counts as the configured reviewer's. With no `reviewerLogin`
+ * configured, every author counts: the freshness guard then treats a verdict by
+ * anyone as current, which can skip a review but can never loop one.
+ */
+function byReviewer(review: { author?: { login?: string } }, reviewerLogin: string | undefined): boolean {
+  return reviewerLogin === undefined || review.author?.login === reviewerLogin;
+}
+
+/**
  * True when the PR already has an APPROVED/CHANGES_REQUESTED review by
  * `reviewerLogin` submitted at or after the PR's latest commit (i.e. the current
  * head has already been reviewed). On any lookup failure returns false — we'd
@@ -1510,7 +1519,7 @@ export function resolveDeadZone(
 function hasFreshReview(
   config: RepoConfig,
   prNumber: number,
-  reviewerLogin: string,
+  reviewerLogin: string | undefined,
   logger: Logger,
 ): boolean {
   try {
@@ -1533,7 +1542,7 @@ function hasFreshReview(
 
     return reviews.some(
       (r) =>
-        r.author?.login === reviewerLogin &&
+        byReviewer(r, reviewerLogin) &&
         (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") &&
         !!r.submittedAt &&
         new Date(r.submittedAt).getTime() >= lastCommitMs,
@@ -1642,7 +1651,7 @@ export const MAX_CI_BOUNCES = 2;
 export function countCiBouncesSinceReview(
   config: RepoConfig,
   prNumber: number,
-  reviewerLogin: string,
+  reviewerLogin: string | undefined,
   logger: Logger,
 ): number {
   try {
@@ -1656,7 +1665,7 @@ export function countCiBouncesSinceReview(
       reviews?: { author?: { login?: string }; submittedAt?: string }[];
     };
     const lastReviewMs = (data.reviews ?? [])
-      .filter((r) => r.author?.login === reviewerLogin && r.submittedAt)
+      .filter((r) => byReviewer(r, reviewerLogin) && r.submittedAt)
       .map((r) => new Date(r.submittedAt as string).getTime())
       .reduce((a, b) => Math.max(a, b), 0);
     return (data.comments ?? []).filter(

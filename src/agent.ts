@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, createWriteStream, type WriteStream } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
@@ -1004,7 +1005,31 @@ Work autonomously. Do not ask questions.`;
 }
 
 /**
- * Invoke the EM repo's /review-all-prs skill, scoped to a single service repo,
+ * Working directory of a repo's review session: the review repo (`emRepoPath`)
+ * when one is configured, else the repo's own managed review checkout. The
+ * second case is what lets a review skill that ships inside the service repo run
+ * without any separate review repo.
+ */
+export function reviewSessionCwd(agentConfig: AgentConfig, repoConfig: RepoConfig): string {
+  return agentConfig.emRepoPath ?? checkoutPathFor(agentConfig, repoConfig);
+}
+
+/**
+ * Absolute path of a repo's review skill, or undefined when none is configured.
+ * `~/` expands to the home directory; any other relative path resolves against
+ * `reviewSessionCwd` — the directory the session runs in, so the path means what
+ * it would mean to the session itself. With `emRepoPath` set this is exactly the
+ * pre-EM#425 behaviour (the session read the relative path from that cwd).
+ */
+export function resolveReviewSkillPath(agentConfig: AgentConfig, repoConfig: RepoConfig): string | undefined {
+  const configured = repoConfig.reviewSkillPath;
+  if (!configured) return undefined;
+  const expanded = configured.replace(/^~(?=$|\/)/, homedir());
+  return isAbsolute(expanded) ? expanded : resolve(reviewSessionCwd(agentConfig, repoConfig), expanded);
+}
+
+/**
+ * Invoke the repo's review skill (Slashbin: the EM's /review-all-prs), scoped to a single service repo,
  * in a headless Claude session.
  *
  * This is categorically different from implement/revise: those run IN the service
@@ -1012,7 +1037,8 @@ Work autonomously. Do not ask questions.`;
  * workflow — it needs the EM repo's MCP servers, npm scripts (healthcheck/verify/
  * validate), and context/docs — so it runs with:
  *   - cwd  = the EM repo (agentConfig.emRepoPath), so it loads the EM .mcp.json,
- *            .claude/skills, and context/docs
+ *            .claude/skills, and context/docs — or, with no emRepoPath, the
+ *            repo's review checkout (reviewSessionCwd)
  *   - token = EM_GITHUB_TOKEN, so reviews/merges are attributed to the EM account
  *             (memory: feedback_mcp_github_for_review_actions)
  *   - the broad reviewAllowedTools surface (GitHub/Postgres/Redis/Railway MCP)
@@ -1040,17 +1066,19 @@ export async function reviewOpenPRs(
   if (!emToken) {
     return { success: false, error: "EM_GITHUB_TOKEN not set — refusing to run review without EM-account attribution" };
   }
-  if (!agentConfig.emRepoPath) {
-    return { success: false, error: "emRepoPath not configured — cannot locate the review skill" };
+  const skillPath = resolveReviewSkillPath(agentConfig, repoConfig);
+  if (!skillPath) {
+    return { success: false, error: "reviewSkillPath not configured for this repo — cannot locate the review skill" };
   }
+  const cwd = reviewSessionCwd(agentConfig, repoConfig);
 
-  logger.info(`Starting review for ${repoConfig.name} (${repoConfig.githubRepo}) — cwd=${agentConfig.emRepoPath}`);
+  logger.info(`Starting review for ${repoConfig.name} (${repoConfig.githubRepo}) — cwd=${cwd}, skill=${skillPath}`);
 
   const { minutes: reviewBudgetMinutes, deadlineIso: reviewDeadlineIso } =
     reviewBudget(agentConfig.reviewMaxDurationMs);
 
   const labels = repoConfig.lifecycleLabels;
-  const prompt = `Read and follow the skill at ${agentConfig.reviewSkillPath}.
+  const prompt = `Read and follow the skill at ${skillPath}.
 
 Review the open feature PRs for the repository \`${repoConfig.githubRepo}\` ONLY. Treat this as the skill's repo-scoped mode (equivalent to \`--repo ${repoConfig.githubRepo}\`): scope every step — inventory, review, merge, verify — to that single repository, and use the full \`owner/repo\` slug \`${repoConfig.githubRepo}\` for all GitHub operations (do not rely on a short repo alias).
 
@@ -1104,7 +1132,7 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
   const result = await spawnClaudeWithOptions(
     prompt,
     {
-      cwd: agentConfig.emRepoPath,
+      cwd,
       ghToken: emToken,
       triggerLabel: repoConfig.triggerLabel,
       lifecycleLabels: repoConfig.lifecycleLabels,

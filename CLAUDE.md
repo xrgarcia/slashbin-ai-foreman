@@ -34,9 +34,11 @@ time (`implementing` mutex) for git-state safety.
 The Review phase is categorically different from Implement/Revise, because review is a
 decision-layer workflow rather than an in-repo edit:
 
-- **Runs in a separate review repo.** The review skill is spawned with its working
-  directory set to `emRepoPath` (not the service repo), so it has the reviewer's own
-  MCP servers, verification scripts, and context docs.
+- **Runs in a separate review repo when one is set.** With `emRepoPath`, the review
+  skill is spawned with its working directory there (not the service repo), so it has
+  the reviewer's own MCP servers, verification scripts, and context docs. Without it,
+  the cwd is the repo's review checkout (`reviewSessionCwd`). A relative
+  `reviewSkillPath` resolves against that same cwd (`resolveReviewSkillPath`).
 - **Runs under a separate token.** Reviews/merges are attributed to `EM_GITHUB_TOKEN`
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
 - **Owns its own outcomes.** The skill posts the verdict, merges approved PRs, and
@@ -55,7 +57,9 @@ issue is `pr under review` (not `pr pending actions`) and with no review by
 loops). Every run's full turn-by-turn interaction (`--output-format stream-json`) is
 written to `logs/review/<repo>-cycle<N>-<ts>.log` for debugging.
 
-Disabled by default; opt in per repo with `reviewEnabled` and set `emRepoPath`. See
+Disabled by default; opt in per repo with `reviewEnabled` and give each such repo a
+`reviewSkillPath` (global or per repo — there is no default, startup fails without
+one). `reviewSkillPath` and `reviewerLogin` cascade per repo like `model`. See
 README "Review phase (opt-in)" for the full config table.
 
 ## State (persisted to disk)

@@ -47,6 +47,11 @@ const repoEntrySchema = z.object({
   maxDurationMs: z.coerce.number().int().positive().optional(),
   // Per-repo opt-out for the review phase (falls back to the global default).
   reviewEnabled: z.boolean().optional(),
+  // Per-repo review skill and reviewer identity; each falls back to the global
+  // value. See the global fields below for what they mean and how a relative
+  // reviewSkillPath resolves.
+  reviewSkillPath: z.string().optional(),
+  reviewerLogin: z.string().optional(),
   // Owner standing authorization: file this repo's dependency batch issue
   // already carrying the trigger label. Opt-in per repo, default OFF — owner
   // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
@@ -123,10 +128,11 @@ const configSchema = z.object({
   // .ai-agent.json keeps the original reconcile/revise/implement/sync/promote
   // behavior with no review step. We opt in via our own .ai-agent.json.
   //
-  // The review phase invokes the EM repo's /review-all-prs skill in a headless
-  // Claude session whose cwd is the EM repo (NOT the service repo) so it has the
-  // EM's MCP servers, npm scripts, and context/docs. It runs under the EM GitHub
-  // token for EM-account review attribution.
+  // The review phase invokes a review skill in a headless Claude session under
+  // the EM GitHub token (reviewer attribution). emRepoPath is optional: when set,
+  // the session's cwd is that repo (NOT the service repo) so it has the
+  // reviewer's MCP servers, npm scripts, and context/docs; when unset, the cwd is
+  // the repo's managed review checkout (see reviewSessionCwd in agent.ts).
   emRepoPath: z.string().optional(),
   // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
   // review is offered to it FIRST — Codex judges, its code posts and merges.
@@ -135,7 +141,12 @@ const configSchema = z.object({
   // before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
   techLeadPath: z.string().optional(),
   reviewEnabled: z.boolean().default(false),
-  reviewSkillPath: z.string().default(".claude/skills/review-all-prs/SKILL.md"),
+  // The review skill. No default: a review-enabled repo must get one from here
+  // or its own entry, or loadConfig refuses to start. A relative path resolves
+  // against the review session's cwd — emRepoPath when set, else the repo's
+  // review checkout — exactly as the session itself would read it
+  // (resolveReviewSkillPath in agent.ts). Per-repo override supported.
+  reviewSkillPath: z.string().optional(),
   reviewModel: z.string().optional(),
   // Where the review session finds the service repo's code.
   //
@@ -191,7 +202,10 @@ const configSchema = z.object({
   ]),
   // GitHub login the review runs as — used by the freshness guard to detect a
   // review already posted for the current PR head (avoids re-review loops).
-  reviewerLogin: z.string().default("slashbin-engineering-manager"),
+  // No default. Unset, the guard counts a verdict by ANY reviewer as current,
+  // so a missing login can suppress a review but never loop one. Per-repo
+  // override supported.
+  reviewerLogin: z.string().optional(),
 
   // prefault, not default: zod 4 returns a `default` value without parsing it, so
   // an omitted block would arrive as {} with none of the five names filled in.
@@ -235,6 +249,10 @@ export interface RepoConfig {
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
+  /** Review skill as configured (per-repo, else global). Required when reviewEnabled. */
+  reviewSkillPath?: string;
+  /** Reviewer login for the freshness guard (per-repo, else global). */
+  reviewerLogin?: string;
   // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
   dependencyPreApproved: boolean;
   /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
@@ -264,18 +282,20 @@ export interface AgentConfig {
   logLevel: "debug" | "info" | "warn" | "error";
 
   // --- Review phase settings (shared across repos) ---
-  // emRepoPath is the absolute path to the EM repo whose /review-all-prs skill
-  // we invoke. Undefined when review is disabled everywhere.
+  // emRepoPath is the absolute path to the review repo used as the review
+  // session's cwd. Optional even with review enabled — see reviewSessionCwd.
   emRepoPath?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
-  reviewSkillPath: string;
+  /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
+  reviewSkillPath?: string;
   reviewModel?: string;
   reviewCheckoutRoot: string;
   reviewMaxTurns: number;
   reviewMaxDurationMs: number;
   reviewAllowedTools: string[];
-  reviewerLogin: string;
+  /** Global reviewer login; repos read their resolved `RepoConfig.reviewerLogin`. */
+  reviewerLogin?: string;
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
 }
@@ -397,6 +417,8 @@ export function loadConfig(configPath?: string): AgentConfig {
         maxTurns: entry.maxTurns ?? parsed.maxTurns,
         maxDurationMs: entry.maxDurationMs ?? parsed.maxDurationMs,
         reviewEnabled: entry.reviewEnabled ?? parsed.reviewEnabled,
+        reviewSkillPath: entry.reviewSkillPath ?? parsed.reviewSkillPath,
+        reviewerLogin: entry.reviewerLogin ?? parsed.reviewerLogin,
         dependencyPreApproved: entry.dependencyPreApproved ?? false,
         ...globals,
       };
@@ -427,6 +449,8 @@ export function loadConfig(configPath?: string): AgentConfig {
       maxTurns: parsed.maxTurns,
       maxDurationMs: parsed.maxDurationMs,
       reviewEnabled: parsed.reviewEnabled,
+      reviewSkillPath: parsed.reviewSkillPath,
+      reviewerLogin: parsed.reviewerLogin,
       dependencyPreApproved: false,
       ...globals,
     }];
@@ -435,11 +459,12 @@ export function loadConfig(configPath?: string): AgentConfig {
   // Resolve emRepoPath to absolute once (used by the review phase as the spawn cwd).
   const emRepoPath = parsed.emRepoPath ? resolve(parsed.emRepoPath) : undefined;
 
-  // Fail fast on misconfiguration: review enabled somewhere but no EM repo path.
-  if (!emRepoPath && repos.some((r) => r.reviewEnabled)) {
+  // Fail fast on misconfiguration: review enabled for a repo with no skill to run.
+  const unskilled = repos.filter((r) => r.reviewEnabled && !r.reviewSkillPath);
+  if (unskilled.length > 0) {
     throw new Error(
-      "reviewEnabled is true for at least one repo but emRepoPath is not set. " +
-      "Set emRepoPath (path to the EM repo holding the /review-all-prs skill) or set AI_AGENT_EM_REPO_PATH."
+      `reviewEnabled is true for repo(s) ${unskilled.map((r) => `"${r.name}"`).join(", ")} but no reviewSkillPath is set for them. ` +
+      "Set reviewSkillPath globally or per repo."
     );
   }
 
