@@ -1042,15 +1042,17 @@ async function tryBatchImplementation(
   //     skill is told to build. Uncapped, because a skill chooses by priority
   //     across all of it: capping would hide an S1 behind three older issues.
   //   - `actionableIssues` — the Foreman's own discovery batch (ascending,
-  //     capped at MAX_BATCH_SIZE) less the same filters. Everything the
+  //     capped at MAX_BATCH_SIZE), cut from `handOff` AFTER the filters, so a
+  //     backed-off or already-implemented issue never holds a batch slot.
+  //     Cutting first and filtering after starved the queue: three backed-off
+  //     issues filled the cap every cycle and the rest of the offer was never
+  //     reached (Slashbin-console#1154, 2026-10-01). Everything the
   //     Foreman does per issue keeps using it: the run gate, the inline
   //     prompt, a batch-wide skip, the labeling fallback.
   const workSource: WorkSourceAdapter = new GitHubIssueConnector();
   const offered = (await workSource.selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
-  const discovered = discoveryBatch(repoConfig, offered, repoLogger);
   let handOff = offered;
-  const batchLeft = () => discovered.filter((n) => handOff.includes(n));
-  if (discovered.length === 0) {
+  if (offered.length === 0) {
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1092,7 +1094,7 @@ async function tryBatchImplementation(
 
   const alreadyImplemented = new Set(repoState.implemented);
   handOff = handOff.filter((n) => !alreadyImplemented.has(n));
-  if (batchLeft().length === 0) {
+  if (handOff.length === 0) {
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1143,7 +1145,7 @@ async function tryBatchImplementation(
       `Backing off ${stillBackedOff.length} previously-skipped issue(s): ${stillBackedOff.map(({ n, reason }) => `#${n} (${reason.split("\n")[0].slice(0, 100)})`).join("; ")}`,
     );
   }
-  const actionableIssues = batchLeft();
+  const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
   if (actionableIssues.length === 0) {
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
