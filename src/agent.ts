@@ -1,9 +1,18 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, createWriteStream, type WriteStream } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, createWriteStream, type WriteStream } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
+import { checkoutPathFor } from "./review-checkout.js";
+
+const FOREMAN_OVERRIDES = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  ".claude",
+  "system-prompt-overrides.md"
+);
 
 /**
  * Describe a non-zero exit WITHOUT letting stderr impersonate the root cause.
@@ -58,7 +67,28 @@ function phaseTranscriptPath(phase: string, repoName: string): string {
 export interface RevisionResult {
   success: boolean;
   error?: string;
+  /**
+   * The revision deliberately made no commit and SAID SO via the
+   * FOREMAN_REVISION trailer. Distinct from a silent no-op, which stays a
+   * failure — see the SHA check in revisePRFeedback.
+   */
+  noCommit?: boolean;
+  /** The reason given on the trailer. Present only when `noCommit` is true. */
+  noCommitReason?: string;
 }
+
+/**
+ * A revision that correctly changes nothing must be able to say so.
+ *
+ * Structured trailer, not prose. `9ed3c02` in the EM repo is the same lesson
+ * from the review side: a gate that reads an agent's narrative instead of a
+ * declared field grades the wrong thing. The reason is required — a bare
+ * "no-commit" is indistinguishable from the silent no-op this guard exists to
+ * catch.
+ *
+ *   FOREMAN_REVISION no-commit reason=<why no code change was needed>
+ */
+const REVISION_NO_COMMIT = /FOREMAN_REVISION\s+no-commit\s+reason=(.+)/i;
 
 /** One parsed FOREMAN_REVIEW trailer line. */
 export interface ReviewTrailer {
@@ -169,11 +199,47 @@ export interface ImplementationResult {
 //  2. Free-text heuristic: the agent wrote about "skipping" or "no immediate
 //     code change". Less precise but catches well-behaved agents that explained
 //     themselves without using the structured trailer.
+/**
+ * The STRUCTURED trailer only — no free-text heuristic.
+ *
+ * This one is consulted BEFORE any PR detection, so it must never fire on an
+ * agent that merely talked about skipping while actually implementing. The
+ * trailer is a declaration; the heuristic in detectSkipSignal is a guess, and a
+ * guess does not get to pre-empt the evidence.
+ */
+// Exported for tests: the field parse is what broke, so it is tested by calling.
+export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number } {
+  // Find the trailer LINE first, then read its fields off it, so the fields may
+  // appear in any order. The previous shape — `skipped(?:\s+reason="...")?` —
+  // only bound `reason` when it immediately followed `skipped`, so the moment the
+  // documented format grew an `issue=` field in front of it the reason silently
+  // became "no reason given". That is not cosmetic: the reason is persisted as
+  // state.skipped[n].reason and is the ONLY input to isResolvedTransientSkip,
+  // which recognises a transient divergence solely by matching the agent's own
+  // wording. A dropped reason turns a self-clearing skip into a 24h back-off.
+  const line = stdout.match(/FOREMAN_RESULT:\s*skipped[^\n]*/i);
+  if (!line) return { skipped: false };
+  const trailer = line[0];
+  const reason = trailer.match(/\breason="([^"]*)"/i);
+  // An OPTIONAL `issue=<N>` scopes the skip to the one issue the agent stopped
+  // on. Without it the skip applies to the whole batch we handed over, which is
+  // right when the agent judged the batch as a whole and wrong when it stopped
+  // on one spec — and `implement-approved-issues` selects exactly ONE issue per
+  // invocation, so unscoped there means every other approved issue in the repo
+  // gets backed off 30m..24h for a defect in a spec it never read.
+  const scoped = trailer.match(/\bissue="?#?(\d+)"?/i);
+  return {
+    skipped: true,
+    reason: reason ? reason[1] : "no reason given",
+    issue: scoped ? Number(scoped[1]) : undefined,
+  };
+}
+
 function detectSkipSignal(stdout: string): { skipped: boolean; reason?: string } {
   // Structured trailer (preferred)
-  const structured = stdout.match(/FOREMAN_RESULT:\s*skipped(?:\s+reason="([^"]*)")?/i);
-  if (structured) {
-    return { skipped: true, reason: structured[1] || "no reason given" };
+  const declared = detectDeclaredSkip(stdout);
+  if (declared.skipped) {
+    return declared;
   }
 
   // Free-text heuristics on the last 2000 chars (agents tend to put the
@@ -227,6 +293,8 @@ interface SpawnOptions {
   ghToken?: string;
   model?: string;
   allowedTools: string[];
+  /** MCP client config to load (`--mcp-config`); each server it names is allowed. */
+  mcpConfig?: string;
   maxTurns: number;
   maxDurationMs: number;
   /**
@@ -240,6 +308,29 @@ interface SpawnOptions {
    * post-hoc debugging. The directory is created if needed.
    */
   transcriptPath?: string;
+  /**
+   * What this run was working on, for the timeout line. `Claude CLI timed out
+   * after 3600000ms` with nothing else on it reads as a daemon fault; the owner
+   * read exactly that as "the merge did not happen" on 2026-09-22 (issue #41),
+   * when in fact the run had merged the PR 55 minutes earlier.
+   */
+  runLabel?: string;
+}
+
+/**
+ * Server names in an MCP client config. Names only — the file carries bearer
+ * tokens and nothing from it but the keys is ever logged. A missing or
+ * unreadable file yields none, which leaves the session exactly as before.
+ */
+export function mcpServerNames(path: string, logger: Logger): string[] {
+  if (!existsSync(path)) return [];
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8")) as { mcpServers?: Record<string, unknown> };
+    return Object.keys(data.mcpServers ?? {}).filter((n) => /^[\w-]+$/.test(n));
+  } catch {
+    logger.warn(`Builder MCP config at ${path} is unreadable — running the builder without it`);
+    return [];
+  }
 }
 
 /**
@@ -261,6 +352,20 @@ function spawnClaudeWithOptions(
     "--dangerously-skip-permissions",
   ];
 
+  // Overrides for the harness defaults that fight how a non-interactive builder
+  // has to behave (.claude/system-prompt-overrides.md in THIS repo).
+  //
+  // Resolved from this file's own location, never from cwd: every run happens
+  // inside a service-repo checkout, so a cwd-relative lookup would silently find
+  // nothing on every cycle and the flag would never be passed.
+  //
+  // This only APPENDS. It does not outrank the default prompt by any mechanism —
+  // later and more specific text is persuasion, not precedence. Anything that must
+  // not happen belongs in a PreToolUse hook that blocks.
+  if (existsSync(FOREMAN_OVERRIDES)) {
+    args.push("--append-system-prompt-file", FOREMAN_OVERRIDES);
+  }
+
   if (opts.streamJson) {
     args.push("--output-format", "stream-json", "--verbose");
   }
@@ -269,8 +374,17 @@ function spawnClaudeWithOptions(
     args.push("--model", opts.model);
   }
 
-  if (opts.allowedTools.length > 0) {
-    args.push("--allowedTools", opts.allowedTools.join(","));
+  const allowedTools = [...opts.allowedTools];
+  if (opts.mcpConfig) {
+    const servers = mcpServerNames(opts.mcpConfig, logger);
+    if (servers.length > 0) {
+      args.push("--mcp-config", opts.mcpConfig);
+      allowedTools.push(...servers.map((s) => `mcp__${s}`));
+    }
+  }
+
+  if (allowedTools.length > 0) {
+    args.push("--allowedTools", allowedTools.join(","));
   }
 
   let transcript: WriteStream | null = null;
@@ -312,7 +426,10 @@ function spawnClaudeWithOptions(
 
     const timeout = setTimeout(() => {
       timedOut = true;
-      logger.warn(`Claude CLI timed out after ${opts.maxDurationMs}ms`);
+      logger.warn(
+        `Claude CLI timed out after ${opts.maxDurationMs}ms` +
+        (opts.runLabel ? ` — ${opts.runLabel}` : ""),
+      );
       if (child) {
         child.kill("SIGTERM");
         setTimeout(() => {
@@ -383,6 +500,7 @@ function spawnClaude(
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       model: config.model,
       allowedTools: config.allowedTools,
+      mcpConfig: config.builderMcpConfig,
       maxTurns: config.maxTurns,
       maxDurationMs: config.maxDurationMs,
       transcriptPath,
@@ -447,6 +565,11 @@ export async function implementApprovedIssues(
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
 
+  // Captured so a DECLARED skip can be distinguished from a declaration made
+  // while the agent was in fact pushing work. Evidence beats narrative in both
+  // directions: the trailer is only honoured when the branch really did not move.
+  const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+
   let prompt: string;
 
   if (config.skillPath) {
@@ -478,7 +601,7 @@ Work autonomously. Do not ask questions.`;
   // end its output with a single line `FOREMAN_RESULT: skipped reason="<text>"`
   // so the orchestrator can distinguish a deliberate no-op from a failed
   // implementation attempt and back off accordingly.
-  prompt += `\n\nIMPORTANT — Skip protocol: If after reading an issue you conclude that the issue body explicitly directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification, etc.), do NOT create an empty PR or guess at a fix. Instead, end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped reason="<one-line explanation>"\n\nThis tells the Foreman to back off rather than re-queue the issue every cycle. If at least one issue in the batch IS implementable, implement those normally and only skip the rest in your written conclusion (no trailer needed when at least one PR was created).`;
+  prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nThis tells the Foreman to back off on THAT issue rather than re-queue it every cycle. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
 
   // Third Way: if a prior attempt failed, include context so Claude can adapt
   if (priorFailureReason) {
@@ -497,6 +620,68 @@ Work autonomously. Do not ask questions.`;
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
     return { success: false, error };
+  }
+
+  // A DECLARED skip, with no new commits, is authoritative — and it has to be
+  // checked here, ahead of every PR heuristic below.
+  //
+  // Slashbin-console#841, 2026-09-02. The agent correctly refused to commit a
+  // chore onto `features` because an unrelated billing PR (#843) was already
+  // open on that branch and its skill forbids bundling the two. It emitted the
+  // trailer exactly as instructed. But an open PR on the branch existed, so the
+  // PR-detection below claimed it as this run's output and returned success —
+  // the skip check sat 30 lines further down and was never reached. Nothing was
+  // recorded, the back-off never armed, and the issue was re-queued every cycle:
+  // 41 full Claude sessions in six hours, each one reaching the same correct
+  // conclusion and having it discarded.
+  //
+  // The SHA guard is what makes this safe to check first. The prompt tells the
+  // agent not to emit the trailer when it created a PR, but "the agent followed
+  // the prompt" is exactly the assumption that should not be load-bearing — so
+  // a declaration is only honoured when the branch demonstrably did not move.
+  const declaredSkip = detectDeclaredSkip(result.stdout);
+  if (declaredSkip.skipped) {
+    const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+    if (beforeSha && afterSha && beforeSha !== afterSha) {
+      logger.warn(
+        `Agent emitted a skip trailer but ${config.featureBranch} advanced ` +
+        `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
+      );
+    } else {
+      // Scope the skip when the agent named an issue, so one unbuildable spec
+      // cannot back off the issues behind it.
+      //
+      // A named issue is TRUSTED even when it is not in `issueNumbers`, and that
+      // is deliberate. In skill mode the prompt never interpolates the batch
+      // (see the skillPath branch below): the agent runs the skill's own
+      // `gh issue list --label approved` and selects by the skill's priority
+      // table, which is strictly WIDER than what we tracked — the batch was
+      // already filtered by the `implemented` cache and by the escalating skip
+      // back-off, while those issues stay open and `approved` on GitHub and so
+      // remain visible to the agent. So "not in the batch" is an ordinary
+      // outcome, not a mistake, and widening to the batch on account of it would
+      // reintroduce exactly the starvation the scope exists to prevent. The
+      // agent naming one issue is strictly more information than the batch list.
+      const named = declaredSkip.issue;
+      if (named !== undefined && !(issueNumbers ?? []).includes(named)) {
+        logger.info(
+          `Skip names #${named}, which was outside the tracked batch ` +
+          `(${(issueNumbers ?? []).map((n) => `#${n}`).join(", ") || "none"}) — ` +
+          `expected in skill mode, where the agent selects from its own query. Honouring the scope.`,
+        );
+      }
+      logger.info(
+        `Implementation skipped by declaration — ${declaredSkip.reason}` +
+        (named !== undefined ? ` (scoped to #${named})` : " (batch-wide — no issue= in the trailer)"),
+      );
+      return {
+        success: false,
+        skipped: true,
+        skipReason: declaredSkip.reason,
+        skippedIssues: named !== undefined ? [named] : (issueNumbers ?? []),
+        error: `skipped: ${declaredSkip.reason}`,
+      };
+    }
   }
 
   // Extract PR URL from Claude's output
@@ -618,10 +803,18 @@ export async function revisePRFeedback(
 
   const labelNote = `\n\nIMPORTANT: Do NOT update issue labels — the orchestrator handles label transitions after you finish.`;
 
+  // A review round can legitimately require no code change: the reviewer asked
+  // for none, the previous round already satisfied it, or the remaining work is
+  // on an issue body rather than the branch. Before this trailer existed, that
+  // outcome was indistinguishable from a silent no-op and was marked failed, so
+  // the labels never returned to "pr under review" and the PR could never be
+  // re-reviewed — Slashbin-console#843 sat in exactly that deadlock.
+  const noCommitNote = `\n\nIF NO CODE CHANGE IS NEEDED: do not invent one. Say so on its own line, as the LAST line of your output:\n\n  FOREMAN_REVISION no-commit reason=<one line: why the branch is already correct>\n\nWithout that trailer, a run that pushes nothing is treated as a failed revision — which is the correct default, because a silent no-op and a deliberate one look identical from outside.`;
+
   let prompt: string;
 
   if (config.revisionSkillPath) {
-    prompt = `Read and follow the skill at ${config.revisionSkillPath}.\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${labelNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+    prompt = `Read and follow the skill at ${config.revisionSkillPath}.\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${labelNote}${noCommitNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else {
     prompt = `Revise PR #${prNumber || "(find open PRs with review feedback)"} in this repository.
 
@@ -631,7 +824,7 @@ export async function revisePRFeedback(
 4. Run tests: npm test
 5. Commit fixes with message: fix: address review feedback (#${prNumber || "<number>"})
 6. Push to the PR branch.
-${prContext}${labelNote}
+${prContext}${labelNote}${noCommitNote}
 
 ${IMAGE_HANDLING_INSTRUCTIONS}
 
@@ -663,11 +856,25 @@ Work autonomously. Do not ask questions.`;
   // error), we trust the exit code rather than fail spuriously.
   const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
   if (beforeSha && afterSha && beforeSha === afterSha) {
+    // Declared no-commit: the revision determined the branch is already correct
+    // and said so on the trailer. That is a real outcome, not a misfire, and it
+    // must return success — otherwise the orchestrator never transitions the
+    // labels back to "pr under review" and the PR is unreviewable forever.
+    const declared = REVISION_NO_COMMIT.exec(result.stdout);
+    if (declared) {
+      const reason = declared[1].trim().slice(0, 300);
+      logger.info(
+        `PR revision made no commit BY DECLARATION on ${config.featureBranch} ` +
+        `(SHA unchanged at ${beforeSha.slice(0, 10)}): ${reason}`,
+      );
+      return { success: true, noCommit: true, noCommitReason: reason };
+    }
+
     const outputTail = result.stdout.slice(-500).trim();
     if (outputTail) {
       logger.warn("Claude output (last 500 chars):\n" + outputTail);
     }
-    logger.error(`PR revision completed (exit 0) but no commits were pushed to ${config.featureBranch} (SHA unchanged at ${beforeSha.slice(0, 10)}) — marking as failed`);
+    logger.error(`PR revision completed (exit 0) but no commits were pushed to ${config.featureBranch} (SHA unchanged at ${beforeSha.slice(0, 10)}) and no FOREMAN_REVISION no-commit trailer was given — marking as failed`);
     return { success: false, error: "no commits pushed — revision was a no-op" };
   }
 
@@ -706,6 +913,7 @@ export async function reviewOpenPRs(
   logger: Logger,
   abortSignal?: AbortSignal,
   transcriptPath?: string,
+  runLabel?: string,
 ): Promise<ReviewResult> {
   const emToken = process.env.EM_GITHUB_TOKEN;
   if (!emToken) {
@@ -717,12 +925,19 @@ export async function reviewOpenPRs(
 
   logger.info(`Starting review for ${repoConfig.name} (${repoConfig.githubRepo}) — cwd=${agentConfig.emRepoPath}`);
 
+  const { minutes: reviewBudgetMinutes, deadlineIso: reviewDeadlineIso } =
+    reviewBudget(agentConfig.reviewMaxDurationMs);
+
   const prompt = `Read and follow the skill at ${agentConfig.reviewSkillPath}.
 
 Review the open feature PRs for the repository \`${repoConfig.githubRepo}\` ONLY. Treat this as the skill's repo-scoped mode (equivalent to \`--repo ${repoConfig.githubRepo}\`): scope every step — inventory, review, merge, verify — to that single repository, and use the full \`owner/repo\` slug \`${repoConfig.githubRepo}\` for all GitHub operations (do not rely on a short repo alias).
 
+WORKING COPY — use this one, do not make your own:
+A checkout of \`${repoConfig.githubRepo}\` is already prepared and fetched for you at \`${checkoutPathFor(agentConfig, repoConfig)}\`. Read the code there: \`git -C <that path> checkout <branch>\`, \`git -C <that path> diff\`, and so on. It is reused across runs, so its \`node_modules\` is usually already installed.
+Do NOT \`git clone\` this repo anywhere else, and do NOT clone into \`/tmp\` for any reason. \`/tmp\` here is a RAM filesystem with a hard limit on the NUMBER of files, and a repo plus its \`node_modules\` consumes tens of thousands of them; improvised review clones exhausted that limit on 2026-09-12 and left every agent on the box unable to run a single command, including the ones needed to clean it up. If you need a second working tree, use \`git -C <that path> worktree add\` inside that same directory — it shares the object store instead of duplicating it.
+
 Follow the skill exactly and act autonomously — do NOT ask questions or wait for confirmation:
-- Run the relevant healthchecks first (skill Phase 0).
+- Do NOT run healthchecks up front. A healthcheck verifies a deployment; a review that requests changes deploys nothing. Run them only in post-merge verification (skill Phase 5, via \`npm run verify\`), against a merge this run actually made.
 - Review each open \`features → develop\` PR (skill Phase 3): the Fix-Completeness gate first, then the rubric.
 - For APPROVED PRs: post the review from the EM account, merge to develop, then verify dev and label \`pr approved\` per the skill. Do NOT apply \`ready for prod release\`, and do NOT remove it either — that label is the EM outcome-gate's signature (separation of duties; see /review-pr Step 17). If a linked issue already carries it, the EM has signed off ahead of you: leave that issue's labels alone entirely. Removing it silently blocks the promotion PR forever, so the Foreman now detects and restores it — but a restore is a repaired mistake, not a supported path.
 - For BLOCKED PRs: post REQUEST_CHANGES, label the linked issue \`pr pending actions\`, and file S3/S4 follow-up issues per the skill.
@@ -736,6 +951,14 @@ Ending your turn ends the process. Anything still running is killed at that inst
 - The merge is irreversible and the labeling is not automatic. Once you merge a PR you MUST, in the same turn, finish verification and set the issue's labels. If you cannot finish, say so explicitly in your final message rather than stopping quietly.
 - If a step genuinely cannot complete (verification times out, a deploy never settles), do NOT stall — record the outcome, label the issue \`pr pending actions\`, and emit the trailer with \`deploy=FAILURE\`. A reported failure is recoverable; silence is not.
 
+WALL-CLOCK BUDGET — you have ${reviewBudgetMinutes} minutes, until ${reviewDeadlineIso}.
+The process is SIGTERMed at that instant. You get no warning and no chance to write anything, so nothing you were partway through survives.
+
+- Check the clock before you start anything that polls. If the thing you are watching will not finish in the time you have LEFT, it does not fit in this run — and starting it anyway spends the rest of your budget to learn what you already knew.
+- A criterion that converges on its own schedule — a backfill sweeping historical rows, a deploy that settles when it settles, an index build — is the case this rule exists for. Do NOT poll it to the wall. Take the measurement you can take now, finish the labeling, and emit \`hold=<reason>\` on that PR's trailer line (see below).
+- A held issue is visible and recoverable: the Foreman leaves it alone and reports it as held, and the EM resolves it when the criterion can be checked. A run killed mid-poll is none of those things — it is recorded as a plain failure, and the review and merge it already completed are thrown away.
+- This does NOT license ending your turn to "wait". Holding is a decision you record and report; waiting is stopping and hoping. Never do the second.
+
 If there are no open feature PRs awaiting review for this repo, that is a clean no-op — say so and emit exactly \`FOREMAN_REVIEW none\` as your final line.
 
 IMPORTANT — status trailer: After you finish, end your output with one line per PR you acted on, in EXACTLY this format (nothing after the last one):
@@ -744,7 +967,7 @@ FOREMAN_REVIEW pr=#<number> verdict=<APPROVE|REQUEST_CHANGES> merged=<yes|no> de
 
 Rules for the trailer: \`merged=yes\` only if you actually merged the PR to the base branch. \`deploy=SUCCESS\`/\`deploy=FAILURE\` reflects the post-merge deployment+verification result for that merge (use \`deploy=NA\` when nothing was merged, or when the repo has no deployment to verify, e.g. a docs/CLI/npm-package repo). Emit one trailer line for every PR you reviewed this run.
 
-OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`pr under review\` (e.g. an acceptance criterion cannot be observed yet), append \`hold=<short-reason-slug>\` to that PR's trailer line:
+OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`pr under review\`, append \`hold=<short-reason-slug>\` to that PR's trailer line. Two cases qualify: an acceptance criterion cannot be observed YET (nothing has happened that would let you check it), or it cannot be observed IN TIME (it is converging, but not inside the budget above). Both are decisions; both belong in the trailer rather than in a poll loop:
 
 FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-not-observable-until-0300z
 
@@ -767,6 +990,7 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
       maxDurationMs: agentConfig.reviewMaxDurationMs,
       streamJson: true,
       transcriptPath,
+      runLabel: runLabel ?? `review of ${repoConfig.githubRepo}`,
     },
     logger,
     abortSignal
@@ -846,4 +1070,29 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
     logger.info(`Review for ${repoConfig.name}: clean no-op (no PRs awaiting review)`);
   }
   return { success: true, summary, statusLine, trailers };
+}
+
+/**
+ * Render a review run's wall-clock budget as the two facts the run needs: how
+ * long it has, and the instant it dies.
+ *
+ * Exists as its own function because the ceiling was enforced and never
+ * disclosed. On 2026-09-22 a review of `jerky_skuvault_service#362` finished its
+ * work at 22:11, then polled a backfill that needed ~75 minutes to converge
+ * until the 60-minute kill; a completed review and merge was recorded as
+ * `Review failed: timed out`. Nothing in its prompt named a number, so it had no
+ * way to know the poll could not fit. Issue #41.
+ *
+ * The absolute deadline matters more than the duration: an agent tens of minutes
+ * into a run cannot subtract elapsed time it never measured, but it can compare
+ * a timestamp against the clock.
+ */
+export function reviewBudget(
+  maxDurationMs: number,
+  now: Date = new Date(),
+): { minutes: number; deadlineIso: string } {
+  return {
+    minutes: Math.round(maxDurationMs / 60_000),
+    deadlineIso: new Date(now.getTime() + maxDurationMs).toISOString(),
+  };
 }
