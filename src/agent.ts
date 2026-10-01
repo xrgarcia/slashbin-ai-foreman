@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, createWriteStream, type WriteStream } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentConfig, RepoConfig } from "./config.js";
+import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
 import { checkoutPathFor } from "./review-checkout.js";
@@ -307,6 +307,10 @@ interface SpawnOptions {
   cwd: string;
   /** Value to inject as GH_TOKEN (controls GitHub account attribution). */
   ghToken?: string;
+  /** The repo's trigger label, handed to the session as FOREMAN_TRIGGER_LABEL. */
+  triggerLabel: string;
+  /** The configured lifecycle labels, handed to the session as FOREMAN_LIFECYCLE_LABELS. */
+  lifecycleLabels: LifecycleLabels;
   model?: string;
   allowedTools: string[];
   /** MCP client config to load (`--mcp-config`); each server it names is allowed. */
@@ -424,6 +428,15 @@ function spawnClaudeWithOptions(
   // GH_TOKEN must be a string or absent — never literal "undefined".
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   if (opts.ghToken) env.GH_TOKEN = opts.ghToken;
+  // The configured label names, for the skill. The daemon filtering on a renamed
+  // trigger label while the skill runs `gh issue list --label approved` selects
+  // work the agent never finds, so the skill reads these instead of its own
+  // literals. Set here because every session goes through this function — a new
+  // caller cannot forget them. Labels as one JSON map (`JSON.parse` once, iterate
+  // the set); the trigger label on its own, since it selects work and a skill
+  // uses it alone in `--label`.
+  env.FOREMAN_TRIGGER_LABEL = opts.triggerLabel;
+  env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(opts.lifecycleLabels);
 
   return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
@@ -514,6 +527,8 @@ function spawnClaude(
     {
       cwd: config.repoPath,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
+      triggerLabel: config.triggerLabel,
+      lifecycleLabels: config.lifecycleLabels,
       model: config.model,
       allowedTools: config.allowedTools,
       mcpConfig: config.builderMcpConfig,
@@ -686,7 +701,7 @@ export async function implementApprovedIssues(
   } else {
     const issueScope = issueNumbers && issueNumbers.length > 0
       ? `Implement ONLY these issues: ${issueNumbers.map(n => `#${n}`).join(", ")}. Read each issue with \`gh issue view <number>\` to understand the requirements.`
-      : `Implement all open GitHub issues labeled "approved" in this repository.\n\n1. Query GitHub for approved issues: gh issue list --label approved --state open --json number,title,body,labels\n2. Prioritize by severity (S1 > security > S2+bug > ... > chore).`;
+      : `Implement all open GitHub issues labeled "${config.triggerLabel}" in this repository.\n\n1. Query GitHub for them: gh issue list --label ${JSON.stringify(config.triggerLabel)} --state open --json number,title,body,labels\n2. Prioritize by severity (S1 > security > S2+bug > ... > chore).`;
 
     prompt = `${issueScope}
 
@@ -881,7 +896,7 @@ Work autonomously. Do not ask questions.`;
 }
 
 /**
- * Invoke Claude CLI to revise PRs that have review feedback ("pr pending actions").
+ * Invoke Claude CLI to revise PRs that have review feedback (`pr pending actions`).
  * The revision skill reads review comments, implements fixes, and pushes.
  *
  * The orchestrator passes the specific PR number and issue numbers so the
@@ -899,7 +914,7 @@ export async function revisePRFeedback(
   // Capture the feature branch's HEAD SHA before invoking Claude so we can
   // detect the no-op case where Claude exits 0 without pushing any commits.
   // Without this, a silent no-op would be reported as success and the
-  // orchestrator would (incorrectly) transition labels to "pr under review",
+  // orchestrator would (incorrectly) transition labels to `pr under review`,
   // hiding the fact that the requested fix was never applied.
   const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
@@ -913,7 +928,7 @@ export async function revisePRFeedback(
   // for none, the previous round already satisfied it, or the remaining work is
   // on an issue body rather than the branch. Before this trailer existed, that
   // outcome was indistinguishable from a silent no-op and was marked failed, so
-  // the labels never returned to "pr under review" and the PR could never be
+  // the labels never returned to `pr under review` and the PR could never be
   // re-reviewed — Slashbin-console#843 sat in exactly that deadlock.
   const noCommitNote = `\n\nIF NO CODE CHANGE IS NEEDED: do not invent one. Say so on its own line, as the LAST line of your output:\n\n  FOREMAN_REVISION no-commit reason=<one line: why the branch is already correct>\n\nWithout that trailer, a run that pushes nothing is treated as a failed revision — which is the correct default, because a silent no-op and a deliberate one look identical from outside.`;
 
@@ -955,7 +970,7 @@ Work autonomously. Do not ask questions.`;
   // feature branch. A clean exit with no SHA change means the revision was a
   // silent no-op (skill misfire, agent decided "nothing to fix", failed push,
   // etc.). Treat it as a failure so the orchestrator does not transition labels
-  // to "pr under review" — that would lie about the PR's state and cause the
+  // to `pr under review` — that would lie about the PR's state and cause the
   // EM to re-review unchanged code.
   //
   // Conservative on lookup failures: if either SHA is null (transient gh
@@ -965,7 +980,7 @@ Work autonomously. Do not ask questions.`;
     // Declared no-commit: the revision determined the branch is already correct
     // and said so on the trailer. That is a real outcome, not a misfire, and it
     // must return success — otherwise the orchestrator never transitions the
-    // labels back to "pr under review" and the PR is unreviewable forever.
+    // labels back to `pr under review` and the PR is unreviewable forever.
     const declared = REVISION_NO_COMMIT.exec(result.stdout);
     if (declared) {
       const reason = declared[1].trim().slice(0, 300);
@@ -1034,6 +1049,7 @@ export async function reviewOpenPRs(
   const { minutes: reviewBudgetMinutes, deadlineIso: reviewDeadlineIso } =
     reviewBudget(agentConfig.reviewMaxDurationMs);
 
+  const labels = repoConfig.lifecycleLabels;
   const prompt = `Read and follow the skill at ${agentConfig.reviewSkillPath}.
 
 Review the open feature PRs for the repository \`${repoConfig.githubRepo}\` ONLY. Treat this as the skill's repo-scoped mode (equivalent to \`--repo ${repoConfig.githubRepo}\`): scope every step — inventory, review, merge, verify — to that single repository, and use the full \`owner/repo\` slug \`${repoConfig.githubRepo}\` for all GitHub operations (do not rely on a short repo alias).
@@ -1045,8 +1061,8 @@ Do NOT \`git clone\` this repo anywhere else, and do NOT clone into \`/tmp\` for
 Follow the skill exactly and act autonomously — do NOT ask questions or wait for confirmation:
 - Do NOT run healthchecks up front. A healthcheck verifies a deployment; a review that requests changes deploys nothing. Run them only in post-merge verification (skill Phase 5, via \`npm run verify\`), against a merge this run actually made.
 - Review each open \`features → develop\` PR (skill Phase 3): the Fix-Completeness gate first, then the rubric.
-- For APPROVED PRs: post the review from the EM account, merge to develop, then verify dev and label \`pr approved\` per the skill. Do NOT apply \`ready for prod release\`, and do NOT remove it either — that label is the EM outcome-gate's signature (separation of duties; see /review-pr Step 17). If a linked issue already carries it, the EM has signed off ahead of you: leave that issue's labels alone entirely. Removing it silently blocks the promotion PR forever, so the Foreman now detects and restores it — but a restore is a repaired mistake, not a supported path.
-- For BLOCKED PRs: post REQUEST_CHANGES, label the linked issue \`pr pending actions\`, and file S3/S4 follow-up issues per the skill.
+- For APPROVED PRs: post the review from the EM account, merge to develop, then verify dev and label \`${labels.prApproved}\` per the skill. Do NOT apply \`${labels.readyForProd}\`, and do NOT remove it either — that label is the EM outcome-gate's signature (separation of duties; see /review-pr Step 17). If a linked issue already carries it, the EM has signed off ahead of you: leave that issue's labels alone entirely. Removing it silently blocks the promotion PR forever, so the Foreman now detects and restores it — but a restore is a repaired mistake, not a supported path.
+- For BLOCKED PRs: post REQUEST_CHANGES, label the linked issue \`${labels.prPendingActions}\`, and file S3/S4 follow-up issues per the skill.
 - Update issue labels yourself exactly as the skill specifies. The orchestrator reconciles the outcome label from your trailer only when you left it unset — it never overrides a label you did set.
 
 CRITICAL — THIS IS A HEADLESS SESSION. THERE IS NO NEXT TURN.
@@ -1055,7 +1071,7 @@ Ending your turn ends the process. Anything still running is killed at that inst
 - NEVER end your turn to "wait" for something. There is nothing to wait with. Do not say "I'll wait for X to land", "let me check back", or "proceeding once this completes" — those sentences are how a merged PR gets left with a mislabeled issue forever.
 - Run post-merge verification IN THE FOREGROUND and block on it. Do NOT launch it as a background task and yield — a backgrounded verify is killed the moment you stop, so its result never arrives and the labeling step after it never runs.
 - The merge is irreversible and the labeling is not automatic. Once you merge a PR you MUST, in the same turn, finish verification and set the issue's labels. If you cannot finish, say so explicitly in your final message rather than stopping quietly.
-- If a step genuinely cannot complete (verification times out, a deploy never settles), do NOT stall — record the outcome, label the issue \`pr pending actions\`, and emit the trailer with \`deploy=FAILURE\`. A reported failure is recoverable; silence is not.
+- If a step genuinely cannot complete (verification times out, a deploy never settles), do NOT stall — record the outcome, label the issue \`${labels.prPendingActions}\`, and emit the trailer with \`deploy=FAILURE\`. A reported failure is recoverable; silence is not.
 
 WALL-CLOCK BUDGET — you have ${reviewBudgetMinutes} minutes, until ${reviewDeadlineIso}.
 The process is SIGTERMed at that instant. You get no warning and no chance to write anything, so nothing you were partway through survives.
@@ -1073,7 +1089,7 @@ FOREMAN_REVIEW pr=#<number> verdict=<APPROVE|REQUEST_CHANGES> merged=<yes|no> de
 
 Rules for the trailer: \`merged=yes\` only if you actually merged the PR to the base branch. \`deploy=SUCCESS\`/\`deploy=FAILURE\` reflects the post-merge deployment+verification result for that merge (use \`deploy=NA\` when nothing was merged, or when the repo has no deployment to verify, e.g. a docs/CLI/npm-package repo). Emit one trailer line for every PR you reviewed this run.
 
-OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`pr under review\`, append \`hold=<short-reason-slug>\` to that PR's trailer line. Two cases qualify: an acceptance criterion cannot be observed YET (nothing has happened that would let you check it), or it cannot be observed IN TIME (it is converging, but not inside the budget above). Both are decisions; both belong in the trailer rather than in a poll loop:
+OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`${labels.prUnderReview}\`, append \`hold=<short-reason-slug>\` to that PR's trailer line. Two cases qualify: an acceptance criterion cannot be observed YET (nothing has happened that would let you check it), or it cannot be observed IN TIME (it is converging, but not inside the budget above). Both are decisions; both belong in the trailer rather than in a poll loop:
 
 FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-not-observable-until-0300z
 
@@ -1090,6 +1106,8 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
     {
       cwd: agentConfig.emRepoPath,
       ghToken: emToken,
+      triggerLabel: repoConfig.triggerLabel,
+      lifecycleLabels: repoConfig.lifecycleLabels,
       model: agentConfig.reviewModel,
       allowedTools: agentConfig.reviewAllowedTools,
       maxTurns: agentConfig.reviewMaxTurns,

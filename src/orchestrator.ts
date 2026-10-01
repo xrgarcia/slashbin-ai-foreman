@@ -49,7 +49,7 @@ import {
   restoreEmGate,
   findOrphanedLifecycleIssues,
   releaseOrphanedLifecycle,
-  EM_GATE_LABEL,
+  type ReviewOutcome,
 } from "./github.js";
 import type { ReviewTrailer } from "./agent.js";
 import { loadRepoState, saveRepoState } from "./state.js";
@@ -77,7 +77,7 @@ const revisionFailureCount = new Map<string, number>();
 const revisionEscalated = new Set<string>();
 // Consecutive revisions that pushed nothing BY DECLARATION, per repo.
 //
-// A declared no-commit is a valid answer, so it returns to "pr under review"
+// A declared no-commit is a valid answer, so it returns to `pr under review`
 // and gets re-reviewed. But if the reviewer then asks for the same change
 // again, the pair will ping-pong forever at no cost to either side and with
 // nothing changing. One is an answer; two in a row is a disagreement, and a
@@ -186,8 +186,10 @@ function recoverDeadZonedIssue(
 }
 
 /**
- * The label a review run's own trailer implies for the issues its PR closed, or
- * null when the trailer does not warrant a write.
+ * The lifecycle state a review run's own trailer implies for the issues its PR
+ * closed, or null when the trailer does not warrant a write. Returned as a
+ * `LifecycleLabels` key, so the configured name is looked up at the write and
+ * `readyForProd` is not even expressible here.
  *
  * Null is the important half. The reconciler exists to repair a MISSING write,
  * never to invent one, so anything the trailer does not say plainly is left for a
@@ -197,11 +199,11 @@ function recoverDeadZonedIssue(
  * `deploy=NA` is a PASS, not an absence: it is what a repo with nothing to deploy
  * (docs, CLI, npm package) is instructed to emit.
  */
-export function labelFromTrailer(t: ReviewTrailer): "pr approved" | "pr pending actions" | null {
+export function labelFromTrailer(t: ReviewTrailer): ReviewOutcome | null {
   if (!t.merged) return null;
   if (t.verdict !== "APPROVE") return null;
-  if (/^(FAIL|FAILURE|FAILED)$/.test(t.deploy)) return "pr pending actions";
-  if (/^(SUCCESS|OK|PASS|PASSED|NA|N\/A|NONE)$/.test(t.deploy)) return "pr approved";
+  if (/^(FAIL|FAILURE|FAILED)$/.test(t.deploy)) return "prPendingActions";
+  if (/^(SUCCESS|OK|PASS|PASSED|NA|N\/A|NONE)$/.test(t.deploy)) return "prApproved";
   return null;
 }
 
@@ -264,18 +266,18 @@ function reconcileReviewOutcomeLabels(
       held.push({ issue: issueNumber, reason: trailer.hold, pr: ref.prNumber });
       continue;
     }
-    const label = labelFromTrailer(trailer);
-    if (!label) {
+    const outcome = labelFromTrailer(trailer);
+    if (!outcome) {
       logger.warn(
         `Not reconciling #${issueNumber}: PR #${ref.prNumber}'s trailer is ambiguous (verdict=${trailer.verdict} merged=${trailer.merged} deploy=${trailer.deploy}) — leaving it for a human`,
       );
       unresolved.push(issueNumber);
       continue;
     }
-    if (transitionReviewOutcomeLabel(repoConfig, issueNumber, label, logger)) {
+    if (transitionReviewOutcomeLabel(repoConfig, issueNumber, outcome, logger)) {
       events?.push({
-        message: `${repoConfig.githubRepo} #${issueNumber} — review merged PR #${ref.prNumber} without labeling; reconciled to "${label}" from its own trailer`,
-        level: label === "pr approved" ? "info" : "warn",
+        message: `${repoConfig.githubRepo} #${issueNumber} — review merged PR #${ref.prNumber} without labeling; reconciled to "${repoConfig.lifecycleLabels[outcome]}" from its own trailer`,
+        level: outcome === "prApproved" ? "info" : "warn",
       });
     } else {
       unresolved.push(issueNumber);
@@ -292,7 +294,7 @@ function reconcileReviewOutcomeLabels(
     for (const h of held) {
       state.held[h.issue] = { heldAt: at, prNumber: h.pr, reason: h.reason };
       logger.info(
-        `#${h.issue} held by the reviewer (PR #${h.pr}): ${h.reason} — leaving "pr under review" in place, not re-verifying`,
+        `#${h.issue} held by the reviewer (PR #${h.pr}): ${h.reason} — leaving "${repoConfig.lifecycleLabels.prUnderReview}" in place, not re-verifying`,
       );
       events?.push({
         message: `⏸️ ${repoConfig.githubRepo} #${h.issue} held by review: ${h.reason} (PR #${h.pr} merged; label intentionally withheld)`,
@@ -565,6 +567,7 @@ async function runRepoCycle(
     // an automated verdict. Surface them, never overwrite them.
     const repoState = loadRepoState(repoConfig.name);
     const heldIssues = repoState.held ?? {};
+    const labels = repoConfig.lifecycleLabels;
 
     for (const s of stuck) {
       const hold = heldIssues[s.issueNumber];
@@ -594,9 +597,9 @@ async function runRepoCycle(
           reconLogger,
         );
         if (verdict !== "indeterminate" && resolveDeadZone(repoConfig, s.issueNumber, verdict, reconLogger)) {
-          const label = verdict === "pass" ? "pr approved" : "pr pending actions";
+          const label = labels[verdict === "pass" ? "prApproved" : "prPendingActions"];
           events.push({
-            message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone auto-recovered: re-verification ${verdict.toUpperCase()} → labeled "${label}" (PR #${s.prNumber} was merged with the issue left at "pr under review")`,
+            message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone auto-recovered: re-verification ${verdict.toUpperCase()} → labeled "${label}" (PR #${s.prNumber} was merged with the issue left at "${labels.prUnderReview}")`,
             level: verdict === "pass" ? "info" : "warn",
           });
           seen.delete(s.issueNumber);
@@ -609,11 +612,11 @@ async function runRepoCycle(
       if (seen.has(s.issueNumber)) continue; // already alerted; still stuck
       seen.add(s.issueNumber);
       reconLogger.warn(
-        `Dead-zoned issue #${s.issueNumber}: PR #${s.prNumber} merged to ${repoConfig.baseBranch} but issue still "pr under review" — post-merge verify never advanced it, and re-verification produced no verdict`,
+        `Dead-zoned issue #${s.issueNumber}: PR #${s.prNumber} merged to ${repoConfig.baseBranch} but issue still "${labels.prUnderReview}" — post-merge verify never advanced it, and re-verification produced no verdict`,
         { prUrl: s.prUrl, mergedAt: s.mergedAt },
       );
       events.push({
-        message: `⚠️ ${repoConfig.githubRepo} #${s.issueNumber} dead-zoned: PR #${s.prNumber} merged but issue still "pr under review", and auto re-verification could not produce a verdict. EM: verify by hand (npm run verify -- --repo ${repoConfig.name} --pr ${s.prNumber} --env development), then advance to "ready for prod release" or flag "pr pending actions".`,
+        message: `⚠️ ${repoConfig.githubRepo} #${s.issueNumber} dead-zoned: PR #${s.prNumber} merged but issue still "${labels.prUnderReview}", and auto re-verification could not produce a verdict. EM: verify by hand (npm run verify -- --repo ${repoConfig.name} --pr ${s.prNumber} --env development), then advance to "${labels.readyForProd}" or flag "${labels.prPendingActions}".`,
         level: "warn",
       });
     }
@@ -997,7 +1000,7 @@ async function tryBatchImplementation(
   // Emit event: issues picked up
   events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoConfig.githubRepo}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
 
-  // Gate: if there's a PR awaiting revision ("pr pending actions"), skip implementation.
+  // Gate: if there's a PR awaiting revision (`pr pending actions`), skip implementation.
   // The revision phase (Phase 1) handles these — running implementation would just
   // re-detect the same committed issues and loop without making progress.
   if (hasPendingRevisions(repoConfig, repoLogger)) {
@@ -1125,8 +1128,10 @@ async function tryBatchImplementation(
       }
       saveRepoState(repoName, updatedState);
 
-      // Add "pr under review" label so EM knows PRs are ready for review
-      transitionImplementationLabels(repoConfig.githubRepo, issuesActuallyImplemented, repoConfig.repoPath, repoLogger);
+      // Add the `prUnderReview` label so EM knows PRs are ready for review
+      transitionImplementationLabels(
+        repoConfig.githubRepo, issuesActuallyImplemented, repoConfig.repoPath, repoConfig.lifecycleLabels, repoLogger,
+      );
 
       repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")} in state`, { prUrl: result.prUrl });
       events?.push({ message: `Feature PR on ${repoConfig.githubRepo}: ${result.prUrl || "(commits added to existing PR)"}`, level: "info" });
@@ -1163,10 +1168,10 @@ async function tryBatchImplementation(
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
         transitionToReadyForProd(repoConfig, mergedNums, repoLogger);
         repoLogger.info(
-          `Advanced ${mergedNums.length} already-merged issue(s) to 'ready for prod release': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
+          `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels.prApproved}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
         );
         events?.push({
-          message: `Advanced ${mergedNums.length} already-merged issue(s) on ${repoConfig.githubRepo} to 'ready for prod release': ${mergedNums.map((n) => `#${n}`).join(", ")}`,
+          message: `Advanced ${mergedNums.length} already-merged issue(s) on ${repoConfig.githubRepo} to '${repoConfig.lifecycleLabels.prApproved}': ${mergedNums.map((n) => `#${n}`).join(", ")}`,
           level: "info",
         });
         // They're out of the actionable set now — no skip record needed, and a
@@ -1302,13 +1307,14 @@ async function tryRevision(
         consecutiveNoCommit.delete(repoName);
       }
 
-      // Transition issue labels: "pr pending actions" → "pr under review"
+      // Transition issue labels: `prPendingActions` → `prUnderReview`
       // The orchestrator owns this because the skill runs in the service repo
       // and may not have the right context to find the issue labels.
       transitionRevisionLabels(
         repoConfig.githubRepo,
         pending.issueNumbers,
         repoConfig.repoPath,
+        repoConfig.lifecycleLabels,
         revLogger,
       );
 
@@ -1478,7 +1484,7 @@ async function tryReview(
         const stuck = findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger);
         if (stuck.length > 0) {
           reviewLogger.warn(
-            `Review post-condition: PR(s) #${mergedPrs.join(", #")} reported merged, but issue(s) #${stuck.join(", #")} are still "pr under review" — the run merged without completing the label transition`,
+            `Review post-condition: PR(s) #${mergedPrs.join(", #")} reported merged, but issue(s) #${stuck.join(", #")} are still "${repoConfig.lifecycleLabels.prUnderReview}" — the run merged without completing the label transition`,
             { mergedPrs, stuckIssues: stuck },
           );
 
@@ -1500,7 +1506,7 @@ async function tryReview(
               { mergedPrs, unresolved },
             );
             events?.push({
-              message: `⚠️ ${repoConfig.githubRepo} — review merged PR #${mergedPrs.join(", #")} but left issue(s) #${unresolved.join(", #")} at "pr under review" and the trailer could not settle it. Dead-zone recovery will re-verify next cycle.`,
+              message: `⚠️ ${repoConfig.githubRepo} — review merged PR #${mergedPrs.join(", #")} but left issue(s) #${unresolved.join(", #")} at "${repoConfig.lifecycleLabels.prUnderReview}" and the trailer could not settle it. Dead-zone recovery will re-verify next cycle.`,
               level: "warn",
             });
           }
@@ -1604,13 +1610,13 @@ async function tryReview(
       !!findOpenPromotionPR(repoConfig.githubRepo, "main", repoConfig.repoPath, reviewLogger);
     if (promotionOwnsIt) {
       reviewLogger.info(
-        `"${EM_GATE_LABEL}" left removed on #${revoked.join(", #")} — an open promotion PR owns it now.`,
+        `"${repoConfig.lifecycleLabels.readyForProd}" left removed on #${revoked.join(", #")} — an open promotion PR owns it now.`,
       );
     }
     const restored = promotionOwnsIt ? [] : restoreEmGate(repoConfig, revoked, reviewLogger);
     if (restored.length > 0) {
       events?.push({
-        message: `⚠️ ${repoConfig.githubRepo} — the review run removed "${EM_GATE_LABEL}" from issue(s) ${restored.map((n) => `#${n}`).join(", ")}; restored. Promotion would otherwise have stalled silently.`,
+        message: `⚠️ ${repoConfig.githubRepo} — the review run removed "${repoConfig.lifecycleLabels.readyForProd}" from issue(s) ${restored.map((n) => `#${n}`).join(", ")}; restored. Promotion would otherwise have stalled silently.`,
         level: "warn",
       });
     }
@@ -1726,7 +1732,9 @@ function tryPromotion(
     return null;
   }
 
-  const issues = findReadyForProdIssues(repoConfig.githubRepo, repoConfig.repoPath, promoLogger);
+  const issues = findReadyForProdIssues(
+    repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
+  );
   if (issues.length === 0) {
     // "Nothing ready to promote" and "the gate was revoked and promotion is
     // stalled" produce the identical empty set and the identical silence. They
@@ -1747,7 +1755,7 @@ function tryPromotion(
       if (drift && drift.developAheadFiles > 0) {
         promoLogger.warn(
           `${repoName}: develop carries ${drift.developAheadFiles} changed file(s) not on main ` +
-          `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${EM_GATE_LABEL}" — ` +
+          `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${repoConfig.lifecycleLabels.readyForProd}" — ` +
           `promotion is STALLED, not idle. Either the EM gate has not been signed yet, or it was signed and revoked.`,
           { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles },
         );
@@ -1815,7 +1823,7 @@ function tryPromotion(
     // owns outcome verification; an open issue with no lifecycle label is inert
     // (the Foreman won't re-pick it) and stays visible for that close.
     promoLogger.warn(
-      `Already promoted — ${issues.length} issue(s) still labeled 'ready for prod release' but develop has 0 file changes vs main, ` +
+      `Already promoted — ${issues.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but develop has 0 file changes vs main, ` +
       `so their work is already in main: ${issues.map((i) => `#${i.number}`).join(", ")}. ` +
       `Stripping the label (nothing left to promote). They remain open for EM outcome-verification + close.`,
     );
@@ -1823,6 +1831,7 @@ function tryPromotion(
       repoConfig.githubRepo,
       issues.map((i) => i.number),
       repoConfig.repoPath,
+      repoConfig.lifecycleLabels,
       promoLogger,
     );
     return null;
@@ -1851,6 +1860,7 @@ function tryPromotion(
       repoConfig.githubRepo,
       issues.map((i) => i.number),
       repoConfig.repoPath,
+      repoConfig.lifecycleLabels,
       promoLogger,
     );
     return "promoted";

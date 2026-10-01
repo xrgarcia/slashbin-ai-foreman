@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { RepoConfig } from "./config.js";
+import type { LifecycleLabels, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "./upstream-backoff.js";
 
@@ -377,19 +377,13 @@ export function findAllApprovedActionableIssues(
     const issues = getOpenIssues(repo, config.repoPath, logger)
       .filter((i) => hasLabel(i, config.triggerLabel));
 
-    const lifecycleLabels = [
-      "pr under review",
-      "pr approved",
-      "pr pending actions",
-      "ready for prod release",
-      "ready to close",
-    ];
+    const lifecycleLabelValues = Object.values(config.lifecycleLabels);
 
     const actionable: number[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
       if (labels.includes("blocked")) continue;
-      if (lifecycleLabels.some((l) => labels.includes(l))) continue;
+      if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
       actionable.push(issue.number);
     }
     return actionable;
@@ -478,20 +472,14 @@ export function findActionableIssues(
     const issues = getOpenIssues(repo, config.repoPath, logger)
       .filter((i) => hasLabel(i, config.triggerLabel));
 
-    const lifecycleLabels = [
-      "pr under review",
-      "pr approved",
-      "pr pending actions",
-      "ready for prod release",
-      "ready to close",
-    ];
+    const lifecycleLabelValues = Object.values(config.lifecycleLabels);
 
     // Collect actionable issues (approved, not blocked, no lifecycle label)
     const actionable: number[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
       if (labels.includes("blocked")) continue;
-      if (lifecycleLabels.some((l) => labels.includes(l))) continue;
+      if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
       actionable.push(issue.number);
     }
 
@@ -582,11 +570,11 @@ export interface PendingRevisionInfo {
 }
 
 /**
- * Gate check: are there any issues with "pr pending actions" label?
+ * Gate check: are there any issues with the `prPendingActions` label?
  * These are issues where the reviewer requested changes on the linked PR
  * and the Foreman needs to revise the code.
  *
- * The review workflow applies "pr pending actions" to the ISSUE (not the PR),
+ * The review workflow applies `prPendingActions` to the ISSUE (not the PR),
  * so we query issues and then confirm they have an open feature PR.
  *
  * Returns the pending revision details, or null if no work.
@@ -596,9 +584,10 @@ export function findPendingRevisions(
   logger: Logger
 ): PendingRevisionInfo | null {
   try {
-    // Find issues labeled "pr pending actions" + the trigger label (approved)
+    // Find issues labeled `prPendingActions` + the trigger label (approved)
+    const pendingLabel = config.lifecycleLabels.prPendingActions;
     const pendingActions = getOpenIssues(config.githubRepo, config.repoPath, logger)
-      .filter((i) => hasLabel(i, "pr pending actions"));
+      .filter((i) => hasLabel(i, pendingLabel));
     const issues = pendingActions.filter((i) => hasLabel(i, config.triggerLabel));
 
     // An issue asked to revise but no longer carrying the trigger label is
@@ -612,7 +601,7 @@ export function findPendingRevisions(
     const withheld = pendingActions.filter((i) => !hasLabel(i, config.triggerLabel));
     if (withheld.length > 0) {
       logger.warn(
-        `${config.name}: ${withheld.length} issue(s) labeled "pr pending actions" without "${config.triggerLabel}" — ` +
+        `${config.name}: ${withheld.length} issue(s) labeled "${pendingLabel}" without "${config.triggerLabel}" — ` +
         `revise will NOT act on them and no other phase owns them. Intentional if the work was called off; ` +
         `otherwise re-apply "${config.triggerLabel}" or clear the lifecycle label: ` +
         withheld.map((i) => `#${i.number}`).join(", "),
@@ -632,7 +621,7 @@ export function findPendingRevisions(
       return { issueNumbers: issues.map(i => i.number), pr: prs[0] };
     }
 
-    logger.debug(`Found ${issues.length} issue(s) with "pr pending actions" but no open feature PR`);
+    logger.debug(`Found ${issues.length} issue(s) with "${pendingLabel}" but no open feature PR`);
     return null;
   } catch (err) {
     logger.error("Failed to check for pending revisions", {
@@ -685,10 +674,11 @@ export function findPRsNeedingReview(
   logger: Logger,
 ): ReviewCandidate | null {
   try {
+    const { prUnderReview, prPendingActions } = config.lifecycleLabels;
     const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
-      .filter((i) => hasLabel(i, "pr under review"));
+      .filter((i) => hasLabel(i, prUnderReview));
     // Exclude issues also labeled `pr pending actions` — the revise phase owns those.
-    const reviewable = issues.filter((i) => !hasLabel(i, "pr pending actions"));
+    const reviewable = issues.filter((i) => !hasLabel(i, prPendingActions));
     if (reviewable.length === 0) {
       return adoptOrphanedReviewCandidate(config, reviewerLogin, logger);
     }
@@ -700,7 +690,7 @@ export function findPRsNeedingReview(
       limit: 1,
     });
     if (prs.length === 0) {
-      logger.debug(`${config.name}: ${reviewable.length} issue(s) labeled "pr under review" but no open feature PR`);
+      logger.debug(`${config.name}: ${reviewable.length} issue(s) labeled "${prUnderReview}" but no open feature PR`);
       return null;
     }
     const pr = prs[0];
@@ -751,6 +741,7 @@ function adoptOrphanedReviewCandidate(
 
   if (hasFreshReview(config, pr.number, reviewerLogin, logger)) return null;
 
+  const { prUnderReview, prPendingActions, readyForProd } = config.lifecycleLabels;
   const refs = new Set<number>();
   const combined = `${pr.title}\n${pr.body ?? ""}`;
   for (const m of combined.matchAll(/#(\d+)/g)) {
@@ -758,7 +749,7 @@ function adoptOrphanedReviewCandidate(
     if (Number.isFinite(n) && n !== pr.number) refs.add(n);
   }
   if (refs.size === 0) {
-    logger.debug(`${config.name}: PR #${pr.number} has no "pr under review" label and no linked issues found in title/body`);
+    logger.debug(`${config.name}: PR #${pr.number} has no "${prUnderReview}" label and no linked issues found in title/body`);
     return null;
   }
 
@@ -774,17 +765,17 @@ function adoptOrphanedReviewCandidate(
       if (info.state !== "OPEN") continue;
       const names = new Set(info.labels.map((l) => l.name));
       if (!names.has(config.triggerLabel)) continue;
-      if (names.has("pr pending actions")) continue;
-      if (names.has("ready for prod release")) continue;
+      if (names.has(prPendingActions)) continue;
+      if (names.has(readyForProd)) continue;
       try {
         gh([
           "issue", "edit", String(num),
           "--repo", config.githubRepo,
-          "--add-label", "pr under review",
+          "--add-label", prUnderReview,
         ], config.repoPath);
-        logger.warn(`${config.name}: adopted orphaned issue #${num} → PR #${pr.number} (implement phase never applied "pr under review")`);
+        logger.warn(`${config.name}: adopted orphaned issue #${num} → PR #${pr.number} (implement phase never applied "${prUnderReview}")`);
       } catch (err) {
-        logger.warn(`${config.name}: failed to add "pr under review" on adopted #${num}: ${err instanceof Error ? err.message : String(err)}`);
+        logger.warn(`${config.name}: failed to add "${prUnderReview}" on adopted #${num}: ${err instanceof Error ? err.message : String(err)}`);
       }
       adopted.push(num);
     } catch (err) {
@@ -900,7 +891,8 @@ export function findIssuesMergedToBase(
  * Stripping `triggerLabel` is the load-bearing half: without it the issue stays
  * "actionable" forever and the Foreman burns a full Claude session every back-off
  * window concluding there is nothing to do. Uses `config.triggerLabel` rather than
- * a hard-coded "approved" — the trigger label is configurable (OSS).
+ * a hard-coded `approved` — the trigger label is configurable (OSS), and so is the
+ * label it adds (`lifecycleLabels.prApproved`).
  */
 export function transitionToReadyForProd(
   config: RepoConfig,
@@ -913,10 +905,10 @@ export function transitionToReadyForProd(
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
         "--remove-label", config.triggerLabel,
-        "--add-label", "pr approved",
+        "--add-label", config.lifecycleLabels.prApproved,
       ], config.repoPath);
       logger.info(
-        `Terminal transition on #${num}: removed "${config.triggerLabel}", added "pr approved" (work already merged to ${config.baseBranch})`,
+        `Terminal transition on #${num}: removed "${config.triggerLabel}", added "${config.lifecycleLabels.prApproved}" (work already merged to ${config.baseBranch})`,
       );
     } catch (err) {
       logger.warn(
@@ -970,11 +962,12 @@ export function findStuckMergedIssues(
 ): StuckMergedIssue[] {
   if (config.baseBranch === config.featureBranch) return [];
   try {
+    const { prUnderReview, prPendingActions, prApproved, readyForProd } = config.lifecycleLabels;
     const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
-      .filter((i) => hasLabel(i, "pr under review") || hasLabel(i, "pr pending actions"));
+      .filter((i) => hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions));
     const candidates = issues.filter(
       (i) => !(
-        hasLabel(i, "pr approved") || hasLabel(i, "ready for prod release")
+        hasLabel(i, prApproved) || hasLabel(i, readyForProd)
       ),
     );
     if (candidates.length === 0) return [];
@@ -1076,12 +1069,13 @@ export function findOrphanedLifecycleIssues(
 ): number[] {
   if (config.baseBranch === config.featureBranch) return [];
   try {
+    const { prUnderReview, prPendingActions, prApproved, readyForProd } = config.lifecycleLabels;
     const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
     const candidates = open.filter(
       (i) =>
-        (hasLabel(i, "pr under review") || hasLabel(i, "pr pending actions")) &&
-        !hasLabel(i, "pr approved") &&
-        !hasLabel(i, "ready for prod release"),
+        (hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions)) &&
+        !hasLabel(i, prApproved) &&
+        !hasLabel(i, readyForProd),
     );
     if (candidates.length === 0) return [];
 
@@ -1141,8 +1135,9 @@ export function releaseOrphanedLifecycle(
 
     const args = ["issue", "edit", String(issueNumber), "--repo", config.githubRepo];
     // `gh` errors when removing a label that is not present, so only remove what is.
-    if (hasLabel(issue, "pr under review")) args.push("--remove-label", "pr under review");
-    if (hasLabel(issue, "pr pending actions")) args.push("--remove-label", "pr pending actions");
+    for (const l of [config.lifecycleLabels.prUnderReview, config.lifecycleLabels.prPendingActions]) {
+      if (hasLabel(issue, l)) args.push("--remove-label", l);
+    }
     if (args.length === 5) return false; // nothing to strip — state changed under us
 
     gh(args, config.repoPath);
@@ -1189,11 +1184,12 @@ export function findIssuesStillUnderReview(
       const issue = open.find((i) => i.number === num);
       // Absent from the open set = closed. The review closed it out; not stuck.
       if (!issue) return false;
-      if (!hasLabel(issue, "pr under review")) return false;
+      const { prUnderReview, prApproved, prPendingActions, readyForProd } = config.lifecycleLabels;
+      if (!hasLabel(issue, prUnderReview)) return false;
       return !(
-        hasLabel(issue, "pr approved") ||
-        hasLabel(issue, "pr pending actions") ||
-        hasLabel(issue, "ready for prod release")
+        hasLabel(issue, prApproved) ||
+        hasLabel(issue, prPendingActions) ||
+        hasLabel(issue, readyForProd)
       );
     });
   } catch (err) {
@@ -1203,6 +1199,9 @@ export function findIssuesStillUnderReview(
     return [];
   }
 }
+
+/** The two lifecycle states a review can end in, as `LifecycleLabels` keys. */
+export type ReviewOutcome = "prApproved" | "prPendingActions";
 
 /**
  * Move an issue out of `pr under review` into the outcome label its own review
@@ -1224,23 +1223,27 @@ export function findIssuesStillUnderReview(
  * from, and that provenance is exactly what a reader needs to trust either one.
  *
  * Never applies `ready for prod release` — that label is the EM outcome-gate's
- * signature and stays a human act (separation of duties, 2026-07-27).
+ * signature and stays a human act (separation of duties, 2026-07-27). `outcome`
+ * names a lifecycle KEY, not a label, so no caller can hand it that label: the
+ * type admits only the two review outcomes.
  */
 export function transitionReviewOutcomeLabel(
   config: RepoConfig,
   issueNumber: number,
-  nextLabel: "pr approved" | "pr pending actions",
+  outcome: ReviewOutcome,
   logger: Logger,
 ): boolean {
+  const { prUnderReview } = config.lifecycleLabels;
+  const nextLabel = config.lifecycleLabels[outcome];
   try {
     gh([
       "issue", "edit", String(issueNumber),
       "--repo", config.githubRepo,
-      "--remove-label", "pr under review",
+      "--remove-label", prUnderReview,
       "--add-label", nextLabel,
     ], config.repoPath);
     logger.info(
-      `Reconciled outcome label on #${issueNumber}: "pr under review" → "${nextLabel}" (from the review run's own trailer)`,
+      `Reconciled outcome label on #${issueNumber}: "${prUnderReview}" → "${nextLabel}" (from the review run's own trailer)`,
     );
     return true;
   } catch (err) {
@@ -1251,12 +1254,6 @@ export function transitionReviewOutcomeLabel(
   }
 }
 
-/**
- * The label that authorizes production. Only the EM outcome-gate applies it, and
- * nothing in the review path may take it away.
- */
-export const EM_GATE_LABEL = "ready for prod release";
-
 export interface TimelineLabelEvent {
   event?: string;
   label?: { name?: string };
@@ -1264,7 +1261,9 @@ export interface TimelineLabelEvent {
 }
 
 /**
- * Did the EM outcome-gate label get REMOVED at or after `sinceMs`?
+ * Did the EM outcome-gate label (`labels.readyForProd` — the label that authorizes
+ * production, which only the EM outcome-gate applies and nothing in the review
+ * path may take away) get REMOVED at or after `sinceMs`?
  *
  * Pure, so the rule can be tested without a network. The rule that matters is
  * time-symmetry: this asks "was it taken away during the window", never "did it
@@ -1272,10 +1271,14 @@ export interface TimelineLabelEvent {
  * therefore missed every gate signed while a review was already running — which
  * is the normal case, not the edge case.
  */
-export function wasGateRevokedSince(events: TimelineLabelEvent[], sinceMs: number): boolean {
+export function wasGateRevokedSince(
+  events: TimelineLabelEvent[],
+  sinceMs: number,
+  labels: LifecycleLabels,
+): boolean {
   return events.some((e) =>
     e.event === "unlabeled" &&
-    e.label?.name === EM_GATE_LABEL &&
+    e.label?.name === labels.readyForProd &&
     typeof e.created_at === "string" &&
     Number.isFinite(Date.parse(e.created_at)) &&
     Date.parse(e.created_at) >= sinceMs,
@@ -1319,7 +1322,7 @@ export function findRevokedEmGates(
     for (const num of issueNumbers) {
       const issue = open.find((i) => i.number === num);
       // Closed, or the gate is still there — nothing was revoked.
-      if (!issue || hasLabel(issue, EM_GATE_LABEL)) continue;
+      if (!issue || hasLabel(issue, config.lifecycleLabels.readyForProd)) continue;
 
       try {
         const raw = gh([
@@ -1327,7 +1330,7 @@ export function findRevokedEmGates(
           "-H", "Accept: application/vnd.github.mockingbird-preview+json",
         ], config.repoPath);
         const events: TimelineLabelEvent[] = JSON.parse(raw || "[]");
-        if (wasGateRevokedSince(events, since)) revoked.push(num);
+        if (wasGateRevokedSince(events, since, config.lifecycleLabels)) revoked.push(num);
       } catch (err) {
         logger.warn(
           `Could not read the label timeline for #${num}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1361,14 +1364,15 @@ export interface EmGateRestoreStep {
 export function planEmGateRestore(
   hadGate: number[],
   open: { number: number; labels: { name: string }[] }[],
+  labels: LifecycleLabels,
 ): EmGateRestoreStep[] {
   const steps: EmGateRestoreStep[] = [];
   for (const num of hadGate) {
     const issue = open.find((i) => i.number === num);
     if (!issue) continue;                                   // closed — nothing to restore
     const names = new Set(issue.labels.map((l) => l.name));
-    if (names.has(EM_GATE_LABEL)) continue;                 // still signed — healthy path
-    steps.push({ number: num, dropPrApproved: names.has("pr approved") });
+    if (names.has(labels.readyForProd)) continue;           // still signed — healthy path
+    steps.push({ number: num, dropPrApproved: names.has(labels.prApproved) });
   }
   return steps;
 }
@@ -1401,30 +1405,31 @@ export function restoreEmGate(
   logger: Logger,
 ): number[] {
   if (hadGate.length === 0) return [];
+  const { readyForProd, prApproved } = config.lifecycleLabels;
   const restored: number[] = [];
   try {
     dropIssueSnapshot(config.githubRepo);
     const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
-    for (const step of planEmGateRestore(hadGate, open)) {
+    for (const step of planEmGateRestore(hadGate, open, config.lifecycleLabels)) {
       const { number: num, dropPrApproved } = step;
       const args = [
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
-        "--add-label", EM_GATE_LABEL,
+        "--add-label", readyForProd,
       ];
       // Only remove what is actually there; `gh` errors on removing an absent label.
-      if (dropPrApproved) args.push("--remove-label", "pr approved");
+      if (dropPrApproved) args.push("--remove-label", prApproved);
 
       try {
         gh(args, config.repoPath);
         restored.push(num);
         logger.warn(
-          `Restored "${EM_GATE_LABEL}" on #${num} — the review run removed it. ` +
+          `Restored "${readyForProd}" on #${num} — the review run removed it. ` +
           `A review verdict does not authorize or revoke production; only the EM outcome-gate does.`,
         );
       } catch (err) {
         logger.error(
-          `Failed to restore "${EM_GATE_LABEL}" on #${num} — promotion is STALLED until a human re-applies it: ` +
+          `Failed to restore "${readyForProd}" on #${num} — promotion is STALLED until a human re-applies it: ` +
           `${err instanceof Error ? err.message : String(err)}`,
         );
       }
@@ -1450,11 +1455,12 @@ export function resolveDeadZone(
   verdict: "pass" | "fail",
   logger: Logger,
 ): boolean {
-  const nextLabel = verdict === "pass" ? "pr approved" : "pr pending actions";
+  const { prUnderReview, prPendingActions } = config.lifecycleLabels;
+  const nextLabel = config.lifecycleLabels[verdict === "pass" ? "prApproved" : "prPendingActions"];
   try {
     // Remove only what is actually present. `gh` errors on removing an absent
     // label, and since the dead zone now covers `pr pending actions` as well as
-    // `pr under review`, a hard `--remove-label "pr under review"` would throw
+    // `pr under review`, a hard `--remove-label` of `prUnderReview` would throw
     // on exactly the issues the widened detector just started catching — the
     // recovery would fail for the new case while looking like a gh outage.
     dropIssueSnapshot(config.githubRepo);
@@ -1467,7 +1473,7 @@ export function resolveDeadZone(
 
     const args = ["issue", "edit", String(issueNumber), "--repo", config.githubRepo];
     const stripped: string[] = [];
-    for (const l of ["pr under review", "pr pending actions"]) {
+    for (const l of [prUnderReview, prPendingActions]) {
       // Never strip the label we are about to add — that is a no-op edit that
       // reads as a transition.
       if (l !== nextLabel && hasLabel(issue, l)) {
@@ -1699,10 +1705,13 @@ export function bounceForRedCI(
       gh([
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
-        "--remove-label", "pr under review",
-        "--add-label", "pr pending actions",
+        "--remove-label", config.lifecycleLabels.prUnderReview,
+        "--add-label", config.lifecycleLabels.prPendingActions,
       ], config.repoPath);
-      logger.info(`Transitioned issue #${num} labels: "pr under review" → "pr pending actions" (CI red on PR #${prNumber})`);
+      logger.info(
+        `Transitioned issue #${num} labels: "${config.lifecycleLabels.prUnderReview}" → ` +
+        `"${config.lifecycleLabels.prPendingActions}" (CI red on PR #${prNumber})`,
+      );
     } catch (err) {
       logger.warn(`Failed to bounce labels on #${num}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1711,12 +1720,13 @@ export function bounceForRedCI(
 
 /**
  * Transition issue labels after successful revision:
- * remove "pr pending actions", add "pr under review".
+ * remove `prPendingActions`, add `prUnderReview`.
  */
 export function transitionRevisionLabels(
   repo: string,
   issueNumbers: number[],
   cwd: string,
+  labels: LifecycleLabels,
   logger: Logger,
 ): void {
   for (const num of issueNumbers) {
@@ -1724,10 +1734,10 @@ export function transitionRevisionLabels(
       gh([
         "issue", "edit", String(num),
         "--repo", repo,
-        "--remove-label", "pr pending actions",
-        "--add-label", "pr under review",
+        "--remove-label", labels.prPendingActions,
+        "--add-label", labels.prUnderReview,
       ], cwd);
-      logger.info(`Transitioned issue #${num} labels: "pr pending actions" → "pr under review"`);
+      logger.info(`Transitioned issue #${num} labels: "${labels.prPendingActions}" → "${labels.prUnderReview}"`);
     } catch (err) {
       logger.warn(`Failed to transition labels on #${num}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1736,12 +1746,13 @@ export function transitionRevisionLabels(
 
 /**
  * Transition issue labels after successful implementation:
- * add "pr under review" so the EM knows a PR is ready for review.
+ * add `prUnderReview` so the EM knows a PR is ready for review.
  */
 export function transitionImplementationLabels(
   repo: string,
   issueNumbers: number[],
   cwd: string,
+  labels: LifecycleLabels,
   logger: Logger,
 ): void {
   for (const num of issueNumbers) {
@@ -1749,11 +1760,11 @@ export function transitionImplementationLabels(
       gh([
         "issue", "edit", String(num),
         "--repo", repo,
-        "--add-label", "pr under review",
+        "--add-label", labels.prUnderReview,
       ], cwd);
-      logger.info(`Added "pr under review" to issue #${num} after implementation`);
+      logger.info(`Added "${labels.prUnderReview}" to issue #${num} after implementation`);
     } catch (err) {
-      logger.warn(`Failed to add "pr under review" on #${num}: ${err instanceof Error ? err.message : String(err)}`);
+      logger.warn(`Failed to add "${labels.prUnderReview}" on #${num}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
@@ -1768,11 +1779,12 @@ export interface PromotionIssue {
 export function findReadyForProdIssues(
   repo: string,
   cwd: string,
+  labels: LifecycleLabels,
   logger: Logger
 ): PromotionIssue[] {
   try {
     return getOpenIssues(repo, cwd, logger)
-      .filter((i) => hasLabel(i, "ready for prod release"))
+      .filter((i) => hasLabel(i, labels.readyForProd))
       .map((i) => ({ number: i.number, title: i.title }));
   } catch (err) {
     logger.error("Failed to query ready-for-prod issues", {
@@ -1899,6 +1911,7 @@ export function stripReadyForProdLabel(
   repo: string,
   issueNumbers: number[],
   cwd: string,
+  labels: LifecycleLabels,
   logger: Logger,
 ): void {
   for (const num of issueNumbers) {
@@ -1906,11 +1919,11 @@ export function stripReadyForProdLabel(
       gh([
         "issue", "edit", String(num),
         "--repo", repo,
-        "--remove-label", "ready for prod release",
+        "--remove-label", labels.readyForProd,
       ], cwd);
-      logger.info(`Stripped "ready for prod release" from #${num} — promotion PR owns it now`);
+      logger.info(`Stripped "${labels.readyForProd}" from #${num} — promotion PR owns it now`);
     } catch (err) {
-      logger.warn(`Failed to strip "ready for prod release" from #${num}: ${err instanceof Error ? err.message : String(err)}`);
+      logger.warn(`Failed to strip "${labels.readyForProd}" from #${num}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
@@ -2557,7 +2570,7 @@ export function verifyPRExists(
  * skill actually addressed — under the canonical one-issue-per-invocation
  * skill (jerky_data_receiver#43 and friends), the skill picks one issue from a
  * batch but the orchestrator must NOT label the unpicked issues as
- * "pr under review", or they get stuck waiting forever for revision activity.
+ * `pr under review`, or they get stuck waiting forever for revision activity.
  *
  * Returns the parsed issue numbers (deduped). On lookup or parse failure
  * returns null so callers can fall back to existing behavior rather than

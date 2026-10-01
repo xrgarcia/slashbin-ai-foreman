@@ -1,4 +1,6 @@
-export { loadConfig, type AgentConfig, type RepoConfig } from "./config.js";
+export {
+  loadConfig, defaultLifecycleLabels, type AgentConfig, type RepoConfig, type LifecycleLabels,
+} from "./config.js";
 export { createLogger, type Logger, type LogLevel } from "./logger.js";
 export { findActionableIssues, hasPendingRevisions, verifyPRExists } from "./github.js";
 export { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";

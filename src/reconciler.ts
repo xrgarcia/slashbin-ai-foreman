@@ -503,6 +503,7 @@ export function reconcileRepo(
         config.githubRepo,
         issueNumbers,
         config.repoPath,
+        config.lifecycleLabels,
         logger,
       );
     }
