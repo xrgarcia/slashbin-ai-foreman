@@ -44,6 +44,11 @@ decision-layer workflow rather than an in-repo edit:
   label side effects feed the other phases (approve → `ready for prod release` → Promote;
   request-changes → `pr pending actions` → Revise).
 
+CI gate (before any review session): the PR's checks are read first. Red →
+comment the failing checks on the PR and relabel `pr pending actions` so revise
+fixes them, no review spent (capped at 2 bounces since the last review, then it
+reviews anyway). Running → wait a pass. No CI → review as before.
+
 Gating (`findPRsNeedingReview`): an open `featureBranch → baseBranch` PR whose linked
 issue is `pr under review` (not `pr pending actions`) and with no review by
 `reviewerLogin` newer than the PR's latest commit (freshness guard against re-review
