@@ -165,6 +165,8 @@ Every Claude session the daemon spawns (implement, revise, review) gets the name
 - `FOREMAN_TRIGGER_LABEL`: the repo's `triggerLabel`, e.g. for `gh issue list --label "$FOREMAN_TRIGGER_LABEL"`
 - `FOREMAN_LIFECYCLE_LABELS`: the five names as a JSON object with the keys above
 
+To create the labels on your repos, run `npm run build && npm run labels:install` (or ask Claude Code in this repo to "install the labels" — the `install-labels` skill runs the same thing). Per repo it creates whichever of the `triggerLabel` and five lifecycle names are missing, prints `<repo>: created N, present M`, and never changes or deletes an existing label. A failed repo is listed at the end and the exit code is 1.
+
 ### GitHub API budget
 
 Each poll cycle spends **one GraphQL request per repo** for issue discovery. GitHub's GraphQL limit is **5,000 requests/hour per token**, so the discovery floor is:
