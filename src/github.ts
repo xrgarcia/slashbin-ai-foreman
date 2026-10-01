@@ -1531,6 +1531,177 @@ function hasFreshReview(
   }
 }
 
+// --- CI gate in front of review ---------------------------------------------
+//
+// A review is a full EM session (median 13 min). Spending one on a PR whose own
+// CI is red buys a REQUEST_CHANGES that says "CI is red" — the builder could have
+// learned that for free. So the review phase reads the PR's checks first:
+// red → straight back to revise with the failing checks named, still running →
+// wait a pass, green or no CI at all → review as before.
+
+/** One entry of `gh pr view --json statusCheckRollup`: a CheckRun or a StatusContext. */
+export interface CheckRollupEntry {
+  __typename?: string;
+  name?: string;
+  context?: string;
+  status?: string;
+  conclusion?: string;
+  state?: string;
+  detailsUrl?: string;
+  targetUrl?: string;
+}
+
+export interface CheckVerdict {
+  /** `none` = the repo runs no CI on this PR; review proceeds exactly as before. */
+  state: "none" | "pending" | "passing" | "failing";
+  failing: { name: string; url?: string }[];
+  pending: string[];
+}
+
+const FAILING_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
+const PENDING_STATES = new Set(["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED", "EXPECTED"]);
+
+/**
+ * Reduce a check rollup to one verdict. Pure, so it is tested without GitHub.
+ *
+ * The rollup can carry the same check name more than once (a push run and a
+ * pull_request run, or a re-run after a flake). A name counts as failing only
+ * when NO entry of that name succeeded — a re-run that went green clears it.
+ * CANCELLED, SKIPPED and NEUTRAL are not failures: a superseded run is cancelled,
+ * and path-filtered jobs skip.
+ */
+export function summarizeCheckRollup(rollup: CheckRollupEntry[]): CheckVerdict {
+  if (rollup.length === 0) return { state: "none", failing: [], pending: [] };
+
+  const byName = new Map<string, CheckRollupEntry[]>();
+  for (const e of rollup) {
+    const name = e.name ?? e.context ?? "(unnamed check)";
+    byName.set(name, [...(byName.get(name) ?? []), e]);
+  }
+
+  const failing: { name: string; url?: string }[] = [];
+  const pending: string[] = [];
+  for (const [name, entries] of byName) {
+    const outcome = (e: CheckRollupEntry): string =>
+      (e.__typename === "StatusContext" ? e.state : e.status === "COMPLETED" ? e.conclusion : e.status ?? e.state) ?? "";
+    if (entries.some((e) => outcome(e) === "SUCCESS")) continue;
+    if (entries.some((e) => PENDING_STATES.has(outcome(e)))) {
+      pending.push(name);
+      continue;
+    }
+    const red = entries.find((e) => FAILING_CONCLUSIONS.has(outcome(e)));
+    if (red) failing.push({ name, url: red.detailsUrl ?? red.targetUrl });
+  }
+
+  if (pending.length > 0) return { state: "pending", failing, pending };
+  if (failing.length > 0) return { state: "failing", failing, pending };
+  return { state: "passing", failing, pending };
+}
+
+/** Read the PR's checks. A lookup failure answers `none`, i.e. review as before. */
+export function getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): CheckVerdict {
+  try {
+    const raw = gh([
+      "pr", "view", String(prNumber),
+      "--repo", config.githubRepo,
+      "--json", "statusCheckRollup",
+    ], config.repoPath);
+    const data = JSON.parse(raw || "{}") as { statusCheckRollup?: CheckRollupEntry[] };
+    return summarizeCheckRollup(data.statusCheckRollup ?? []);
+  } catch (err) {
+    logger.warn(`${config.name}: could not read checks on PR #${prNumber} — reviewing without the CI gate: ${err instanceof Error ? err.message : String(err)}`);
+    return { state: "none", failing: [], pending: [] };
+  }
+}
+
+/** Marker on every CI-gate bounce comment; counted to cap the bounce loop. */
+export const CI_GATE_MARKER = "<!-- foreman-ci-gate -->";
+
+/** Consecutive bounces allowed before the PR goes to review anyway. A check the
+ *  builder cannot turn green (a broken workflow, a red base branch) must still
+ *  reach a reviewer instead of cycling builder sessions forever. */
+export const MAX_CI_BOUNCES = 2;
+
+/**
+ * How many CI-gate bounces this PR has had since the reviewer last reviewed it.
+ * A reviewer verdict resets the count: it means the PR reached review.
+ */
+export function countCiBouncesSinceReview(
+  config: RepoConfig,
+  prNumber: number,
+  reviewerLogin: string,
+  logger: Logger,
+): number {
+  try {
+    const raw = gh([
+      "pr", "view", String(prNumber),
+      "--repo", config.githubRepo,
+      "--json", "comments,reviews",
+    ], config.repoPath);
+    const data = JSON.parse(raw || "{}") as {
+      comments?: { body?: string; createdAt?: string }[];
+      reviews?: { author?: { login?: string }; submittedAt?: string }[];
+    };
+    const lastReviewMs = (data.reviews ?? [])
+      .filter((r) => r.author?.login === reviewerLogin && r.submittedAt)
+      .map((r) => new Date(r.submittedAt as string).getTime())
+      .reduce((a, b) => Math.max(a, b), 0);
+    return (data.comments ?? []).filter(
+      (c) => c.body?.includes(CI_GATE_MARKER) && c.createdAt && new Date(c.createdAt).getTime() > lastReviewMs,
+    ).length;
+  } catch (err) {
+    logger.debug(`countCiBouncesSinceReview failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    // Unknown count → treat as capped, so a lookup failure can never start a loop.
+    return MAX_CI_BOUNCES;
+  }
+}
+
+/** The bounce comment the revise skill reads. */
+export function ciBounceComment(verdict: CheckVerdict): string {
+  const lines = verdict.failing.map((f) => `- **${f.name}**${f.url ? ` — ${f.url}` : ""}`);
+  return [
+    CI_GATE_MARKER,
+    "**CI is red — sent back before review.** The review was not run; a reviewer would have blocked on this first.",
+    "",
+    "Failing checks:",
+    ...lines,
+    "",
+    "Reproduce each one locally, fix the code (never the test), push, and the PR returns to review once CI is green.",
+  ].join("\n");
+}
+
+/**
+ * Send a red-CI PR back to revise: comment the failing checks on the PR, then
+ * move each linked issue `pr under review` → `pr pending actions`, which is the
+ * label the revise phase picks up.
+ */
+export function bounceForRedCI(
+  config: RepoConfig,
+  prNumber: number,
+  issueNumbers: number[],
+  verdict: CheckVerdict,
+  logger: Logger,
+): void {
+  gh([
+    "pr", "comment", String(prNumber),
+    "--repo", config.githubRepo,
+    "--body", ciBounceComment(verdict),
+  ], config.repoPath);
+  for (const num of issueNumbers) {
+    try {
+      gh([
+        "issue", "edit", String(num),
+        "--repo", config.githubRepo,
+        "--remove-label", "pr under review",
+        "--add-label", "pr pending actions",
+      ], config.repoPath);
+      logger.info(`Transitioned issue #${num} labels: "pr under review" → "pr pending actions" (CI red on PR #${prNumber})`);
+    } catch (err) {
+      logger.warn(`Failed to bounce labels on #${num}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 /**
  * Transition issue labels after successful revision:
  * remove "pr pending actions", add "pr under review".
@@ -2037,7 +2208,17 @@ export function tryMergeSyncPR(
 // --- Dependency PRs (Dependabot) ---
 
 /**
- * Open Dependabot PRs into `base`, and nothing else.
+ * Open Dependabot PRs into any of `bases`, and nothing else.
+ *
+ * **Why a list and not one branch (owner decision, 2026-09-07).** Dependabot is
+ * moving from `target-branch: develop` to `target-branch: features`, so that a
+ * dependency bump travels `features → develop → main` like every other change
+ * instead of landing on `develop` and leaving `features` behind. That retarget
+ * happens one repo at a time and cannot be simultaneous with this code change:
+ * whichever went first, every dependency PR in the gap would be invisible here
+ * and would sit unmerged with nothing logged. Accepting both branches for the
+ * duration is the additive half of that swap. Drop `develop` once no repo aims
+ * dependabot at it.
  *
  * Dependabot PRs never carry a linked issue, so the review phase cannot see
  * them: it is scoped to `features → develop` PRs and every step after the merge
@@ -2053,104 +2234,295 @@ export function tryMergeSyncPR(
  * branch means a mislabelled human PR can never be swept into an unreviewed
  * merge.
  */
+/**
+ * The branches a dependency PR may legitimately target, for one repo.
+ *
+ * BOTH the feature branch and the base branch, because a dependency update is
+ * now work on either one and a mechanical merge on neither.
+ *
+ * **This function used to be `dependencyMergeBases` and it named the branches a
+ * bump could be MERGED into without a session. That phase is gone.** Retargeting
+ * Dependabot at `features` only governs pull requests it opens from now on; on
+ * 2026-09-07 twenty-four of the twenty-eight already open were sitting on
+ * `develop`, where the merge phase would have swept them in on a green check
+ * rollup — no session, no build, no boot. Excluding `features` from a mechanical
+ * merge while leaving `develop` in it moved the defect one branch over rather
+ * than removing it.
+ *
+ * `main` stays excluded outright: a dependency update must never be worked
+ * against the production branch, which is what `jerky_shipping#237` closed on
+ * the producing side.
+ *
+ * Pure, exported and tested because that exclusion is the safety property.
+ */
+export function dependencyBatchBases(
+  featureBranch: string | undefined,
+  baseBranch: string | undefined,
+): string[] {
+  return [...new Set([featureBranch, baseBranch])]
+    .filter((b): b is string => !!b && b !== "main");
+}
+
 export function findDependencyPRs(
   repo: string,
   cwd: string,
-  base: string,
+  bases: readonly string[],
   logger?: Logger,
 ): PrSnapshot[] {
+  const allowed = new Set(bases);
   try {
     return getOpenPrs(repo, cwd).filter(
-      (p) => p.baseRefName === base && p.headRefName.startsWith("dependabot/"),
+      (p) => allowed.has(p.baseRefName) && p.headRefName.startsWith("dependabot/"),
     );
   } catch (err) {
-    logger?.warn("findDependencyPRs: gh pr list failed", { ...formatGhError(err), repo, base });
+    logger?.warn("findDependencyPRs: gh pr list failed", { ...formatGhError(err), repo, bases: [...allowed] });
     return [];
   }
 }
 
+// ---------------------------------------------------------------------------
+// Dependency BATCH issues — the path for bumps aimed at the feature branch
+// ---------------------------------------------------------------------------
+
 /**
- * Merge one Dependabot PR, but only once every check has CONCLUDED successfully.
- *
- * Deliberately stricter than `tryMergeSyncPR`, which merges whatever branch
- * protection permits. A sync PR carries content that is already on `main` — it
- * has been reviewed and deployed. A dependency bump has been reviewed by nobody,
- * so the build and test suite are the entire review, and a merge while they are
- * still running would be a merge on no evidence at all.
- *
- * The gate therefore refuses on ANY check that is not a concluded success:
- * pending, queued, failed and cancelled all mean "not yet proven". `SKIPPED` and
- * `NEUTRAL` pass, because a skipped job made no claim either way.
- *
- * Returns false and stays quiet on anything unmergeable, so the caller can retry
- * every cycle without noise — the same idempotent-retry shape as the sync path.
+ * Every dependency-batch issue title starts with this, and that prefix is the
+ * whole idempotency mechanism: at most one open batch issue per repo, matched
+ * off the open-issue snapshot that is already fetched every cycle. No marker
+ * label to create on twenty repos, no extra API call, and nothing to drift.
  */
-export function tryMergeDependencyPR(
+export const DEPENDENCY_BATCH_TITLE_PREFIX = "chore(deps): validate and land ";
+
+/** One dependency PR, reduced to what the issue body needs to say about it. */
+export interface DependencyChange {
+  number: number;
+  packages: string[];
+  from?: string;
+  to?: string;
+  /** True when the leading version component moves. `0.x` counts every minor. */
+  major: boolean;
+}
+
+/**
+ * Read a Dependabot PR title into packages and versions.
+ *
+ * Dependabot writes four shapes, all of them seen live on 2026-09-07:
+ *   `chore(deps): bump vite from 5.4.21 to 8.2.2`
+ *   `chore(deps-dev): bump react-dom and @types/react-dom in /desktop`
+ *   `chore(deps): bump qs and express`
+ *   `Bump form-data from 4.0.5 to 4.0.6`
+ *
+ * A grouped bump carries no versions in its title, so `from`/`to` stay undefined
+ * and `major` is false — deliberately understated rather than guessed. The issue
+ * body says to read the PR for those, because inventing a version here would put
+ * a wrong number in front of the person deciding whether to approve.
+ */
+export function describeDependencyPR(number: number, title: string): DependencyChange {
+  const versioned = /\bbump\s+(.+?)\s+from\s+(\S+)\s+to\s+(\S+)/i.exec(title);
+  if (versioned) {
+    return {
+      number,
+      packages: [versioned[1].trim()],
+      from: versioned[2],
+      to: versioned[3],
+      major: isMajorBump(versioned[2], versioned[3]),
+    };
+  }
+  const grouped = /\bbump\s+(.+?)(?:\s+in\s+\S+)?\s*$/i.exec(title);
+  const packages = grouped
+    ? grouped[1].split(/\s*,\s*|\s+and\s+/).map((p) => p.trim()).filter(Boolean)
+    : [];
+  return { number, packages, major: false };
+}
+
+/**
+ * Does this version move break compatibility by semver convention?
+ *
+ * `0.x` is the case that matters here and the one a naive major-compare gets
+ * wrong: under semver a `0.y` release may break on every minor, which is exactly
+ * how `esbuild` 0.25 → 0.28 behaves. Treating that as "not a major" would file
+ * a batch issue claiming a breaking upgrade is routine.
+ */
+export function isMajorBump(from: string, to: string): boolean {
+  const parse = (v: string) => v.replace(/^[^0-9]*/, "").split(".").map((n) => parseInt(n, 10));
+  const [fMaj, fMin] = parse(from);
+  const [tMaj, tMin] = parse(to);
+  if (!Number.isFinite(fMaj) || !Number.isFinite(tMaj)) return false;
+  if (fMaj !== tMaj) return true;
+  if (fMaj === 0) return Number.isFinite(fMin) && Number.isFinite(tMin) && fMin !== tMin;
+  return false;
+}
+
+/**
+ * The batch issue for a set of dependency PRs — title and body, pure.
+ *
+ * **Why an issue at all (owner decision, 2026-09-07).** Every stage after
+ * implement is keyed on an issue: the review phase starts from issues labelled
+ * `pr under review` and only then looks for the PR, promotion queries issues
+ * carrying the EM gate, and the promotion PR body is a list of issue numbers. A
+ * dependency PR with no issue can reach `develop` and then has no route to
+ * `main` at all. Filing one puts an upgrade through the same pipeline as every
+ * other change — including the implement session that actually builds it, starts
+ * the app and smoke-tests it, which is the step a CI-rollup merge never did.
+ *
+ * Filed with the trigger label only on a pre-approved repo — see
+ * `createDependencyBatchIssue`.
+ */
+export function buildDependencyBatchIssue(
+  featureBranch: string,
+  changes: readonly DependencyChange[],
+): { title: string; body: string } {
+  const majors = changes.filter((c) => c.major);
+  const n = changes.length;
+  const title =
+    `${DEPENDENCY_BATCH_TITLE_PREFIX}${n} dependency update${n === 1 ? "" : "s"} on \`${featureBranch}\`` +
+    (majors.length > 0 ? ` (${majors.length} major)` : "");
+
+  const row = (c: DependencyChange) => {
+    const pkg = c.packages.length ? c.packages.join(", ") : "(see PR)";
+    const move = c.from && c.to ? `\`${c.from}\` → \`${c.to}\`` : "grouped — read the PR";
+    return `| #${c.number} | ${pkg} | ${move} | ${c.major ? "**yes**" : "no"} |`;
+  };
+
+  const body = [
+    `## Problem`,
+    ``,
+    `${n} Dependabot pull request${n === 1 ? "" : "s"} target \`${featureBranch}\` and ${n === 1 ? "is" : "are"} not merged.`,
+    `They do not reach \`develop\` on their own: a bump aimed at the feature branch has no`,
+    `mechanical merge path, because a CI check rollup proves the code compiles and never`,
+    `proves the application still runs.`,
+    ``,
+    majors.length > 0
+      ? `**${majors.length} of these ${majors.length === 1 ? "is a" : "are"} major version change${majors.length === 1 ? "" : "s"}.** A major bump is the class most likely to break a runtime while passing every check.`
+      : `None of these crosses a major version.`,
+    ``,
+    `| PR | Package(s) | Version | Major |`,
+    `|---|---|---|---|`,
+    ...changes.map(row),
+    ``,
+    `## Required Changes`,
+    ``,
+    `Land every PR above on \`${featureBranch}\`, or leave behind the ones that cannot be landed`,
+    `and say which and why. Merging them is not the work — **exercising them is**:`,
+    ``,
+    `1. Merge the branches into \`${featureBranch}\` locally.`,
+    `2. Install from the lockfile as the deploy does, not with a resolver flag that papers over a peer conflict.`,
+    `3. Build.`,
+    `4. **Start the application and confirm it serves.** A dependency upgrade that compiles and does not boot is the failure this issue exists to catch.`,
+    `5. Exercise the flows the changed packages sit under — a web framework means a real request through a real route; a date or validation library means the code paths that parse and format.`,
+    ``,
+    `If a PR fails any step, do not force it. Drop it from the batch, keep the rest, and record`,
+    `the failure and the step it failed at.`,
+    ``,
+    `## Acceptance`,
+    ``,
+    `- **No-Script:** the caller-facing surface of a dependency upgrade is the running application itself, and the evidence is the smoke test the implement session performs against it — build, boot, and a real request through the flows the changed packages sit under. A committed script would assert the lockfile, which is the half that already passes today.`,
+    ``,
+    `### Automated checks`,
+    ``,
+    `- The repo's build succeeds.`,
+    `- The repo's test suite passes.`,
+    `- The application starts and answers its health route.`,
+    ``,
+    `### Human validation`,
+    ``,
+    `- Confirm the PR names each landed package and its version, and names any PR dropped from the batch with the step it failed at.`,
+    ``,
+    `## Pre-Flight`,
+    ``,
+    `- **Design locked.** Land and exercise the listed PRs; drop and report the ones that fail. No open decision.`,
+    `- **Preconditions:** none. The PRs already exist and target \`${featureBranch}\`.`,
+    `- **Dev-safety: read-only, no customer writes.** A dependency upgrade changes no request handler, no worker and no outbound integration by itself. The smoke test exercises the app's own routes; it writes to no external system.`,
+    ``,
+    `## References`,
+    ``,
+    ...changes.map((c) => `- #${c.number}`),
+    ``,
+    `_Filed automatically by the Foreman: Dependabot PRs targeting \`${featureBranch}\` accumulate with no merge path until one of these exists._`,
+  ].join("\n");
+
+  return { title, body };
+}
+
+/**
+ * The open dependency-batch issue for a repo, if one exists.
+ *
+ * Reads the per-cycle open-issue snapshot rather than issuing its own query, so
+ * this costs nothing on the twenty-repo sweep.
+ */
+export function findOpenDependencyBatchIssue(
   repo: string,
-  prNumber: number,
   cwd: string,
+  logger: Logger,
+): IssueSnapshot | undefined {
+  return getOpenIssues(repo, cwd, logger)
+    .find((i) => i.title.startsWith(DEPENDENCY_BATCH_TITLE_PREFIX));
+}
+
+/**
+ * The `gh` argv that files a batch issue. Pure and exported because the label
+ * on it is the whole behaviour, in both directions: drop it on a pre-approved
+ * repo and that repo's batches stall unapproved again (as every repo's did from
+ * 2026-09-07 to 2026-09-29); add it on a repo the owner never pre-approved and
+ * the Foreman flies work nobody authorized. `label` is null for the latter.
+ */
+export function dependencyBatchIssueCreateArgs(
+  repo: string,
+  title: string,
+  body: string,
+  label: string | null,
+): string[] {
+  const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];
+  return label ? [...args, "--label", label] : args;
+}
+
+/**
+ * File one dependency-batch issue — carrying `label` when the repo is
+ * pre-approved, bare otherwise. Returns its number, or null if `gh` refused.
+ *
+ * **Pre-authorized (owner decision, 2026-09-29).** From 2026-09-07 these were
+ * filed WITHOUT the trigger label so the owner would approve each batch by hand.
+ * None was ever approved: six sat open for 22 days, and because an open batch
+ * blocks the next one, every Dependabot PR opened after them — security updates
+ * included — never reached a session at all. A gate nobody operates is not a
+ * gate, it is a stall.
+ *
+ * Standing authorization is safe here because the flight carries its own
+ * checks: the session drops any bump that fails to build or boot, the review
+ * phase reviews the resulting `features → develop` PR like any other, the merge
+ * deploys to dev, and nothing reaches `main` without the EM outcome gate. This
+ * is maintenance on existing code — the class of work the Foreman may approve
+ * for itself (slashbin-ai-foreman#37) — never a new feature or a spec change.
+ *
+ * **Scoped per repo (same day, owner correction).** The authorization covers
+ * slashbin.io repos only; a customer's repo is the customer's call. It is an
+ * opt-in `dependencyPreApproved` flag on the repo's config, default off, so a
+ * newly onboarded repo can never inherit it by omission.
+ */
+export function createDependencyBatchIssue(
+  repo: string,
+  cwd: string,
+  title: string,
+  body: string,
+  label: string | null,
   logger?: Logger,
-): boolean {
-  interface CheckRun { status?: string; conclusion?: string; name?: string }
-  let view: { mergeable?: string; baseRefName?: string; headRefName?: string; statusCheckRollup?: CheckRun[] };
+): number | null {
   try {
-    view = JSON.parse(
-      gh([
-        "pr", "view", String(prNumber),
-        "--repo", repo,
-        "--json", "mergeable,baseRefName,headRefName,statusCheckRollup",
-      ], cwd) || "{}",
-    );
+    const out = gh(dependencyBatchIssueCreateArgs(repo, title, body, label), cwd);
+    const m = /\/issues\/(\d+)/.exec(out);
+    return m ? parseInt(m[1], 10) : null;
   } catch (err) {
-    logger?.debug(`Dependency PR #${prNumber}: could not read state: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
-
-  // Re-assert both invariants against the PR itself rather than trusting the
-  // list that selected it. A base that is not the development branch is the one
-  // outcome this must never produce.
-  if (!view.headRefName?.startsWith("dependabot/")) {
-    logger?.warn(`Dependency PR #${prNumber} is not a dependabot branch (${view.headRefName}) — refusing`);
-    return false;
-  }
-
-  const checks = view.statusCheckRollup ?? [];
-  const unfinished = checks.filter((c) => (c.status ?? "").toUpperCase() !== "COMPLETED");
-  if (unfinished.length > 0) {
-    logger?.debug(`Dependency PR #${prNumber}: ${unfinished.length} check(s) still running`);
-    return false;
-  }
-  const passing = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
-  const failed = checks.filter((c) => !passing.has((c.conclusion ?? "").toUpperCase()));
-  if (failed.length > 0) {
-    logger?.info(
-      `Dependency PR #${prNumber} has failing check(s): ${failed.map((c) => `${c.name}=${c.conclusion}`).join(", ")} — leaving it open for a human`,
-    );
-    return false;
-  }
-  if (checks.length === 0) {
-    logger?.info(`Dependency PR #${prNumber} has no checks at all — refusing to merge on no evidence`);
-    return false;
-  }
-
-  try {
-    try {
-      ghAsEM([
-        "pr", "review", String(prNumber),
-        "--repo", repo,
-        "--approve",
-        "--body", `Automated dependency update — every check concluded successfully (${checks.length} check(s)). Merged to \`${view.baseRefName}\` by the Foreman; it reaches production only through the normal promotion gate.`,
-      ], cwd);
-    } catch {
-      // Already approved, or approval not required.
-    }
-    ghAsEM(["pr", "merge", String(prNumber), "--repo", repo, "--merge"], cwd);
-    return true;
-  } catch (err) {
-    logger?.debug(`Dependency PR #${prNumber} not mergeable yet: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    logger?.warn("createDependencyBatchIssue: gh issue create failed", { ...formatGhError(err), repo });
+    return null;
   }
 }
+
+/*
+ * `tryMergeDependencyPR` lived here and merged a Dependabot PR whenever its
+ * check rollup was green. It was deleted on 2026-09-07: a rollup proves the code
+ * compiles and the unit tests pass, and never that the application still starts.
+ * Dependency updates now go through `buildDependencyBatchIssue` and the implement
+ * session, which builds and boots. Nothing merges a dependency PR without one.
+ */
 
 // --- PR Verification ---
 
@@ -2223,3 +2595,59 @@ export function getReferencedIssuesFromOpenPR(
   }
 }
 
+
+/**
+ * Decide, with no I/O, what a FAILED review run actually earned.
+ *
+ * Split out from `tryReview` for the same reason as `planEmGateRestore`: the
+ * rule is the part worth pinning, and the `gh` calls around it are not.
+ *
+ * A review run that dies is not automatically a review that achieved nothing.
+ * On 2026-09-22 one merged `jerky_skuvault_service#362`, verified it, then spent
+ * its remaining 52 minutes polling a backfill that needed longer than the budget
+ * it was never told about. The wall-clock kill reported `Review failed (1/2):
+ * timed out`, skipped every post-condition check — they all lived inside the
+ * success branch — and left the issue dead-zoned for 55 minutes. The merge had
+ * already happened; the retry had nothing to retry. Issue #41.
+ *
+ * So the question is not "did the process exit cleanly" but "did the work land":
+ *
+ *  - Nothing merged → a plain failure. Charge the retry, exactly as before.
+ *  - Something merged → the work landed and the run outlived it. Reconcile the
+ *    labels this cycle instead of waiting for the dead-zone sweep, and do NOT
+ *    charge a retry: the next cycle would find the PR merged and no work to do.
+ *
+ * `stillUnderReview` is asked for separately because a run can merge AND label
+ * correctly before dying — in which case there is nothing left to reconcile and
+ * only the retry accounting changes.
+ */
+export interface FailedReviewPlan {
+  /** True when at least one of the run's issues reached the base branch. */
+  workLanded: boolean;
+  /** PRs the run merged, deduped, ascending. */
+  mergedPrs: number[];
+  /** Merged issues still sitting at `pr under review` — the labels to repair. */
+  toReconcile: number[];
+  /** Whether this run counts against the review retry/backoff counter. */
+  chargeRetry: boolean;
+}
+
+export function planFailedReviewOutcome(
+  mergedRefs: { issueNumber: number; prNumber: number }[],
+  stillUnderReview: number[],
+): FailedReviewPlan {
+  if (mergedRefs.length === 0) {
+    return { workLanded: false, mergedPrs: [], toReconcile: [], chargeRetry: true };
+  }
+
+  const mergedIssues = new Set(mergedRefs.map((m) => m.issueNumber));
+  return {
+    workLanded: true,
+    mergedPrs: [...new Set(mergedRefs.map((m) => m.prNumber))].sort((a, b) => a - b),
+    // Only issues we can actually tie to a merge. An issue still under review
+    // whose PR never merged is CORRECTLY under review, and relabeling it would
+    // be the same overreach the dead-zone guard exists to prevent.
+    toReconcile: stillUnderReview.filter((n) => mergedIssues.has(n)),
+    chargeRetry: false,
+  };
+}

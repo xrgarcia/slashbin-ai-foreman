@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 
 // --- Schemas ---
@@ -20,6 +21,11 @@ const repoEntrySchema = z.object({
   maxDurationMs: z.coerce.number().int().positive().optional(),
   // Per-repo opt-out for the review phase (falls back to the global default).
   reviewEnabled: z.boolean().optional(),
+  // Owner standing authorization: file this repo's dependency batch issue
+  // already carrying the trigger label. Opt-in per repo, default OFF — owner
+  // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
+  // the batch unapproved, as before, and nothing builds until a human approves.
+  dependencyPreApproved: z.boolean().optional(),
 });
 
 const configSchema = z.object({
@@ -72,6 +78,12 @@ const configSchema = z.object({
   // without the cascade the only way to move the fleet is to edit all 20 entries.
   model: z.string().optional(),
   allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "Bash", "Glob", "Grep"]),
+  // MCP client config handed to implement/revise sessions (`--mcp-config`), so a
+  // builder can check its assumptions against real data before it builds instead
+  // of learning them at review. Every server in it is added to the builder's
+  // allowed tools — so put READ-ONLY servers in it and nothing else. Optional and
+  // inert when unset or when the file does not exist. Additive + OSS-safe.
+  builderMcpConfig: z.string().optional(),
   logFormat: z.enum(["json", "text"]).default("text"),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
@@ -88,6 +100,24 @@ const configSchema = z.object({
   reviewEnabled: z.boolean().default(false),
   reviewSkillPath: z.string().default(".claude/skills/review-all-prs/SKILL.md"),
   reviewModel: z.string().optional(),
+  // Where the review session finds the service repo's code.
+  //
+  // The session's cwd is the EM repo, so it does NOT have the code it is
+  // reviewing, and nothing ever told it where to get it. Left to improvise,
+  // every run `git clone`d into /tmp under a name it invented (sbc1006, js520,
+  // jerky_shipping_rev, cli-review-2 …) and never removed it. /tmp here is a
+  // tmpfs with a HARD CAP of 1,048,576 inodes; a review clone plus its
+  // node_modules is 40k-95k of them, and 140 such clones exhausted the cap on
+  // 2026-09-12 — at 84% of BYTES, so every `df -h` looked healthy. Once inodes
+  // are gone no agent can run at all, because Claude Code creates an output
+  // file before each command; two Foreman runs failed that morning purely
+  // because their sessions could not write.
+  //
+  // So: one managed checkout per repo, on the root filesystem (66M inodes)
+  // rather than the tmpfs, at a path the Foreman owns and can therefore also
+  // delete. Reused across cycles — the expensive part is node_modules, not the
+  // clone — and removed when the repo's queue empties (see releaseReviewCheckout).
+  reviewCheckoutRoot: z.string().default("~/.foreman/review-checkouts"),
   // The review skill is long-running (it polls Railway deploys during dev verify),
   // so it gets a much larger turn/duration budget than implement/revise.
   reviewMaxTurns: z.coerce.number().int().positive().default(200),
@@ -148,9 +178,13 @@ export interface RepoConfig {
   maxTurns: number;
   maxDurationMs: number;
   allowedTools: string[];
+  /** Absolute path of the builder MCP config, when one is configured. */
+  builderMcpConfig?: string;
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
+  // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
+  dependencyPreApproved: boolean;
 }
 
 /**
@@ -177,6 +211,7 @@ export interface AgentConfig {
   emRepoPath?: string;
   reviewSkillPath: string;
   reviewModel?: string;
+  reviewCheckoutRoot: string;
   reviewMaxTurns: number;
   reviewMaxDurationMs: number;
   reviewAllowedTools: string[];
@@ -235,6 +270,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxDurationMs: process.env.AI_AGENT_MAX_DURATION_MS ?? fileConfig.maxDurationMs,
     model: process.env.AI_AGENT_MODEL ?? fileConfig.model,
     allowedTools: fileConfig.allowedTools,
+    builderMcpConfig: process.env.AI_AGENT_BUILDER_MCP_CONFIG ?? fileConfig.builderMcpConfig,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
     repos: fileConfig.repos,
@@ -243,6 +279,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
+    reviewCheckoutRoot: process.env.AI_AGENT_REVIEW_CHECKOUT_ROOT ?? fileConfig.reviewCheckoutRoot,
     reviewMaxTurns: process.env.AI_AGENT_REVIEW_MAX_TURNS ?? fileConfig.reviewMaxTurns,
     reviewMaxDurationMs: process.env.AI_AGENT_REVIEW_MAX_DURATION_MS ?? fileConfig.reviewMaxDurationMs,
     reviewAllowedTools: fileConfig.reviewAllowedTools,
@@ -261,6 +298,7 @@ export function loadConfig(configPath?: string): AgentConfig {
   // doesn't specify its own value)
   const globals = {
     allowedTools: [...parsed.allowedTools],
+    builderMcpConfig: parsed.builderMcpConfig ? resolve(parsed.builderMcpConfig) : undefined,
   };
 
   let repos: RepoConfig[];
@@ -292,6 +330,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         maxTurns: entry.maxTurns ?? parsed.maxTurns,
         maxDurationMs: entry.maxDurationMs ?? parsed.maxDurationMs,
         reviewEnabled: entry.reviewEnabled ?? parsed.reviewEnabled,
+        dependencyPreApproved: entry.dependencyPreApproved ?? false,
         ...globals,
       };
     });
@@ -321,6 +360,7 @@ export function loadConfig(configPath?: string): AgentConfig {
       maxTurns: parsed.maxTurns,
       maxDurationMs: parsed.maxDurationMs,
       reviewEnabled: parsed.reviewEnabled,
+      dependencyPreApproved: false,
       ...globals,
     }];
   }
@@ -348,6 +388,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
+    reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),
     reviewMaxTurns: parsed.reviewMaxTurns,
     reviewMaxDurationMs: parsed.reviewMaxDurationMs,
     reviewAllowedTools: [...parsed.reviewAllowedTools],

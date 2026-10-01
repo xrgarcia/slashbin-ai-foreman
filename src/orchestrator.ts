@@ -8,6 +8,10 @@ import {
   hasPendingRevisions,
   findPendingRevisions,
   findPRsNeedingReview,
+  getPRCheckVerdict,
+  countCiBouncesSinceReview,
+  bounceForRedCI,
+  MAX_CI_BOUNCES,
   transitionRevisionLabels,
   transitionImplementationLabels,
   getReferencedIssuesFromOpenPR,
@@ -18,19 +22,24 @@ import {
   checkBranchDrift,
   findOpenSyncPR,
   createSyncPR,
+  buildDependencyBatchIssue,
+  createDependencyBatchIssue,
+  dependencyBatchBases,
+  describeDependencyPR,
   findDependencyPRs,
-  tryMergeDependencyPR,
+  findOpenDependencyBatchIssue,
   tryMergeSyncPR,
   countBranchDiffFiles,
   stripReadyForProdLabel,
   type PendingRevisionInfo,
 } from "./github.js";
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, type ImplementationResult, type RevisionResult } from "./agent.js";
-import { reconcileRepo, checkLocalBranchDivergence } from "./reconciler.js";
+import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch } from "./reconciler.js";
 import {
   verifyPRExists,
   findStuckMergedIssues,
   findIssuesMergedToBase,
+  planFailedReviewOutcome,
   transitionToReadyForProd,
   findIssuesStillUnderReview,
   resolveDeadZone,
@@ -43,6 +52,7 @@ import {
 } from "./github.js";
 import type { ReviewTrailer } from "./agent.js";
 import { loadRepoState, saveRepoState } from "./state.js";
+import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
 
 const MAX_RETRIES = 2;
 
@@ -64,6 +74,17 @@ const revisionFailureCount = new Map<string, number>();
 // cleared the moment a revision succeeds or the pending feedback clears, so a repo
 // that recovers escalates again if it breaks again.
 const revisionEscalated = new Set<string>();
+// Consecutive revisions that pushed nothing BY DECLARATION, per repo.
+//
+// A declared no-commit is a valid answer, so it returns to "pr under review"
+// and gets re-reviewed. But if the reviewer then asks for the same change
+// again, the pair will ping-pong forever at no cost to either side and with
+// nothing changing. One is an answer; two in a row is a disagreement, and a
+// disagreement between two agents is a human's call.
+//
+// Cleared whenever a revision actually pushes, or the pending feedback clears.
+const consecutiveNoCommit = new Map<string, number>();
+const MAX_CONSECUTIVE_NO_COMMIT = 1;
 const reviewFailureCount = new Map<string, number>();
 const reviewFailureHitMaxAt = new Map<string, number>();
 
@@ -319,6 +340,23 @@ export function getActiveRunCount(): number {
 /** Repos currently running an agent, for shutdown logging. */
 export function getActiveRunRepos(): string[] {
   return [...activeRuns.keys()];
+}
+
+/**
+ * Set once a shutdown starts. Every phase that would spawn a NEW session checks
+ * it first, so a draining daemon finishes what is running and starts nothing.
+ *
+ * Without it the drain never converged: on 2026-09-29 a restart asked to stop at
+ * 15:53, and at 16:21 a repo whose review had just finished went straight on to
+ * start an implement session in the same pass — work begun inside the drain
+ * window and then cut off when the window elapsed, leaving a half-built branch.
+ */
+let shutdownRequested = false;
+export function requestShutdown(): void {
+  shutdownRequested = true;
+}
+export function isShutdownRequested(): boolean {
+  return shutdownRequested;
 }
 
 /** Abort every in-flight run. Only for a shutdown whose drain window elapsed —
@@ -628,8 +666,13 @@ async function runRepoCycle(
     );
   }
 
+  // Phases 1-3 each spawn a Claude session. None may START once a shutdown is
+  // under way — see `shutdownRequested`.
+  if (shutdownRequested) return { processed, lastImplementation, events };
+
   // --- Phase 1: Review open feature PRs (invokes the EM /review-all-prs skill) ---
   if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
+  if (shutdownRequested) return { processed, lastImplementation, events };
 
   // --- Phase 2: Revise PRs with pending review feedback ---
   const revisionInfo = await tryRevision(repoConfig, base, cycleNumber, events);
@@ -637,6 +680,8 @@ async function runRepoCycle(
     events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
     processed++;
   }
+
+  if (shutdownRequested) return { processed, lastImplementation, events };
 
   // --- Phase 3: Implement approved issues (one batch per repo) ---
   const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
@@ -655,16 +700,20 @@ async function runRepoCycle(
     }
   }
 
-  // --- Phase 4b: Merge Dependabot PRs into the development branch once their
-  //    checks are green. They carry no linked issue, so the review phase cannot
-  //    see them and they accumulate against the base branch forever — 8 open
-  //    across the two jerky repos when this was added. Mechanical, like the sync
-  //    merge above: the build and test suite are the whole review. ---
+  // --- Phase 4c: File ONE issue for the Dependabot PRs aimed at the feature
+  //    branch. Phase 4b deliberately refuses to merge those, so without this
+  //    they accumulate with no path forward at all. The issue puts them through
+  //    the implement session — which builds, boots the app and smoke-tests it —
+  //    instead of a CI rollup that only ever proved the code compiles. Filed
+  //    pre-approved on a repo that opts in (slashbin.io repos), so it enters
+  //    the queue with no human step; bare everywhere else. ---
   if (repoConfig.baseBranch !== "main") {
-    const merged = tryDependencyMerges(repoConfig, base, cycleNumber);
-    if (merged > 0) {
+    const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
+    if (filed) {
       events.push({
-        message: `${repoConfig.githubRepo}: merged ${merged} dependency PR(s) into ${repoConfig.baseBranch}`,
+        message: repoConfig.dependencyPreApproved
+          ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+          : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
         level: "info",
       });
       processed++;
@@ -946,6 +995,22 @@ async function tryBatchImplementation(
   // idempotency — it skips issues already committed on features. If no open PR
   // exists, the skill creates one. If one exists, new commits are added to it.
 
+  // Bring `features` up to `develop` before the session builds on it.
+  //
+  // The implement skill's Phase 0 only pulls `features` — nothing has ever
+  // merged the base branch in. Dependabot lands on the base, so without this
+  // the session builds and boots a tree missing every bump since the last
+  // feature merge. Fast-forward only: an in-flight feature PR (features ahead)
+  // is the normal state and is left alone, and a true divergence is reported
+  // rather than resolved. See fastForwardFeatureBranch for the full rationale.
+  const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger);
+  if (ffOutcome === "diverged") {
+    repoLogger.warn(
+      `Skipping ${repoName} implementation — ${repoConfig.featureBranch} diverged from ${repoConfig.baseBranch}; implementing on it would build an unknown tree`,
+    );
+    return null;
+  }
+
   // Invoke the skill — one Claude session implements all approved issues
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
@@ -1151,6 +1216,7 @@ async function tryRevision(
   if (!pending) {
     if (failures > 0) revisionFailureCount.set(repoName, 0);
     revisionEscalated.delete(repoName);
+    consecutiveNoCommit.delete(repoName);
     return null;
   }
 
@@ -1168,6 +1234,38 @@ async function tryRevision(
     if (result.success) {
       revisionFailureCount.set(repoName, 0);
       revisionEscalated.delete(repoName);
+
+      if (result.noCommit) {
+        const seen = (consecutiveNoCommit.get(repoName) ?? 0) + 1;
+        consecutiveNoCommit.set(repoName, seen);
+
+        // Second one in a row: the reviewer keeps asking and the reviser keeps
+        // answering "already correct". Neither is going to move. Stop, and say
+        // who is stuck on what — a ping-pong nobody is told about looks exactly
+        // like an idle queue.
+        if (seen > MAX_CONSECUTIVE_NO_COMMIT) {
+          const issues = pending.issueNumbers.map((n) => `#${n}`).join(", ");
+          revLogger.error(
+            `PR #${pending.pr.number} has answered ${seen} review rounds in a row with no commit — ` +
+            `the reviewer and the reviser disagree and neither will move. Not re-labelling.`,
+            { pr: pending.pr.number, issues: pending.issueNumbers, reason: result.noCommitReason },
+          );
+          events.push({
+            message:
+              `🛑 ${repoConfig.githubRepo} — PR #${pending.pr.number} answered ${seen} review rounds with no code change` +
+              `${issues ? ` (issues ${issues})` : ""}. The reviewer asks, the reviser says the branch is already correct. ` +
+              `EM: rule on it. Last reason: ${result.noCommitReason ?? "not given"}`,
+            level: "error",
+          });
+          return null;
+        }
+
+        revLogger.info(
+          `PR #${pending.pr.number} revision made no commit by declaration — returning it to review: ${result.noCommitReason}`,
+        );
+      } else {
+        consecutiveNoCommit.delete(repoName);
+      }
 
       // Transition issue labels: "pr pending actions" → "pr under review"
       // The orchestrator owns this because the skill runs in the service repo
@@ -1257,6 +1355,24 @@ async function tryReview(
     return false;
   }
 
+  // CI gate: never spend a review session on a PR its own CI already rejects.
+  const checks = getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
+  if (checks.state === "pending") {
+    reviewLogger.info(`PR #${candidate.prNumber} CI still running (${checks.pending.join(", ")}) — review waits for it`);
+    return false;
+  }
+  if (checks.state === "failing") {
+    const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, config.reviewerLogin, reviewLogger);
+    if (bounces < MAX_CI_BOUNCES) {
+      const names = checks.failing.map((f) => f.name).join(", ");
+      bounceForRedCI(repoConfig, candidate.prNumber, candidate.issueNumbers, checks, reviewLogger);
+      reviewLogger.info(`PR #${candidate.prNumber} CI red (${names}) — sent back to revise without a review (bounce ${bounces + 1}/${MAX_CI_BOUNCES})`);
+      events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: CI red (${names}) — sent back to the builder before review`, level: "info" });
+      return true;
+    }
+    reviewLogger.warn(`PR #${candidate.prNumber} CI still red after ${bounces} bounce(s) — reviewing anyway so a reviewer sees it`);
+  }
+
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const transcriptPath = resolve(process.cwd(), "logs", "review", `${repoName}-cycle${cycleNumber}-${ts}.log`);
 
@@ -1267,13 +1383,21 @@ async function tryReview(
   // it is precisely the case a pre-run snapshot cannot see.
   const reviewStartedAt = new Date().toISOString();
 
+  // The session reads the code from here rather than cloning one for itself.
+  // Prepared before the run so it is warm on arrival; see review-checkout.ts
+  // for why an unmanaged clone per review took the whole box down.
+  const checkoutPath = prepareReviewCheckout(config, repoConfig, reviewLogger);
+
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
   reviewLogger.info(`Triggering review for ${repoName} — PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")}), transcript: ${transcriptPath}`);
   events?.push({ message: `Reviewing ${repoConfig.githubRepo} PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
 
   try {
-    const result = await reviewOpenPRs(repoConfig, config, reviewLogger, runAbort.signal, transcriptPath);
+    const result = await reviewOpenPRs(
+      repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
+      `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
+    );
 
     if (result.success) {
       reviewFailureCount.set(repoName, 0);
@@ -1341,14 +1465,74 @@ async function tryReview(
       return true;
     }
 
+    // --- The run failed. Did it fail before or AFTER doing the work? --------
+    // Ask GitHub, not the trailer: a run killed at the wall may never have
+    // emitted one. `planFailedReviewOutcome` holds the rule and the incident
+    // behind it (#41).
+    const plan = planFailedReviewOutcome(
+      findIssuesMergedToBase(repoConfig, candidate.issueNumbers, reviewLogger),
+      findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
+    );
+
+    if (plan.workLanded) {
+      reviewLogger.warn(
+        `Review run on ${repoName} ended with "${result.error}" AFTER merging PR #${plan.mergedPrs.join(", #")} — ` +
+        `the work landed and the run outlived it. Reconciling labels now rather than leaving the dead zone.`,
+        { mergedPrs: plan.mergedPrs, toReconcile: plan.toReconcile },
+      );
+
+      const unresolved = plan.toReconcile.length > 0 && config.reviewLabelReconcile
+        ? reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events)
+        : plan.toReconcile;
+
+      if (unresolved.length > 0) {
+        reviewLogger.error(
+          `Review post-condition UNRESOLVED on ${repoName} after a failed run: issue(s) #${unresolved.join(", #")} ` +
+          `— dead-zone recovery will re-verify`,
+          { mergedPrs: plan.mergedPrs, unresolved },
+        );
+      }
+
+      // Reset rather than increment: the next cycle would find the PR merged and
+      // nothing to review, so charging a failure only walks the repo toward its
+      // backoff for work that succeeded.
+      reviewFailureCount.set(repoName, 0);
+      reviewFailureHitMaxAt.delete(repoName);
+      events?.push({
+        message: `⚠️ ${repoConfig.githubRepo} — review of PR #${plan.mergedPrs.join(", #")} merged, then ran past its budget (${result.error}). Labels reconciled; not counted as a failed review.`,
+        level: "warn",
+      });
+      return true;
+    }
+
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
     if (newCount >= MAX_RETRIES) reviewFailureHitMaxAt.set(repoName, cycleNumber);
-    reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
+    reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
     return false;
   } finally {
     activeRuns.delete(repoName);
+
+    // Hand the checkout back if nothing else is queued for this repo. In
+    // `finally` for the same reason as the label repair below: a run that threw
+    // or was killed still leaves the directory behind, and that is precisely the
+    // case that accumulated 140 of them.
+    //
+    // Queued = work that would bring a session straight back here: approved
+    // issues waiting to be built, plus any PR still awaiting review. Counted
+    // AFTER the run, so a review that just merged the last PR sees an empty
+    // queue and releases, while a repo mid-batch keeps its node_modules.
+    if (checkoutPath) {
+      try {
+        const stillApproved = findAllApprovedActionableIssues(repoConfig, reviewLogger).length;
+        const stillToReview = findPRsNeedingReview(repoConfig, config.reviewerLogin, reviewLogger) ? 1 : 0;
+        releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
+      } catch (err) {
+        // Never let bookkeeping fail the phase. The nightly sweep is the backstop.
+        reviewLogger.debug(`Checkout release check skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     // Undo any revocation of the EM outcome-gate. In `finally` on purpose: a run
     // that threw or was aborted may still have written labels before it died.
@@ -1417,42 +1601,60 @@ function trySyncDrift(
 }
 
 /**
- * Merge every green Dependabot PR into the repo's development branch.
+ * File ONE issue covering every open Dependabot PR on either working branch.
  *
- * Guarded to `baseBranch !== "main"` by the caller, and again inside
- * `tryMergeDependencyPR`: a dependency update must never be merged straight to
- * a production branch, which is the exact defect `jerky_shipping#237` exists to
- * close on the producing side. This is the consuming side — it only ever acts on
- * PRs already aimed at development.
+ * **Idempotent by construction: at most one open batch issue per repo.** Not by
+ * remembering what was filed — this runs every cycle across twenty repos and any
+ * state it kept in memory would be lost on the next restart, which is how a
+ * filing loop becomes twenty issues an hour. The check is a title-prefix match
+ * against the open-issue snapshot the cycle already fetched, so it is correct
+ * after a restart, correct if someone closes the issue by hand, and free.
  *
- * Returns how many merged, so a quiet cycle stays quiet.
+ * A PR that appears while a batch issue is open is not filed separately; it is
+ * picked up by the next batch once the current one closes. Bounded noise beats
+ * complete coverage here — the alternative is editing an issue body an agent may
+ * already be working from, which the issue-authoring rules forbid outright.
+ *
+ * Returns the new issue number, or null when there was nothing to file.
  */
-function tryDependencyMerges(
+function tryFileDependencyBatchIssue(
   repoConfig: RepoConfig,
   logger: Logger,
   cycleNumber: number,
-): number {
+): number | null {
   const depLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "dependencies" });
+  const bases = dependencyBatchBases(repoConfig.featureBranch, repoConfig.baseBranch);
+  if (bases.length === 0) return null;
+  const featureBranch = repoConfig.featureBranch || bases[0];
 
-  const prs = findDependencyPRs(
-    repoConfig.githubRepo,
-    repoConfig.repoPath,
-    repoConfig.baseBranch,
-    depLogger,
+  const prs = findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger);
+  if (prs.length === 0) return null;
+
+  const existing = findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, depLogger);
+  if (existing) {
+    depLogger.debug(
+      `${prs.length} dependency PR(s) on ${bases.join("/")}; batch issue #${existing.number} is already open`,
+    );
+    return null;
+  }
+
+  const changes = prs.map((p) => describeDependencyPR(p.number, p.title));
+  const { title, body } = buildDependencyBatchIssue(featureBranch, changes);
+  const number = createDependencyBatchIssue(
+    repoConfig.githubRepo, repoConfig.repoPath, title, body,
+    repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, depLogger,
   );
-  if (prs.length === 0) return 0;
+  if (number === null) return null;
 
-  let merged = 0;
-  for (const pr of prs) {
-    if (tryMergeDependencyPR(repoConfig.githubRepo, pr.number, repoConfig.repoPath, depLogger)) {
-      depLogger.info(`Dependency PR merged — #${pr.number}: ${pr.title}`);
-      merged++;
-    }
-  }
-  if (merged === 0) {
-    depLogger.debug(`${prs.length} dependency PR(s) open, none mergeable this cycle`);
-  }
-  return merged;
+  const majors = changes.filter((c) => c.major).length;
+  depLogger.info(
+    `Filed dependency batch issue #${number} for ${prs.length} PR(s) on ${bases.join("/")}` +
+    (majors > 0 ? ` — ${majors} major` : "") +
+    (repoConfig.dependencyPreApproved
+      ? ` — filed with "${repoConfig.triggerLabel}", queued to build`
+      : ` — awaiting "${repoConfig.triggerLabel}"`),
+  );
+  return number;
 }
 
 function tryPromotion(

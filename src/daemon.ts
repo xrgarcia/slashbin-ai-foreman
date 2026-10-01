@@ -1,7 +1,7 @@
 import type { AgentConfig } from "./config.js";
 import { loadConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns } from "./orchestrator.js";
+import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
 import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
 import { configureIssueCache } from "./github.js";
 
@@ -175,8 +175,10 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
           );
         }
 
-        if (didWork) continue; // more to do — go straight round again
+        // Stop BEFORE the fast re-loop: a pass that did work used to go straight
+        // round again even while the daemon was draining, and start new sessions.
         if (stopping || loopStopping) return;
+        if (didWork) continue; // more to do — go straight round again
 
         await new Promise<void>((resolve) => {
           wake = resolve;
@@ -232,6 +234,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     stopping = true;
 
     logger.info("Shutting down...");
+    requestShutdown();
 
     // Wake the supervisor and every repo loop so none sits out a poll interval
     // before noticing the shutdown.
