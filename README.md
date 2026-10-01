@@ -128,8 +128,10 @@ For a single repo, set fields at the root level:
 | `upstreamBackoffBaseMs` | `AI_AGENT_UPSTREAM_BACKOFF_BASE_MS` | `120000` (2 min) | First window of the daemon-wide back-off when GitHub (rate limit) or Claude (session limit) refuses work. Doubles per consecutive window. Each transition is logged and sent once to Discord |
 | `upstreamBackoffCapMs` | `AI_AGENT_UPSTREAM_BACKOFF_CAP_MS` | `3600000` (60 min) | Ceiling for that back-off window |
 | `issueSnapshotLimit` | `AI_AGENT_ISSUE_SNAPSHOT_LIMIT` | `500` | Max open issues fetched per snapshot. Must exceed a repo's open-issue count; truncation is logged |
-| `skillPath` | `AI_AGENT_SKILL_PATH` | — | Claude Code skill for implementation |
-| `revisionSkillPath` | — | — | Claude Code skill for PR revision |
+| `skillPath` | `AI_AGENT_SKILL_PATH` | — | Claude Code skill for implementation: a repo-relative path, or `builtin:` for the skill shipped in `skills/implement/` |
+| `revisionSkillPath` | — | — | Claude Code skill for PR revision: a repo-relative path, or `builtin:` for `skills/revise/` |
+| `skillOverlayPath` | — | — | Optional repo-relative file appended to the implement prompt after the skill. Configured but unreadable → the run is not started |
+| `revisionSkillOverlayPath` | — | — | Same, for the revise prompt |
 | `prompt` | `AI_AGENT_PROMPT` | *(built-in)* | Custom prompt template |
 | `baseBranch` | `AI_AGENT_BASE_BRANCH` | `develop` | PR target branch |
 | `featureBranch` | `AI_AGENT_FEATURE_BRANCH` | `features` | Branch to commit to |
@@ -260,6 +262,25 @@ The Foreman delegates work by invoking Claude Code skills on each service repo. 
 - **`revisionSkillPath`** — invoked during the Revision phase when a PR has review feedback (e.g. `.claude/skills/revise-pr-feedback/SKILL.md`)
 
 The Foreman passes the issue context to Claude and instructs it to read and follow the skill. The skill defines the repo-specific implementation workflow — how to branch, test, and structure the PR.
+
+### Built-in skills
+
+Set either field to `builtin:` to use the generic skills that ship with the Foreman
+(`skills/implement/SKILL.md`, `skills/revise/SKILL.md`) instead of keeping a copy in
+every repo. The built-in text is inlined into the prompt together with the repo's
+feature and base branch. It never names a label: it reads the configured names from
+`FOREMAN_TRIGGER_LABEL` and `FOREMAN_LIFECYCLE_LABELS`, which the Foreman sets on every
+session.
+
+To add repo-specific rules without forking the skill, point `skillOverlayPath` /
+`revisionSkillOverlayPath` at a file in the repo; its contents are appended after the
+skill. A configured overlay that cannot be read fails that run before Claude starts —
+the skill is never run without it.
+
+```json
+{ "name": "api", "repoPath": "../my-api", "skillPath": "builtin:", "revisionSkillPath": "builtin:",
+  "skillOverlayPath": "docs/foreman-overlay.md" }
+```
 
 ## Review phase (opt-in)
 

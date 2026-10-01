@@ -24,6 +24,15 @@
       "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md",
       "maxTurns": 60,
       "maxDurationMs": 3000000
+    },
+    {
+      "name": "builtin-skills-repo",
+      "repoPath": "../my-service",
+      "githubRepo": "your-org/my-service",
+      "_skillPath": "builtin: uses the generic skills shipped in this package's skills/ directory instead of a repo-local copy.",
+      "skillPath": "builtin:",
+      "revisionSkillPath": "builtin:",
+      "_skillOverlayPath": "Optional. A repo-relative file appended after the skill; revisionSkillOverlayPath does the same for revise."
     }
   ],
   "triggerLabel": "approved",
