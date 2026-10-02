@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import type { PriorState, WorkItem, WorkSourceAdapter, WorkState } from "./adapters.js";
 import type { Logger } from "./logger.js";
+import { ghResource, recordGhCall } from "./gh-usage.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "./upstream-backoff.js";
 
 const GH_MAX_ATTEMPTS = 3;
@@ -57,6 +58,15 @@ function isRateLimitGhError(err: unknown): boolean {
   );
 }
 
+/**
+ * An expected refusal from `runGh` while the GitHub back-off is active — no gh
+ * was spawned. Lookups log it at debug: a deliberate pause is not an outage
+ * (2026-10-02: 330 ERROR lines in one morning, every one of them this).
+ */
+function isBackoffRefusal(err: unknown): err is UpstreamBackoffError {
+  return err instanceof UpstreamBackoffError;
+}
+
 /** execFileSync gh with retry+backoff on transient (network/5xx/timeout) failures. */
 function runGh(args: string[], cwd: string, token: string): string {
   // A limit is account-wide: while GitHub is backing off, spawning gh only
@@ -65,6 +75,7 @@ function runGh(args: string[], cwd: string, token: string): string {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= GH_MAX_ATTEMPTS; attempt++) {
     try {
+      recordGhCall(args);
       return execFileSync("gh", args, {
         cwd,
         encoding: "utf-8",
@@ -79,7 +90,10 @@ function runGh(args: string[], cwd: string, token: string): string {
         // and once, then let the caller's own error path handle the cycle.
         console.warn(`[gh] RATE LIMIT EXHAUSTED — GitHub API quota is spent, skipping: gh ${args.slice(0, 3).join(" ")}`);
         const { message, stderr } = formatGhError(err);
-        signalUpstreamLimit("github", stderr.split("\n")[0] || message.split("\n")[0]);
+        signalUpstreamLimit("github", stderr.split("\n")[0] || message.split("\n")[0], {
+          token,
+          resource: ghResource(args),
+        });
         throw err;
       }
       if (attempt < GH_MAX_ATTEMPTS && isTransientGhError(err)) {
@@ -808,6 +822,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       logger.info(`Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`);
       return [];
     } catch (err) {
+      if (isBackoffRefusal(err)) {
+        logger.debug("Failed to check for approved issues — GitHub back-off active");
+        return [];
+      }
       logger.error("Failed to check for approved issues", {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -884,6 +902,10 @@ export function findPendingRevisions(
     logger.debug(`Found ${issues.length} issue(s) with "${pendingLabel}" but no open feature PR`);
     return null;
   } catch (err) {
+    if (isBackoffRefusal(err)) {
+      logger.debug("Failed to check for pending revisions — GitHub back-off active");
+      return null;
+    }
     logger.error("Failed to check for pending revisions", {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -972,6 +994,10 @@ export function findPRsNeedingReview(
     );
     return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [] };
   } catch (err) {
+    if (isBackoffRefusal(err)) {
+      logger.debug("Failed to check for PRs needing review — GitHub back-off active");
+      return null;
+    }
     logger.error("Failed to check for PRs needing review", {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -1798,6 +1824,10 @@ export function findReadyForProdIssues(
       .filter((i) => hasLabel(i, labels.readyForProd))
       .map((i) => ({ number: i.number, title: i.title }));
   } catch (err) {
+    if (isBackoffRefusal(err)) {
+      logger.debug("Failed to query ready-for-prod issues — GitHub back-off active");
+      return [];
+    }
     logger.error("Failed to query ready-for-prod issues", {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -2089,6 +2119,10 @@ export function checkBranchDrift(
       developAheadFiles: result.files ?? 0,
     };
   } catch (err) {
+    if (isBackoffRefusal(err)) {
+      logger.debug("Failed to check branch drift — GitHub back-off active");
+      return null;
+    }
     logger.error("Failed to check branch drift", {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -2306,6 +2340,10 @@ export function findDependencyPRs(
       (p) => allowed.has(p.baseRefName) && p.headRefName.startsWith("dependabot/"),
     );
   } catch (err) {
+    if (isBackoffRefusal(err)) {
+      logger?.debug("findDependencyPRs: gh pr list failed — GitHub back-off active");
+      return [];
+    }
     logger?.warn("findDependencyPRs: gh pr list failed", { ...formatGhError(err), repo, bases: [...allowed] });
     return [];
   }

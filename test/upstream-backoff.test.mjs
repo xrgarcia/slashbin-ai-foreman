@@ -28,6 +28,13 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_GH_LOG, Date.now() + " " + args.join(" ") + "\\n");
 if (args[0] === "api" && args[1] === "rate_limit") { process.stdout.write(fs.readFileSync(process.env.FAKE_GH_RATE)); process.exit(0); }
+// The GraphQL endpoint answers from the same graphql bucket (#69: a GraphQL trip is probed there).
+if (args[0] === "api" && args[1] === "graphql") {
+  const g = JSON.parse(fs.readFileSync(process.env.FAKE_GH_RATE, "utf8"))?.resources?.graphql ?? {};
+  process.stdout.write(JSON.stringify({ data: { rateLimit: { remaining: g.remaining,
+    resetAt: typeof g.reset === "number" ? new Date(g.reset * 1000).toISOString() : null } } }));
+  process.exit(0);
+}
 const err = fs.readFileSync(process.env.FAKE_GH_ERR, "utf8");
 if (err) { process.stderr.write(err); process.exit(1); }
 process.stdout.write("[]");
@@ -48,8 +55,9 @@ function runCase(body, { baseMs = 200, capMs = 1600 } = {}) {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const calls = () => readFileSync(F.log, "utf8").split("\\n").filter(Boolean)
       .map((l) => { const [ts, ...a] = l.split(" "); return { ts: Number(ts), args: a.join(" ") }; });
-    const work = () => calls().filter((c) => !c.args.startsWith("api rate_limit")).length;
-    const probes = () => calls().filter((c) => c.args.startsWith("api rate_limit")).map((c) => c.ts);
+    const isProbe = (c) => c.args.startsWith("api rate_limit") || c.args.startsWith("api graphql");
+    const work = () => calls().filter((c) => !isProbe(c)).length;
+    const probes = () => calls().filter(isProbe).map((c) => c.ts);
     const rate = (remaining, resetSec, graphqlRemaining = remaining) => writeFileSync(F.rate, JSON.stringify({ resources: {
       core: { remaining, reset: resetSec }, graphql: { remaining: graphqlRemaining, reset: resetSec } } }));
     const nowSec = () => Math.floor(Date.now() / 1000);
