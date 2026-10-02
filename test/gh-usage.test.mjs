@@ -20,8 +20,9 @@ test("configureGhUsage: one summary per interval, counters reset on each emit", 
   await new Promise((r) => setTimeout(r, 100));
   assert.ok(lines.length >= 2);
   assert.deepEqual({ total: lines[0].total, graphql: lines[0].graphql, core: lines[0].core }, { total: 3, graphql: 2, core: 1 });
-  assert.equal(lines[0].bySubcommand["issue list"], 1);
-  assert.equal(lines[0].bySubcommand["pr list"], 1);
+  assert.ok(typeof lines[0].bySubcommand === "string" && lines[0].bySubcommand.includes("issue list"), "breakdown must survive the text log format");
+  assert.equal(JSON.parse(lines[0].bySubcommand)["issue list"], 1);
+  assert.equal(JSON.parse(lines[0].bySubcommand)["pr list"], 1);
   assert.equal(lines[1].total, 0);
   configureGhUsage({ intervalMs: 3_600_000, logger: { info() {} } });
 });
