@@ -12,7 +12,9 @@ export type PaperclipIssue = {
   title: string;
   status: string;
   description?: string;
-  assigneeUserId?: string;
+  /** A board user holding the task; Paperclip allows one assignee, user or agent. */
+  assigneeUserId?: string | null;
+  assigneeAgentId?: string | null;
 };
 
 export type PaperclipComment = {

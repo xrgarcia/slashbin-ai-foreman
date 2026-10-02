@@ -33,6 +33,10 @@ function fakePaperclip(rows = []) {
     let m = u.pathname.match(/^\/api\/issues\/([^/]+)$/);
     if (m && method === "PATCH") {
       const r = rows.find((x) => x.id === m[1]);
+      // Paperclip's rule: one assignee, an agent or a user, never both.
+      const agent = "assigneeAgentId" in body ? body.assigneeAgentId : r.assigneeAgentId;
+      const user = "assigneeUserId" in body ? body.assigneeUserId : r.assigneeUserId;
+      if (agent && user) return ok({ error: "Issue can only have one assignee" }, 422);
       Object.assign(r, body);
       return ok(r);
     }
@@ -160,4 +164,40 @@ test("Paperclip down: nothing throws, the outage is logged once, a success ends 
   down = true;
   await mirror.onMerged(item, repoConfig, logger());
   assert.equal(log.lines.filter(([lvl]) => lvl === "warn").length, 2);
+});
+
+test("a row the sync gave a board user: the claim takes it, clearing the user", async () => {
+  const fake = fakePaperclip([{ id: "synced", title: "t", status: "in_progress", assigneeUserId: "local-board", description: "source: example/r#7" }]);
+  const { mirror, log } = mirrorOn(fake);
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.equal(fake.rows[0].assigneeAgentId, AGENT);
+  assert.equal(fake.rows[0].assigneeUserId, null);
+  assert.deepEqual(fake.comments.synced, ["picked up by Foreman"]);
+  assert.equal(log.lines.length, 0);
+});
+
+test("a rejected update is logged once with Paperclip's reason, the note still posts, and it is not an outage", async () => {
+  const fake = fakePaperclip([{ id: "synced", title: "t", status: "todo", description: "source: example/r#7" }]);
+  const reject = { fetch: async (url, init = {}) => (init.method === "PATCH"
+    ? new Response(JSON.stringify({ error: "nope" }), { status: 422 }) : fake.fetch(url, init)) };
+  const { mirror, log } = mirrorOn(reject);
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onClaim(item, repoConfig, logger());
+  const warns = log.lines.filter(([lvl]) => lvl === "warn");
+  assert.equal(warns.length, 1);
+  assert.match(warns[0][1], /rejected: .*422 — nope/);
+  assert.doesNotMatch(warns[0][1], /down/);
+  assert.equal(fake.comments.synced.length, 2);
+});
+
+test("a second claim before any state change is a retry, not a second pick-up", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake);
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onState(item, "new", "inReview", repoConfig, logger());
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.deepEqual(fake.comments["row-1"], [
+    "picked up by Foreman", "retrying: the previous attempt did not finish", "under review", "picked up by Foreman",
+  ]);
 });
