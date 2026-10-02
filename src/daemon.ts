@@ -5,6 +5,7 @@ import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos,
 import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
 import { configureIssueCache } from "./github.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
+import { configureGhUsage } from "./gh-usage.js";
 
 export interface DaemonOptions {
   configPath?: string;
@@ -61,6 +62,9 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     },
     logger,
   });
+
+  // One info line per hour: spawned gh calls by quota bucket and subcommand.
+  configureGhUsage({ intervalMs: 3_600_000, logger });
 
   // A TTL at or above the poll interval means a cycle can be served entirely
   // from the previous cycle's snapshot, so an externally-applied `approved`

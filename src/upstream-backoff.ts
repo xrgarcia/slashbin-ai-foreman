@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import type { GhResource } from "./gh-usage.js";
 import type { Logger } from "./logger.js";
 import { notifyBackoffPause, notifyBackoffResume } from "./work-source.js";
 
@@ -20,8 +21,10 @@ import { notifyBackoffPause, notifyBackoffResume } from "./work-source.js";
  * by every repo loop. Nothing else stores a limit, a window or a probe result.
  *
  *  - github: `runGh` refuses to spawn while blocked; at each window end the
- *    module itself probes `gh api rate_limit` (free against the REST quota) per
- *    configured token and either clears or extends.
+ *    module itself probes the bucket that tripped, with the token that tripped
+ *    it, and either clears or extends. A GraphQL trip is probed on the GraphQL
+ *    endpoint itself: `/rate_limit` reports a different bucket (2026-10-02:
+ *    2 used there vs 3,614 on the endpoint, same token, same second).
  *  - claude: there is no free probe, so the next real launch IS the probe. At
  *    window end the state goes half-open and `tryAcquire` admits exactly one
  *    caller; its result clears or extends.
@@ -56,6 +59,9 @@ interface UpstreamState {
   resetAtMs?: number;
   /** claude only: the single half-open launch has been handed out. */
   probeOut: boolean;
+  /** github only: the token and bucket of the call that tripped this episode. */
+  trippedToken?: string;
+  trippedResource?: GhResource;
   timer: ReturnType<typeof setTimeout> | null;
   waiters: (() => void)[];
 }
@@ -191,6 +197,8 @@ function clear(u: Upstream): void {
   s.state = "clear";
   s.probeOut = false;
   s.resetAtMs = undefined;
+  s.trippedToken = undefined;
+  s.trippedResource = undefined;
   s.lastClearedAt = Date.now();
   notify(`Foreman ${NAMES[u]} back-off cleared — resuming`, "info");
   void notifyBackoffResume(u, observerLogger);
@@ -228,52 +236,52 @@ interface RateResource {
   reset?: number;
 }
 
+const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining resetAt}}"];
+
 /**
- * One `gh api rate_limit` per configured token, deliberately NOT via `runGh`
- * (which refuses while blocked). Clear only when core AND graphql have quota
- * on EVERY token. The reset of the latest exhausted resource bounds the next
- * window; a probe that itself fails extends on the computed window alone.
+ * Probe the bucket that tripped, with the token that tripped it — deliberately
+ * NOT via `runGh` (which refuses while blocked) and not counted as usage.
+ *  - graphql: `gh api graphql` rateLimit. Clears only on remaining > 0; on 0
+ *    its resetAt bounds the next window. A refused probe lands in catch.
+ *  - core (or unknown): `gh api rate_limit` resources.core, as before.
+ * No stored token (ambient gh auth): probe with the ambient auth.
+ * A probe that itself fails never clears; it extends on the computed window.
  */
 function probeGitHub(): { clear: boolean; resetAtMs?: number } {
-  const tokens = [process.env.FOREMAN_GITHUB_TOKEN, process.env.EM_GITHUB_TOKEN].filter(
-    (t): t is string => !!t,
-  );
-  // No token configured: probe with the ambient gh auth so the state can still clear.
-  const envs = tokens.length > 0
-    ? tokens.map((t) => ({ ...process.env, GH_TOKEN: t }))
-    : [{ ...process.env }];
-  let allClear = true;
-  let latestReset = 0;
-  for (const env of envs) {
-    try {
-      const out = execFileSync("gh", ["api", "rate_limit"], {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 30_000,
-        env,
-      });
-      const resources = (JSON.parse(out)?.resources ?? {}) as Record<string, RateResource>;
-      for (const name of ["core", "graphql"]) {
-        const r = resources[name];
-        if (typeof r?.remaining === "number" && r.remaining > 0) continue;
-        allClear = false;
-        if (typeof r?.reset === "number") latestReset = Math.max(latestReset, r.reset);
-      }
-    } catch (err) {
-      allClear = false;
-      console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  const s = states.github;
+  const env = s.trippedToken ? { ...process.env, GH_TOKEN: s.trippedToken } : { ...process.env };
+  const opts = { encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"], timeout: 30_000, env };
+  try {
+    if (s.trippedResource === "graphql") {
+      const rl = JSON.parse(execFileSync("gh", PROBE_GRAPHQL, opts))?.data?.rateLimit;
+      if (typeof rl?.remaining === "number" && rl.remaining > 0) return { clear: true };
+      const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
+      return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
     }
+    const core = JSON.parse(execFileSync("gh", ["api", "rate_limit"], opts))?.resources?.core as RateResource | undefined;
+    if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
+    return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
+  } catch (err) {
+    console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    return { clear: false };
   }
-  return allClear ? { clear: true } : { clear: false, resetAtMs: latestReset > 0 ? latestReset * 1000 : undefined };
 }
 
 /**
  * Record that an upstream refused work. Enters the back-off when clear; while
  * already backing off it is a no-op (no second message).
  */
-export function signalUpstreamLimit(u: Upstream, reason: string, resetAtMs?: number): void {
-  if (states[u].state !== "clear") return;
-  enter(u, reason, resetAtMs);
+export function signalUpstreamLimit(
+  u: Upstream,
+  reason: string,
+  opts?: number | { resetAtMs?: number; token?: string; resource?: GhResource },
+): void {
+  const s = states[u];
+  if (s.state !== "clear") return;
+  const o = typeof opts === "number" ? { resetAtMs: opts } : (opts ?? {});
+  s.trippedToken = o.token;
+  s.trippedResource = o.resource;
+  enter(u, reason, o.resetAtMs);
 }
 
 /** True while blocked, and for claude also while the half-open probe is out. */
