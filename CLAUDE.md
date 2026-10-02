@@ -107,6 +107,7 @@ src/
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
 ├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
 ├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
+├── paperclip/mirror.ts # PaperclipMirror: WorkObserver writing each step to the issue's task; best-effort
 └── index.ts         # Public API exports
 ```
 

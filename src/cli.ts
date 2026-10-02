@@ -8,6 +8,10 @@ import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
+import { addObserver } from "./work-source.js";
+import { secretValues } from "./agent.js";
+import { PaperclipClient } from "./paperclip/client.js";
+import { PaperclipMirror } from "./paperclip/mirror.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -102,6 +106,22 @@ async function main(): Promise<void> {
   });
 
   logger.info(`slashbin-ai-agent v${getVersion()}`);
+
+  // Paperclip mirror (EM#417): an observer of the Foreman's steps, never a work
+  // source. Read once at startup; a config reload does not add or drop it.
+  if (config.paperclip.enabled) {
+    if (config.paperclip.agentId && config.paperclip.companyId) {
+      addObserver(new PaperclipMirror(
+        new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId }),
+        config.paperclip,
+        secretValues(config.sessionEnv),
+        logger,
+      ));
+      logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
+    } else {
+      logger.info("paperclip mirror enabled but no agentId configured; run npm run paperclip:register");
+    }
+  }
 
   if (once) {
     // Single cycle mode
