@@ -140,6 +140,7 @@ For a single repo, set fields at the root level:
 | `maxDurationMs` | `AI_AGENT_MAX_DURATION_MS` | `1800000` (30 min) | Max implementation time |
 | `model` | `AI_AGENT_MODEL` | CLI default | Model for implement/revise. Cascades to every repo that sets no `model` of its own |
 | `allowedTools` | — | `["Read","Write","Edit","Bash","Glob","Grep"]` | Tools the CLI can use |
+| `sessionEnv` | — | `[]` | Daemon env var names every Claude session inherits, on top of the essentials. Top-level only. May not name a GitHub token. See [Session security](#session-security) |
 | `logFormat` | `AI_AGENT_LOG_FORMAT` | `text` | `json` or `text` |
 | `logLevel` | `AI_AGENT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `lifecycleLabels` | — | see below | Names of the five labels that move a PR through its lifecycle. Top-level only — every repo shares one set |
@@ -256,6 +257,12 @@ The prompt supports these placeholders:
 - `{{issue_number}}` — GitHub issue number
 - `{{issue_title}}` — Issue title
 - `{{issue_body}}` — Issue body (markdown)
+
+## Session security
+
+Sessions run with `--dangerously-skip-permissions`. Each receives one GitHub token as `GH_TOKEN` — the Foreman token for implement, revise and custom stages, the EM token for review — plus `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TERM`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK` when set, `FOREMAN_TRIGGER_LABEL`, `FOREMAN_LIFECYCLE_LABELS`, a custom stage's `FOREMAN_STAGE_*`, and the names in the top-level `sessionEnv` list. `sessionEnv` may not name a GitHub token. Values of `FOREMAN_GITHUB_TOKEN`, `EM_GITHUB_TOKEN` and `sessionEnv` names (8+ characters) are replaced by `[REDACTED:<NAME>]` in the Foreman's own transcripts under `logs/`, its log lines and the errors it returns. The Claude CLI's own session log under `~/.claude/projects/` is not touched — that is where the 2026-10-01 leak landed, and the allowlist is what keeps a token out of it. This narrows what a session holds in its environment; it does not stop a session reading what `HOME` grants (`~/.ssh`, the Doppler CLI login, `~/.claude`).
+
+The Tech Lead hand-off gets the same essentials and `sessionEnv` names, `EM_GITHUB_TOKEN`, its own `TECH_LEAD_*` settings and the two label vars — never `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
 
 ## Using with skills
 

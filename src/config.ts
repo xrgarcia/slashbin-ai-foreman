@@ -129,6 +129,14 @@ export const configSchema = z.object({
   // allowed tools — so put READ-ONLY servers in it and nothing else. Optional and
   // inert when unset or when the file does not exist. Additive + OSS-safe.
   builderMcpConfig: z.string().optional(),
+  // Env var names a Claude session inherits from the daemon, on top of the
+  // essentials every session gets (SESSION_ENV_ESSENTIALS in agent.ts). Nothing
+  // else from the daemon's env reaches a session: the production daemon runs
+  // under `doppler run`, and on 2026-10-01 a session that listed its env printed
+  // FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix
+  // denylist misses names like SYSTEM_SUDO_PW and WORKER_POSTGRES_URL. One list
+  // for the fleet, never per repo. May not name a GitHub token (see loadConfig).
+  sessionEnv: z.array(z.string()).default([]),
   logFormat: z.enum(["json", "text"]).default("text"),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
@@ -267,6 +275,8 @@ export interface RepoConfig {
   allowedTools: string[];
   /** Absolute path of the builder MCP config, when one is configured. */
   builderMcpConfig?: string;
+  /** Daemon env names a session inherits on top of the essentials — the global value. */
+  sessionEnv: string[];
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
@@ -301,6 +311,8 @@ export interface AgentConfig {
   issueSnapshotLimit: number;
   logFormat: "json" | "text";
   logLevel: "debug" | "info" | "warn" | "error";
+  /** Daemon env names a session inherits on top of the essentials (see configSchema). */
+  sessionEnv: string[];
 
   // --- Review phase settings (shared across repos) ---
   // emRepoPath is the absolute path to the review repo used as the review
@@ -324,6 +336,15 @@ export interface AgentConfig {
 }
 
 // --- Helpers ---
+
+/**
+ * Names `sessionEnv` may not carry: the four `gh` reads a token from, and the
+ * Foreman's and EM's own. A session's token is assigned, never inherited.
+ */
+const SESSION_ENV_FORBIDDEN: readonly string[] = [
+  "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+  "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN",
+];
 
 function inferGithubRepo(repoPath: string): string | undefined {
   try {
@@ -380,6 +401,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     model: process.env.AI_AGENT_MODEL ?? fileConfig.model,
     allowedTools: fileConfig.allowedTools,
     builderMcpConfig: process.env.AI_AGENT_BUILDER_MCP_CONFIG ?? fileConfig.builderMcpConfig,
+    sessionEnv: fileConfig.sessionEnv,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
     repos: fileConfig.repos,
@@ -406,12 +428,22 @@ export function loadConfig(configPath?: string): AgentConfig {
 
   const parsed = configSchema.parse(cleaned);
 
+  // A session gets exactly one GitHub token, as GH_TOKEN, chosen by phase. A
+  // token name in sessionEnv would hand it a second one (or, for the names `gh`
+  // reads, outrank the one assigned), which is the leak this list exists to stop.
+  for (const name of parsed.sessionEnv) {
+    if (SESSION_ENV_FORBIDDEN.includes(name)) {
+      throw new Error(`sessionEnv must not name a GitHub token: "${name}"`);
+    }
+  }
+
   // Global settings shared by all repos (used as fallback when a per-repo entry
   // doesn't specify its own value)
   const lifecycleLabels: LifecycleLabels = Object.freeze({ ...parsed.lifecycleLabels });
   const globals = {
     allowedTools: [...parsed.allowedTools],
     builderMcpConfig: parsed.builderMcpConfig ? resolve(parsed.builderMcpConfig) : undefined,
+    sessionEnv: [...parsed.sessionEnv],
     lifecycleLabels,
   };
 
@@ -529,6 +561,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     issueSnapshotLimit: parsed.issueSnapshotLimit,
     logFormat: parsed.logFormat,
     logLevel: parsed.logLevel,
+    sessionEnv: [...parsed.sessionEnv],
     emRepoPath,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     reviewSkillPath: parsed.reviewSkillPath,

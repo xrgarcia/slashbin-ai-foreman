@@ -360,9 +360,11 @@ function readOverlay(config: RepoConfig, overlayPath: string | undefined, field:
   }
 }
 
-interface SpawnOptions {
+export interface SpawnOptions {
   /** Working directory for the claude process. */
   cwd: string;
+  /** Daemon env names the session inherits on top of SESSION_ENV_ESSENTIALS (config `sessionEnv`). */
+  sessionEnv: string[];
   /** Value to inject as GH_TOKEN (controls GitHub account attribution). */
   ghToken?: string;
   /** The repo's trigger label, handed to the session as FOREMAN_TRIGGER_LABEL. */
@@ -395,6 +397,130 @@ interface SpawnOptions {
   runLabel?: string;
   /** Extra session env on top of the label env every session gets. */
   extraEnv?: Record<string, string>;
+}
+
+/**
+ * Daemon env names every session inherits when set: what a shell, git over SSH
+ * and the Claude CLI need to run. Nothing else crosses unless `sessionEnv`
+ * names it.
+ */
+export const SESSION_ENV_ESSENTIALS: readonly string[] = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+  "TZ", "TMPDIR", "TERM", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
+];
+
+/** Copy each name present in the daemon env. */
+function pickEnv(names: readonly string[], into: Record<string, string> = {}): Record<string, string> {
+  for (const n of names) {
+    const v = process.env[n];
+    if (v !== undefined) into[n] = v;
+  }
+  return into;
+}
+
+/**
+ * A Claude session's whole environment, built from an allowlist.
+ *
+ * It used to be `{ ...process.env }`. The production daemon runs under
+ * `doppler run`, so every session — run with --dangerously-skip-permissions —
+ * held every secret in that config, both GitHub tokens among them; on
+ * 2026-10-01 a custom-stage session listed its env and printed
+ * FOREMAN_GITHUB_TOKEN into its Claude transcript.
+ *
+ * Order matters: the inherited names first, then GH_TOKEN, the label vars and
+ * extraEnv, so nothing inherited can overwrite the token this phase assigned.
+ * Set here because every session goes through spawnClaudeWithOptions — a new
+ * caller cannot forget the label vars or widen the env by accident.
+ */
+export function buildSessionEnv(opts: SpawnOptions): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(opts.sessionEnv ?? [])]);
+  // GH_TOKEN must be a string or absent — never literal "undefined".
+  if (opts.ghToken) env.GH_TOKEN = opts.ghToken;
+  // The configured label names, for the skill. The daemon filtering on a renamed
+  // trigger label while the skill runs `gh issue list --label approved` selects
+  // work the agent never finds, so the skill reads these instead of its own
+  // literals. Labels as one JSON map (`JSON.parse` once, iterate the set); the
+  // trigger label on its own, since it selects work and a skill uses it alone in
+  // `--label`.
+  env.FOREMAN_TRIGGER_LABEL = opts.triggerLabel;
+  env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(opts.lifecycleLabels);
+  if (opts.extraEnv) Object.assign(env, opts.extraEnv);
+  return env;
+}
+
+/**
+ * The Tech Lead hand-off's environment. It reads EM_GITHUB_TOKEN by name and
+ * sets GH_TOKEN itself, then starts its own Claude session from what it gets
+ * here — so it receives the EM token and never the Foreman's, plus its own
+ * TECH_LEAD_* settings and the configured label names.
+ */
+export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  pickEnv(Object.keys(process.env).filter((n) => n.startsWith("TECH_LEAD_")), env);
+  pickEnv(["EM_GITHUB_TOKEN"], env);
+  env.TECH_LEAD_EM_REPO = agentConfig.emRepoPath ?? "";
+  // The configured label names, exactly as every Claude session gets them
+  // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
+  if (repoConfig.triggerLabel) env.FOREMAN_TRIGGER_LABEL = repoConfig.triggerLabel;
+  if (repoConfig.lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(repoConfig.lifecycleLabels);
+  return env;
+}
+
+/** A value shorter than this is not redacted: too likely to match ordinary text. */
+const MIN_SECRET_LENGTH = 8;
+
+/**
+ * The values redacted from everything a child prints: both GitHub tokens and
+ * each `sessionEnv` name, read from the daemon env at spawn, 8+ characters,
+ * longest first (so a value containing another is replaced whole).
+ */
+export function secretValues(sessionEnv: readonly string[]): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", ...sessionEnv]) {
+    const value = process.env[name];
+    if (value !== undefined && value.length >= MIN_SECRET_LENGTH && !out.some((s) => s.value === value)) {
+      out.push({ name, value });
+    }
+  }
+  return out.sort((a, b) => b.value.length - a.value.length);
+}
+
+/** Replace every occurrence of each secret value with `[REDACTED:<NAME>]`. */
+export function redactAll(text: string, secrets: ReadonlyArray<{ name: string; value: string }>): string {
+  let out = text;
+  for (const { name, value } of secrets) {
+    if (out.includes(value)) out = out.split(value).join(`[REDACTED:${name}]`);
+  }
+  return out;
+}
+
+/**
+ * Redact a stream written in chunks. A value split across two chunks would
+ * escape a per-chunk redactor, so `push` holds back the last L − 1 characters
+ * (L = longest value) — the most of a value that can still be incomplete — and
+ * prepends them to the next chunk. `flush` releases the held tail; it MUST run
+ * before the stream ends, or whatever was written last (the run's trailer) is lost.
+ */
+export function createStreamRedactor(secrets: ReadonlyArray<{ name: string; value: string }>): {
+  push(chunk: string): string;
+  flush(): string;
+} {
+  const hold = secrets.reduce((m, s) => Math.max(m, s.value.length), 0) - 1;
+  let tail = "";
+  return {
+    push(chunk: string): string {
+      if (secrets.length === 0) return chunk;
+      const text = redactAll(tail + chunk, secrets);
+      const cut = Math.max(0, text.length - hold);
+      tail = text.slice(cut);
+      return text.slice(0, cut);
+    },
+    flush(): string {
+      const out = redactAll(tail, secrets);
+      tail = "";
+      return out;
+    },
+  };
 }
 
 /**
@@ -485,33 +611,41 @@ function spawnClaudeWithOptions(
     }
   }
 
-  // GH_TOKEN must be a string or absent — never literal "undefined".
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (opts.ghToken) env.GH_TOKEN = opts.ghToken;
-  // The configured label names, for the skill. The daemon filtering on a renamed
-  // trigger label while the skill runs `gh issue list --label approved` selects
-  // work the agent never finds, so the skill reads these instead of its own
-  // literals. Set here because every session goes through this function — a new
-  // caller cannot forget them. Labels as one JSON map (`JSON.parse` once, iterate
-  // the set); the trigger label on its own, since it selects work and a skill
-  // uses it alone in `--label`.
-  env.FOREMAN_TRIGGER_LABEL = opts.triggerLabel;
-  env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(opts.lifecycleLabels);
-  if (opts.extraEnv) Object.assign(env, opts.extraEnv);
+  const env = buildSessionEnv(opts);
+
+  // Everything the child prints is redacted at each sink — transcript, logger
+  // lines, and the stdout/stderr handed back (which feed trailer parsing and
+  // describeSpawnFailure, whose tails become logged errors). The allowlist keeps
+  // the other secrets out of the session; these values are the ones it may hold.
+  const secrets = secretValues(opts.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  let stderrLine = "";
+  const warnStderr = (line: string) => {
+    if (line) logger.warn(`[claude stderr] ${redactAll(line, secrets)}`);
+  };
 
   return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
     let stderr = "";
     let child: ChildProcess | null = null;
     let timedOut = false;
+    let finished = false;
 
     const finish = (r: SpawnResult) => {
+      if (finished) return;
+      finished = true;
+      warnStderr(stderrLine);
+      stderrLine = "";
       if (transcript) {
+        transcript.write(outRedactor.flush());
+        const errTail = errRedactor.flush();
+        if (errTail) transcript.write(`[stderr] ${errTail}`);
         transcript.write(`\n===== END (exit=${r.exitCode}${r.timedOut ? ", timedOut" : ""}) @ ${new Date().toISOString()} =====\n`);
         transcript.end();
         transcript = null;
       }
-      resolve(r);
+      resolve({ ...r, stdout: redactAll(r.stdout, secrets), stderr: redactAll(r.stderr, secrets) });
     };
 
     const timeout = setTimeout(() => {
@@ -543,18 +677,21 @@ function spawnClaudeWithOptions(
     });
 
     child.stdout?.on("data", (data: Buffer) => {
-      stdout += data.toString();
-      transcript?.write(data);
+      const text = data.toString();
+      stdout += text;
+      transcript?.write(outRedactor.push(text));
     });
 
     child.stderr?.on("data", (data: Buffer) => {
       const text = data.toString();
       stderr += text;
-      transcript?.write(`[stderr] ${text}`);
-      const lines = text.split("\n").filter(Boolean);
-      for (const line of lines) {
-        logger.warn(`[claude stderr] ${line}`);
-      }
+      const safe = errRedactor.push(text);
+      if (safe) transcript?.write(`[stderr] ${safe}`);
+      // One logger line per COMPLETE line, so a value split across two chunks
+      // is whole when it is redacted; the remainder is emitted in finish().
+      const lines = (stderrLine + text).split("\n");
+      stderrLine = lines.pop() ?? "";
+      for (const line of lines) warnStderr(line);
     });
 
     child.on("error", (err) => {
@@ -587,6 +724,7 @@ function spawnClaude(
     prompt,
     {
       cwd: config.repoPath,
+      sessionEnv: config.sessionEnv,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       triggerLabel: config.triggerLabel,
       lifecycleLabels: config.lifecycleLabels,
@@ -1166,6 +1304,7 @@ export async function runCustomStage(
     prompt,
     {
       cwd: config.repoPath,
+      sessionEnv: config.sessionEnv,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       triggerLabel: config.triggerLabel,
       lifecycleLabels: config.lifecycleLabels,
@@ -1328,6 +1467,7 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
     prompt,
     {
       cwd,
+      sessionEnv: repoConfig.sessionEnv,
       ghToken: emToken,
       triggerLabel: repoConfig.triggerLabel,
       lifecycleLabels: repoConfig.lifecycleLabels,
@@ -1449,31 +1589,33 @@ export async function reviewViaTechLead(
   const args = [join(techLead, "bin/tech-lead.mjs"), "review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
   logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead (Codex)`);
 
+  // Redacted at every sink, as in spawnClaudeWithOptions: the transcript as it
+  // streams, and the stdout/stderr the trailer parse and the error read.
+  const secrets = secretValues(agentConfig.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolveRun) => {
     const child = spawn("node", args, {
       cwd: techLead,
-      // The configured label names, exactly as every Claude session gets them
-      // (spawnClaudeWithOptions), so the Tech Lead never writes a hardcoded name.
-      env: {
-        ...process.env,
-        TECH_LEAD_EM_REPO: agentConfig.emRepoPath ?? "",
-        ...(repoConfig.triggerLabel ? { FOREMAN_TRIGGER_LABEL: repoConfig.triggerLabel } : {}),
-        ...(repoConfig.lifecycleLabels ? { FOREMAN_LIFECYCLE_LABELS: JSON.stringify(repoConfig.lifecycleLabels) } : {}),
-      },
+      env: buildTechLeadEnv(agentConfig, repoConfig),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "", stderr = "", timedOut = false;
     const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath)) : null;
-    child.stdout.on("data", (b) => { stdout += b; log?.write(b); });
-    child.stderr.on("data", (b) => { stderr += b; log?.write(b); });
+    child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, agentConfig.reviewMaxDurationMs);
     const onAbort = () => child.kill("SIGTERM");
     abortSignal?.addEventListener("abort", onAbort, { once: true });
     child.on("close", (code) => {
       clearTimeout(timer);
       abortSignal?.removeEventListener("abort", onAbort);
-      log?.end();
-      resolveRun({ code, stdout, stderr, timedOut });
+      if (log) {
+        log.write(outRedactor.flush());
+        log.write(errRedactor.flush());
+        log.end();
+      }
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(stderr, secrets), timedOut });
     });
   });
 
