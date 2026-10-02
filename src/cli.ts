@@ -12,6 +12,7 @@ import { addObserver } from "./work-source.js";
 import { secretValues } from "./agent.js";
 import { PaperclipClient } from "./paperclip/client.js";
 import { PaperclipMirror } from "./paperclip/mirror.js";
+import { runDoctor } from "./paperclip/doctor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -29,6 +30,7 @@ function printHelp(): void {
 slashbin-ai-agent v${getVersion()}
 
 Usage: slashbin-ai-agent [options]
+       slashbin-ai-agent paperclip:doctor [--config <path>]
 
 Options:
   --config <path>  Path to .ai-agent.json config file
@@ -36,6 +38,10 @@ Options:
   --once           Run a single poll cycle and exit
   --version        Print version and exit
   --help           Show this help message
+
+Commands:
+  paperclip:doctor  Check Paperclip reachability, company, agent registration, and config
+                    (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
 repoPath, githubRepo, baseBranch, featureBranch, triggerLabel, skillPath, prompt.
@@ -80,6 +86,20 @@ async function main(): Promise<void> {
   const configPath = getArg(args, "--config");
   const repoFilter = getArg(args, "--repo");
   const once = args.includes("--once");
+
+  // Read-only Paperclip check. Handled here, before anything that needs a GitHub
+  // token, a logger or the PID file: the doctor needs only the config.
+  if (args[0] === "paperclip:doctor") {
+    let doctorConfig;
+    try {
+      doctorConfig = loadConfig(configPath);
+    } catch (err) {
+      console.log(`FAIL: config-complete — the config does not load: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    }
+    const allPassed = await runDoctor(doctorConfig);
+    process.exit(allPassed ? 0 : 1);
+  }
 
   let config;
   try {
