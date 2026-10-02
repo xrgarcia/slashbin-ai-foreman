@@ -118,12 +118,10 @@ export class PaperclipClient {
     return this.request("POST", `${this.companyPath()}/agents`, body);
   }
 
+  // Addressed by agent id alone: Paperclip reads `?companyId=` only to resolve
+  // an agent shortname, and every id the Foreman holds is the agent's UUID.
   updateAgent(id: string, body: Partial<PaperclipAgent> & Record<string, unknown>): Promise<PaperclipAgent> {
-    return this.request(
-      "PATCH",
-      `/api/agents/${encodeURIComponent(id)}?companyId=${encodeURIComponent(this.companyId)}`,
-      body,
-    );
+    return this.request("PATCH", `/api/agents/${encodeURIComponent(id)}`, body);
   }
 
   private companyPath(): string {

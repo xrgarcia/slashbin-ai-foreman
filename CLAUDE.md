@@ -106,6 +106,7 @@ src/
 ├── orchestrator.ts  # Stage pass per repo, failure cooldowns, label transitions
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
 ├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
+├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
 └── index.ts         # Public API exports
 ```
 
