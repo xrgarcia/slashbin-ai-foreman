@@ -27,10 +27,30 @@ export function workSourceFor(_repoConfig: RepoConfig): WorkSourceAdapter {
 const observers: WorkObserver[] = [];
 
 /**
- * Not configurable on purpose: a value set to zero by mistake would cut off
- * every observer, and one set high would let an observer stall every step.
+ * Per-observer, per-event limit. Generous because observers run OFF the build
+ * path (see `enqueue`): the daemon's gh calls are execFileSync and block the
+ * event loop, so a 5 s limit expired on a healthy Paperclip during the
+ * startup sweep and dropped the note (2026-10-01, first mirror run). A hung
+ * observer now delays only the notes queued behind it, never a build step.
  */
-const OBSERVER_TIMEOUT_MS = 5_000;
+const OBSERVER_TIMEOUT_MS = 30_000;
+
+/** Events are delivered in order, one at a time, behind the build. */
+let queue: Promise<void> = Promise.resolve();
+
+function enqueue<K extends keyof WorkObserver>(
+  method: K,
+  args: Parameters<NonNullable<WorkObserver[K]>>,
+  logger: Logger,
+): void {
+  if (observers.length === 0) return;
+  queue = queue.then(() => fanOut(method, args, logger));
+}
+
+/** Resolves when every queued event has been delivered (tests, shutdown). */
+export function drainObservers(): Promise<void> {
+  return queue;
+}
 
 /**
  * Register an observer. No de-duplication: registering the same instance twice
@@ -87,7 +107,7 @@ export async function selectWork(
 
 export async function claimWork(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
   await workSourceFor(repoConfig).claim(item, repoConfig, logger);
-  await fanOut("onClaim", [item, repoConfig, logger], logger);
+  enqueue("onClaim", [item, repoConfig, logger], logger);
 }
 
 export async function reportWorkState(
@@ -98,7 +118,7 @@ export async function reportWorkState(
   logger: Logger,
 ): Promise<boolean> {
   const changed = await workSourceFor(repoConfig).reportState(item, from, to, repoConfig, logger);
-  await fanOut("onState", [item, from, to, repoConfig, logger], logger);
+  enqueue("onState", [item, from, to, repoConfig, logger], logger);
   return changed;
 }
 
@@ -109,7 +129,7 @@ export async function reportWorkPrLink(
   logger: Logger,
 ): Promise<void> {
   await workSourceFor(repoConfig).reportPrLink(item, prUrl, repoConfig, logger);
-  await fanOut("onPrLink", [item, prUrl, repoConfig, logger], logger);
+  enqueue("onPrLink", [item, prUrl, repoConfig, logger], logger);
 }
 
 export async function reportWorkBlocked(
@@ -119,25 +139,25 @@ export async function reportWorkBlocked(
   logger: Logger,
 ): Promise<void> {
   await workSourceFor(repoConfig).reportBlocked(item, reason, repoConfig, logger);
-  await fanOut("onBlocked", [item, reason, repoConfig, logger], logger);
+  enqueue("onBlocked", [item, reason, repoConfig, logger], logger);
 }
 
 /** The feature PR delivering `item` merged to the base branch. Observers only. */
 export async function notifyObserversMerged(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  await fanOut("onMerged", [item, repoConfig, logger], logger);
+  enqueue("onMerged", [item, repoConfig, logger], logger);
 }
 
 /** `item` was handed to promotion (develop → main). Observers only. */
 export async function notifyObserversPromoted(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  await fanOut("onPromoted", [item, repoConfig, logger], logger);
+  enqueue("onPromoted", [item, repoConfig, logger], logger);
 }
 
 /** An upstream (github / claude) started refusing work. Observers only. */
 export async function notifyBackoffPause(upstream: string, reason: string, logger: Logger): Promise<void> {
-  await fanOut("onBackoffPause", [upstream, reason, logger], logger);
+  enqueue("onBackoffPause", [upstream, reason, logger], logger);
 }
 
 /** An upstream back-off cleared. Observers only. */
 export async function notifyBackoffResume(upstream: string, logger: Logger): Promise<void> {
-  await fanOut("onBackoffResume", [upstream, logger], logger);
+  enqueue("onBackoffResume", [upstream, logger], logger);
 }
