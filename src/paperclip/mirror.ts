@@ -3,8 +3,11 @@
 // is held by the Foreman's agent, and its status follows the step.
 //
 // An observer, never a work source: GitHub decides what is built. Everything
-// here is best-effort. Every Paperclip call is caught, an outage is logged
-// once (and again only after a success in between), and no method throws.
+// here is best-effort. Every Paperclip call is caught and no method throws.
+// An outage (unreachable, or a 5xx) is logged once, and again only after a
+// success in between. A rejection (any other 4xx) is about that one call: it
+// is logged with Paperclip's reason, once per task and status code, and never
+// stands in for an outage or stops the step's note.
 //
 // The task row is shared with whatever else syncs GitHub issues into Paperclip.
 // It is found by the first line of its description, `identityKeyFormat` with
@@ -18,7 +21,7 @@ import type { PriorState, WorkItem, WorkObserver, WorkState } from "../adapters.
 import { redactAll } from "../agent.js";
 import type { PaperclipConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import type { PaperclipClient } from "./client.js";
+import { PaperclipClientError, type PaperclipClient } from "./client.js";
 
 /** A Paperclip status bucket; `statusMap` may rename each one. */
 export type PaperclipBucket = "todo" | "in_progress" | "in_review" | "done" | "cancelled";
@@ -46,6 +49,9 @@ export const PAPERCLIP_STEPS = Object.freeze({
   backoffPause: { status: null, note: "paused: {upstream} back-off: {reason}" },
   backoffResume: { status: null, note: "resumed after back-off" },
 } as const satisfies Record<string, PaperclipStep>);
+
+/** The note a repeat claim posts: the same work, retried after an attempt that did not finish. */
+export const PAPERCLIP_RETRY_NOTE = "retrying: the previous attempt did not finish";
 
 /** The status a task is created with, before the claim moves it on. */
 export const PAPERCLIP_CREATE_STATUS: Bucket = "todo";
@@ -77,6 +83,10 @@ export class PaperclipMirror implements WorkObserver {
   /** First description line → task id, from the last full scan. */
   private index: Map<string, string> | null = null;
   private indexedAt = 0;
+  /** Identity keys claimed and not yet moved on by a state change: a repeat claim is a retry. */
+  private readonly claimed = new Set<string>();
+  /** "<task id> <status>" rejections already logged, so a repeating one is logged once. */
+  private readonly rejectionsLogged = new Set<string>();
   /** The item being built right now (one session at a time), for back-off notes. */
   private building: WorkItem | null = null;
 
@@ -92,14 +102,19 @@ export class PaperclipMirror implements WorkObserver {
     const id = await this.resolve(item, true);
     if (!id) return;
     const step = PAPERCLIP_STEPS.claim;
-    if (!(await this.setStatus(id, step.status))) return;
-    await this.note(id, step.note);
+    await this.setStatus(id, step.status);
+    // A second claim before any state change is the same work, retried after a
+    // failed attempt: say so once, rather than "picked up" twice.
+    const key = this.keyOf(item);
+    await this.note(id, this.claimed.has(key) ? PAPERCLIP_RETRY_NOTE : step.note);
+    this.claimed.add(key);
   }
 
   async onState(item: WorkItem, _from: PriorState, to: WorkState, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     const step = STATE_STEP[to];
     if (!step) return;
     if (to !== "queued" && sameItem(this.building, item)) this.building = null;
+    if (to !== "queued") this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
     if (step.status) await this.setStatus(id, step.status);
@@ -113,6 +128,7 @@ export class PaperclipMirror implements WorkObserver {
 
   async onBlocked(item: WorkItem, reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
+    this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (id) await this.note(id, fill(PAPERCLIP_STEPS.blocked.note, { reason }));
   }
@@ -195,23 +211,31 @@ export class PaperclipMirror implements WorkObserver {
     return made.value.id;
   }
 
-  /** Set the task's status, held by the Foreman's agent. True on success. */
+  /**
+   * Set the task's status, held by the Foreman's agent. True on success.
+   *
+   * `assigneeUserId: null` in the same update: Paperclip allows one assignee
+   * ("Issue can only have one assignee", 422), and a sync gives an in_progress
+   * row a board user, so taking the row means releasing that user.
+   */
   private async setStatus(id: string, bucket: Bucket): Promise<boolean> {
     const r = await this.safeCall("update task", () =>
-      this.client.updateIssue(id, { status: this.statusName(bucket), assigneeAgentId: this.cfg.agentId }),
-    );
+      this.client.updateIssue(id, { status: this.statusName(bucket), assigneeAgentId: this.cfg.agentId, assigneeUserId: null }),
+    id);
     return r.ok;
   }
 
   private async note(id: string, text: string): Promise<void> {
-    await this.safeCall("post note", () => this.client.createComment(id, redactAll(text, this.secrets)));
+    await this.safeCall("post note", () => this.client.createComment(id, redactAll(text, this.secrets)), id);
   }
 
   /**
-   * Run one Paperclip call. Never throws: a failure is logged at warn only when
-   * it starts an outage, and the next success ends that outage.
+   * Run one Paperclip call. Never throws. An outage (no answer, or a 5xx) is
+   * logged at warn when it starts, and the next success ends it. A rejection
+   * (any other 4xx) is about this call only: logged with Paperclip's reason,
+   * once per task and status code, and it neither starts nor ends an outage.
    */
-  private async safeCall<T>(what: string, fn: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
+  private async safeCall<T>(what: string, fn: () => Promise<T>, taskId = ""): Promise<{ ok: true; value: T } | { ok: false }> {
     try {
       const value = await fn();
       if (this.outageLogged) {
@@ -220,10 +244,18 @@ export class PaperclipMirror implements WorkObserver {
       }
       return { ok: true, value };
     } catch (err) {
-      if (!this.outageLogged) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = err instanceof PaperclipClientError ? err.status : 0;
+      if (status >= 400 && status < 500) {
+        const once = `${taskId} ${what} ${status}`;
+        if (!this.rejectionsLogged.has(once)) {
+          this.rejectionsLogged.add(once);
+          const reason = err instanceof PaperclipClientError ? reasonOf(err.body) : "";
+          this.log("warn", redactAll(`Paperclip mirror: ${what} rejected: ${msg}${reason ? ` — ${reason}` : ""}`, this.secrets));
+        }
+      } else if (!this.outageLogged) {
         this.outageLogged = true;
-        const msg = err instanceof Error ? err.message : String(err);
-        this.log("warn", `Paperclip mirror: ${what} failed, notes are skipped until Paperclip answers again: ${redactAll(msg, this.secrets)}`);
+        this.log("warn", `Paperclip mirror: ${what} failed, Paperclip looks down; logged again only after it answers: ${redactAll(msg, this.secrets)}`);
       }
       return { ok: false };
     }
@@ -236,6 +268,18 @@ export class PaperclipMirror implements WorkObserver {
       // a broken logger must not turn a skipped note into a thrown error
     }
   }
+}
+
+/** Paperclip's error text from a response body (`{ error }` JSON), or the body trimmed. */
+function reasonOf(body: string): string {
+  try {
+    const j = JSON.parse(body) as { error?: unknown; message?: unknown };
+    const e = j?.error ?? j?.message;
+    if (typeof e === "string") return e.slice(0, 300);
+  } catch {
+    // not JSON: fall through to the raw body
+  }
+  return body.trim().slice(0, 300);
 }
 
 function sameItem(a: WorkItem | null, b: WorkItem): boolean {
