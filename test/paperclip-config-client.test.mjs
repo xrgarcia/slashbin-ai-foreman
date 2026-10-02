@@ -166,7 +166,7 @@ test("each method hits its documented method, path and body", async () => {
     "POST /api/issues/iss/comments",
     `GET /api/companies/${CID}/agents`,
     `POST /api/companies/${CID}/agents`,
-    `PATCH /api/agents/ag?companyId=${CID}`,
+    "PATCH /api/agents/ag",
   ]);
   assert.deepEqual(calls[0].body, { title: "t", status: "todo", description: "source: o/r#1" });
   assert.deepEqual(calls[3].body, { body: "note" });
