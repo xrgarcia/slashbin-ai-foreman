@@ -68,3 +68,26 @@ export interface WorkSourceAdapter {
   /** The Foreman cannot proceed on `item`; `reason` says why. */
   reportBlocked(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
 }
+
+/**
+ * Something that watches the Foreman work without being a work source (EM#417:
+ * the Paperclip mirror). It receives every report the work source receives, in
+ * the same order and with the same arguments, plus the events the source never
+ * sees: a feature PR merged, work handed to promotion, an upstream back-off
+ * starting or ending.
+ *
+ * Every method is optional and best-effort. The dispatcher (work-source.ts)
+ * awaits each one under a hard timeout and logs, never rethrows, its errors, so
+ * an observer can neither fail nor stall a build. It never decides anything:
+ * GitHub stays the only work source.
+ */
+export interface WorkObserver {
+  onClaim?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  onState?(item: WorkItem, from: PriorState, to: WorkState, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  onPrLink?(item: WorkItem, prUrl: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  onBlocked?(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  onMerged?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  onPromoted?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  onBackoffPause?(upstream: string, reason: string, logger: Logger): Promise<void>;
+  onBackoffResume?(upstream: string, logger: Logger): Promise<void>;
+}

@@ -59,6 +59,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       logger.warn(text);
       bridge?.sendStatus(`**FOREMAN:** ${text}`, level);
     },
+    logger,
   });
 
   // A TTL at or above the poll interval means a cycle can be served entirely

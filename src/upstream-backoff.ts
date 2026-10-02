@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import type { Logger } from "./logger.js";
+import { notifyBackoffPause, notifyBackoffResume } from "./work-source.js";
 
 /**
  * Daemon-wide back-off for upstreams that refuse work: the GitHub API rate limit
@@ -25,7 +27,9 @@ import { execFileSync } from "node:child_process";
  *    caller; its result clears or extends.
  *
  * One Discord message per transition per upstream (enter, extend, clear) —
- * never per repo or per refused call.
+ * never per repo or per refused call. Work observers (EM#417) get the two real
+ * transitions only: pause on enter, resume on clear. An extend is the same
+ * episode continuing, and half-open is not yet clear.
  */
 
 export type Upstream = "github" | "claude";
@@ -62,6 +66,16 @@ let baseMs = 120_000;
 let capMs = 3_600_000;
 let notifyFn: ((text: string, level: Level) => void) | undefined;
 
+/** Fallback until the daemon supplies its own; observer errors land here at info. */
+const consoleLogger: Logger = {
+  debug: () => {},
+  info: (msg) => console.info(`[upstream] ${msg}`),
+  warn: (msg) => console.warn(`[upstream] ${msg}`),
+  error: (msg) => console.error(`[upstream] ${msg}`),
+  child: () => consoleLogger,
+};
+let observerLogger: Logger = consoleLogger;
+
 const states: Record<Upstream, UpstreamState> = {
   github: freshState(),
   claude: freshState(),
@@ -82,10 +96,13 @@ export function configureUpstreamBackoff(opts: {
   baseMs: number;
   capMs: number;
   notify?: (text: string, level: Level) => void;
+  /** Passed to work observers on pause / resume. */
+  logger?: Logger;
 }): void {
   if (Number.isFinite(opts.baseMs) && opts.baseMs > 0) baseMs = opts.baseMs;
   if (Number.isFinite(opts.capMs) && opts.capMs > 0) capMs = opts.capMs;
   notifyFn = opts.notify;
+  observerLogger = opts.logger ?? consoleLogger;
 }
 
 function notify(text: string, level: Level): void {
@@ -145,6 +162,10 @@ function enter(u: Upstream, reason: string, resetAtMs?: number): void {
   const windowMs = windowFor(s.consecutive);
   schedule(u, windowMs);
   notify(`Foreman backing off ${NAMES[u]} for ${formatDuration(windowMs)} — ${reason}`, "warn");
+  // Not awaited: the state machine is synchronous and must not wait on an
+  // observer. The fan-out awaits each observer under its own timeout and never
+  // rejects.
+  void notifyBackoffPause(u, reason, observerLogger);
 }
 
 function extend(u: Upstream, resetAtMs?: number): void {
@@ -172,6 +193,7 @@ function clear(u: Upstream): void {
   s.resetAtMs = undefined;
   s.lastClearedAt = Date.now();
   notify(`Foreman ${NAMES[u]} back-off cleared — resuming`, "info");
+  void notifyBackoffResume(u, observerLogger);
   releaseWaiters(u);
 }
 
