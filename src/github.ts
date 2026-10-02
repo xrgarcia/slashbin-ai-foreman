@@ -4,6 +4,9 @@ import type { PriorState, WorkItem, WorkSourceAdapter, WorkState } from "./adapt
 import type { Logger } from "./logger.js";
 import { ghResource, recordGhCall } from "./gh-usage.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "./upstream-backoff.js";
+import {
+  closedVersion, isGitHubStateEnabled, markAllDirty, markRepoDirty, stateOpenIssues, stateOpenPrs,
+} from "./github-state.js";
 
 const GH_MAX_ATTEMPTS = 3;
 const GH_BACKOFF_MS = [1000, 3000, 9000];
@@ -204,6 +207,9 @@ function invalidateSnapshotIfMutating(args: string[]): void {
   if (args[0] === "api" && methodIdx >= 0 && args[methodIdx + 1] !== "GET") {
     issueSnapshots.clear();
     prSnapshots.clear();
+    const m = /^repos\/([^/]+\/[^/]+)\//.exec(args.find((a) => a.startsWith("repos/")) ?? "");
+    if (m) markRepoDirty(m[1]);
+    else markAllDirty();
     return;
   }
 
@@ -213,6 +219,7 @@ function invalidateSnapshotIfMutating(args: string[]): void {
   const READ_ONLY = new Set(["list", "view", "diff", "checks", "status"]);
   if (READ_ONLY.has(args[1])) return;
 
+  markRepoDirty(repo);
   if (args[0] === "issue") issueSnapshots.delete(repo);
   // A PR merge closes the PR *and* moves the issue labels that track it, so a
   // `pr` mutation has to drop both — otherwise a later phase this cycle reads a
@@ -234,10 +241,15 @@ function invalidateSnapshotIfMutating(args: string[]): void {
  */
 export function dropIssueSnapshot(repo: string): void {
   issueSnapshots.delete(repo);
+  markRepoDirty(repo);
 }
 
 /** Every open issue in the repo, from cache when warm. */
 function getOpenIssues(repo: string, cwd: string, logger: Logger): IssueSnapshot[] {
+  // The fleet-wide state (github-state.ts) answers for every configured repo
+  // from one bulk query. `issueCacheTtlMs: 0` still means "always live".
+  if (issueCacheTtlMs > 0 && isGitHubStateEnabled(repo)) return stateOpenIssues(repo);
+
   const cached = issueSnapshots.get(repo);
   if (cached && issueCacheTtlMs > 0 && Date.now() - cached.fetchedAt < issueCacheTtlMs) {
     return cached.issues;
@@ -302,6 +314,8 @@ const prSnapshots = new Map<string, { fetchedAt: number; prs: PrSnapshot[] }>();
 
 /** Every open PR in the repo, from cache when warm. */
 function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
+  if (issueCacheTtlMs > 0 && isGitHubStateEnabled(repo)) return stateOpenPrs(repo);
+
   const cached = prSnapshots.get(repo);
   if (cached && issueCacheTtlMs > 0 && Date.now() - cached.fetchedAt < issueCacheTtlMs) {
     return cached.prs;
@@ -335,6 +349,54 @@ function findOpenPrs(
       (opts.base === undefined || p.baseRefName === opts.base),
   );
   return opts.limit === undefined ? matches : matches.slice(0, opts.limit);
+}
+
+/**
+ * The open `head → base` PR the fleet state already knows about, or undefined
+ * when the state is off or has none. Undefined is "ask GitHub", never "no PR":
+ * a session the Foreman just ran may have opened one the state has not seen yet,
+ * and a caller that reads absence as "no PR" would open a duplicate.
+ */
+export function knownOpenPr(
+  repo: string,
+  head: string,
+  base: string,
+): { number: number; url: string; headRefOid: string } | undefined {
+  if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return undefined;
+  const pr = stateOpenPrs(repo).find((p) => p.headRefName === head && p.baseRefName === base);
+  return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid } : undefined;
+}
+
+/**
+ * Deep reads keyed on what the fleet state says about the repo, so they repeat
+ * only when the thing they read can have changed. `key` returns null when the
+ * state cannot vouch (off, or the PR is not in it) — then the read is live.
+ */
+const deepReadCache = new Map<string, { key: string; json: string }>();
+
+function ghKeyed(id: string, key: () => string | null, args: string[], cwd: string): string {
+  let k: string | null = null;
+  try { k = key(); } catch { k = null; }
+  if (k !== null) {
+    const hit = deepReadCache.get(id);
+    if (hit && hit.key === k) return hit.json;
+  }
+  const json = gh(args, cwd);
+  if (k !== null) deepReadCache.set(id, { key: k, json });
+  return json;
+}
+
+/** The open `head → base` PR's head commit and last update, or null when the state cannot say. */
+function openPrVersion(repo: string, head: string, base: string): string | null {
+  if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return null;
+  const pr = stateOpenPrs(repo).find((p) => p.headRefName === head && p.baseRefName === base);
+  return pr ? `${pr.number}:${pr.headRefOid}@${pr.updatedAt}` : null;
+}
+
+/** Changes whenever a PR in the repo was seen merged or closed, or null when the state is off. */
+function closedPrVersion(repo: string): string | null {
+  if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return null;
+  return String(closedVersion(repo));
 }
 
 /**
@@ -786,7 +848,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       // but the issue label wasn't updated.
       const openPrs = findOpenPrs(repo, config.repoPath, { base: config.baseBranch, limit: 50 });
 
-      const mergedPrJson = gh([
+      const mergedPrJson = ghKeyed(`merged20:${repo}:${config.baseBranch}`, () => closedPrVersion(repo), [
         "pr", "list",
         "--repo", repo,
         "--state", "merged",
@@ -1047,15 +1109,22 @@ function adoptOrphanedReviewCandidate(
     return null;
   }
 
+  // This probe runs on every idle cycle while a feature PR waits for review.
+  // With the fleet state on, the open-issue list already answers "open, and
+  // with which labels" for every ref — absent from it means not open.
+  const known = issueCacheTtlMs > 0 && isGitHubStateEnabled(config.githubRepo)
+    ? new Map(stateOpenIssues(config.githubRepo).map((i) => [i.number, i]))
+    : null;
   const adopted: number[] = [];
   for (const num of refs) {
     try {
-      const raw = gh([
-        "issue", "view", String(num),
-        "--repo", config.githubRepo,
-        "--json", "state,labels",
-      ], config.repoPath);
-      const info: { state: string; labels: { name: string }[] } = JSON.parse(raw);
+      const info: { state: string; labels: { name: string }[] } = known
+        ? { state: known.has(num) ? "OPEN" : "CLOSED", labels: known.get(num)?.labels ?? [] }
+        : JSON.parse(gh([
+          "issue", "view", String(num),
+          "--repo", config.githubRepo,
+          "--json", "state,labels",
+        ], config.repoPath));
       if (info.state !== "OPEN") continue;
       const names = new Set(info.labels.map((l) => l.name));
       if (!names.has(config.triggerLabel)) continue;
@@ -1107,7 +1176,8 @@ export function findIssuesMergedToBase(
 ): MergedIssueRef[] {
   if (candidates.length === 0) return [];
   try {
-    const json = gh([
+    // The merged set only grows when a PR merges, which the fleet state sees.
+    const json = ghKeyed(`merged:${config.githubRepo}:${config.baseBranch}`, () => closedPrVersion(config.githubRepo), [
       "pr", "list",
       "--repo", config.githubRepo,
       "--state", "merged",
@@ -1612,12 +1682,44 @@ function byReviewer(review: { author?: { login?: string } }, reviewerLogin: stri
  * head has already been reviewed). On any lookup failure returns false — we'd
  * rather (rarely) re-review than silently never review.
  */
+/**
+ * hasFreshReview answers, keyed by the PR's head commit and last-update time
+ * from the fleet state. A new commit moves the head; a submitted review bumps
+ * the PR's updatedAt — either one misses this cache. Without it, every idle
+ * cycle re-read the reviews of every open feature PR waiting on a human.
+ */
+const freshReviewCache = new Map<string, { key: string; fresh: boolean }>();
+
 function hasFreshReview(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
 ): boolean {
+  let cacheKey: string | null = null;
+  const id = `${config.githubRepo}#${prNumber}`;
+  try {
+    if (issueCacheTtlMs > 0 && isGitHubStateEnabled(config.githubRepo)) {
+      const pr = stateOpenPrs(config.githubRepo).find((p) => p.number === prNumber);
+      if (pr) {
+        cacheKey = `${pr.headRefOid}@${pr.updatedAt}@${reviewerLogin ?? ""}`;
+        const hit = freshReviewCache.get(id);
+        if (hit && hit.key === cacheKey) return hit.fresh;
+      }
+    }
+  } catch { /* state unavailable — read live */ }
+  const fresh = readFreshReview(config, prNumber, reviewerLogin, logger);
+  if (cacheKey && fresh !== null) freshReviewCache.set(id, { key: cacheKey, fresh });
+  return fresh ?? false;
+}
+
+/** Null when the lookup failed — not cached, reads as "no fresh review". */
+function readFreshReview(
+  config: RepoConfig,
+  prNumber: number,
+  reviewerLogin: string | undefined,
+  logger: Logger,
+): boolean | null {
   try {
     const json = gh([
       "pr", "view", String(prNumber),
@@ -1645,7 +1747,7 @@ function hasFreshReview(
     );
   } catch (err) {
     logger.debug(`hasFreshReview lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    return null;
   }
 }
 
@@ -2633,7 +2735,9 @@ export function getReferencedIssuesFromOpenPR(
   logger?: Logger,
 ): number[] | null {
   try {
-    const json = gh([
+    // A new commit moves the head and an edited title/body bumps updatedAt, so
+    // the PR's version from the fleet state is a safe key for what it implements.
+    const json = ghKeyed(`refs:${repo}:${headBranch}:${baseBranch}`, () => openPrVersion(repo, headBranch, baseBranch), [
       "pr", "list",
       "--repo", repo,
       "--head", headBranch,
@@ -2675,7 +2779,14 @@ export function getReferencedIssuesFromOpenPR(
 export function findOpenFeaturePR(
   config: RepoConfig,
 ): { number: number; headSha: string; issueNumbers: number[] } | null {
-  const json = gh([
+  // Fleet state on: no open feature PR in it means nothing to check — at most
+  // one refresh late, which only defers a stage, never skips one for good.
+  // A thrown refresh propagates: the caller holds the later stages on it.
+  if (issueCacheTtlMs > 0 && isGitHubStateEnabled(config.githubRepo)
+    && !knownOpenPr(config.githubRepo, config.featureBranch, config.baseBranch)) {
+    return null;
+  }
+  const json = ghKeyed(`feature:${config.githubRepo}`, () => openPrVersion(config.githubRepo, config.featureBranch, config.baseBranch), [
     "pr", "list",
     "--repo", config.githubRepo,
     "--head", config.featureBranch,

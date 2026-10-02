@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 interface FailedIssue {
   count: number;
@@ -65,6 +65,11 @@ let statePath = ".agent-state.json";
 
 export function setStatePath(dir: string): void {
   statePath = join(dir, ".agent-state.json");
+}
+
+/** The directory `.agent-state.json` lives in — other persisted Foreman state sits beside it. */
+export function stateDir(): string {
+  return dirname(statePath);
 }
 
 function loadRaw(): PersistedState {

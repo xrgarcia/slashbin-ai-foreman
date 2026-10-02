@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { gh, verifyPRExists } from "./github.js";
+import { gh, knownOpenPr, verifyPRExists } from "./github.js";
 
 export interface ReconciliationResult {
   reconciled: boolean;
@@ -260,6 +260,11 @@ function hasOpenPR(
   cwd: string,
 ): { number: number; url: string } | null {
   try {
+    // Every cycle, for every branch with commits waiting on review, this asks
+    // whether the PR is still open — and almost always it is. The fleet state
+    // answers that without a request; only "not known open" goes to GitHub.
+    const known = knownOpenPr(githubRepo, featureBranch, baseBranch);
+    if (known) return { number: known.number, url: known.url };
     const json = gh([
       "pr", "list",
       "--repo", githubRepo,

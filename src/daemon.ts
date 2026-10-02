@@ -3,7 +3,13 @@ import { loadConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
 import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
-import { configureIssueCache } from "./github.js";
+import { join } from "node:path";
+import { configureIssueCache, gh } from "./github.js";
+import {
+  clearActivity, configureGitHubState, recordActivity, setGitHubStateRepos, takeGitHubStateUsage,
+} from "./github-state.js";
+import { addObserver } from "./work-source.js";
+import { stateDir } from "./state.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
 
@@ -51,6 +57,28 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     snapshotLimit: config.issueSnapshotLimit,
   });
 
+  // Every repo's open issues and PRs from ONE bulk GraphQL query per refresh,
+  // and only what changed since the last one. See the header of github-state.ts.
+  configureGitHubState({
+    repos: config.repos.map((r) => r.githubRepo),
+    refreshMs: config.issueCacheTtlMs,
+    issueLimit: config.issueSnapshotLimit,
+    persistPath: join(stateDir(), ".github-state.json"),
+    run: (args) => gh(args, process.cwd()),
+    logger,
+  });
+
+  // The Foreman's own in-flight work, beside the GitHub view: every step the work
+  // source reports lands in the same state file, and each one re-syncs that repo.
+  addObserver({
+    onClaim: async (item, rc) => recordActivity(rc.githubRepo, item.issueNumber, "claimed"),
+    onState: async (item, _from, to, rc) => recordActivity(rc.githubRepo, item.issueNumber, String(to)),
+    onPrLink: async (item, prUrl, rc) => recordActivity(rc.githubRepo, item.issueNumber, "pr-linked", prUrl),
+    onBlocked: async (item, _reason, rc) => recordActivity(rc.githubRepo, item.issueNumber, "blocked"),
+    onMerged: async (item, rc) => recordActivity(rc.githubRepo, item.issueNumber, "merged"),
+    onPromoted: async (item, rc) => clearActivity(rc.githubRepo, item.issueNumber),
+  });
+
   // One daemon-wide back-off per upstream (GitHub rate limit, Claude session
   // limit). Every transition is logged AND sent once to Discord — never per repo.
   configureUpstreamBackoff({
@@ -64,7 +92,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   });
 
   // One info line per hour: spawned gh calls by quota bucket and subcommand.
-  configureGhUsage({ intervalMs: 3_600_000, logger });
+  // statePoints: what the fleet state's bulk queries actually cost, as GitHub reported it.
+  configureGhUsage({ intervalMs: 3_600_000, logger, extra: takeGitHubStateUsage });
 
   // A TTL at or above the poll interval means a cycle can be served entirely
   // from the previous cycle's snapshot, so an externally-applied `approved`
@@ -131,6 +160,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         }
       }
 
+      setGitHubStateRepos(fresh.repos.map((r) => r.githubRepo));
       return fresh;
     } catch (err) {
       logger.warn("Config reload failed, using previous config", {
