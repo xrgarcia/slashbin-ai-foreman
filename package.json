@@ -28,7 +28,8 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "labels:install": "node scripts/install-labels.mjs",
-    "paperclip:register": "node scripts/paperclip/agent.mjs"
+    "paperclip:register": "node scripts/paperclip/agent.mjs",
+    "paperclip:doctor": "node dist/cli.js paperclip:doctor"
   },
   "engines": {
     "node": ">=18"

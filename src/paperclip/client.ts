@@ -1,6 +1,7 @@
 // HTTP client for the slice of Paperclip's REST API the Foreman uses
 // (https://github.com/paperclipai/paperclip): company issues, their comments,
-// and company agents. One instance talks to one company.
+// company agents, the company itself and server health. One instance talks to
+// one company.
 //
 // No retry and no back-off here: every failure — a non-2xx status, an
 // unreachable server, a 2xx body that is not JSON — throws PaperclipClientError
@@ -26,6 +27,11 @@ export type PaperclipAgent = {
   role?: string;
   adapterType?: string;
   runtimeConfig?: unknown;
+};
+
+export type PaperclipCompany = {
+  id: string;
+  name?: string;
 };
 
 export type CreatePaperclipIssue = {
@@ -77,6 +83,16 @@ export class PaperclipClient {
     this.base = opts.url.replace(/\/+$/, "");
     this.companyId = opts.companyId;
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
+  }
+
+  /** `GET /api/health`: resolves when the server answers 2xx. */
+  health(): Promise<unknown> {
+    return this.request("GET", "/api/health");
+  }
+
+  /** The configured company. */
+  getCompany(): Promise<PaperclipCompany> {
+    return this.request("GET", this.companyPath());
   }
 
   /** Every issue in the company, fetched a page at a time. */
