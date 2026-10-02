@@ -2,7 +2,8 @@
 /**
  * PreToolUse hook the Foreman passes to EVERY Claude session it spawns
  * (`--settings`, see src/agent.ts sessionSettings). It blocks Bash commands
- * that would print an environment or credential VALUE.
+ * that would print an environment or credential VALUE, and file-tool calls
+ * (Read, Grep, Edit, notebooks) on a file whose content is a credential.
  *
  * Why it exists: every session gets GH_TOKEN and runs with
  * --dangerously-skip-permissions in the service repo's checkout, so neither a
@@ -108,6 +109,54 @@ export const RULES = [
   },
 ];
 
+/**
+ * Files whose content IS a credential. Matched against a path a file tool is
+ * given and against the arguments of a Bash command. Templates (.env.example
+ * and friends) hold names, not values, and stay readable.
+ */
+const CREDENTIAL_FILE =
+  /(?:^|[\s'"=/:(])(?:\.env(?:\.(?!(?:example|sample|template|dist|defaults?)\b)[\w.*-]+)?|\.netrc|\.git-credentials|\.config\/gh\/hosts\.ya?ml|\.doppler\.ya?ml|\.doppler\/[^\s'";|&)]*|\/proc\/[^\s/'"]+\/environ)(?=$|[\s'";|&)*])/;
+
+RULES.push({
+  id: "credential-file",
+  what: "puts the content of a credential file (.env, .netrc, .git-credentials, gh hosts.yml, doppler config, /proc environ) on screen",
+  re: new RegExp(
+    `(?:^|[;|&(\`]\\s*|\\$\\(\\s*|<\\(?\\s*)(?:cat|tac|less|more|head|tail|bat|grep|egrep|rg|ag|awk|sed|cut|strings|xxd|od|hexdump|base64|sort|uniq|diff|cmp|jq|yq|nl|tr|fold|column|paste|source|\\.|python3?|node|ruby|perl)\\b[^\\n;|&]*?` +
+      CREDENTIAL_FILE.source,
+  ),
+});
+
+/** Tools that return file content, and the input fields that name a file. */
+const FILE_TOOLS = {
+  Read: ["file_path"],
+  Grep: ["path", "glob"],
+  Edit: ["file_path"],
+  MultiEdit: ["file_path"],
+  NotebookEdit: ["notebook_path"],
+  NotebookRead: ["notebook_path"],
+};
+
+/** The credential file a file-tool call would open, or undefined. */
+export function fileViolation(toolName, toolInput) {
+  const fields = FILE_TOOLS[toolName];
+  if (!fields || !toolInput) return undefined;
+  for (const f of fields) {
+    const v = toolInput[f];
+    if (typeof v === "string" && CREDENTIAL_FILE.test(v)) return v;
+  }
+  return undefined;
+}
+
+export function fileMessage(toolName, path) {
+  return [
+    `[foreman session-secret-gate] BLOCKED (credential-file): ${toolName} on ${path} would put a credential file's content in this session's transcript, a permanent log.`,
+    "Do not read it another way (Bash, another tool, a copy). Safe paths:",
+    "  - Credentials are already in your environment for the tools that need them: gh and git read GH_TOKEN themselves.",
+    '  - Check a variable is set without printing it: `test -n "$NAME" && echo set`.',
+    "  - Need the variable NAMES a .env expects? Read .env.example (or .env.sample) instead.",
+  ].join("\n");
+}
+
 export const SAFE_PATHS = [
   "gh and git already read GH_TOKEN from the environment — run the gh/git command itself.",
   "Check auth with `gh auth status` (without --show-token).",
@@ -143,7 +192,12 @@ function main() {
   } catch {
     process.exit(0);
   }
-  if (input?.tool_name && input.tool_name !== "Bash") process.exit(0);
+  if (input?.tool_name && input.tool_name !== "Bash") {
+    const path = fileViolation(input.tool_name, input.tool_input);
+    if (!path) process.exit(0);
+    process.stderr.write(fileMessage(input.tool_name, path) + "\n");
+    process.exit(2);
+  }
   const rule = violation(input?.tool_input?.command);
   if (!rule) process.exit(0);
   process.stderr.write(message(rule) + "\n");
