@@ -20,15 +20,51 @@ import type { PaperclipConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { PaperclipClient } from "./client.js";
 
-type Bucket = "todo" | "in_progress" | "in_review" | "done" | "cancelled";
+/** A Paperclip status bucket; `statusMap` may rename each one. */
+export type PaperclipBucket = "todo" | "in_progress" | "in_review" | "done" | "cancelled";
+type Bucket = PaperclipBucket;
 
-/** The status bucket and note for each state the Foreman can report. */
-const STATE_STEP: Record<WorkState, { bucket: Bucket; note: string }> = {
-  queued: { bucket: "in_progress", note: "queued" },
-  inReview: { bucket: "in_review", note: "under review" },
-  changesRequested: { bucket: "in_review", note: "changes requested" },
-  approved: { bucket: "in_review", note: "approved" },
+/** One step the mirror writes: the status it sets (null = note only) and the note. */
+export type PaperclipStep = { readonly status: Bucket | null; readonly note: string };
+
+/**
+ * Every step the mirror writes to a task, in the order an issue meets them.
+ * `{name}` in a note is filled from the event; nothing else varies. Exported
+ * as the single source for these strings, so docs/paperclip.md is generated
+ * from the table the mirror runs on.
+ */
+export const PAPERCLIP_STEPS = Object.freeze({
+  claim: { status: "in_progress", note: "picked up by Foreman" },
+  queued: { status: "in_progress", note: "queued" },
+  prLink: { status: null, note: "PR opened: {prUrl}" },
+  inReview: { status: "in_review", note: "under review" },
+  changesRequested: { status: "in_review", note: "changes requested" },
+  approved: { status: "in_review", note: "approved" },
+  blocked: { status: null, note: "blocked: {reason}" },
+  merged: { status: null, note: "merged" },
+  promoted: { status: null, note: "promoted to production" },
+  backoffPause: { status: null, note: "paused: {upstream} back-off: {reason}" },
+  backoffResume: { status: null, note: "resumed after back-off" },
+} as const satisfies Record<string, PaperclipStep>);
+
+/** The status a task is created with, before the claim moves it on. */
+export const PAPERCLIP_CREATE_STATUS: Bucket = "todo";
+
+/** A task's title: {repo} is owner/name, {N} the issue number. */
+export const PAPERCLIP_TASK_TITLE_FORMAT = "{repo}#{N}";
+
+/** The step for each state the Foreman can report. */
+const STATE_STEP: Record<WorkState, PaperclipStep> = {
+  queued: PAPERCLIP_STEPS.queued,
+  inReview: PAPERCLIP_STEPS.inReview,
+  changesRequested: PAPERCLIP_STEPS.changesRequested,
+  approved: PAPERCLIP_STEPS.approved,
 };
+
+/** `template` with each `{name}` replaced from `vars`, in one pass. */
+function fill(template: string, vars: Record<string, string> = {}): string {
+  return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m));
+}
 
 /** How long a full scan of the company's tasks answers a lookup that missed. */
 const INDEX_TTL_MS = 10 * 60_000;
@@ -55,8 +91,9 @@ export class PaperclipMirror implements WorkObserver {
     this.building = item;
     const id = await this.resolve(item, true);
     if (!id) return;
-    if (!(await this.setStatus(id, "in_progress"))) return;
-    await this.note(id, "picked up by Foreman");
+    const step = PAPERCLIP_STEPS.claim;
+    if (!(await this.setStatus(id, step.status))) return;
+    await this.note(id, step.note);
   }
 
   async onState(item: WorkItem, _from: PriorState, to: WorkState, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
@@ -65,41 +102,41 @@ export class PaperclipMirror implements WorkObserver {
     if (to !== "queued" && sameItem(this.building, item)) this.building = null;
     const id = await this.resolve(item, false);
     if (!id) return;
-    await this.setStatus(id, step.bucket);
+    if (step.status) await this.setStatus(id, step.status);
     await this.note(id, step.note);
   }
 
   async onPrLink(item: WorkItem, prUrl: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, `PR opened: ${prUrl}`);
+    if (id) await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }));
   }
 
   async onBlocked(item: WorkItem, reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, `blocked: ${reason}`);
+    if (id) await this.note(id, fill(PAPERCLIP_STEPS.blocked.note, { reason }));
   }
 
   async onMerged(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, "merged");
+    if (id) await this.note(id, PAPERCLIP_STEPS.merged.note);
   }
 
   async onPromoted(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, "promoted to production");
+    if (id) await this.note(id, PAPERCLIP_STEPS.promoted.note);
   }
 
   async onBackoffPause(upstream: string, reason: string, _logger: Logger): Promise<void> {
     if (!this.building) return;
     const id = await this.resolve(this.building, false);
-    if (id) await this.note(id, `paused: ${upstream} back-off: ${reason}`);
+    if (id) await this.note(id, fill(PAPERCLIP_STEPS.backoffPause.note, { upstream, reason }));
   }
 
   async onBackoffResume(_upstream: string, _logger: Logger): Promise<void> {
     if (!this.building) return;
     const id = await this.resolve(this.building, false);
-    if (id) await this.note(id, "resumed after back-off");
+    if (id) await this.note(id, PAPERCLIP_STEPS.backoffResume.note);
   }
 
   /** `identityKeyFormat` for `item`: the first line of its task's description. */
@@ -147,8 +184,8 @@ export class PaperclipMirror implements WorkObserver {
 
     const made = await this.safeCall("create task", () =>
       this.client.createIssue({
-        title: `${item.repo}#${item.issueNumber}`,
-        status: this.statusName("todo"),
+        title: fill(PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, N: String(item.issueNumber) }),
+        status: this.statusName(PAPERCLIP_CREATE_STATUS),
         description: `${key}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
       }),
     );
