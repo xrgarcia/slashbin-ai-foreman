@@ -46,7 +46,12 @@ export function configureGhUsage(opts: { intervalMs: number; logger: Logger; ext
   if (timer) clearInterval(timer);
   const intervalMs = Number.isFinite(opts.intervalMs) && opts.intervalMs > 0 ? opts.intervalMs : 3_600_000;
   timer = setInterval(() => {
-    opts.logger.info("gh-usage: gh calls in the last interval", { intervalMs, ...ghUsageSnapshot(), ...(opts.extra?.() ?? {}) });
+    const snap = ghUsageSnapshot();
+    // Stringified: the text log format prints a nested object as [object Object],
+    // which is how the first hourly line (2026-10-02 13:24) lost its breakdown.
+    opts.logger.info("gh-usage: gh calls in the last interval", {
+      intervalMs, ...snap, bySubcommand: JSON.stringify(snap.bySubcommand), ...(opts.extra?.() ?? {}),
+    });
     counts = { graphql: 0, core: 0 };
     bySubcommand = {};
   }, intervalMs);
