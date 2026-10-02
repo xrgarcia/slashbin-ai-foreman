@@ -18,6 +18,36 @@ const FOREMAN_OVERRIDES = resolve(
 );
 
 /**
+ * The PreToolUse hook every session runs under (hooks/session-secret-gate.mjs).
+ * Resolved from this file's location for the same reason as FOREMAN_OVERRIDES.
+ */
+export const SESSION_SECRET_GATE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "hooks",
+  "session-secret-gate.mjs"
+);
+
+/**
+ * The `--settings` JSON passed to every Claude session: a Bash PreToolUse hook
+ * that blocks commands printing an environment or credential value. Sessions
+ * hold GH_TOKEN and run with --dangerously-skip-permissions inside the service
+ * repo, so neither a permission prompt nor that repo's own hooks stand between
+ * a session and `env` — and what a session prints lands in its transcript,
+ * which the Foreman's log redaction never sees. Passed with --settings so it
+ * applies whatever the service repo's settings say (they merge; this adds).
+ * The node binary is absolute: a systemd PATH may not carry it.
+ */
+export function sessionSettings(): string {
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(SESSION_SECRET_GATE)}`;
+  return JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] },
+  });
+}
+
+let secretGateLogged = false;
+
+/**
  * Describe a non-zero exit WITHOUT letting stderr impersonate the root cause.
  *
  * The previous form was `stderr || stdoutTail || exitCode`, which put stderr
@@ -557,6 +587,18 @@ function spawnClaudeWithOptions(
     "--max-turns", String(opts.maxTurns),
     "--dangerously-skip-permissions",
   ];
+
+  // Every session runs under the secret gate. A missing hook file is a broken
+  // install, not a reason to run ungated quietly — say so on every spawn.
+  if (existsSync(SESSION_SECRET_GATE)) {
+    args.push("--settings", sessionSettings());
+    if (!secretGateLogged) {
+      logger.info(`Session secret gate on: ${SESSION_SECRET_GATE}`);
+      secretGateLogged = true;
+    }
+  } else {
+    logger.error(`Session secret gate MISSING (${SESSION_SECRET_GATE}) — this session can print credentials`);
+  }
 
   // Overrides for the harness defaults that fight how a non-interactive builder
   // has to behave (.claude/system-prompt-overrides.md in THIS repo).
