@@ -105,6 +105,7 @@ src/
 ├── stages.ts        # Stage schema, default order, dispatch loop
 ├── orchestrator.ts  # Stage pass per repo, failure cooldowns, label transitions
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
+├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
 └── index.ts         # Public API exports
 ```
 

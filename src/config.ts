@@ -33,6 +33,45 @@ const lifecycleLabelsSchema = z.object({
   readyToClose: z.string().min(1).default("ready to close"),
 });
 
+// Optional mirror of the Foreman's work onto a Paperclip instance
+// (https://github.com/paperclipai/paperclip). GitHub stays the only work source:
+// Paperclip only ever shows what the Foreman is doing. Off by default — a config
+// without this block, or with `enabled` unset, runs exactly as before.
+//
+// The five Paperclip statuses a GitHub issue's state maps onto. `statusMap`
+// renames any of them for an instance whose workflow uses other names.
+const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "done", "cancelled"] as const;
+
+const paperclipConfigSchema = z.object({
+  // Strict: env vars arrive as strings, and Boolean("false") is true. Anything
+  // that is not a recognised yes/no reaches z.boolean() unchanged and fails.
+  enabled: z.preprocess(
+    (v) => {
+      if (typeof v !== "string") return v;
+      if (/^(1|true|yes|on)$/i.test(v.trim())) return true;
+      if (/^(0|false|no|off)$/i.test(v.trim())) return false;
+      return v;
+    },
+    z.boolean(),
+  ).default(false),
+  // Base URL of the Paperclip server; the client appends /api/...
+  url: z.url().default("http://127.0.0.1:3100"),
+  // The Paperclip company the Foreman's tasks live in. Required once enabled.
+  companyId: z.string().min(1).optional(),
+  // The name the Foreman registers under, and finds itself by, in Paperclip.
+  agentName: z.string().min(1).default("Foreman"),
+  // The Foreman's Paperclip agent id, once registered.
+  agentId: z.string().min(1).optional(),
+  // How a Paperclip task names the GitHub issue it mirrors. {repo} is the full
+  // owner/name, {N} the issue number. Must match whatever else writes those
+  // tasks, or the Foreman creates a second row for an issue that already has one.
+  identityKeyFormat: z.string()
+    .refine((f) => f.includes("{repo}") && f.includes("{N}"), "identityKeyFormat must contain {repo} and {N}")
+    .default("source: {repo}#{N}"),
+  // Per-bucket override of the Paperclip status name. Unset = the bucket names.
+  statusMap: z.partialRecord(z.enum(PAPERCLIP_STATUS_BUCKETS), z.string().min(1)).optional(),
+});
+
 const repoEntrySchema = z.object({
   name: z.string(),
   repoPath: z.string(),
@@ -234,12 +273,19 @@ export const configSchema = z.object({
   // skill when the pass reaches it. Global, never per repo — the stages hand
   // work to each other by label, one pipeline for the fleet.
   stages: stagesSchema,
+
+  // Paperclip mirror (see paperclipConfigSchema). Global, never per repo: one
+  // Foreman is one Paperclip agent. prefault for the same reason as above.
+  paperclip: paperclipConfigSchema.prefault({}),
 });
 
 // --- Types ---
 
 /** Configured names of the five lifecycle labels. See `lifecycleLabelsSchema`. */
 export type LifecycleLabels = Readonly<z.infer<typeof lifecycleLabelsSchema>>;
+
+/** The resolved `paperclip` block. `enabled: false` means the daemon never calls Paperclip. */
+export type PaperclipConfig = Readonly<z.infer<typeof paperclipConfigSchema>>;
 
 /**
  * The lifecycle labels a config that omits `lifecycleLabels` resolves to. Built
@@ -333,6 +379,8 @@ export interface AgentConfig {
   lifecycleLabels: LifecycleLabels;
   /** The stages each repo pass runs, in order. Defaults to the seven built-ins. */
   stages: readonly StageEntry[];
+  /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
+  paperclip: PaperclipConfig;
 }
 
 // --- Helpers ---
@@ -371,6 +419,27 @@ function loadConfigFile(configPath?: string): Record<string, unknown> {
     }
   }
   return {};
+}
+
+/**
+ * The `paperclip` block with its AI_AGENT_PAPERCLIP_* overrides applied, one env
+ * var per leaf. `statusMap` has none. Undefined when neither the file nor the
+ * env sets anything, so the schema's prefault applies. A file value that is not
+ * an object is passed through untouched for the schema to reject.
+ */
+function mergePaperclip(fromFile: unknown): unknown {
+  const env = Object.fromEntries(Object.entries({
+    enabled: process.env.AI_AGENT_PAPERCLIP_ENABLED,
+    url: process.env.AI_AGENT_PAPERCLIP_URL,
+    companyId: process.env.AI_AGENT_PAPERCLIP_COMPANY_ID,
+    agentName: process.env.AI_AGENT_PAPERCLIP_AGENT_NAME,
+    agentId: process.env.AI_AGENT_PAPERCLIP_AGENT_ID,
+    identityKeyFormat: process.env.AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT,
+  }).filter(([, v]) => v !== undefined));
+  if (Object.keys(env).length === 0) return fromFile;
+  if (fromFile === undefined) return env;
+  if (typeof fromFile !== "object" || fromFile === null || Array.isArray(fromFile)) return fromFile;
+  return { ...fromFile, ...env };
 }
 
 // --- Config Loading ---
@@ -419,6 +488,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewLabelReconcile: process.env.AI_AGENT_REVIEW_LABEL_RECONCILE ?? fileConfig.reviewLabelReconcile,
     lifecycleLabels: fileConfig.lifecycleLabels,
     stages: fileConfig.stages,
+    paperclip: mergePaperclip(fileConfig.paperclip),
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -550,6 +620,16 @@ export function loadConfig(configPath?: string): AgentConfig {
     }
   }
 
+  // Fail fast on a mirror with nowhere to write: every Paperclip route the
+  // Foreman uses is scoped to one company.
+  if (parsed.paperclip.enabled && !parsed.paperclip.companyId) {
+    throw new Error("paperclip.enabled is true but no paperclip.companyId is set.");
+  }
+  const paperclip: PaperclipConfig = Object.freeze({
+    ...parsed.paperclip,
+    ...(parsed.paperclip.statusMap ? { statusMap: Object.freeze({ ...parsed.paperclip.statusMap }) } : {}),
+  });
+
   return Object.freeze({
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
@@ -574,5 +654,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewLabelReconcile: parsed.reviewLabelReconcile,
     lifecycleLabels,
     stages,
+    paperclip,
   });
 }
