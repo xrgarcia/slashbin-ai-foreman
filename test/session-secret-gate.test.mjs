@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(root, "hooks", "session-secret-gate.mjs");
-const { violation } = await import(HOOK);
+const { violation, fileViolation } = await import(HOOK);
 const { implementApprovedIssues, revisePRFeedback, runCustomStage, sessionSettings, SESSION_SECRET_GATE } =
   await import(join(root, "dist/agent.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
@@ -73,9 +73,37 @@ test("as a hook: allowed Bash, other tools and unreadable input exit 0", () => {
   assert.equal(runHook("not json").status, 0);
 });
 
-test("sessionSettings: a Bash PreToolUse hook running this node on the shipped file", () => {
+const FILE_DENY = [
+  ["Read", { file_path: "/srv/app/.env" }], ["Read", { file_path: ".env.local" }],
+  ["Read", { file_path: "/home/u/.config/gh/hosts.yml" }], ["Read", { file_path: "/home/u/.netrc" }],
+  ["Read", { file_path: "/home/u/.git-credentials" }], ["Read", { file_path: "/proc/1/environ" }],
+  ["Read", { file_path: "/home/u/.doppler/.doppler.yaml" }], ["Grep", { pattern: "X", path: ".env" }],
+  ["Grep", { pattern: "X", glob: ".env*" }], ["Edit", { file_path: ".env", old_string: "a", new_string: "b" }],
+];
+const FILE_ALLOW = [
+  ["Read", { file_path: ".env.example" }], ["Read", { file_path: ".env.sample" }], ["Read", { file_path: "src/env.ts" }],
+  ["Grep", { pattern: "process.env", path: "src" }], ["Write", { file_path: ".env", content: "X=" }], ["Glob", { pattern: "**/.env*" }],
+];
+for (const [t, i] of FILE_DENY) {
+  test(`blocks ${t}: ${JSON.stringify(i)}`, () => assert.ok(fileViolation(t, i)));
+}
+for (const [t, i] of FILE_ALLOW) {
+  test(`allows ${t}: ${JSON.stringify(i)}`, () => assert.equal(fileViolation(t, i), undefined));
+}
+
+test("as a hook: Read of .env is exit 2 and points at .env.example", () => {
+  const r = runHook({ tool_name: "Read", tool_input: { file_path: "/srv/app/.env" } });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /BLOCKED \(credential-file\)/);
+  assert.match(r.stderr, /\.env\.example/);
+});
+
+test("sessionSettings: one hook on Bash and every content-returning file tool, running this node on the shipped file", () => {
   const s = JSON.parse(sessionSettings());
-  const h = s.hooks.PreToolUse.find((x) => x.matcher === "Bash").hooks[0];
+  const entry = s.hooks.PreToolUse[0];
+  for (const t of ["Bash", "Read", "Grep", "Edit", "MultiEdit"]) assert.match(t, new RegExp(`^(?:${entry.matcher})$`));
+  assert.doesNotMatch("Glob", new RegExp(`^(?:${entry.matcher})$`));
+  const h = entry.hooks[0];
   assert.equal(h.type, "command");
   assert.ok(h.command.includes(JSON.stringify(process.execPath)), "node must be absolute — systemd PATH may not have it");
   assert.ok(h.command.includes(JSON.stringify(SESSION_SECRET_GATE)));

@@ -38,10 +38,12 @@ export const SESSION_SECRET_GATE = resolve(
  * applies whatever the service repo's settings say (they merge; this adds).
  * The node binary is absolute: a systemd PATH may not carry it.
  */
+/** Bash, plus every tool that returns file content to the transcript. */
+export const SESSION_SECRET_GATE_TOOLS = "Bash|Read|Grep|Edit|MultiEdit|NotebookEdit|NotebookRead";
 export function sessionSettings(): string {
   const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(SESSION_SECRET_GATE)}`;
   return JSON.stringify({
-    hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] },
+    hooks: { PreToolUse: [{ matcher: SESSION_SECRET_GATE_TOOLS, hooks: [{ type: "command", command }] }] },
   });
 }
 
