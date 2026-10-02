@@ -42,11 +42,11 @@ export function ghUsageSnapshot(): { total: number; graphql: number; core: numbe
  * total 0 — a zero hour is the signature of a back-off. The default (never
  * configured) is count-only, no log.
  */
-export function configureGhUsage(opts: { intervalMs: number; logger: Logger }): void {
+export function configureGhUsage(opts: { intervalMs: number; logger: Logger; extra?: () => Record<string, unknown> }): void {
   if (timer) clearInterval(timer);
   const intervalMs = Number.isFinite(opts.intervalMs) && opts.intervalMs > 0 ? opts.intervalMs : 3_600_000;
   timer = setInterval(() => {
-    opts.logger.info("gh-usage: gh calls in the last interval", { intervalMs, ...ghUsageSnapshot() });
+    opts.logger.info("gh-usage: gh calls in the last interval", { intervalMs, ...ghUsageSnapshot(), ...(opts.extra?.() ?? {}) });
     counts = { graphql: 0, core: 0 };
     bySubcommand = {};
   }, intervalMs);
