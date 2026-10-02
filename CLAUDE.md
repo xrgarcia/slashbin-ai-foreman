@@ -93,7 +93,7 @@ restart — safe).
 
 ```
 src/
-├── cli.ts           # CLI entry point (--once, --repo, --help, --version)
+├── cli.ts           # CLI entry point (--once, --repo, --help, --version, paperclip:doctor)
 ├── config.ts        # Zod-validated config from .ai-agent.json + env vars
 ├── logger.ts        # Structured logging (JSON/text, levels, child contexts)
 ├── adapters.ts      # WorkSourceAdapter / WorkItem — the work-source seam (no source-specific code)
@@ -108,6 +108,7 @@ src/
 ├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
 ├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
 ├── paperclip/mirror.ts # PaperclipMirror: WorkObserver writing each step to the issue's task; best-effort
+├── paperclip/doctor.ts # Read-only check of the integration, six named PASS/FAIL checks (`npm run paperclip:doctor`)
 └── index.ts         # Public API exports
 ```
 
