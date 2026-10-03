@@ -335,6 +335,22 @@ function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
 }
 
 /**
+ * Whether PR #`prNumber` is still open, from the same per-cycle snapshot every
+ * other open-PR question reads — so asking costs no `gh` call when it is warm.
+ * Null when it cannot say: the list failed, or it is full (`--limit 100`), where
+ * a missing PR may just be past the page.
+ */
+export function isPrOpen(repo: string, prNumber: number, cwd: string): boolean | null {
+  try {
+    const prs = getOpenPrs(repo, cwd);
+    if (prs.some((p) => p.number === prNumber)) return true;
+    return prs.length >= 100 ? null : false;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Open PRs matching a head/base pair, newest first — the shape the old
  * `--head X --base Y --limit N` calls returned.
  */
