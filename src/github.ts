@@ -562,6 +562,9 @@ export function discoveryBatch(config: RepoConfig, offered: number[], logger: Lo
  *
  * Stateless: construct one where it is used.
  */
+/** repo → the covered issue set last announced by implement's "all have linked PRs" skip. */
+const coveredSkipAnnounced = new Map<string, string>();
+
 export class GitHubIssueConnector implements WorkSourceAdapter {
   async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
     return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
@@ -895,9 +898,21 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         }
       }
 
-      if (uncovered.length > 0) return uncovered;
+      if (uncovered.length > 0) {
+        coveredSkipAnnounced.delete(repo);
+        return uncovered;
+      }
 
-      logger.info(`Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`);
+      // A standing condition, not an event: announce it once per episode (the
+      // same covered set), not every cycle. Dead-zone recovery picks up the
+      // merged ones; this line only says why implement is idle.
+      const episode = [...actionable].sort((a, b) => a - b).join(",");
+      const msg = `Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`;
+      if (coveredSkipAnnounced.get(repo) === episode) logger.debug(msg);
+      else {
+        coveredSkipAnnounced.set(repo, episode);
+        logger.info(msg);
+      }
       return [];
     } catch (err) {
       if (isBackoffRefusal(err)) {
@@ -1280,6 +1295,11 @@ const STUCK_MERGE_GRACE_MS = 15 * 60 * 1000;
  *    tryReview owns those specific issues)
  *  - only flags PRs merged more than STUCK_MERGE_GRACE_MS ago (no flap on fresh merges)
  *
+ * An issue with ONLY the trigger label is the same dead zone by a third door
+ * (slashbin-ai-foreman#73): implement treats it as covered once its PR merged,
+ * and no lifecycle label ever arrives. It is included when it carries no
+ * lifecycle label and is not `blocked`.
+ *
  * `pr pending actions` USED to be excluded here on the grounds that "revise owns
  * it". That was only true while a feature PR is open: `findPendingRevisions`
  * returns null the moment there is none, at `debug` level, so a revision request
@@ -1294,8 +1314,14 @@ export function findStuckMergedIssues(
   if (config.baseBranch === config.featureBranch) return [];
   try {
     const { prUnderReview, prPendingActions, prApproved, readyForProd } = config.lifecycleLabels;
+    const lifecycle = Object.values(config.lifecycleLabels);
     const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
-      .filter((i) => hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions));
+      .filter((i) =>
+        hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions) ||
+        // Trigger label only, no lifecycle label: implement skips it as covered
+        // once its PR merged, and before slashbin-ai-foreman#73 nothing else
+        // looked at it — the third door into the same dead zone.
+        (hasLabel(i, config.triggerLabel) && !hasLabel(i, "blocked") && !lifecycle.some((l) => hasLabel(i, l))));
     const candidates = issues.filter(
       (i) => !(
         hasLabel(i, prApproved) || hasLabel(i, readyForProd)
