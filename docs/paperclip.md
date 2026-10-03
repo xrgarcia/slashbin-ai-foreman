@@ -26,6 +26,9 @@ that one field. The block is read once at startup — restart the daemon after c
 | `agentId` | string | `AI_AGENT_PAPERCLIP_AGENT_ID` | — | The Foreman's Paperclip agent id, once registered. |
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
 | `statusMap` | object | none | — | Per-bucket override of the Paperclip status name. Unset = the bucket names. |
+| `liveTask` | boolean | none | `true` | Keep one task, held by the Foreman's agent, whose description always shows what the Foreman is doing now: running sessions, waiting issues, stalled promotions, upstream back-offs. |
+| `liveTaskTitle` | string | none | `"Foreman — live"` | The title of that task. |
+| `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 
 `enabled` is a boolean; given as a string (as the env var always is) it takes `true` / `false`,
 `1` / `0`, `yes` / `no` or `on` / `off`, and any other value stops the Foreman at startup.
@@ -59,25 +62,35 @@ description is the identity line, a blank line, and the issue's GitHub URL.
 
 ## Status mapping
 
-The Foreman moves a task between five status buckets. Each is sent to Paperclip under its
+The Foreman moves a task between six status buckets. Each is sent to Paperclip under its
 `statusMap` name if one is configured, else under the bucket name itself.
 
 | Bucket | Set by the Foreman at | Name sent to Paperclip |
 |---|---|---|
 | `todo` | task creation | `statusMap.todo`, else `todo` |
-| `in_progress` | `claim`, `queued` | `statusMap.in_progress`, else `in_progress` |
+| `in_progress` | `claim`, `queued`, `resumed` | `statusMap.in_progress`, else `in_progress` |
 | `in_review` | `inReview`, `changesRequested`, `approved` | `statusMap.in_review`, else `in_review` |
+| `blocked` | `waiting` | `statusMap.blocked`, else `blocked` |
 | `done` | never — the Foreman does not close issues | `statusMap.done`, else `done` |
 | `cancelled` | never — the Foreman does not close issues | `statusMap.cancelled`, else `cancelled` |
 
 `done` and `cancelled` follow the GitHub issue closing, which the Foreman never does: they are
-left to whatever else syncs GitHub issues into the same company. Merged, promoted and blocked
-are therefore notes, not statuses.
+left to whatever else syncs GitHub issues into the same company. Merged and promoted are
+therefore notes, not statuses, and so is an agent declining an issue (`blocked` step).
+
+`blocked` is the one status no GitHub label carries: it means the Foreman is holding the issue
+back right now (`waiting`). Paperclip only accepts `blocked` with an unblock descriptor, so the
+Foreman sends one owned by its agent, with the reason as the action — the reason shows on the
+task itself. When the issue stops waiting the Foreman moves it back to `in_progress`, and
+Paperclip clears the descriptor. Both are written only when they change: the task's own status
+and descriptor are the record, so a restarted Foreman reads them back instead of repeating
+them. A sync that also writes these tasks should leave a `blocked` task held by the Foreman's
+agent alone unless the issue has closed, or the two will flip it back and forth.
 
 ## Notes per step
 
-Every step below posts one note on the issue's task. `{name}` in a note is filled from the
-event. A step with a status also sets the task's status (see above). Secrets the Foreman
+Every step below posts one note on the issue's task (a session step, on the task of each issue
+the session is about). `{name}` in a note is filled from the event. A step with a status also sets the task's status (see above). Secrets the Foreman
 knows of are redacted from every note before it is sent.
 
 | Step | When | Status | Note |
@@ -93,6 +106,17 @@ knows of are redacted from every note before it is sent.
 | `promoted` | The merged work is handed to promotion to production. | unchanged | `promoted to production` |
 | `backoffPause` | A GitHub or Claude limit pauses the build in progress. | unchanged | `paused: {upstream} back-off: {reason}` |
 | `backoffResume` | The build in progress resumes after that limit clears. | unchanged | `resumed after back-off` |
+| `waiting` | The Foreman holds the issue back this cycle (a back-off after a skip, an occupied branch). Written once per reason, not once per cycle. | `blocked` | `waiting: {reason}` |
+| `resumed` | An issue the Foreman had moved to blocked is no longer held back. | `in_progress` | `resumed: no longer waiting` |
+| `implementFinished` | The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason). | unchanged | `implement session finished: {detail}` |
+| `implementFailed` | The build session for the issue fails. | unchanged | `implement session failed: {detail}` |
+| `reviseStarted` | A session starts revising the issue's pull request after review feedback. | unchanged | `revision started: PR #{pr}` |
+| `reviseFinished` | That revision session ends. | unchanged | `revision finished: {detail}` |
+| `reviseFailed` | That revision session fails. | unchanged | `revision failed: {detail}` |
+| `reviewStarted` | A review of the issue's pull request starts; the note names the reviewer. | unchanged | `review started: PR #{pr} by {reviewer}` |
+| `reviewHandoff` | The first reviewer declines and the review passes to another, with the reason. | unchanged | `review handed to {reviewer}: {detail}` |
+| `reviewFinished` | The review ends, with its outcome. | unchanged | `review finished: {detail}` |
+| `reviewFailed` | The review fails. | unchanged | `review failed: {detail}` |
 
 A task is created only when the Foreman picks an issue up (`claim`). A later step on an issue
 that has no task writes nothing.
@@ -104,6 +128,24 @@ task is held by the Foreman from the moment it is picked up. Note-only steps lea
 alone; a task reassigned by hand in Paperclip goes back to the Foreman at its next status
 change. The agent is registered with every wake path off (no heartbeat, no wake-on-demand), so
 assigning a task to it never makes Paperclip start a run.
+
+## Live activity
+
+Per-issue tasks say what happened to each issue. Two more surfaces say what the Foreman is doing
+right now, across every repo:
+
+- **The live task.** With `liveTask` on, the Foreman keeps one task, titled `liveTaskTitle` and
+  held by its agent, whose description lists the sessions running now (repo, build / revise /
+  review, issues, pull request, reviewer, start time), every issue waiting and why, every repo
+  whose promotion to production is stalled and why, and any upstream back-off. Its first
+  description line is `foreman-live: {agentId}`, which is how a restarted Foreman finds
+  it again. It is updated in place, only when what it shows changes, and never commented on.
+- **The agent's status.** With `agentStatus` on, the Foreman's agent is `running` while any
+  session runs and `idle` otherwise, written only on a change.
+
+Promotion stalls appear only here: a repo whose base branch carries changed files that no
+issue marked ready for release covers is stalled, not idle, and the per-issue tasks cannot show
+that.
 
 ## When Paperclip is down
 

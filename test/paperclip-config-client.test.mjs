@@ -40,6 +40,9 @@ test("no paperclip block: mirror off, every default applied", () => {
     url: "http://127.0.0.1:3100",
     agentName: "Foreman",
     identityKeyFormat: "source: {repo}#{N}",
+    liveTask: true,
+    liveTaskTitle: "Foreman — live",
+    agentStatus: true,
   });
   assert.equal(paperclip.statusMap, undefined);
   assert.equal(paperclip.companyId, undefined);
@@ -104,9 +107,9 @@ test("identityKeyFormat must name both {repo} and {N}", () => {
 });
 
 test("statusMap overrides only the buckets it names; unknown buckets are rejected", () => {
-  const { paperclip } = loadConfig(cfg({ paperclip: { statusMap: { in_review: "review" } } }));
-  assert.deepEqual({ ...paperclip.statusMap }, { in_review: "review" });
-  assert.throws(() => loadConfig(cfg({ paperclip: { statusMap: { blocked: "x" } } })));
+  const { paperclip } = loadConfig(cfg({ paperclip: { statusMap: { in_review: "review", blocked: "on_hold" } } }));
+  assert.deepEqual({ ...paperclip.statusMap }, { in_review: "review", blocked: "on_hold" });
+  assert.throws(() => loadConfig(cfg({ paperclip: { statusMap: { paused: "x" } } })));
 });
 
 // --- client ---

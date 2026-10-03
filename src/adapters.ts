@@ -90,4 +90,37 @@ export interface WorkObserver {
   onPromoted?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
   onBackoffPause?(upstream: string, reason: string, logger: Logger): Promise<void>;
   onBackoffResume?(upstream: string, logger: Logger): Promise<void>;
+  /** A Claude (or Tech Lead) session on a repo started, changed hands, or ended. */
+  onSession?(event: SessionEvent, logger: Logger): Promise<void>;
+  /**
+   * The repo's FULL set of items waiting out a back-off this cycle, each with
+   * the reason it waits. An item missing from a later set has stopped waiting.
+   */
+  onWaiting?(repo: string, waiting: ReadonlyArray<WaitingItem>, logger: Logger): Promise<void>;
+  /** Promotion on `repo` is stalled for `detail`, or no longer stalled (null). */
+  onPromotionStall?(repo: string, detail: string | null, logger: Logger): Promise<void>;
+}
+
+/** One session the Foreman runs for a repo: building, revising or reviewing. */
+export type SessionPhase = "implement" | "revise" | "review";
+
+/**
+ * A session's lifecycle. `handoff` is a review passing from one reviewer to
+ * another (the Tech Lead declining, Claude taking over). `items` are the work
+ * items the session is about; `pr` the pull request, when there is one.
+ */
+export interface SessionEvent {
+  readonly phase: SessionPhase;
+  readonly status: "started" | "handoff" | "finished" | "failed";
+  readonly repo: string;
+  readonly items: ReadonlyArray<WorkItem>;
+  readonly pr?: number;
+  readonly reviewer?: string;
+  readonly detail?: string;
+}
+
+/** An item the Foreman is holding back this cycle, and why. */
+export interface WaitingItem {
+  readonly item: WorkItem;
+  readonly reason: string;
 }

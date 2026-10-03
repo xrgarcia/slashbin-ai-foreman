@@ -38,9 +38,9 @@ const lifecycleLabelsSchema = z.object({
 // Paperclip only ever shows what the Foreman is doing. Off by default — a config
 // without this block, or with `enabled` unset, runs exactly as before.
 //
-// The five Paperclip statuses a GitHub issue's state maps onto. `statusMap`
-// renames any of them for an instance whose workflow uses other names.
-const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "done", "cancelled"] as const;
+// The six Paperclip statuses the Foreman's view of an issue maps onto.
+// `statusMap` renames any of them for an instance whose workflow uses other names.
+const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "blocked", "done", "cancelled"] as const;
 
 const paperclipConfigSchema = z.object({
   // Strict: env vars arrive as strings, and Boolean("false") is true. Anything
@@ -70,6 +70,12 @@ const paperclipConfigSchema = z.object({
     .default("source: {repo}#{N}"),
   // Per-bucket override of the Paperclip status name. Unset = the bucket names.
   statusMap: z.partialRecord(z.enum(PAPERCLIP_STATUS_BUCKETS), z.string().min(1)).optional(),
+  // Keep one task, held by the Foreman's agent, whose description always shows what the Foreman is doing now: running sessions, waiting issues, stalled promotions, upstream back-offs.
+  liveTask: z.boolean().default(true),
+  // The title of that task.
+  liveTaskTitle: z.string().min(1).default("Foreman — live"),
+  // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
+  agentStatus: z.boolean().default(true),
 });
 
 const repoEntrySchema = z.object({
