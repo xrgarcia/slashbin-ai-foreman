@@ -10,8 +10,10 @@
 //   - each field's description is the comment above it in `src/config.ts`;
 //   - each env override is read from `mergePaperclip` in `src/config.ts`;
 //   - the six status buckets come from the schema's `statusMap` keys;
-//   - every step's status and note text come from `PAPERCLIP_STEPS` in the
-//     built `src/paperclip/mirror.ts`, the table the mirror itself runs on.
+//   - every step's move and note text come from `PAPERCLIP_STEPS` in the
+//     built `src/paperclip/mirror.ts`, the table the mirror itself runs on;
+//   - the lifecycle stages, their default holder / status / stage label and
+//     the stage labels' names and colors come from the schema's defaults.
 // What IS written here is prose and one "when" line per step. A step, field or
 // bucket this file does not know, or one it knows that the code dropped, stops
 // the run, so the doc cannot quietly fall behind the code.
@@ -34,7 +36,7 @@ function fail(msg) {
 for (const f of [CONFIG_SRC, MIRROR_SRC]) if (!existsSync(f)) fail(`${f} not found.`);
 for (const f of [builtConfig, builtMirror]) if (!existsSync(f)) fail(`${f} not found — run \`npm run build\` first.`);
 
-const { configSchema } = await import(builtConfig);
+const { configSchema, PAPERCLIP_STAGES, PAPERCLIP_FOREMAN_ROLE } = await import(builtConfig);
 const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS, PAPERCLIP_TASK_TITLE_FORMAT } = await import(builtMirror);
 const { toJSONSchema } = await import("zod");
 
@@ -111,9 +113,30 @@ const unknown = stepIds.filter((s) => !(s in WHEN));
 const dropped = Object.keys(WHEN).filter((s) => !stepIds.includes(s));
 if (unknown.length) fail(`PAPERCLIP_STEPS has step(s) this generator does not describe: ${unknown.join(", ")}. Add them to WHEN.`);
 if (dropped.length) fail(`WHEN describes step(s) PAPERCLIP_STEPS no longer has: ${dropped.join(", ")}.`);
+const MOVES = [...PAPERCLIP_STAGES, "done", "blocked"];
 for (const s of stepIds) {
-  const st = PAPERCLIP_STEPS[s].status;
-  if (st !== null && !buckets.includes(st)) fail(`step ${s} sets status "${st}", which is not a statusMap bucket.`);
+  const st = PAPERCLIP_STEPS[s].stage;
+  if (st !== null && !MOVES.includes(st)) fail(`step ${s} moves to "${st}", which is not a lifecycle stage, done or blocked.`);
+}
+
+// What each lifecycle stage means. The key set must equal PAPERCLIP_STAGES.
+const STAGE_WHEN = {
+  approved: "Authorized and waiting to be built.",
+  implementing: "A build session is running on it.",
+  inReview: "Its pull request waits for review.",
+  reviewing: "A review session is running on it.",
+  changesRequested: "The review asked for changes; waiting for a revision.",
+  revising: "A revision session is running on it.",
+  pendingVerification: "Approved and merged to the base branch; waiting for verification before release.",
+  awaitingRelease: "Verified (or in an open release pull request); waiting for the release to merge.",
+};
+const stageKeys = [...PAPERCLIP_STAGES];
+if (stageKeys.join() !== Object.keys(STAGE_WHEN).join()) fail(`STAGE_WHEN must describe exactly ${stageKeys.join(", ")}.`);
+for (const st of stageKeys) {
+  const b = defaults.board?.[st];
+  if (!b) fail(`paperclip.board has no default for stage ${st}.`);
+  if (!buckets.includes(b.status)) fail(`stage ${st} defaults to status "${b.status}", which is not a statusMap bucket.`);
+  if (b.label !== null && !(b.label in defaults.stageLabels)) fail(`stage ${st} defaults to label "${b.label}", which stageLabels does not define.`);
 }
 if (!buckets.includes(PAPERCLIP_CREATE_STATUS)) fail(`PAPERCLIP_CREATE_STATUS "${PAPERCLIP_CREATE_STATUS}" is not a statusMap bucket.`);
 
@@ -127,17 +150,39 @@ const defaultOf = (f) => (defaults[f] === undefined ? "—" : code(JSON.stringif
 const configRows = fields.map((f) =>
   `| ${code(f)} | ${typeOf(props[f])} | ${envOf[f] ? code(envOf[f]) : "none"} | ${defaultOf(f)} | ${cell(descriptions[f])} |`);
 
+const bucketOf = (move) => (move === null ? null : move === "done" || move === "blocked" ? move : defaults.board[move].status);
 const setters = (b) => {
-  const by = stepIds.filter((s) => PAPERCLIP_STEPS[s].status === b).map(code);
+  const by = stepIds.filter((s) => bucketOf(PAPERCLIP_STEPS[s].stage) === b).map(code);
   if (b === PAPERCLIP_CREATE_STATUS) by.unshift("task creation");
-  return by.length ? by.join(", ") : "never — the Foreman does not close issues";
+  return by.length ? by.join(", ") : "never by default — the Foreman does not close issues";
 };
 const statusRows = buckets.map((b) => `| ${code(b)} | ${setters(b)} | ${code(`statusMap.${b}`)}, else ${code(b)} |`);
 
 const stepRows = stepIds.map((s) => {
-  const { status, note } = PAPERCLIP_STEPS[s];
-  return `| ${code(s)} | ${cell(WHEN[s])} | ${status ? code(status) : "unchanged"} | ${code(note)} |`;
+  const { stage, note } = PAPERCLIP_STEPS[s];
+  return `| ${code(s)} | ${cell(WHEN[s])} | ${stage ? code(stage) : "unchanged"} | ${code(note)} |`;
 });
+
+const stageRows = stageKeys.map((st) => {
+  const b = defaults.board[st];
+  return `| ${code(st)} | ${cell(STAGE_WHEN[st])} | ${code(b.owner)} | ${code(b.status)} | ${b.label === null ? "none" : code(b.label)} |`;
+});
+const labelRows = Object.entries(defaults.stageLabels).map(([k, l]) => `| ${code(k)} | ${code(l.name)} | ${code(l.color)} |`);
+
+// A generic two-role example: a reviewer agent holds review, a lead holds verification and release.
+const rolesExample = JSON.stringify({ paperclip: {
+  agentReportsTo: "lead",
+  roles: {
+    reviewer: { name: "Reviewer", title: "Code reviewer", reportsTo: "lead" },
+    lead: { name: "Lead", title: "Engineering lead", role: "general" },
+  },
+  board: {
+    inReview: { owner: "reviewer" },
+    reviewing: { owner: "reviewer" },
+    pendingVerification: { owner: "lead", status: "todo" },
+    awaitingRelease: { owner: "lead" },
+  },
+} }, null, 2);
 
 const exampleBlock = JSON.stringify({ paperclip: {
   enabled: true, url: defaults.url, companyId: "<your Paperclip company id>", agentName: defaults.agentName,
@@ -149,8 +194,8 @@ const doc = `<!-- GENERATED by scripts/docs/generate-paperclip.mjs — do not ed
 # Paperclip mirror
 
 The Foreman can mirror its work onto a [Paperclip](https://github.com/paperclipai/paperclip)
-company: each GitHub issue it builds gets a Paperclip task, held by a Foreman agent, whose
-status follows the build and which gets a note at every step.
+company: each GitHub issue it builds gets a Paperclip task whose holder, status and stage label
+follow the issue through its lifecycle, and which gets a note at every step.
 
 GitHub stays the only work source. Paperclip only ever shows what the Foreman is doing; nothing
 set in Paperclip starts, stops or changes a build. The mirror is off by default, and a config
@@ -191,10 +236,11 @@ description is the identity line, a blank line, and the issue's GitHub URL.
 
 ## Status mapping
 
-The Foreman moves a task between six status buckets. Each is sent to Paperclip under its
+Each step moves the task to a lifecycle stage (see **Board stages**), and the stage sets one of
+six status buckets. Each is sent to Paperclip under its
 \`statusMap\` name if one is configured, else under the bucket name itself.
 
-| Bucket | Set by the Foreman at | Name sent to Paperclip |
+| Bucket | Set by default at | Name sent to Paperclip |
 |---|---|---|
 ${statusRows.join("\n")}
 
@@ -210,7 +256,7 @@ company, and an agent declining an issue is a note (\`blocked\` step).
 \`blocked\` is the one status no GitHub label carries: it means the Foreman is holding the issue
 back right now (\`waiting\`). Paperclip only accepts \`blocked\` with an unblock descriptor, so the
 Foreman sends one owned by its agent, with the reason as the action — the reason shows on the
-task itself. When the issue stops waiting the Foreman moves it back to \`in_progress\`, and
+task itself. When the issue stops waiting the Foreman moves it back to the stage it was in, and
 Paperclip clears the descriptor. Both are written only when they change: the task's own status
 and descriptor are the record, so a restarted Foreman reads them back instead of repeating
 them. A sync that also writes these tasks should leave a \`blocked\` task held by the Foreman's
@@ -219,29 +265,79 @@ agent alone unless the issue has closed, or the two will flip it back and forth.
 ## Notes per step
 
 Every step below posts one note on the issue's task (a session step, on the task of each issue
-the session is about). \`{name}\` in a note is filled from the event. A step with a status also sets the task's status (see above). Secrets the Foreman
+the session is about). \`{name}\` in a note is filled from the event. A step with a stage also moves the task there (see **Board stages**). Secrets the Foreman
 knows of are redacted from every note before it is sent.
 
-| Step | When | Status | Note |
+| Step | When | Moves to | Note |
 |---|---|---|---|
 ${stepRows.join("\n")}
 
 A task is created only when the Foreman picks an issue up (\`claim\`). A later step on an issue
 that has no task writes nothing.
 
+## Board stages
+
+Paperclip's columns are fixed, so each task carries two things beyond its status: the agent
+holding it (whoever owns the next action, so each agent's view is its own queue) and a stage
+label naming where it is inside that status. Both come from \`board\`, one entry per lifecycle
+stage: \`owner\` is \`${PAPERCLIP_FOREMAN_ROLE}\` (the Foreman's own agent) or a key of \`roles\`,
+\`status\` a status bucket, and \`label\` a key of \`stageLabels\` or \`null\`. Each entry, and each
+field in it, falls back to its default on its own, so a config names only what it changes.
+
+| Stage | Meaning | Default owner | Default status | Default stage label |
+|---|---|---|---|---|
+${stageRows.join("\n")}
+
+The defaults suit a Foreman that is the only agent: it holds every task. A task carries at most
+one stage label; a move swaps it and leaves every other label on the task alone. Each stage
+label is created in the company on first use (by name, so one created by hand is reused):
+
+| Key | Default name | Default color |
+|---|---|---|
+${labelRows.join("\n")}
+
+When the issue ships (\`done\`) its stage label is removed and it stays with whoever held it.
+A config that names a stage owner or label that does not exist stops the Foreman at startup.
+
+### Roles
+
+\`roles\` adds agents that only hold tasks — a reviewer, a lead who verifies and releases. Each
+is a Paperclip agent like the Foreman's, registered by \`npm run paperclip:register\` with every
+wake path off, so assigning it a task never makes Paperclip start a run. Two roles and the
+stages they take over:
+
+\`\`\`json
+${rolesExample}
+\`\`\`
+
+\`reportsTo\` names another role key or \`${PAPERCLIP_FOREMAN_ROLE}\`; \`agentReportsTo\` is the
+Foreman's own. Both are applied at registration; left unset, Paperclip's value is kept.
+
+### Live sessions
+
+The \`implementing\`, \`reviewing\` and \`revising\` stages last exactly as long as the session.
+A state the issue reaches meanwhile (the review approves it, say) is applied when the session
+ends; a session that ends with none returns the task to the stage it came from (\`approved\`,
+\`inReview\` or \`changesRequested\`). Each review note names the reviewer.
+
+While any session runs, the Foreman's agent carries a lease in its metadata
+(\`foremanLive\`: the tasks held and when, renewed every few minutes). Past
+\`liveLeaseMinutes\` without renewal the lease is void. A Foreman that starts with a lease left
+by a process that died mid-session returns those tasks to their stages, and any other tool
+that writes the same tasks can read the lease to leave live ones alone.
+
 ## Assignment
 
-Every step that sets a status also assigns the task to the Foreman's agent (\`agentId\`), so the
-task is held by the Foreman from the moment it is picked up. Note-only steps leave the assignee
-alone; a task reassigned by hand in Paperclip goes back to the Foreman at its next status
-change. The agent is registered with every wake path off (no heartbeat, no wake-on-demand), so
-assigning a task to it never makes Paperclip start a run.
+Every move to a lifecycle stage assigns the task to that stage's owner (see above). Note-only
+steps leave the assignee alone; a task reassigned by hand in Paperclip goes back at its next
+move. The Foreman's agent is registered with every wake path off (no heartbeat, no
+wake-on-demand), so assigning a task to it never makes Paperclip start a run.
 
 ## Projects
 
 With \`projects\` on, every task is filed under a Paperclip project for its repo, named by
 \`projectNameFormat\` (default ${code(defaults.projectNameFormat)}): \`{name}\` is the repo's
-name (\`Slashbin-console\`), \`{repo}\` its full \`owner/name\`. The project is looked up by name,
+name (\`my-service\`), \`{repo}\` its full \`owner/name\`. The project is looked up by name,
 archived ones included, and created only when none has that name, so renaming the format
 creates new projects rather than renaming old ones. A task the Foreman creates carries the
 project from the start; at startup, and at every refresh of its task list after, the Foreman
@@ -249,9 +345,9 @@ sets the project on any task with an identity line (its own or another tool's) t
 
 ## Live activity
 
-The board is the queue: each task's status says what the Foreman is doing with it — building
-(\`in_progress\`), held back with the reason on the task (\`blocked\`), in review or waiting on its
-release (\`in_review\`), shipped (\`done\`). With \`agentStatus\` on, the Foreman's agent is
+The board is the queue: \`in_progress\` means a session is running on the task right now,
+\`blocked\` that the Foreman is holding it back (with the reason on the task), and the stage
+label and holder say what the task waits for otherwise. With \`agentStatus\` on, the Foreman's agent is
 \`running\` while any session runs and \`idle\` otherwise, written only on a change.
 
 Earlier versions kept one extra summary task held by the agent; the Foreman cancels it at
@@ -273,11 +369,12 @@ app"**: the \`setup-paperclip-integration\` skill walks through the steps below 
 configuration only. By hand:
 
 1. Add the \`paperclip\` block above to \`.ai-agent.json\`, with your company's id.
-2. \`npm run build && npm run paperclip:register\` — registers the agent named \`agentName\` with
-   every wake path off and writes \`paperclip.agentId\` into the file. Re-running it finds the
-   same agent and switches its wake paths off again.
-3. \`npm run labels:install\` — the configured labels exist on every configured repo.
-4. Restart the daemon.
+2. Optionally, add \`roles\` and the \`board\` stages they own (see **Roles**).
+3. \`npm run build && npm run paperclip:register\` — registers the agent named \`agentName\`, and
+   each role, with every wake path off and writes their ids into the file. Re-running it finds
+   the same agents (by name) and switches their wake paths off again.
+4. \`npm run labels:install\` — the configured labels exist on every configured repo.
+5. Restart the daemon.
 
 ## Verify
 
@@ -286,11 +383,12 @@ npm run build && npm run paperclip:doctor        # or: node dist/cli.js papercli
 \`\`\`
 
 The doctor is read-only: it checks that Paperclip answers, the company exists, the agent is
-registered with both wake paths off, and the \`paperclip\` block is complete. It prints one
+registered with both wake paths off, the \`paperclip\` block is complete, and every configured
+role is registered under its name with its wake paths off. It prints one
 \`PASS\` or \`FAIL\` line per check, naming what failed, and exits 0 only when every check passes.
 
 To see it work, give a GitHub issue in a configured repo its trigger label. When the Foreman
-picks it up, its Paperclip task appears, assigned to the Foreman, with a
+picks it up, its Paperclip task appears, in progress and assigned to the Foreman, with a
 ${code(PAPERCLIP_STEPS.claim.note)} note, and gains a note at each step after.
 
 ## Remove

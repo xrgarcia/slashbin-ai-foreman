@@ -1,6 +1,9 @@
 // Mirrors the Foreman's work onto Paperclip (EM#417): each step the Foreman
-// reports on an issue becomes a note on that issue's Paperclip task, the task
-// is held by the Foreman's agent, and its status follows the step.
+// reports on an issue becomes a note on that issue's Paperclip task, and the
+// step's lifecycle stage places the card: the agent holding it, its status and
+// its stage label, all from `paperclip.board` (board.ts). By default the
+// Foreman holds every card; a config with roles hands review to one agent and
+// verification to another.
 //
 // An observer, never a work source: GitHub decides what is built. Everything
 // here is best-effort. Every Paperclip call is caught and no method throws.
@@ -12,9 +15,15 @@
 // The task row is shared with whatever else syncs GitHub issues into Paperclip.
 // It is found by the first line of its description, `identityKeyFormat` with
 // {repo} = owner/name and {N} = the issue number, and created only when no row
-// carries that line. Status is set only where a sync deriving it from GitHub
-// labels would set the same bucket: building → in_progress, any PR-review
-// state → in_review. Merged to the base branch and blocked are notes only.
+// carries that line. Merged to the base branch and blocked are notes only.
+//
+// A live session (implement, review, revision) holds its cards in the
+// session's stage (in progress, by default) until it ends; a state reported
+// meanwhile is kept and applied when it does, and a session that ends with no
+// newer state returns the card to the stage it came from. While any session
+// runs, the Foreman agent's metadata carries a lease naming the cards it
+// holds, renewed every few minutes: a sync reading the board defers to it, and
+// on start the mirror returns any card a dead process left in progress.
 //
 // Release: once an item's work is in a release PR (base → production) the row
 // goes to in_review, "waiting on release PR #N", and to done when that PR
@@ -23,7 +32,7 @@
 //
 // The one status no label carries is `blocked`: an issue the Foreman holds
 // back this cycle (a back-off, an occupied branch) is moved to blocked with the
-// reason as Paperclip's unblock descriptor, and back to in_progress once it
+// reason as Paperclip's unblock descriptor, and back to its stage once it
 // stops waiting. Both are written only on a change — the row's own status and
 // descriptor are the record, so a restart re-derives them instead of repeating.
 //
@@ -35,16 +44,26 @@
 
 import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkState } from "../adapters.js";
 import { redactAll } from "../agent.js";
-import type { PaperclipConfig, RepoConfig } from "../config.js";
+import type { PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
+import {
+  ensureStageLabels, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  type LiveLease, type PaperclipBucket,
+} from "./board.js";
 import { PaperclipClientError, type PaperclipClient } from "./client.js";
 
-/** A Paperclip status bucket; `statusMap` may rename each one. */
-export type PaperclipBucket = "todo" | "in_progress" | "in_review" | "blocked" | "done" | "cancelled";
+export type { PaperclipBucket } from "./board.js";
 type Bucket = PaperclipBucket;
 
-/** One step the mirror writes: the status it sets (null = note only) and the note. */
-export type PaperclipStep = { readonly status: Bucket | null; readonly note: string };
+/**
+ * Where a step moves the card: a lifecycle stage (placed by `paperclip.board`),
+ * "done" (status done, holder and stage label as before, stage label removed),
+ * "blocked" (held by the Foreman, waiting), or null (a note only).
+ */
+export type PaperclipStepMove = PaperclipStage | "done" | "blocked" | null;
+
+/** One step the mirror writes: where it moves the card, and the note. */
+export type PaperclipStep = { readonly stage: PaperclipStepMove; readonly note: string };
 
 /**
  * Every step the mirror writes to a task, in the order an issue meets them.
@@ -53,31 +72,31 @@ export type PaperclipStep = { readonly status: Bucket | null; readonly note: str
  * from the table the mirror runs on.
  */
 export const PAPERCLIP_STEPS = Object.freeze({
-  claim: { status: "in_progress", note: "picked up by Foreman" },
-  queued: { status: "in_progress", note: "queued" },
-  prLink: { status: null, note: "PR opened: {prUrl}" },
-  inReview: { status: "in_review", note: "under review" },
-  changesRequested: { status: "in_review", note: "changes requested" },
-  approved: { status: "in_review", note: "approved" },
-  blocked: { status: null, note: "blocked: {reason}" },
-  merged: { status: null, note: "merged" },
-  releaseWaiting: { status: "in_review", note: "waiting on release PR #{pr} to merge to {branch}" },
-  released: { status: "done", note: "release PR #{pr} merged to {branch}" },
-  inProduction: { status: "done", note: "in production ({branch})" },
-  releaseClosed: { status: null, note: "release PR #{pr} closed without merging; waiting for the next release" },
-  backoffPause: { status: null, note: "paused: {upstream} back-off: {reason}" },
-  backoffResume: { status: null, note: "resumed after back-off" },
-  waiting: { status: "blocked", note: "waiting: {reason}" },
-  resumed: { status: "in_progress", note: "resumed: no longer waiting" },
-  implementFinished: { status: null, note: "implement session finished: {detail}" },
-  implementFailed: { status: null, note: "implement session failed: {detail}" },
-  reviseStarted: { status: null, note: "revision started: PR #{pr}" },
-  reviseFinished: { status: null, note: "revision finished: {detail}" },
-  reviseFailed: { status: null, note: "revision failed: {detail}" },
-  reviewStarted: { status: null, note: "review started: PR #{pr} by {reviewer}" },
-  reviewHandoff: { status: null, note: "review handed to {reviewer}: {detail}" },
-  reviewFinished: { status: null, note: "review finished: {detail}" },
-  reviewFailed: { status: null, note: "review failed: {detail}" },
+  claim: { stage: "implementing", note: "picked up by Foreman" },
+  queued: { stage: "approved", note: "queued" },
+  prLink: { stage: null, note: "PR opened: {prUrl}" },
+  inReview: { stage: "inReview", note: "under review" },
+  changesRequested: { stage: "changesRequested", note: "changes requested" },
+  approved: { stage: "pendingVerification", note: "approved" },
+  blocked: { stage: null, note: "blocked: {reason}" },
+  merged: { stage: null, note: "merged" },
+  releaseWaiting: { stage: "awaitingRelease", note: "waiting on release PR #{pr} to merge to {branch}" },
+  released: { stage: "done", note: "release PR #{pr} merged to {branch}" },
+  inProduction: { stage: "done", note: "in production ({branch})" },
+  releaseClosed: { stage: null, note: "release PR #{pr} closed without merging; waiting for the next release" },
+  backoffPause: { stage: null, note: "paused: {upstream} back-off: {reason}" },
+  backoffResume: { stage: null, note: "resumed after back-off" },
+  waiting: { stage: "blocked", note: "waiting: {reason}" },
+  resumed: { stage: null, note: "resumed: no longer waiting" },
+  implementFinished: { stage: null, note: "implement session finished: {detail}" },
+  implementFailed: { stage: null, note: "implement session failed: {detail}" },
+  reviseStarted: { stage: "revising", note: "revising PR #{pr}" },
+  reviseFinished: { stage: null, note: "revision finished: {detail}" },
+  reviseFailed: { stage: null, note: "revision failed: {detail}" },
+  reviewStarted: { stage: "reviewing", note: "{reviewer} reviewing PR #{pr}" },
+  reviewHandoff: { stage: null, note: "review handed to {reviewer}: {detail}" },
+  reviewFinished: { stage: null, note: "review finished: {detail}" },
+  reviewFailed: { stage: null, note: "review failed: {detail}" },
 } as const satisfies Record<string, PaperclipStep>);
 
 /** The note a repeat claim posts: the same work, retried after an attempt that did not finish. */
@@ -127,6 +146,18 @@ function fill(template: string, vars: Record<string, string> = {}): string {
 /** How long a full scan of the company's tasks answers a lookup that missed. */
 const INDEX_TTL_MS = 10 * 60_000;
 
+/**
+ * A lookup that misses rescans once the last scan is this old, so a row
+ * another writer (a periodic sync) added since is found within a minute, not
+ * at the next ten-minute refresh.
+ */
+const MISS_RESCAN_MS = 60_000;
+
+/** How often a held lease is renewed; well inside the shortest sensible `liveLeaseMinutes`. */
+const LEASE_RENEW_MS = 4 * 60_000;
+
+type SessionPhase = keyof typeof SESSION_STAGE;
+
 export class PaperclipMirror implements WorkObserver {
   /** Identity key → Paperclip task id, for every task this mirror has resolved. */
   private readonly taskUuidCache = new Map<string, string>();
@@ -155,6 +186,18 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rejectionsLogged = new Set<string>();
   /** The item being built right now (one session at a time), for back-off notes. */
   private building: WorkItem | null = null;
+  /**
+   * Task id → the live sessions holding it in progress: how many, the phase
+   * of the first, and the stage a state reported meanwhile asks for, applied
+   * when the last one ends.
+   */
+  private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove }>();
+  /** Task id → the last lifecycle stage the mirror placed it in, so a resumed card goes back there. */
+  private readonly rowStage = new Map<string, PaperclipStage>();
+  /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
+  private stageLabelIds: Promise<Map<string, string> | null> | null = null;
+  /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
+  private agentMetadata: Record<string, unknown> | null = null;
 
   constructor(
     private readonly client: PaperclipClient,
@@ -168,7 +211,7 @@ export class PaperclipMirror implements WorkObserver {
     const id = await this.resolve(item, true);
     if (!id) return;
     const step = PAPERCLIP_STEPS.claim;
-    await this.setStatus(id, step.status);
+    await this.move(id, step.stage);
     // A second claim before any state change is the same work, retried after a
     // failed attempt: say so once, rather than "picked up" twice.
     const key = this.keyOf(item);
@@ -183,7 +226,7 @@ export class PaperclipMirror implements WorkObserver {
     if (to !== "queued") this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
-    if (step.status) await this.setStatus(id, step.status);
+    await this.move(id, step.stage);
     await this.note(id, step.note);
   }
 
@@ -226,7 +269,7 @@ export class PaperclipMirror implements WorkObserver {
       this.claimed.delete(this.keyOf(item));
       const id = await this.resolve(item, false);
       if (!id) continue;
-      if (step.status && !(await this.setStatus(id, step.status))) continue;
+      if (step.stage && !(await this.move(id, step.stage))) continue;
       await this.note(id, fill(step.note, vars));
     }
   }
@@ -239,10 +282,60 @@ export class PaperclipMirror implements WorkObserver {
    */
   start(): () => void {
     const run = () => void this.housekeep();
-    run();
+    void this.recoverLease().then(run);
     const timer = setInterval(run, INDEX_TTL_MS);
     timer.unref?.();
-    return () => clearInterval(timer);
+    const renew = setInterval(() => {
+      if (this.holds.size) void this.writeLease();
+    }, LEASE_RENEW_MS);
+    renew.unref?.();
+    return () => {
+      clearInterval(timer);
+      clearInterval(renew);
+    };
+  }
+
+  /**
+   * Return every card the last process's lease still names to the stage its
+   * session came from: this process has no session yet, so a card shown in
+   * progress for one belongs to a session that died with it. Then write an
+   * empty lease. Never throws.
+   */
+  async recoverLease(): Promise<void> {
+    if (!this.cfg.agentId) return;
+    const agent = await this.safeCall("read agent", () => this.client.getAgent(this.cfg.agentId!));
+    if (!agent.ok) return;
+    const { [LIVE_LEASE_KEY]: lease, ...rest } = (agent.value?.metadata ?? {}) as Record<string, unknown>;
+    this.agentMetadata = rest;
+    const inProgress = this.statusName("in_progress");
+    for (const r of (lease as Partial<LiveLease> | undefined)?.rows ?? []) {
+      if (!r?.id || this.holds.has(r.id) || !(r.phase in SESSION_FALLBACK_STAGE)) continue;
+      const row = await this.safeCall("read task", () => this.client.getIssue(r.id), r.id);
+      if (!row.ok || row.value?.status !== inProgress) continue;
+      await this.move(r.id, SESSION_FALLBACK_STAGE[r.phase]);
+    }
+    await this.writeLease();
+  }
+
+  /**
+   * The lease: the cards held right now, stamped now. Paperclip replaces the
+   * whole metadata object, so the agent's other keys are read first when this
+   * process has not seen them; unread, the lease is not written. Never throws.
+   */
+  private async writeLease(): Promise<void> {
+    if (!this.cfg.agentId) return;
+    if (this.agentMetadata === null) {
+      const agent = await this.safeCall("read agent", () => this.client.getAgent(this.cfg.agentId!));
+      if (!agent.ok) return;
+      const { [LIVE_LEASE_KEY]: _old, ...rest } = (agent.value?.metadata ?? {}) as Record<string, unknown>;
+      this.agentMetadata = rest;
+    }
+    const lease: LiveLease = {
+      leaseAt: new Date().toISOString(),
+      rows: [...this.holds].map(([id, h]) => ({ id, phase: h.phase })),
+    };
+    await this.safeCall("update agent", () =>
+      this.client.updateAgent(this.cfg.agentId!, { metadata: { ...(this.agentMetadata ?? {}), [LIVE_LEASE_KEY]: lease } }));
   }
 
   /** One housekeeping pass; never throws. */
@@ -335,6 +428,8 @@ export class PaperclipMirror implements WorkObserver {
       const id = await this.resolve(w.item, false);
       if (!id) continue;
       keep.add(id);
+      // A card a session holds is not waiting, whatever this cycle's plan says.
+      if (this.holds.has(id)) continue;
       const want = `waiting\n${w.reason}`;
       if (this.rowState.get(id) === want) continue;
       const step = PAPERCLIP_STEPS.waiting;
@@ -353,7 +448,7 @@ export class PaperclipMirror implements WorkObserver {
     if (await this.ensureIndex()) {
       for (const [id, state] of this.rowState) {
         if (keep.has(id) || !state.startsWith("waiting\n") || this.rowRepo.get(id) !== repo) continue;
-        if (!(await this.setStatus(id, "in_progress"))) continue;
+        if (!(await this.move(id, this.rowStage.get(id) ?? "approved"))) continue;
         await this.note(id, PAPERCLIP_STEPS.resumed.note);
       }
     }
@@ -368,18 +463,41 @@ export class PaperclipMirror implements WorkObserver {
       this.sessions.set(key, { event: { ...(s?.event ?? event), reviewer: event.reviewer }, since: s?.since ?? new Date() });
     } else this.sessions.delete(key);
 
+    const phase = event.phase as SessionPhase;
     const step = SESSION_STEP[`${event.phase}:${event.status}`];
-    if (step) {
-      const text = fill(step.note, {
-        pr: event.pr === undefined ? "?" : String(event.pr),
-        reviewer: event.reviewer ?? "reviewer",
-        detail: this.clean(event.detail ?? "") || event.status,
-      });
-      for (const item of event.items) {
-        const id = await this.resolve(item, false);
-        if (id) await this.note(id, text);
+    const text = step && fill(step.note, {
+      pr: event.pr === undefined ? "?" : String(event.pr),
+      reviewer: event.reviewer ?? "reviewer",
+      detail: this.clean(event.detail ?? "") || event.status,
+    });
+    let leaseChanged = false;
+    for (const item of event.items) {
+      const id = await this.resolve(item, false);
+      if (!id) continue;
+      if (event.status === "started" && phase in SESSION_STAGE) {
+        const h = this.holds.get(id);
+        if (h) h.count++;
+        else {
+          // The card takes the session's stage first (the claim may already
+          // have put it there), then is held there.
+          const stage = SESSION_STAGE[phase];
+          if (this.rowStage.get(id) !== stage || this.rowState.get(id) !== `status:${this.statusName(stageTarget(this.cfg, stage).bucket)}`) {
+            await this.move(id, stage);
+          }
+          this.holds.set(id, { count: 1, phase, restore: null });
+        }
+        leaseChanged = true;
+      } else if (event.status === "finished" || event.status === "failed") {
+        const h = this.holds.get(id);
+        if (h && --h.count <= 0) {
+          this.holds.delete(id);
+          await this.move(id, h.restore ?? SESSION_FALLBACK_STAGE[h.phase]);
+          leaseChanged = true;
+        }
       }
+      if (text) await this.note(id, text);
     }
+    if (leaseChanged) await this.writeLease();
     await this.syncAgentStatus();
   }
 
@@ -406,7 +524,7 @@ export class PaperclipMirror implements WorkObserver {
   }
 
   private statusName(bucket: Bucket): string {
-    return this.cfg.statusMap?.[bucket] ?? bucket;
+    return statusName(this.cfg, bucket);
   }
 
   /**
@@ -422,7 +540,10 @@ export class PaperclipMirror implements WorkObserver {
 
     if (!(await this.ensureIndex(create))) return null;
 
-    const found = this.index?.get(key);
+    let found = this.index?.get(key);
+    if (!found && !create && Date.now() - this.indexedAt > MISS_RESCAN_MS && (await this.ensureIndex(true))) {
+      found = this.index?.get(key);
+    }
     if (found) {
       this.taskUuidCache.set(key, found);
       return found;
@@ -498,20 +619,59 @@ export class PaperclipMirror implements WorkObserver {
   }
 
   /**
-   * Set the task's status, held by the Foreman's agent. True on success.
+   * Move the card. A lifecycle stage places it by `paperclip.board`: status,
+   * holder and stage label. "done" sets the status and drops the stage label,
+   * leaving the holder as it was. A card a live session holds keeps its
+   * session stage; the move is kept and made when the session ends. True on
+   * success, and when kept.
    *
-   * `assigneeUserId: null` in the same update: Paperclip allows one assignee
-   * ("Issue can only have one assignee", 422), and a sync gives an in_progress
-   * row a board user, so taking the row means releasing that user.
+   * `assigneeUserId: null` with every assignee: Paperclip allows one assignee
+   * ("Issue can only have one assignee", 422), and a sync may give the row a
+   * board user, so taking the row means releasing that user. The stage label
+   * is best-effort: when the labels cannot be read the status still moves.
    */
-  private async setStatus(id: string, bucket: Bucket): Promise<boolean> {
+  private async move(id: string, to: PaperclipStepMove): Promise<boolean> {
+    if (to === null || to === "blocked") return true;
+    const h = this.holds.get(id);
+    if (h) {
+      if (to !== SESSION_STAGE[h.phase]) h.restore = to;
+      return true;
+    }
+    let bucket: Bucket;
+    let holder: Record<string, unknown> = {};
+    let label: string | null = null;
+    if (to === "done") bucket = "done";
+    else {
+      const t = stageTarget(this.cfg, to);
+      bucket = t.bucket;
+      label = t.label;
+      if (t.agentId) holder = { assigneeAgentId: t.agentId, assigneeUserId: null };
+    }
     const project = await this.projectPatch(id);
-    const ok = await this.patch(id, { ...project, status: this.statusName(bucket), assigneeAgentId: this.cfg.agentId, assigneeUserId: null });
+    const labelIds = await this.labelIdsFor(id, label);
+    const ok = await this.patch(id, { ...project, status: this.statusName(bucket), ...holder, ...(labelIds ? { labelIds } : {}) });
     if (ok) {
       this.rowState.set(id, `status:${this.statusName(bucket)}`);
+      if (to !== "done") this.rowStage.set(id, to);
       if (project.projectId) this.rowProject.set(id, project.projectId);
     }
     return ok;
+  }
+
+  /** The card's label ids with `key`'s stage label as its only one; null when the labels cannot be read. */
+  private async labelIdsFor(id: string, key: string | null): Promise<string[] | null> {
+    this.stageLabelIds ??= (async () => {
+      const r = await this.safeCall("ensure stage labels", () => ensureStageLabels(this.client, this.cfg));
+      if (!r.ok) this.stageLabelIds = null;
+      return r.ok ? r.value : null;
+    })();
+    const ids = await this.stageLabelIds;
+    if (!ids) return null;
+    const row = await this.safeCall("read task", () => this.client.getIssue(id), id);
+    if (!row.ok) return null;
+    const current = Array.isArray(row.value?.labelIds) ? row.value.labelIds : [];
+    const next = withStage(current, ids, key);
+    return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
   }
 
   private async patch(id: string, body: Record<string, unknown>): Promise<boolean> {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Register the Foreman as an agent in its Paperclip company, with every wake
-// path off, and record the agent's id in the config. Run as
+// Register the Foreman, and every role in `paperclip.roles`, as an agent in
+// its Paperclip company, with every wake path off, and record each agent's id
+// in the config. Run as
 // `npm run paperclip:register [-- config-path]`; with no path it uses the same
 // `.ai-agent.json` / `ai-agent.config.json` the daemon reads from the current
 // directory. Run `npm run build` first.
@@ -11,11 +12,13 @@
 // block: that is where the id is written, and its absence means the operator
 // never opted in, so nothing is sent.
 //
-// Requests: GET the company's agents; POST one when none has the name; then
-// always PATCH both heartbeat flags off (Paperclip defaults wake-on-demand ON,
-// and the PATCH repairs an agent switched back on since). The config file is
-// written only after all of that succeeds, and only when `paperclip.agentId`
-// changes: that one key is set, every other key kept, and the diff printed.
+// Requests: GET the company's agents; POST one for each name none has; then
+// always PATCH each agent's heartbeat flags off (Paperclip defaults
+// wake-on-demand ON, and the PATCH repairs an agent switched back on since),
+// with its title and reportsTo where the config sets them. The config file is
+// written only after all of that succeeds, and only when an id changes:
+// `paperclip.agentId` and `paperclip.roles.<key>.id` are set, every other key
+// kept, and the diff printed.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +34,7 @@ for (const f of [builtConfig, builtAgent, builtClient]) {
   }
 }
 const { loadConfig } = await import(builtConfig);
-const { registerPaperclipAgent, PAPERCLIP_AGENT_ADAPTER } = await import(builtAgent);
+const { registerPaperclipTeam, PAPERCLIP_AGENT_ADAPTER } = await import(builtAgent);
 const { PaperclipClient } = await import(builtClient);
 
 function fail(msg) {
@@ -69,23 +72,33 @@ if (!paperclip.companyId) fail(`${configPath}: paperclip.companyId is not set.`)
 const client = new PaperclipClient({ url: paperclip.url, companyId: paperclip.companyId });
 let result;
 try {
-  result = await registerPaperclipAgent(client, paperclip.agentName);
+  result = await registerPaperclipTeam(client, paperclip);
 } catch (err) {
   fail(`Registration against ${paperclip.url} failed: ${err.message}\nNothing was written to ${configPath}.`);
 }
-const { agent, created } = result;
+const { agent, created } = result.foreman;
 
-console.log(`${created ? "Registered" : "Found"} Paperclip agent "${agent.name ?? paperclip.agentName}" (${agent.id}) in company ${paperclip.companyId}; heartbeat and wake-on-demand are off.`);
-if (agent.adapterType && agent.adapterType !== PAPERCLIP_AGENT_ADAPTER) {
-  console.log(`Note: this agent's adapter is "${agent.adapterType}", not "${PAPERCLIP_AGENT_ADAPTER}". Left as is; with its wake paths off Paperclip starts no run either way.`);
-}
+const said = (reg, fallback) => {
+  const a = reg.agent;
+  console.log(`${reg.created ? "Registered" : "Found"} Paperclip agent "${a.name ?? fallback}" (${a.id}) in company ${paperclip.companyId}; heartbeat and wake-on-demand are off.`);
+  if (a.adapterType && a.adapterType !== PAPERCLIP_AGENT_ADAPTER) {
+    console.log(`Note: this agent's adapter is "${a.adapterType}", not "${PAPERCLIP_AGENT_ADAPTER}". Left as is; with its wake paths off Paperclip starts no run either way.`);
+  }
+};
+said({ agent, created }, paperclip.agentName);
+for (const [key, reg] of Object.entries(result.roles)) said(reg, paperclip.roles[key].name);
 
-if (raw.paperclip.agentId === agent.id) {
-  console.log(`${configPath} already records paperclip.agentId; unchanged.`);
+const roleIdsChanged = Object.entries(result.roles).filter(([key, reg]) => raw.paperclip.roles?.[key]?.id !== reg.agent.id);
+if (raw.paperclip.agentId === agent.id && roleIdsChanged.length === 0) {
+  console.log(`${configPath} already records every agent id; unchanged.`);
   process.exit(0);
 }
 
 raw.paperclip.agentId = agent.id;
+for (const [key, reg] of roleIdsChanged) {
+  // A role exists in the file only when the operator wrote it there; ids land beside it.
+  if (isObject(raw.paperclip.roles?.[key])) raw.paperclip.roles[key].id = reg.agent.id;
+}
 const indent = before.match(/^[{[]\r?\n([ \t]+)/)?.[1] ?? 2;
 const after = JSON.stringify(raw, null, indent) + (before.endsWith("\n") ? "\n" : "");
 writeFileSync(configPath, after);
@@ -97,7 +110,7 @@ let head = 0;
 while (head < a.length && head < b.length && a[head] === b[head]) head++;
 let tail = 0;
 while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
-console.log(`Wrote paperclip.agentId to ${configPath}:`);
+console.log(`Wrote agent ids to ${configPath}:`);
 console.log(`--- ${configPath}`);
 console.log(`+++ ${configPath}`);
 for (const l of a.slice(head, a.length - tail)) console.log(`-${l}`);

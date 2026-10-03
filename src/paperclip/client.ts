@@ -19,6 +19,14 @@ export type PaperclipIssue = {
   unblockDescriptor?: { owner: unknown; action: string } | null;
   /** The project the task belongs to; the mirror gives each repo one. */
   projectId?: string | null;
+  /** The task's labels; a PATCH of labelIds replaces the whole set. */
+  labelIds?: string[];
+};
+
+export type PaperclipLabel = {
+  id: string;
+  name: string;
+  color?: string;
 };
 
 export type PaperclipProject = {
@@ -39,6 +47,10 @@ export type PaperclipAgent = {
   role?: string;
   adapterType?: string;
   runtimeConfig?: unknown;
+  title?: string | null;
+  reportsTo?: string | null;
+  status?: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 export type PaperclipCompany = {
@@ -165,6 +177,19 @@ export class PaperclipClient {
   // an agent shortname, and every id the Foreman holds is the agent's UUID.
   updateAgent(id: string, body: Partial<PaperclipAgent> & Record<string, unknown>): Promise<PaperclipAgent> {
     return this.request("PATCH", `/api/agents/${encodeURIComponent(id)}`, body);
+  }
+
+  getAgent(id: string): Promise<PaperclipAgent> {
+    return this.request("GET", `/api/agents/${encodeURIComponent(id)}`);
+  }
+
+  listLabels(): Promise<PaperclipLabel[]> {
+    return this.request("GET", `${this.companyPath()}/labels`);
+  }
+
+  // Label names are unique per company: a second create of one name is a 409.
+  createLabel(body: { name: string; color: string }): Promise<PaperclipLabel> {
+    return this.request("POST", `${this.companyPath()}/labels`, body);
   }
 
   private companyPath(): string {

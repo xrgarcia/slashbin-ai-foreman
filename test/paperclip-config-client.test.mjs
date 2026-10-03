@@ -35,7 +35,12 @@ const CID = "company-1";
 
 test("no paperclip block: mirror off, every default applied", () => {
   const { paperclip } = loadConfig(cfg({}));
-  assert.deepEqual({ ...paperclip }, {
+  const { board, stageLabels, roles, ...rest } = paperclip;
+  assert.deepEqual(roles, {}, "no roles: the Foreman holds every card");
+  assert.ok(Object.values(board).every((s) => s.owner === "foreman"));
+  assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "changesRequested", "inReview", "pendingVerification"]);
+  assert.deepEqual({ ...rest }, {
+    liveLeaseMinutes: 15,
     enabled: false,
     url: "http://127.0.0.1:3100",
     agentName: "Foreman",
@@ -204,4 +209,17 @@ test("a network failure throws PaperclipClientError with status 0, no retry", as
 test("a 2xx body that is not JSON throws PaperclipClientError", async () => {
   const fn = async () => new Response("<html>", { status: 200 });
   await assert.rejects(make(fn).listAgents(), PaperclipClientError);
+});
+
+test("board: a partial stage keeps its defaults; an unknown owner, label or reportsTo is refused", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: {
+    roles: { reviewer: { name: "Reviewer" } },
+    board: { inReview: { owner: "reviewer" } },
+  } }));
+  assert.deepEqual({ ...paperclip.board.inReview }, { owner: "reviewer", status: "in_review", label: "inReview" });
+  assert.equal(paperclip.board.approved.owner, "foreman");
+  assert.equal(paperclip.roles.reviewer.role, "engineer");
+  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { owner: "nobody" } } } })), /nobody/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { label: "nope" } } } })), /nope/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { agentReportsTo: "ghost" } })), /ghost/);
 });

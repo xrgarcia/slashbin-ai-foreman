@@ -42,6 +42,53 @@ const lifecycleLabelsSchema = z.object({
 // `statusMap` renames any of them for an instance whose workflow uses other names.
 const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "blocked", "done", "cancelled"] as const;
 
+// The board's lifecycle stages: where an issue is between "authorized" and
+// "shipped". Each maps to who holds the card (a role), its Paperclip status,
+// and the stage label it carries. The `…ing` stages are a live session.
+export const PAPERCLIP_STAGES = [
+  "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising", "pendingVerification", "awaitingRelease",
+] as const;
+export type PaperclipStage = (typeof PAPERCLIP_STAGES)[number];
+
+/** The role every stage defaults to: the Foreman's own agent. */
+export const PAPERCLIP_FOREMAN_ROLE = "foreman";
+
+const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, "a 6-digit hex color, e.g. #2563eb");
+const stageLabel = (name: string, color: string) =>
+  z.object({ name: z.string().trim().min(1).max(48).default(name), color: hexColor.default(color) }).prefault({});
+const stageLabelsSchema = z.object({
+  inReview: stageLabel("In code review", "#2563eb"),
+  changesRequested: stageLabel("Changes requested", "#d97706"),
+  pendingVerification: stageLabel("Pending verification", "#7c3aed"),
+  awaitingRelease: stageLabel("Awaiting release", "#059669"),
+}).catchall(z.object({ name: z.string().trim().min(1).max(48), color: hexColor })).prefault({});
+
+const stage = (owner: string, status: (typeof PAPERCLIP_STATUS_BUCKETS)[number], label: string | null) =>
+  z.object({
+    owner: z.string().min(1).default(owner),
+    status: z.enum(PAPERCLIP_STATUS_BUCKETS).default(status),
+    label: z.string().min(1).nullable().default(label),
+  }).prefault({});
+// The default mapping fits a Foreman with no other roles: it holds every card.
+const boardStagesSchema = z.object({
+  approved: stage(PAPERCLIP_FOREMAN_ROLE, "todo", null),
+  implementing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", null),
+  inReview: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "inReview"),
+  reviewing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "inReview"),
+  changesRequested: stage(PAPERCLIP_FOREMAN_ROLE, "todo", "changesRequested"),
+  revising: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "changesRequested"),
+  pendingVerification: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "pendingVerification"),
+  awaitingRelease: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingRelease"),
+}).prefault({});
+
+const roleSchema = z.object({
+  name: z.string().trim().min(1),
+  title: z.string().min(1).optional(),
+  role: z.string().min(1).default("engineer"),
+  reportsTo: z.string().min(1).optional(),
+  id: z.string().min(1).optional(),
+});
+
 const paperclipConfigSchema = z.object({
   // Strict: env vars arrive as strings, and Boolean("false") is true. Anything
   // that is not a recognised yes/no reaches z.boolean() unchanged and fails.
@@ -72,10 +119,20 @@ const paperclipConfigSchema = z.object({
   statusMap: z.partialRecord(z.enum(PAPERCLIP_STATUS_BUCKETS), z.string().min(1)).optional(),
   // File every task under a Paperclip project for its repo, created on first use, and backfill the project on rows that lack it.
   projects: z.boolean().default(true),
-  // The project name for a repo: {name} is the repo name (Slashbin-console), {repo} is owner/name.
+  // The project name for a repo: {name} is the repo name (my-service), {repo} is owner/name.
   projectNameFormat: z.string().min(1).default("{name}"),
   // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
   agentStatus: z.boolean().default(true),
+  // Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card.
+  roles: z.record(z.string().regex(/^\w+$/), roleSchema).default({}),
+  // The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is.
+  agentReportsTo: z.string().min(1).optional(),
+  // Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none).
+  board: boardStagesSchema,
+  // The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched.
+  stageLabels: stageLabelsSchema,
+  // Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way.
+  liveLeaseMinutes: z.number().int().positive().default(15),
 });
 
 const repoEntrySchema = z.object({
@@ -288,6 +345,18 @@ export const configSchema = z.object({
 });
 
 // --- Types ---
+
+/** One lifecycle stage's place on the board: who holds the card, its status, its stage label. */
+export type PaperclipBoardStage = PaperclipConfig["board"][PaperclipStage];
+
+/**
+ * The board mapping and stage labels a config that omits them resolves to: the
+ * Foreman holds every card. Exported for callers that hold a partial config
+ * object rather than a loaded one, and for the generated docs.
+ */
+export function paperclipBoardDefaults(): Pick<PaperclipConfig, "board" | "stageLabels" | "roles"> {
+  return Object.freeze({ board: boardStagesSchema.parse({}), stageLabels: stageLabelsSchema.parse({}), roles: {} });
+}
 
 /** Configured names of the five lifecycle labels. See `lifecycleLabelsSchema`. */
 export type LifecycleLabels = Readonly<z.infer<typeof lifecycleLabelsSchema>>;
@@ -637,6 +706,17 @@ export function loadConfig(configPath?: string): AgentConfig {
   // Foreman uses is scoped to one company.
   if (parsed.paperclip.enabled && !parsed.paperclip.companyId) {
     throw new Error("paperclip.enabled is true but no paperclip.companyId is set.");
+  }
+  // Every stage must name a role that exists and a label that exists, or a card
+  // would be handed to nobody, silently.
+  const pc = parsed.paperclip;
+  const roleKeys = new Set([PAPERCLIP_FOREMAN_ROLE, ...Object.keys(pc.roles)]);
+  for (const [name, st] of Object.entries(pc.board)) {
+    if (!roleKeys.has(st.owner)) throw new Error(`paperclip.board.${name}.owner "${st.owner}" is not "${PAPERCLIP_FOREMAN_ROLE}" or a key of paperclip.roles.`);
+    if (st.label !== null && !(st.label in pc.stageLabels)) throw new Error(`paperclip.board.${name}.label "${st.label}" is not a key of paperclip.stageLabels.`);
+  }
+  for (const [key, role] of [...Object.entries(pc.roles), ["agentReportsTo", { reportsTo: pc.agentReportsTo }] as const]) {
+    if (role.reportsTo !== undefined && !roleKeys.has(role.reportsTo)) throw new Error(`paperclip ${key}: reportsTo "${role.reportsTo}" is not "${PAPERCLIP_FOREMAN_ROLE}" or a key of paperclip.roles.`);
   }
   const paperclip: PaperclipConfig = Object.freeze({
     ...parsed.paperclip,

@@ -4,8 +4,8 @@
 # Paperclip mirror
 
 The Foreman can mirror its work onto a [Paperclip](https://github.com/paperclipai/paperclip)
-company: each GitHub issue it builds gets a Paperclip task, held by a Foreman agent, whose
-status follows the build and which gets a note at every step.
+company: each GitHub issue it builds gets a Paperclip task whose holder, status and stage label
+follow the issue through its lifecycle, and which gets a note at every step.
 
 GitHub stays the only work source. Paperclip only ever shows what the Foreman is doing; nothing
 set in Paperclip starts, stops or changes a build. The mirror is off by default, and a config
@@ -27,8 +27,13 @@ that one field. The block is read once at startup — restart the daemon after c
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
 | `statusMap` | object | none | — | Per-bucket override of the Paperclip status name. Unset = the bucket names. |
 | `projects` | boolean | none | `true` | File every task under a Paperclip project for its repo, created on first use, and backfill the project on rows that lack it. |
-| `projectNameFormat` | string | none | `"{name}"` | The project name for a repo: {name} is the repo name (Slashbin-console), {repo} is owner/name. |
+| `projectNameFormat` | string | none | `"{name}"` | The project name for a repo: {name} is the repo name (my-service), {repo} is owner/name. |
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
+| `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
+| `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
+| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
+| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"pendingVerification":{"name":"Pending verification","color":"#7c3aed"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
+| `liveLeaseMinutes` | integer | none | `15` | Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way. |
 
 `enabled` is a boolean; given as a string (as the env var always is) it takes `true` / `false`,
 `1` / `0`, `yes` / `no` or `on` / `off`, and any other value stops the Foreman at startup.
@@ -62,17 +67,18 @@ description is the identity line, a blank line, and the issue's GitHub URL.
 
 ## Status mapping
 
-The Foreman moves a task between six status buckets. Each is sent to Paperclip under its
+Each step moves the task to a lifecycle stage (see **Board stages**), and the stage sets one of
+six status buckets. Each is sent to Paperclip under its
 `statusMap` name if one is configured, else under the bucket name itself.
 
-| Bucket | Set by the Foreman at | Name sent to Paperclip |
+| Bucket | Set by default at | Name sent to Paperclip |
 |---|---|---|
-| `todo` | task creation | `statusMap.todo`, else `todo` |
-| `in_progress` | `claim`, `queued`, `resumed` | `statusMap.in_progress`, else `in_progress` |
-| `in_review` | `inReview`, `changesRequested`, `approved`, `releaseWaiting` | `statusMap.in_review`, else `in_review` |
+| `todo` | task creation, `queued`, `changesRequested` | `statusMap.todo`, else `todo` |
+| `in_progress` | `claim`, `reviseStarted`, `reviewStarted` | `statusMap.in_progress`, else `in_progress` |
+| `in_review` | `inReview`, `approved`, `releaseWaiting` | `statusMap.in_review`, else `in_review` |
 | `blocked` | `waiting` | `statusMap.blocked`, else `blocked` |
 | `done` | `released`, `inProduction` | `statusMap.done`, else `done` |
-| `cancelled` | never — the Foreman does not close issues | `statusMap.cancelled`, else `cancelled` |
+| `cancelled` | never by default — the Foreman does not close issues | `statusMap.cancelled`, else `cancelled` |
 
 Merging to the base branch is a note, not a status: the work is not in production yet. Once
 the issue is in a release pull request (base branch → production branch) the task goes to
@@ -86,7 +92,7 @@ company, and an agent declining an issue is a note (`blocked` step).
 `blocked` is the one status no GitHub label carries: it means the Foreman is holding the issue
 back right now (`waiting`). Paperclip only accepts `blocked` with an unblock descriptor, so the
 Foreman sends one owned by its agent, with the reason as the action — the reason shows on the
-task itself. When the issue stops waiting the Foreman moves it back to `in_progress`, and
+task itself. When the issue stops waiting the Foreman moves it back to the stage it was in, and
 Paperclip clears the descriptor. Both are written only when they change: the task's own status
 and descriptor are the record, so a restarted Foreman reads them back instead of repeating
 them. A sync that also writes these tasks should leave a `blocked` task held by the Foreman's
@@ -95,33 +101,33 @@ agent alone unless the issue has closed, or the two will flip it back and forth.
 ## Notes per step
 
 Every step below posts one note on the issue's task (a session step, on the task of each issue
-the session is about). `{name}` in a note is filled from the event. A step with a status also sets the task's status (see above). Secrets the Foreman
+the session is about). `{name}` in a note is filled from the event. A step with a stage also moves the task there (see **Board stages**). Secrets the Foreman
 knows of are redacted from every note before it is sent.
 
-| Step | When | Status | Note |
+| Step | When | Moves to | Note |
 |---|---|---|---|
-| `claim` | The Foreman picks the issue up to build it. The task is created here if none exists. | `in_progress` | `picked up by Foreman` |
-| `queued` | The issue goes back to the build queue: it carried a lifecycle label, but no pull request covers it and nothing merged. | `in_progress` | `queued` |
+| `claim` | The Foreman picks the issue up to build it. The task is created here if none exists. | `implementing` | `picked up by Foreman` |
+| `queued` | The issue goes back to the build queue: it carried a lifecycle label, but no pull request covers it and nothing merged. | `approved` | `queued` |
 | `prLink` | The Foreman opens the pull request that delivers the issue. | unchanged | `PR opened: {prUrl}` |
-| `inReview` | The issue's pull request is waiting for review. | `in_review` | `under review` |
-| `changesRequested` | The review asked for changes; the Foreman will revise. | `in_review` | `changes requested` |
-| `approved` | The review approved the pull request. | `in_review` | `approved` |
+| `inReview` | The issue's pull request is waiting for review. | `inReview` | `under review` |
+| `changesRequested` | The review asked for changes; the Foreman will revise. | `changesRequested` | `changes requested` |
+| `approved` | The review approved the pull request. | `pendingVerification` | `approved` |
 | `blocked` | The Foreman declines or cannot finish the issue (with its reason). | unchanged | `blocked: {reason}` |
 | `merged` | The pull request is merged to the base branch. | unchanged | `merged` |
-| `releaseWaiting` | The issue is in an open release pull request (base branch → production branch). Written once per release pull request. | `in_review` | `waiting on release PR #{pr} to merge to {branch}` |
+| `releaseWaiting` | The issue is in an open release pull request (base branch → production branch). Written once per release pull request. | `awaitingRelease` | `waiting on release PR #{pr} to merge to {branch}` |
 | `released` | That release pull request merges to the production branch. | `done` | `release PR #{pr} merged to {branch}` |
 | `inProduction` | Promotion finds the issue's work already on the production branch, with no release pull request left to merge. | `done` | `in production ({branch})` |
 | `releaseClosed` | That release pull request is closed without merging; the task stays in review until the next one. | unchanged | `release PR #{pr} closed without merging; waiting for the next release` |
 | `backoffPause` | A GitHub or Claude limit pauses the build in progress. | unchanged | `paused: {upstream} back-off: {reason}` |
 | `backoffResume` | The build in progress resumes after that limit clears. | unchanged | `resumed after back-off` |
 | `waiting` | The Foreman holds the issue back this cycle (a back-off after a skip, an occupied branch). Written once per reason, not once per cycle. | `blocked` | `waiting: {reason}` |
-| `resumed` | An issue the Foreman had moved to blocked is no longer held back. | `in_progress` | `resumed: no longer waiting` |
+| `resumed` | An issue the Foreman had moved to blocked is no longer held back. | unchanged | `resumed: no longer waiting` |
 | `implementFinished` | The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason). | unchanged | `implement session finished: {detail}` |
 | `implementFailed` | The build session for the issue fails. | unchanged | `implement session failed: {detail}` |
-| `reviseStarted` | A session starts revising the issue's pull request after review feedback. | unchanged | `revision started: PR #{pr}` |
+| `reviseStarted` | A session starts revising the issue's pull request after review feedback. | `revising` | `revising PR #{pr}` |
 | `reviseFinished` | That revision session ends. | unchanged | `revision finished: {detail}` |
 | `reviseFailed` | That revision session fails. | unchanged | `revision failed: {detail}` |
-| `reviewStarted` | A review of the issue's pull request starts; the note names the reviewer. | unchanged | `review started: PR #{pr} by {reviewer}` |
+| `reviewStarted` | A review of the issue's pull request starts; the note names the reviewer. | `reviewing` | `{reviewer} reviewing PR #{pr}` |
 | `reviewHandoff` | The first reviewer declines and the review passes to another, with the reason. | unchanged | `review handed to {reviewer}: {detail}` |
 | `reviewFinished` | The review ends, with its outcome. | unchanged | `review finished: {detail}` |
 | `reviewFailed` | The review fails. | unchanged | `review failed: {detail}` |
@@ -129,19 +135,110 @@ knows of are redacted from every note before it is sent.
 A task is created only when the Foreman picks an issue up (`claim`). A later step on an issue
 that has no task writes nothing.
 
+## Board stages
+
+Paperclip's columns are fixed, so each task carries two things beyond its status: the agent
+holding it (whoever owns the next action, so each agent's view is its own queue) and a stage
+label naming where it is inside that status. Both come from `board`, one entry per lifecycle
+stage: `owner` is `foreman` (the Foreman's own agent) or a key of `roles`,
+`status` a status bucket, and `label` a key of `stageLabels` or `null`. Each entry, and each
+field in it, falls back to its default on its own, so a config names only what it changes.
+
+| Stage | Meaning | Default owner | Default status | Default stage label |
+|---|---|---|---|---|
+| `approved` | Authorized and waiting to be built. | `foreman` | `todo` | none |
+| `implementing` | A build session is running on it. | `foreman` | `in_progress` | none |
+| `inReview` | Its pull request waits for review. | `foreman` | `in_review` | `inReview` |
+| `reviewing` | A review session is running on it. | `foreman` | `in_progress` | `inReview` |
+| `changesRequested` | The review asked for changes; waiting for a revision. | `foreman` | `todo` | `changesRequested` |
+| `revising` | A revision session is running on it. | `foreman` | `in_progress` | `changesRequested` |
+| `pendingVerification` | Approved and merged to the base branch; waiting for verification before release. | `foreman` | `in_review` | `pendingVerification` |
+| `awaitingRelease` | Verified (or in an open release pull request); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
+
+The defaults suit a Foreman that is the only agent: it holds every task. A task carries at most
+one stage label; a move swaps it and leaves every other label on the task alone. Each stage
+label is created in the company on first use (by name, so one created by hand is reused):
+
+| Key | Default name | Default color |
+|---|---|---|
+| `inReview` | `In code review` | `#2563eb` |
+| `changesRequested` | `Changes requested` | `#d97706` |
+| `pendingVerification` | `Pending verification` | `#7c3aed` |
+| `awaitingRelease` | `Awaiting release` | `#059669` |
+
+When the issue ships (`done`) its stage label is removed and it stays with whoever held it.
+A config that names a stage owner or label that does not exist stops the Foreman at startup.
+
+### Roles
+
+`roles` adds agents that only hold tasks — a reviewer, a lead who verifies and releases. Each
+is a Paperclip agent like the Foreman's, registered by `npm run paperclip:register` with every
+wake path off, so assigning it a task never makes Paperclip start a run. Two roles and the
+stages they take over:
+
+```json
+{
+  "paperclip": {
+    "agentReportsTo": "lead",
+    "roles": {
+      "reviewer": {
+        "name": "Reviewer",
+        "title": "Code reviewer",
+        "reportsTo": "lead"
+      },
+      "lead": {
+        "name": "Lead",
+        "title": "Engineering lead",
+        "role": "general"
+      }
+    },
+    "board": {
+      "inReview": {
+        "owner": "reviewer"
+      },
+      "reviewing": {
+        "owner": "reviewer"
+      },
+      "pendingVerification": {
+        "owner": "lead",
+        "status": "todo"
+      },
+      "awaitingRelease": {
+        "owner": "lead"
+      }
+    }
+  }
+}
+```
+
+`reportsTo` names another role key or `foreman`; `agentReportsTo` is the
+Foreman's own. Both are applied at registration; left unset, Paperclip's value is kept.
+
+### Live sessions
+
+The `implementing`, `reviewing` and `revising` stages last exactly as long as the session.
+A state the issue reaches meanwhile (the review approves it, say) is applied when the session
+ends; a session that ends with none returns the task to the stage it came from (`approved`,
+`inReview` or `changesRequested`). Each review note names the reviewer.
+
+While any session runs, the Foreman's agent carries a lease in its metadata
+(`foremanLive`: the tasks held and when, renewed every few minutes). Past
+`liveLeaseMinutes` without renewal the lease is void. A Foreman that starts with a lease left
+by a process that died mid-session returns those tasks to their stages, and any other tool
+that writes the same tasks can read the lease to leave live ones alone.
+
 ## Assignment
 
-Every step that sets a status also assigns the task to the Foreman's agent (`agentId`), so the
-task is held by the Foreman from the moment it is picked up. Note-only steps leave the assignee
-alone; a task reassigned by hand in Paperclip goes back to the Foreman at its next status
-change. The agent is registered with every wake path off (no heartbeat, no wake-on-demand), so
-assigning a task to it never makes Paperclip start a run.
+Every move to a lifecycle stage assigns the task to that stage's owner (see above). Note-only
+steps leave the assignee alone; a task reassigned by hand in Paperclip goes back at its next
+move. The Foreman's agent is registered with every wake path off (no heartbeat, no
+wake-on-demand), so assigning a task to it never makes Paperclip start a run.
 
 ## Projects
 
 With `projects` on, every task is filed under a Paperclip project for its repo, named by
 `projectNameFormat` (default `{name}`): `{name}` is the repo's
-name (`Slashbin-console`), `{repo}` its full `owner/name`. The project is looked up by name,
+name (`my-service`), `{repo}` its full `owner/name`. The project is looked up by name,
 archived ones included, and created only when none has that name, so renaming the format
 creates new projects rather than renaming old ones. A task the Foreman creates carries the
 project from the start; at startup, and at every refresh of its task list after, the Foreman
@@ -149,9 +246,9 @@ sets the project on any task with an identity line (its own or another tool's) t
 
 ## Live activity
 
-The board is the queue: each task's status says what the Foreman is doing with it — building
-(`in_progress`), held back with the reason on the task (`blocked`), in review or waiting on its
-release (`in_review`), shipped (`done`). With `agentStatus` on, the Foreman's agent is
+The board is the queue: `in_progress` means a session is running on the task right now,
+`blocked` that the Foreman is holding it back (with the reason on the task), and the stage
+label and holder say what the task waits for otherwise. With `agentStatus` on, the Foreman's agent is
 `running` while any session runs and `idle` otherwise, written only on a change.
 
 Earlier versions kept one extra summary task held by the agent; the Foreman cancels it at
@@ -173,11 +270,12 @@ app"**: the `setup-paperclip-integration` skill walks through the steps below an
 configuration only. By hand:
 
 1. Add the `paperclip` block above to `.ai-agent.json`, with your company's id.
-2. `npm run build && npm run paperclip:register` — registers the agent named `agentName` with
-   every wake path off and writes `paperclip.agentId` into the file. Re-running it finds the
-   same agent and switches its wake paths off again.
-3. `npm run labels:install` — the configured labels exist on every configured repo.
-4. Restart the daemon.
+2. Optionally, add `roles` and the `board` stages they own (see **Roles**).
+3. `npm run build && npm run paperclip:register` — registers the agent named `agentName`, and
+   each role, with every wake path off and writes their ids into the file. Re-running it finds
+   the same agents (by name) and switches their wake paths off again.
+4. `npm run labels:install` — the configured labels exist on every configured repo.
+5. Restart the daemon.
 
 ## Verify
 
@@ -186,11 +284,12 @@ npm run build && npm run paperclip:doctor        # or: node dist/cli.js papercli
 ```
 
 The doctor is read-only: it checks that Paperclip answers, the company exists, the agent is
-registered with both wake paths off, and the `paperclip` block is complete. It prints one
+registered with both wake paths off, the `paperclip` block is complete, and every configured
+role is registered under its name with its wake paths off. It prints one
 `PASS` or `FAIL` line per check, naming what failed, and exits 0 only when every check passes.
 
 To see it work, give a GitHub issue in a configured repo its trigger label. When the Foreman
-picks it up, its Paperclip task appears, assigned to the Foreman, with a
+picks it up, its Paperclip task appears, in progress and assigned to the Foreman, with a
 `picked up by Foreman` note, and gains a note at each step after.
 
 ## Remove

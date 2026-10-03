@@ -12,9 +12,10 @@ const SECRET = { name: "TEST_TOKEN", value: "secret-value-0123456789" };
 const item = { issueNumber: 7, repo: "example/r" };
 const repoConfig = { name: "r", githubRepo: "example/r" };
 
-function fakePaperclip(rows = [], projects = []) {
+function fakePaperclip(rows = [], projects = [], labels = []) {
   const calls = [];
   const comments = {};
+  const agent = { id: AGENT, metadata: {} };
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method ?? "GET";
@@ -60,7 +61,15 @@ function fakePaperclip(rows = [], projects = []) {
       Object.assign(r, body);
       return ok(r);
     }
-    if (method === "PATCH" && u.pathname === `/api/agents/${AGENT}`) return ok({ id: AGENT, ...body });
+    if (method === "GET" && u.pathname === `/api/agents/${AGENT}`) return ok(agent);
+    if (method === "PATCH" && u.pathname === `/api/agents/${AGENT}`) return ok(Object.assign(agent, body));
+    if (method === "GET" && u.pathname === `/api/companies/${CID}/labels`) return ok(labels);
+    if (method === "POST" && u.pathname === `/api/companies/${CID}/labels`) {
+      if (labels.some((l) => l.name === body.name)) return ok({ error: "exists" }, 409);
+      const l = { id: `label-${labels.length + 1}`, ...body };
+      labels.push(l);
+      return ok(l, 201);
+    }
     m = u.pathname.match(/^\/api\/issues\/([^/]+)\/comments$/);
     if (m && method === "POST") {
       (comments[m[1]] ??= []).push(body.body);
@@ -70,7 +79,7 @@ function fakePaperclip(rows = [], projects = []) {
     }
     return ok({}, 404);
   };
-  return { rows, projects, calls, comments, fetch };
+  return { rows, projects, labels, agent, calls, comments, fetch };
 }
 
 function logger() {
@@ -124,9 +133,9 @@ test("status per step; merged and blocked are notes only, promoted writes nothin
   await mirror.onState(item, "new", "inReview", repoConfig, logger());
   assert.equal(fake.rows[0].status, "in_review");
   await mirror.onState(item, "inReview", "changesRequested", repoConfig, logger());
-  assert.equal(fake.rows[0].status, "in_review");
+  assert.equal(fake.rows[0].status, "todo");
   await mirror.onState(item, "changesRequested", "queued", repoConfig, logger());
-  assert.equal(fake.rows[0].status, "in_progress");
+  assert.equal(fake.rows[0].status, "todo");
   await mirror.onState(item, "inReview", "approved", repoConfig, logger());
   assert.equal(fake.rows[0].status, "in_review");
   const before = statusPatches(fake).length;
@@ -265,17 +274,17 @@ test("resume touches only rows this agent blocked in this repo", async () => {
   ]);
   const { mirror } = mirrorOn(fake);
   await mirror.onWaiting("example/r", [], logger());
-  assert.deepEqual(statusPatches(fake).map((c) => [c.path, c.body.status]), [["/api/issues/mine", "in_progress"]]);
+  assert.deepEqual(statusPatches(fake).map((c) => [c.path, c.body.status]), [["/api/issues/mine", "todo"]]);
   assert.deepEqual(fake.comments.mine, ["resumed: no longer waiting"]);
 });
 
-test("agentStatus off: sessions write notes only, and no summary task", async () => {
+test("agentStatus off: sessions write notes and the lease only, and no summary task", async () => {
   const fake = fakePaperclip([row("r7", 7)]);
   const { mirror } = mirrorOn(fake, { agentStatus: false });
   await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", items: [item], pr: 3 }, logger());
-  assert.deepEqual(fake.comments.r7, ["revision started: PR #3"]);
+  assert.deepEqual(fake.comments.r7, ["revising PR #3"]);
   assert.equal(fake.rows.length, 1, "no live task");
-  assert.ok(!fake.calls.some((c) => c.path.startsWith("/api/agents/")), "no agent update");
+  assert.ok(!fake.calls.some((c) => c.path.startsWith("/api/agents/") && c.body && "status" in c.body), "no agent status");
 });
 
 test("an implement session drives the agent status; start has no per-issue note; no summary task", async () => {
@@ -284,7 +293,7 @@ test("an implement session drives the agent status; start has no per-issue note;
   await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
   await mirror.onSession({ phase: "implement", status: "failed", repo: "example/r", items: [item], detail: "exit 1" }, logger());
   assert.deepEqual(fake.comments.r7, ["implement session failed: exit 1"]);
-  const agentCalls = fake.calls.filter((c) => c.path === `/api/agents/${AGENT}`).map((c) => c.body.status);
+  const agentCalls = fake.calls.filter((c) => c.path === `/api/agents/${AGENT}` && c.body && "status" in c.body).map((c) => c.body.status);
   assert.deepEqual(agentCalls, ["running", "idle"]);
   assert.equal(fake.rows.length, 1);
 });
@@ -351,4 +360,91 @@ test("projects off: no project call, no projectId", async () => {
   await mirror.housekeep();
   assert.ok(!fake.calls.some((c) => c.path.endsWith("/projects")));
   assert.equal(fake.rows[0].projectId, undefined);
+});
+
+// --- board stages: holder, status and one stage label per step ---
+
+const TEAM = {
+  roles: { reviewer: { name: "Reviewer", id: "agent-rev" }, lead: { name: "Lead", id: "agent-lead" } },
+  board: {
+    approved: { owner: "foreman", status: "todo", label: null },
+    implementing: { owner: "foreman", status: "in_progress", label: null },
+    inReview: { owner: "reviewer", status: "in_review", label: "inReview" },
+    reviewing: { owner: "reviewer", status: "in_progress", label: "inReview" },
+    changesRequested: { owner: "foreman", status: "todo", label: "changesRequested" },
+    revising: { owner: "foreman", status: "in_progress", label: "changesRequested" },
+    pendingVerification: { owner: "lead", status: "todo", label: "pendingVerification" },
+    awaitingRelease: { owner: "lead", status: "in_review", label: "awaitingRelease" },
+  },
+};
+const labelName = (fake, r) => (r.labelIds ?? []).map((id) => fake.labels.find((l) => l.id === id)?.name);
+
+test("each step hands the card to its configured agent with exactly one stage label; other labels kept", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "todo", labelIds: ["keep-me"] })], [], [{ id: "keep-me", name: "bug" }]);
+  const { mirror } = mirrorOn(fake, TEAM);
+  const r = fake.rows[0];
+  const at = () => [r.status, r.assigneeAgentId, labelName(fake, r)];
+  await mirror.onState(item, "new", "inReview", repoConfig, logger());
+  assert.deepEqual(at(), ["in_review", "agent-rev", ["bug", "In code review"]]);
+  await mirror.onState(item, "inReview", "changesRequested", repoConfig, logger());
+  assert.deepEqual(at(), ["todo", AGENT, ["bug", "Changes requested"]]);
+  await mirror.onState(item, "changesRequested", "approved", repoConfig, logger());
+  assert.deepEqual(at(), ["todo", "agent-lead", ["bug", "Pending verification"]]);
+  await mirror.onRelease(release("open", 12, [7]), logger());
+  assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
+  await mirror.onRelease(release("merged", 12, [7]), logger());
+  assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
+  assert.equal(fake.labels.length, 5, "the four stage labels created once");
+});
+
+test("a review session holds the card in progress under the reviewer, noted by name, and returns it when it ends", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "in_review", assigneeAgentId: "agent-rev" })]);
+  const { mirror } = mirrorOn(fake, TEAM);
+  const r = fake.rows[0];
+  await mirror.onSession({ phase: "review", status: "started", repo: "example/r", items: [item], pr: 9, reviewer: "Tech Lead" }, logger());
+  assert.equal(r.status, "in_progress");
+  assert.equal(r.assigneeAgentId, "agent-rev");
+  assert.deepEqual(fake.agent.metadata.foremanLive.rows, [{ id: "r7", phase: "review" }]);
+  // The verdict lands while the session still runs: kept, applied at the end.
+  await mirror.onState(item, "inReview", "approved", repoConfig, logger());
+  assert.equal(r.status, "in_progress", "a live session keeps its card in progress");
+  await mirror.onSession({ phase: "review", status: "finished", repo: "example/r", items: [item], pr: 9 }, logger());
+  assert.equal(r.status, "todo");
+  assert.equal(r.assigneeAgentId, "agent-lead");
+  assert.deepEqual(labelName(fake, r), ["Pending verification"]);
+  assert.deepEqual(fake.agent.metadata.foremanLive.rows, []);
+  assert.ok(fake.comments.r7.includes("Tech Lead reviewing PR #9"));
+});
+
+test("a session that ends with no verdict returns the card to the stage it came from", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "todo" })]);
+  const { mirror } = mirrorOn(fake, TEAM);
+  await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", items: [item], pr: 9 }, logger());
+  assert.equal(fake.rows[0].status, "in_progress");
+  await mirror.onSession({ phase: "revise", status: "failed", repo: "example/r", items: [item], pr: 9, detail: "exit 1" }, logger());
+  assert.equal(fake.rows[0].status, "todo");
+  assert.deepEqual(labelName(fake, fake.rows[0]), ["Changes requested"]);
+});
+
+test("a restart returns the cards a dead session left in progress, and keeps the agent's other metadata", async () => {
+  const fake = fakePaperclip([row("r7", 7), row("r8", 8, { status: "in_review" })]);
+  fake.agent.metadata = { other: 1, foremanLive: { leaseAt: new Date().toISOString(), rows: [{ id: "r7", phase: "review" }, { id: "r8", phase: "implement" }] } };
+  const { mirror } = mirrorOn(fake, TEAM);
+  await mirror.recoverLease();
+  assert.equal(fake.rows[0].status, "in_review", "r7 back to in review");
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-rev");
+  assert.equal(fake.rows[1].status, "in_review", "a card no longer in progress is left alone");
+  assert.equal(fake.agent.metadata.other, 1);
+  assert.deepEqual(fake.agent.metadata.foremanLive.rows, []);
+});
+
+test("no labels endpoint: the status still moves, and the failure is logged once", async () => {
+  const base = fakePaperclip([row("r7", 7, { status: "todo" })]);
+  const fake = { ...base, fetch: async (url, init) => (new URL(url).pathname.endsWith("/labels")
+    ? new Response(JSON.stringify({ error: "no labels" }), { status: 404 }) : base.fetch(url, init)) };
+  const { mirror, log } = mirrorOn(fake, TEAM);
+  await mirror.onState(item, "new", "inReview", repoConfig, logger());
+  await mirror.onState(item, "inReview", "changesRequested", repoConfig, logger());
+  assert.equal(base.rows[0].status, "todo");
+  assert.equal(log.lines.filter(([lvl]) => lvl === "warn").length, 1);
 });
