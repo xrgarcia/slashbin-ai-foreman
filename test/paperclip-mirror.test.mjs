@@ -30,9 +30,23 @@ function fakePaperclip(rows = []) {
       rows.push(r);
       return ok(r, 201);
     }
+    // Paperclip's rule: a board user's comment on an agent-held blocked, done
+    // or cancelled row moves it to todo, unless the same PATCH restates a status.
+    const reopens = (r) => ["blocked", "done", "cancelled"].includes(r.status) && r.assigneeAgentId;
     let m = u.pathname.match(/^\/api\/issues\/([^/]+)$/);
+    if (m && method === "GET") {
+      const r = rows.find((x) => x.id === m[1]);
+      return r ? ok(r) : ok({ error: "not found" }, 404);
+    }
     if (m && method === "PATCH") {
       const r = rows.find((x) => x.id === m[1]);
+      if ("comment" in body) {
+        const { comment, ...rest } = body;
+        (comments[m[1]] ??= []).push(comment);
+        if (!("status" in rest) && reopens(r)) r.status = "todo";
+        Object.assign(r, rest);
+        return ok(r);
+      }
       // Paperclip's rule: one assignee, an agent or a user, never both.
       const agent = "assigneeAgentId" in body ? body.assigneeAgentId : r.assigneeAgentId;
       const user = "assigneeUserId" in body ? body.assigneeUserId : r.assigneeUserId;
@@ -44,6 +58,8 @@ function fakePaperclip(rows = []) {
     m = u.pathname.match(/^\/api\/issues\/([^/]+)\/comments$/);
     if (m && method === "POST") {
       (comments[m[1]] ??= []).push(body.body);
+      const r = rows.find((x) => x.id === m[1]);
+      if (r && reopens(r)) r.status = "todo";
       return ok({ id: "c", body: body.body }, 201);
     }
     return ok({}, 404);
@@ -222,6 +238,17 @@ test("waiting: blocked under its statusMap name with the reason as the unblock a
   assert.equal(writesTo(fake, "r7").length, before, "same reason again writes nothing");
   await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #5" }], logger());
   assert.equal(fake.comments.r7.length, 2, "a new reason is a new note");
+});
+
+test("a note never moves the row: blocked stays blocked, done stays done", async () => {
+  const fake = fakePaperclip([row("r7", 7), row("r8", 8, { status: "done" })]);
+  const { mirror } = mirrorOn(fake, { liveTask: false, agentStatus: false });
+  await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #4" }], logger());
+  assert.equal(fake.rows[0].status, "blocked", "the waiting note reopened the row it had just blocked");
+  assert.deepEqual(fake.comments.r7, ["waiting: occupied by PR #4"]);
+  await mirror.onPromoted({ issueNumber: 8, repo: "example/r" }, repoConfig, logger());
+  assert.equal(fake.rows[1].status, "done", "the promoted note reopened a done row");
+  assert.deepEqual(fake.comments.r8, ["promoted to production"]);
 });
 
 test("resume touches only rows this agent blocked in this repo", async () => {
