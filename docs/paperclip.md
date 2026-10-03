@@ -31,8 +31,8 @@ that one field. The block is read once at startup — restart the daemon after c
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
-| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
-| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"pendingVerification":{"name":"Pending verification","color":"#7c3aed"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
+| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
+| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"pendingVerification":{"name":"Pending verification","color":"#7c3aed"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
 | `liveLeaseMinutes` | integer | none | `15` | Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way. |
 
 `enabled` is a boolean; given as a string (as the env var always is) it takes `true` / `false`,
@@ -76,7 +76,7 @@ six status buckets. Each is sent to Paperclip under its
 | `todo` | task creation, `queued`, `changesRequested` | `statusMap.todo`, else `todo` |
 | `in_progress` | `claim`, `reviseStarted`, `reviewStarted` | `statusMap.in_progress`, else `in_progress` |
 | `in_review` | `inReview`, `approved`, `releaseWaiting` | `statusMap.in_review`, else `in_review` |
-| `blocked` | `waiting` | `statusMap.blocked`, else `blocked` |
+| `blocked` | `blocked`, `waiting` | `statusMap.blocked`, else `blocked` |
 | `done` | `released`, `inProduction` | `statusMap.done`, else `done` |
 | `cancelled` | never by default — the Foreman does not close issues | `statusMap.cancelled`, else `cancelled` |
 
@@ -87,16 +87,23 @@ reads the release pull request each cycle from the GitHub state it already holds
 leaves the open set, one GitHub read says whether it merged or was closed. The pull request
 being waited on is saved per repo, so a merge that lands while the Foreman is down is seen at
 the next start. `cancelled` is left to whatever else syncs GitHub issues into the same
-company, and an agent declining an issue is a note (`blocked` step).
+company.
 
-`blocked` is the one status no GitHub label carries: it means the Foreman is holding the issue
-back right now (`waiting`). Paperclip only accepts `blocked` with an unblock descriptor, so the
+An issue that needs a person goes to the `blocked` stage: the source labels it `blocked`,
+or the Foreman declines it or runs out of revision retries (`blocked` step). It is held by
+the stage's owner (`board.blocked`), with the reason as its unblock descriptor's action,
+prefixed `blocked:`, and the stage label `blocked`. It stays there until the issue
+moves on (the Foreman picks it up again, or its labels change).
+
+The Foreman also uses the `blocked` status for a hold that is not a person's to clear: an
+issue it is holding back right now (`waiting`). Paperclip only accepts `blocked` with an unblock descriptor, so the
 Foreman sends one owned by its agent, with the reason as the action — the reason shows on the
 task itself. When the issue stops waiting the Foreman moves it back to the stage it was in, and
 Paperclip clears the descriptor. Both are written only when they change: the task's own status
 and descriptor are the record, so a restarted Foreman reads them back instead of repeating
 them. A sync that also writes these tasks should leave a `blocked` task held by the Foreman's
-agent alone unless the issue has closed, or the two will flip it back and forth.
+agent, or one whose descriptor starts with `blocked:`, alone unless the issue has
+closed or changed stage, or the two will flip it back and forth.
 
 ## Notes per step
 
@@ -112,7 +119,7 @@ knows of are redacted from every note before it is sent.
 | `inReview` | The issue's pull request is waiting for review. | `inReview` | `under review` |
 | `changesRequested` | The review asked for changes; the Foreman will revise. | `changesRequested` | `changes requested` |
 | `approved` | The review approved the pull request. | `pendingVerification` | `approved` |
-| `blocked` | The Foreman declines or cannot finish the issue (with its reason). | unchanged | `blocked: {reason}` |
+| `blocked` | The Foreman declines the issue or runs out of revision retries (with its reason): it needs a person. | `blocked` | `blocked: {reason}` |
 | `merged` | The pull request is merged to the base branch. | unchanged | `merged` |
 | `releaseWaiting` | The issue is in an open release pull request (base branch → production branch). Written once per release pull request. | `awaitingRelease` | `waiting on release PR #{pr} to merge to {branch}` |
 | `released` | That release pull request merges to the production branch. | `done` | `release PR #{pr} merged to {branch}` |
@@ -120,7 +127,7 @@ knows of are redacted from every note before it is sent.
 | `releaseClosed` | That release pull request is closed without merging; the task stays in review until the next one. | unchanged | `release PR #{pr} closed without merging; waiting for the next release` |
 | `backoffPause` | A GitHub or Claude limit pauses the build in progress. | unchanged | `paused: {upstream} back-off: {reason}` |
 | `backoffResume` | The build in progress resumes after that limit clears. | unchanged | `resumed after back-off` |
-| `waiting` | The Foreman holds the issue back this cycle (a back-off after a skip, an occupied branch). Written once per reason, not once per cycle. | `blocked` | `waiting: {reason}` |
+| `waiting` | The Foreman holds the issue back this cycle (a back-off after a skip, an occupied branch). Written once per reason, not once per cycle. | `waiting` | `waiting: {reason}` |
 | `resumed` | An issue the Foreman had moved to blocked is no longer held back. | unchanged | `resumed: no longer waiting` |
 | `implementFinished` | The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason). | unchanged | `implement session finished: {detail}` |
 | `implementFailed` | The build session for the issue fails. | unchanged | `implement session failed: {detail}` |
@@ -154,6 +161,7 @@ field in it, falls back to its default on its own, so a config names only what i
 | `revising` | A revision session is running on it. | `foreman` | `in_progress` | `changesRequested` |
 | `pendingVerification` | Approved and merged to the base branch; waiting for verification before release. | `foreman` | `in_review` | `pendingVerification` |
 | `awaitingRelease` | Verified (or in an open release pull request); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
+| `blocked` | Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries. | `foreman` | `blocked` | `blocked` |
 
 The defaults suit a Foreman that is the only agent: it holds every task. A task carries at most
 one stage label; a move swaps it and leaves every other label on the task alone. Each stage
@@ -165,6 +173,7 @@ label is created in the company on first use (by name, so one created by hand is
 | `changesRequested` | `Changes requested` | `#d97706` |
 | `pendingVerification` | `Pending verification` | `#7c3aed` |
 | `awaitingRelease` | `Awaiting release` | `#059669` |
+| `blocked` | `Blocked` | `#dc2626` |
 
 When the issue ships (`done`) its stage label is removed and it stays with whoever held it.
 A config that names a stage owner or label that does not exist stops the Foreman at startup.

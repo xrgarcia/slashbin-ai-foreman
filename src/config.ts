@@ -46,7 +46,7 @@ const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "blocked",
 // "shipped". Each maps to who holds the card (a role), its Paperclip status,
 // and the stage label it carries. The `…ing` stages are a live session.
 export const PAPERCLIP_STAGES = [
-  "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising", "pendingVerification", "awaitingRelease",
+  "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising", "pendingVerification", "awaitingRelease", "blocked",
 ] as const;
 export type PaperclipStage = (typeof PAPERCLIP_STAGES)[number];
 
@@ -61,6 +61,7 @@ const stageLabelsSchema = z.object({
   changesRequested: stageLabel("Changes requested", "#d97706"),
   pendingVerification: stageLabel("Pending verification", "#7c3aed"),
   awaitingRelease: stageLabel("Awaiting release", "#059669"),
+  blocked: stageLabel("Blocked", "#dc2626"),
 }).catchall(z.object({ name: z.string().trim().min(1).max(48), color: hexColor })).prefault({});
 
 const stage = (owner: string, status: (typeof PAPERCLIP_STATUS_BUCKETS)[number], label: string | null) =>
@@ -79,6 +80,8 @@ const boardStagesSchema = z.object({
   revising: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "changesRequested"),
   pendingVerification: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "pendingVerification"),
   awaitingRelease: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingRelease"),
+  // Needs a person: labelled `blocked` on the source, or the Foreman declined it / ran out of retries.
+  blocked: stage(PAPERCLIP_FOREMAN_ROLE, "blocked", "blocked"),
 }).prefault({});
 
 const roleSchema = z.object({

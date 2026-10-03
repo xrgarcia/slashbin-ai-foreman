@@ -125,7 +125,7 @@ test("claim adopts the row another writer created; no duplicate", async () => {
   assert.equal(fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues")).length, 0);
 });
 
-test("status per step; merged and blocked are notes only, promoted writes nothing; secrets redacted", async () => {
+test("status per step; blocked needs a person, merged is a note, promoted writes nothing; secrets redacted", async () => {
   const fake = fakePaperclip();
   const { mirror } = mirrorOn(fake);
   await mirror.onClaim(item, repoConfig, logger());
@@ -138,11 +138,15 @@ test("status per step; merged and blocked are notes only, promoted writes nothin
   assert.equal(fake.rows[0].status, "todo");
   await mirror.onState(item, "inReview", "approved", repoConfig, logger());
   assert.equal(fake.rows[0].status, "in_review");
-  const before = statusPatches(fake).length;
   await mirror.onBlocked(item, `bad ${SECRET.value}`, repoConfig, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, AGENT);
+  assert.deepEqual(fake.rows[0].unblockDescriptor, { owner: { agentId: AGENT }, action: "blocked: bad [REDACTED:TEST_TOKEN]" });
+  const before = statusPatches(fake).length;
   await mirror.onMerged(item, repoConfig, logger());
   await mirror.onPromoted(item, repoConfig, logger());
-  assert.equal(statusPatches(fake).length, before);
+  assert.equal(fake.rows[0].status, "blocked", "a note on a blocked card restates its status");
+  assert.equal(statusPatches(fake).length, before + 1);
   assert.deepEqual(fake.comments["row-1"], [
     "picked up by Foreman",
     "PR opened: https://github.com/example/r/pull/9?t=[REDACTED:TEST_TOKEN]",
@@ -394,7 +398,7 @@ test("each step hands the card to its configured agent with exactly one stage la
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
-  assert.equal(fake.labels.length, 5, "the four stage labels created once");
+  assert.equal(fake.labels.length, 6, "the five stage labels created once");
 });
 
 test("a review session holds the card in progress under the reviewer, noted by name, and returns it when it ends", async () => {
