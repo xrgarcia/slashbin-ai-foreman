@@ -1670,6 +1670,15 @@ async function tryRevision(
     return null;
   }
 
+  // A no-commit stalemate already escalated: the card is Blocked and the EM must
+  // rule. Re-running the reviser only re-answers the same review — it launched a
+  // paid session on 17 straight cycles for slashbin-io-worker PR #694
+  // (2026-10-03). Clears with the pending feedback, like the retry cap above.
+  if ((consecutiveNoCommit.get(repoName) ?? 0) > MAX_CONSECUTIVE_NO_COMMIT) {
+    revLogger.debug(`Skipping ${repoName} revision — PR #${pending.pr.number} is in a no-commit stalemate awaiting the EM`);
+    return null;
+  }
+
   // Invoke the revision skill with specific PR and issue context
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();

@@ -85,3 +85,11 @@ test("the no-commit streak clears on a real push and when feedback clears", () =
   assert.ok(deletes.length >= 2,
     `a streak that never resets escalates a healthy repo later — found ${deletes.length} clear sites`);
 });
+
+test("an escalated stalemate stops launching revision sessions until the feedback clears", () => {
+  const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  const skip = fn.indexOf("(consecutiveNoCommit.get(repoName) ?? 0) > MAX_CONSECUTIVE_NO_COMMIT");
+  assert.ok(skip > 0, "without it every cycle re-runs a paid revision that re-answers the same review");
+  assert.ok(skip < fn.indexOf("revisePRFeedback("), "the skip must come before the session launches");
+  assert.ok(fn.indexOf("consecutiveNoCommit.delete(repoName)") < skip, "clearing pending feedback must still reset it");
+});
