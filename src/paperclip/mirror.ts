@@ -92,6 +92,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   inReview: { stage: "inReview", note: "under review" },
   changesRequested: { stage: "changesRequested", note: "changes requested" },
   approved: { stage: "pendingVerification", note: "approved" },
+  awaitingVerify: { stage: "merged", note: "merged; awaiting dev verification" },
   blocked: { stage: "blocked", note: "blocked: {reason}" },
   merged: { stage: null, note: "merged" },
   releaseWaiting: { stage: "awaitingRelease", note: "waiting on release PR #{pr} to merge to {branch}" },
@@ -111,6 +112,9 @@ export const PAPERCLIP_STEPS = Object.freeze({
   reviewHandoff: { stage: null, note: "review handed to {reviewer}: {detail}" },
   reviewFinished: { stage: null, note: "review finished: {detail}" },
   reviewFailed: { stage: null, note: "review failed: {detail}" },
+  verifyStarted: { stage: "verifying", note: "{reviewer} verifying PR #{pr} in dev" },
+  verifyFinished: { stage: null, note: "dev verification finished: {detail}" },
+  verifyFailed: { stage: null, note: "dev verification did not pass: {detail}" },
 } as const satisfies Record<string, PaperclipStep>);
 
 /** The note a repeat claim posts: the same work, retried after an attempt that did not finish. */
@@ -139,6 +143,9 @@ const SESSION_STEP: Partial<Record<`${SessionEvent["phase"]}:${SessionEvent["sta
   "review:handoff": PAPERCLIP_STEPS.reviewHandoff,
   "review:finished": PAPERCLIP_STEPS.reviewFinished,
   "review:failed": PAPERCLIP_STEPS.reviewFailed,
+  "verify:started": PAPERCLIP_STEPS.verifyStarted,
+  "verify:finished": PAPERCLIP_STEPS.verifyFinished,
+  "verify:failed": PAPERCLIP_STEPS.verifyFailed,
 };
 
 /** The longest reason or detail written; Paperclip caps an unblock action at 2000. */
@@ -149,6 +156,7 @@ const STATE_STEP: Record<WorkState, PaperclipStep> = {
   queued: PAPERCLIP_STEPS.queued,
   inReview: PAPERCLIP_STEPS.inReview,
   changesRequested: PAPERCLIP_STEPS.changesRequested,
+  merged: PAPERCLIP_STEPS.awaitingVerify,
   approved: PAPERCLIP_STEPS.approved,
 };
 

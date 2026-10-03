@@ -1690,6 +1690,104 @@ export async function reviewViaTechLead(
 }
 
 /**
+ * The SRE's environment: the Tech Lead's (EM token, essentials, label names) plus
+ * its own SRE_* settings and the EM checkout it verifies from.
+ */
+export function buildSreEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
+  const env = buildTechLeadEnv(agentConfig, repoConfig);
+  pickEnv(Object.keys(process.env).filter((n) => n.startsWith("SRE_")), env);
+  if (agentConfig.emRepoPath && !env.SRE_EM_REPO) env.SRE_EM_REPO = agentConfig.emRepoPath;
+  return env;
+}
+
+/**
+ * The verify run's ceiling. The SRE's own budget is a hook canary (3 min), a
+ * Codex run (40 min) and, on Codex failure, a Claude run (40 min); the Foreman
+ * kills only past all three.
+ */
+export const SRE_VERIFY_MAX_DURATION_MS = 90 * 60_000;
+
+/** What a verify hand-off came back with. */
+export type VerifyResult =
+  /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string }
+  /** No verdict: an error, a timeout, or the requested engine refused. Nothing was written. */
+  | { kind: "error"; error: string };
+
+/**
+ * The verdict a verify trailer carries. Pass is an approved merge with a clean
+ * (or not-applicable) deploy and no hold; everything else is a hold with the
+ * reason the EM reads on the card. Pure, exported for tests.
+ */
+export function verifyVerdict(t: ReviewTrailer): { pass: boolean; reason?: string } {
+  if (t.hold) return { pass: false, reason: t.hold };
+  if (t.verdict !== "APPROVE" || !t.merged) return { pass: false, reason: `unexpected trailer verdict=${t.verdict} merged=${t.merged}` };
+  if (/^(SUCCESS|NA)$/.test(t.deploy)) return { pass: true };
+  return { pass: false, reason: t.deploy === "FAILURE" ? "dev-verify-failed" : `deploy=${t.deploy}` };
+}
+
+/**
+ * Hand one merged PR to the SRE (`<srePath>/bin/sre.mjs verify`) for dev
+ * verification (EM#440). The SRE posts the evidence comment and writes no label;
+ * the Foreman reads the trailer it prints last and moves the label itself.
+ *
+ * `engine: "codex"` is what the orchestrator passes while Claude is backed off:
+ * the SRE then refuses (exit 1, nothing written) instead of falling back onto
+ * the session limit that is already refusing work.
+ */
+export async function verifyViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  engine: "auto" | "codex",
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<VerifyResult> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "error", error: "srePath not configured" };
+  if (!process.env.EM_GITHUB_TOKEN) {
+    return { kind: "error", error: "EM_GITHUB_TOKEN not set — refusing to verify without EM-account attribution" };
+  }
+  const args = [join(sre, "bin/sre.mjs"), "verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--engine", engine];
+  logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification (engine ${engine})`);
+
+  const secrets = secretValues(agentConfig.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolveRun) => {
+    const child = spawn("node", args, { cwd: sre, env: buildSreEnv(agentConfig, repoConfig), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", timedOut = false;
+    const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath)) : null;
+    child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, SRE_VERIFY_MAX_DURATION_MS);
+    const onAbort = () => child.kill("SIGTERM");
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      if (log) {
+        log.write(outRedactor.flush());
+        log.write(errRedactor.flush());
+        log.end();
+      }
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(stderr, secrets), timedOut });
+    });
+  });
+
+  if (out.timedOut) return { kind: "error", error: "SRE verification timed out" };
+  if (out.code !== 0) {
+    return { kind: "error", error: `SRE verification failed (exit ${out.code}): ${(out.stderr || out.stdout).trim().slice(-400)}` };
+  }
+  const trailer = parseReviewTrailerRecords(out.stdout).filter((t) => t.pr === prNumber).pop();
+  if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
+  const v = verifyVerdict(trailer);
+  logger.info(`SRE verification of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
+}
+
+/**
  * Render a review run's wall-clock budget as the two facts the run needs: how
  * long it has, and the instant it dies.
  *

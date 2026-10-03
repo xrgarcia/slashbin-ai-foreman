@@ -20,6 +20,10 @@ import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 const lifecycleLabelsSchema = z.object({
   // Implement/revise opened or updated a PR; the review phase picks it up.
   prUnderReview: z.string().min(1).default("pr under review"),
+  // Reviewed and merged to the base branch; dev verification pending. The
+  // verify stage picks it up and moves it to prApproved (EM#440). Only written
+  // when `srePath` is configured — without a verify stage nothing would read it.
+  prMerged: z.string().min(1).default("pr merged"),
   // Review asked for changes (or CI is red); the revise phase picks it up.
   prPendingActions: z.string().min(1).default("pr pending actions"),
   // Merged and verified in dev; awaiting the EM outcome-gate.
@@ -46,7 +50,7 @@ const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "blocked",
 // "shipped". Each maps to who holds the card (a role), its Paperclip status,
 // and the stage label it carries. The `…ing` stages are a live session.
 export const PAPERCLIP_STAGES = [
-  "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising", "pendingVerification", "awaitingRelease", "blocked",
+  "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising", "merged", "verifying", "pendingVerification", "awaitingRelease", "blocked",
 ] as const;
 export type PaperclipStage = (typeof PAPERCLIP_STAGES)[number];
 
@@ -59,6 +63,7 @@ const stageLabel = (name: string, color: string) =>
 const stageLabelsSchema = z.object({
   inReview: stageLabel("In code review", "#2563eb"),
   changesRequested: stageLabel("Changes requested", "#d97706"),
+  merged: stageLabel("Dev verification", "#0891b2"),
   pendingVerification: stageLabel("Pending verification", "#7c3aed"),
   awaitingRelease: stageLabel("Awaiting release", "#059669"),
   blocked: stageLabel("Blocked", "#dc2626"),
@@ -78,6 +83,9 @@ const boardStagesSchema = z.object({
   reviewing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "inReview"),
   changesRequested: stage(PAPERCLIP_FOREMAN_ROLE, "todo", "changesRequested"),
   revising: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "changesRequested"),
+  // Merged, waiting for the verify stage; then its live session.
+  merged: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "merged"),
+  verifying: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "merged"),
   pendingVerification: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "pendingVerification"),
   awaitingRelease: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingRelease"),
   // Needs a person: labelled `blocked` on the source, or the Foreman declined it / ran out of retries.
@@ -292,6 +300,11 @@ export const configSchema = z.object({
   // review phase then runs the Claude /review-all-prs session exactly as
   // before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
   techLeadPath: z.string().optional(),
+  // The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at
+  // the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs
+  // `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved.
+  // Unset = no verify stage: the review run verifies and labels as before.
+  srePath: z.string().optional(),
   reviewEnabled: z.boolean().default(false),
   // The review skill. No default: a review-enabled repo must get one from here
   // or its own entry, or loadConfig refuses to start. A relative path resolves
@@ -364,7 +377,7 @@ export const configSchema = z.object({
   lifecycleLabels: lifecycleLabelsSchema.prefault({}),
 
   // The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the
-  // seven built-ins in today's order, so an existing .ai-agent.json runs exactly
+  // eight built-ins in today's order, so an existing .ai-agent.json runs exactly
   // as before. A custom stage is `{ id, skillPath }`: one Claude session on that
   // skill when the pass reaches it. Global, never per repo — the stages hand
   // work to each other by label, one pipeline for the fleet.
@@ -476,6 +489,7 @@ export interface AgentConfig {
   emRepoPath?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
+  srePath?: string;
   /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
   reviewSkillPath?: string;
   reviewModel?: string;
@@ -487,7 +501,7 @@ export interface AgentConfig {
   reviewerLogin?: string;
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
-  /** The stages each repo pass runs, in order. Defaults to the seven built-ins. */
+  /** The stages each repo pass runs, in order. Defaults to the eight built-ins. */
   stages: readonly StageEntry[];
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
@@ -588,6 +602,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
+    srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
@@ -722,7 +737,7 @@ export function loadConfig(configPath?: string): AgentConfig {
   // trigger label that is also a lifecycle label excludes every issue it selects.
   const names = Object.values(lifecycleLabels);
   if (new Set(names).size !== names.length) {
-    throw new Error(`lifecycleLabels must be five distinct names; got ${JSON.stringify(lifecycleLabels)}`);
+    throw new Error(`lifecycleLabels must be distinct names; got ${JSON.stringify(lifecycleLabels)}`);
   }
   for (const r of repos) {
     if (names.includes(r.triggerLabel)) {
@@ -768,6 +783,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     sessionEnv: [...parsed.sessionEnv],
     emRepoPath,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
+    srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
     reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),

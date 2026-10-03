@@ -58,6 +58,6 @@ test("ensureStageLabels: creates only the missing labels; a lost race (409) re-l
   const m = await ensureStageLabels(client, { agentId: "fm" });
   assert.equal(m.get("inReview"), "e1");
   assert.equal(m.get("changesRequested"), "race");
-  assert.equal(created.length, 3);
-  assert.equal(m.size, 5);
+  assert.equal(created.length, 4);
+  assert.equal(m.size, 6);
 });

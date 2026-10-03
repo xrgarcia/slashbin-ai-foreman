@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(root, "scripts", "install-labels.mjs");
-const DEFAULTS = ["approved", "pr under review", "pr pending actions", "pr approved", "ready for prod release", "ready to close"];
+const DEFAULTS = ["approved", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release", "ready to close"];
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-install-labels-test-"));
 const bin = join(tmp, "bin");
@@ -78,13 +78,13 @@ test("creates only the missing configured labels, then nothing on a rerun", () =
   assert.deepEqual(r1.posts.filter((p) => p.startsWith("acme/b:")).map((p) => p.slice(7)).sort(),
     DEFAULTS.filter((l) => l !== "approved" && l !== "pr approved").sort());
   assert.ok(r1.calls.every((c) => ["GET", "POST"].includes(c.args[c.args.indexOf("-X") + 1])), "only GET and POST");
-  assert.match(r1.out, /acme\/a: created 6, present 0/);
-  assert.match(r1.out, /acme\/b: created 4, present 2/);
+  assert.match(r1.out, /acme\/a: created 7, present 0/);
+  assert.match(r1.out, /acme\/b: created 5, present 2/);
 
   const r2 = run();
   assert.equal(r2.status, 0, r2.out);
   assert.deepEqual(r2.posts, []);
-  assert.match(r2.out, /acme\/a: created 0, present 6/);
+  assert.match(r2.out, /acme\/a: created 0, present 7/);
 });
 
 test("names come from config: per-repo triggerLabel and renamed lifecycle labels", () => {
@@ -108,7 +108,7 @@ test("a failed repo or label is reported, the rest still run, exit is 1", () => 
   assert.equal(r.posts.filter((p) => p.startsWith("acme/y:")).length, DEFAULTS.length);
   assert.match(r.out, /acme\/down: could not read labels — HTTP 404: Not Found\n/);
   assert.match(r.out, /acme\/y: could not create "ready to close" — HTTP 422/);
-  assert.match(r.out, /acme\/y: created 5, present 0/);
+  assert.match(r.out, /acme\/y: created 6, present 0/);
 });
 
 test("gh runs as the Foreman when FOREMAN_GITHUB_TOKEN is set", () => {

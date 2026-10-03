@@ -185,6 +185,13 @@ export function sessionComment(event: SessionEvent, item: WorkItem, c: CommentsC
     }
     case "review:failed":
       return `**Review failed** — ${prRef(r.pr, event.pr)}: ${detail || "unknown error"}`;
+    // Verify shares the review comment toggles (reviewStart / reviewEnd).
+    case "verify:started":
+      return `**${reviewer} verifying ${prRef(r.pr, event.pr)} in dev**`;
+    case "verify:finished":
+      return join(`**Dev verification passed** — ${prRef(r.pr, event.pr)}`, detail);
+    case "verify:failed":
+      return `**Dev verification did not pass** — ${prRef(r.pr, event.pr)}: ${detail || "unknown error"}`;
     default:
       return null;
   }

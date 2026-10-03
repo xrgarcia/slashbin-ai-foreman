@@ -32,8 +32,8 @@ that one field. The block is read once at startup — restart the daemon after c
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
-| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
-| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"pendingVerification":{"name":"Pending verification","color":"#7c3aed"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
+| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
+| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"pendingVerification":{"name":"Pending verification","color":"#7c3aed"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
 | `liveLeaseMinutes` | integer | none | `15` | Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way. |
 | `comments` | object | none | `{"enabled":true,"events":{"implementStart":true,"implementEnd":true,"reviewStart":true,"reviewEnd":true,"reviseStart":true,"reviseEnd":true,"progress":true,"release":true,"blocked":true},"maxLength":3000,"includeDiffStat":true}` | What a card's thread says: { enabled, events, maxLength, includeDiffStat }. enabled false = the one-line note per step. events turns each comment off by kind (implementStart, implementEnd, reviewStart, reviewEnd, reviseStart, reviseEnd, progress, release, blocked). maxLength caps every comment, includeDiffStat adds the PR's files and +/- lines to the implement summary. Every comment is redacted (known secrets and token-shaped strings) and never repeats the task's latest comment. |
 
@@ -76,8 +76,8 @@ six status buckets. Each is sent to Paperclip under its
 | Bucket | Set by default at | Name sent to Paperclip |
 |---|---|---|
 | `todo` | task creation, `queued`, `changesRequested` | `statusMap.todo`, else `todo` |
-| `in_progress` | `claim`, `reviseStarted`, `reviewStarted` | `statusMap.in_progress`, else `in_progress` |
-| `in_review` | `inReview`, `approved`, `releaseWaiting` | `statusMap.in_review`, else `in_review` |
+| `in_progress` | `claim`, `reviseStarted`, `reviewStarted`, `verifyStarted` | `statusMap.in_progress`, else `in_progress` |
+| `in_review` | `inReview`, `approved`, `awaitingVerify`, `releaseWaiting` | `statusMap.in_review`, else `in_review` |
 | `blocked` | `blocked`, `waiting` | `statusMap.blocked`, else `blocked` |
 | `done` | `released`, `inProduction` | `statusMap.done`, else `done` |
 | `cancelled` | never by default — the Foreman does not close issues | `statusMap.cancelled`, else `cancelled` |
@@ -122,6 +122,7 @@ knows of are redacted from every note before it is sent.
 | `inReview` | The issue's pull request is waiting for review. | `inReview` | `under review` |
 | `changesRequested` | The review asked for changes; the Foreman will revise. | `changesRequested` | `changes requested` |
 | `approved` | The review approved the pull request. | `pendingVerification` | `approved` |
+| `awaitingVerify` | The Tech Lead approved and merged the pull request; the issue waits for dev verification. | `merged` | `merged; awaiting dev verification` |
 | `blocked` | The Foreman declines the issue or runs out of revision retries (with its reason): it needs a person. | `blocked` | `blocked: {reason}` |
 | `merged` | The pull request is merged to the base branch. | unchanged | `merged` |
 | `releaseWaiting` | The issue is in an open release pull request (base branch → production branch). Written once per release pull request. | `awaitingRelease` | `waiting on release PR #{pr} to merge to {branch}` |
@@ -141,6 +142,9 @@ knows of are redacted from every note before it is sent.
 | `reviewHandoff` | The first reviewer declines and the review passes to another, with the reason. | unchanged | `review handed to {reviewer}: {detail}` |
 | `reviewFinished` | The review ends, with its outcome. | unchanged | `review finished: {detail}` |
 | `reviewFailed` | The review fails. | unchanged | `review failed: {detail}` |
+| `verifyStarted` | A dev-verification session starts on the merged pull request; the note names the verifier. | `verifying` | `{reviewer} verifying PR #{pr} in dev` |
+| `verifyFinished` | Dev verification passes; the issue moves on to release. | unchanged | `dev verification finished: {detail}` |
+| `verifyFailed` | Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most. | unchanged | `dev verification did not pass: {detail}` |
 
 A task is created only when the Foreman picks an issue up (`claim`). A later step on an issue
 that has no task writes nothing.
@@ -193,6 +197,8 @@ field in it, falls back to its default on its own, so a config names only what i
 | `reviewing` | A review session is running on it. | `foreman` | `in_progress` | `inReview` |
 | `changesRequested` | The review asked for changes; waiting for a revision. | `foreman` | `todo` | `changesRequested` |
 | `revising` | A revision session is running on it. | `foreman` | `in_progress` | `changesRequested` |
+| `merged` | Merged to the base branch; waiting for dev verification. | `foreman` | `in_review` | `merged` |
+| `verifying` | A dev-verification session is running on it. | `foreman` | `in_progress` | `merged` |
 | `pendingVerification` | Approved and merged to the base branch; waiting for verification before release. | `foreman` | `in_review` | `pendingVerification` |
 | `awaitingRelease` | Verified (or in an open release pull request); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
 | `blocked` | Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries. | `foreman` | `blocked` | `blocked` |
@@ -205,6 +211,7 @@ label is created in the company on first use (by name, so one created by hand is
 |---|---|---|
 | `inReview` | `In code review` | `#2563eb` |
 | `changesRequested` | `Changes requested` | `#d97706` |
+| `merged` | `Dev verification` | `#0891b2` |
 | `pendingVerification` | `Pending verification` | `#7c3aed` |
 | `awaitingRelease` | `Awaiting release` | `#059669` |
 | `blocked` | `Blocked` | `#dc2626` |

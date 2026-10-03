@@ -27,6 +27,17 @@ interface HeldIssue {
   reason: string;
 }
 
+/** A merged PR whose dev verification did not pass (EM#440). */
+export interface VerifyHold {
+  /** ISO timestamp of the last verify attempt. */
+  heldAt: string;
+  prNumber: number;
+  /** The SRE's hold slug, or the error that left no verdict. */
+  reason: string;
+  /** Verify runs spent on this issue so far. */
+  attempts: number;
+}
+
 export interface RepoState {
   implemented: number[];
   failed: Record<number, FailedIssue>;
@@ -42,6 +53,11 @@ export interface RepoState {
   // deliberate decision must not be rubber-stamped by an automated verdict.
   // Optional for backward compat with state files written before this field existed.
   held?: Record<number, HeldIssue>;
+  // Issues at `pr merged` whose dev verification held or errored (EM#440). Kept
+  // apart from `held`, which the reconcile prunes for any issue not at `pr under
+  // review` / `pr pending actions`. The verify stage retries from here on a
+  // back-off and stops after its attempt cap; the card sits in Blocked meanwhile.
+  verifyHeld?: Record<number, VerifyHold>;
   // Feature branches whose commits were REJECTED — the last PR for the branch was
   // closed unmerged and the branch has not moved since. The reconciler refuses to
   // recreate a PR for them, and this records the head SHA it already alerted on so
@@ -143,6 +159,7 @@ export function loadRepoState(repoName: string): RepoState {
       failed: { ...repo.failed },
       skipped: { ...(repo.skipped ?? {}) },
       held: { ...(repo.held ?? {}) },
+      verifyHeld: { ...(repo.verifyHeld ?? {}) },
       rejectedBranches: { ...(repo.rejectedBranches ?? {}) },
       ...(repo.branchBlock ? { branchBlock: { ...repo.branchBlock, announced: [...repo.branchBlock.announced] } } : {}),
       // Dropping this re-announced an open release PR on every promotion pass:

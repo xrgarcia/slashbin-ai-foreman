@@ -108,6 +108,10 @@ const WHEN = {
   reviewHandoff: "The first reviewer declines and the review passes to another, with the reason.",
   reviewFinished: "The review ends, with its outcome.",
   reviewFailed: "The review fails.",
+  awaitingVerify: "The Tech Lead approved and merged the pull request; the issue waits for dev verification.",
+  verifyStarted: "A dev-verification session starts on the merged pull request; the note names the verifier.",
+  verifyFinished: "Dev verification passes; the issue moves on to release.",
+  verifyFailed: "Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most.",
 };
 const stepIds = Object.keys(PAPERCLIP_STEPS);
 const unknown = stepIds.filter((s) => !(s in WHEN));
@@ -128,6 +132,8 @@ const STAGE_WHEN = {
   reviewing: "A review session is running on it.",
   changesRequested: "The review asked for changes; waiting for a revision.",
   revising: "A revision session is running on it.",
+  merged: "Merged to the base branch; waiting for dev verification.",
+  verifying: "A dev-verification session is running on it.",
   pendingVerification: "Approved and merged to the base branch; waiting for verification before release.",
   awaitingRelease: "Verified (or in an open release pull request); waiting for the release to merge.",
   blocked: "Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries.",

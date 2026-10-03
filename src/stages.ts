@@ -10,13 +10,15 @@ import { z } from "zod";
 /**
  * The built-in stages, in the order a config without `stages` runs them. The
  * order is load-bearing (see runRepoCycle): review runs before implement so it
- * only acts on PRs labeled in a PRIOR pass, and promote runs last so it sees the
- * labels this pass just set. A config that reorders them accepts the
+ * only acts on PRs labeled in a PRIOR pass, verify right after review so a PR
+ * merged this pass is verified in the same pass (the verifier waits on the
+ * deploy itself), and promote runs last so it sees the labels this pass just set. A config that reorders them accepts the
  * consequence; nothing here forbids it.
  */
 export const BUILTIN_STAGES = [
   "reconcile",
   "review",
+  "verify",
   "revise",
   "implement",
   "branch-sync",
@@ -42,7 +44,7 @@ export const stageEntrySchema = z.union([builtinStageSchema, customStageSchema])
 export type StageEntry = z.infer<typeof stageEntrySchema>;
 export type CustomStage = z.infer<typeof customStageSchema>;
 
-/** A fresh copy of the default sequence — the seven built-ins, in order. */
+/** A fresh copy of the default sequence — the eight built-ins, in order. */
 export function defaultStages(): StageEntry[] {
   return BUILTIN_STAGES.map((type) => ({ type }));
 }
