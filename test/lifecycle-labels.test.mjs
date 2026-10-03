@@ -26,6 +26,7 @@ import { createLogger } from "../dist/logger.js";
 const CUSTOM = {
   prUnderReview: "in-review",
   prPendingActions: "changes-requested",
+  prMerged: "merged-to-dev",
   prApproved: "dev-verified",
   readyForProd: "ship-it",
   readyToClose: "shipped",
@@ -98,6 +99,7 @@ test("omitted: every label resolves to the name Slashbin runs on today", () => {
   assert.deepEqual({ ...c.lifecycleLabels }, {
     prUnderReview: "pr under review",
     prPendingActions: "pr pending actions",
+    prMerged: "pr merged",
     prApproved: "pr approved",
     readyForProd: "ready for prod release",
     readyToClose: "ready to close",
@@ -125,7 +127,7 @@ test("global: every repo carries the one configured set — there is no per-repo
 test("two lifecycle states sharing a name is refused at load", () => {
   assert.throws(
     () => load({ lifecycleLabels: { prApproved: "pr under review" } }),
-    /five distinct names/,
+    /distinct names/,
   );
 });
 

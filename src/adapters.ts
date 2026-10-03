@@ -18,14 +18,14 @@ export interface WorkItem {
  * an item is the EM's act after prod verification. A connector refuses any
  * target outside this set.
  */
-export type WorkState = "queued" | "inReview" | "changesRequested" | "approved";
+export type WorkState = "queued" | "inReview" | "changesRequested" | "merged" | "approved";
 
 /**
  * What the caller believes the item's state is before the report. `unknown`
  * tells the connector to read the current state first and move only what is
  * actually there (dead-zone recovery, orphan release).
  */
-export type PriorState = "new" | "inReview" | "changesRequested" | "unknown";
+export type PriorState = "new" | "inReview" | "changesRequested" | "merged" | "unknown";
 
 /**
  * Where the Foreman's work comes from, and where it reports progress on that
@@ -117,8 +117,8 @@ export interface ReleaseEvent {
   readonly productionBranch: string;
 }
 
-/** One session the Foreman runs for a repo: building, revising or reviewing. */
-export type SessionPhase = "implement" | "revise" | "review";
+/** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */
+export type SessionPhase = "implement" | "revise" | "review" | "verify";
 
 /**
  * A session's lifecycle. `handoff` is a review passing from one reviewer to

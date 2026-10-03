@@ -588,6 +588,8 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       case "new→inReview": return this.implementationDone(repoConfig, n, logger);
       case "changesRequested→inReview": return this.revisionDone(repoConfig, n, logger);
       case "inReview→approved": return this.reviewOutcome(repoConfig, n, "prApproved", logger);
+      case "inReview→merged": return this.reviewOutcome(repoConfig, n, "prMerged", logger);
+      case "merged→approved": return this.verifyPassed(repoConfig, n, logger);
       case "inReview→changesRequested": return this.reviewOutcome(repoConfig, n, "prPendingActions", logger);
       case "new→approved": return this.alreadyMerged(repoConfig, n, logger);
       case "unknown→approved": return this.deadZoneResolve(repoConfig, n, "pass", logger);
@@ -654,7 +656,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * verdict is the one the review just produced.
    *
    * Never applies `ready for prod release`: `outcome` names a lifecycle KEY, not a
-   * label, and the type admits only the two review outcomes.
+   * label, and the type admits only the review outcomes.
    */
   private reviewOutcome(config: RepoConfig, issueNumber: number, outcome: ReviewOutcome, logger: Logger): boolean {
     const { prUnderReview } = config.lifecycleLabels;
@@ -667,6 +669,29 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         "--add-label", nextLabel,
       ], config.repoPath);
       logger.info(`Transitioned issue #${issueNumber} labels: "${prUnderReview}" → "${nextLabel}"`);
+      return true;
+    } catch (err) {
+      logger.warn(
+        `Failed to transition labels on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Dev verification passed (EM#440): `prMerged` → `prApproved`. The verifier
+   * writes no label itself; this is the only writer of the step.
+   */
+  private verifyPassed(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+    const { prMerged, prApproved } = config.lifecycleLabels;
+    try {
+      gh([
+        "issue", "edit", String(issueNumber),
+        "--repo", config.githubRepo,
+        "--remove-label", prMerged,
+        "--add-label", prApproved,
+      ], config.repoPath);
+      logger.info(`Transitioned issue #${issueNumber} labels: "${prMerged}" → "${prApproved}" (dev verification passed)`);
       return true;
     } catch (err) {
       logger.warn(
@@ -1320,7 +1345,7 @@ export function findStuckMergedIssues(
 ): StuckMergedIssue[] {
   if (config.baseBranch === config.featureBranch) return [];
   try {
-    const { prUnderReview, prPendingActions, prApproved, readyForProd } = config.lifecycleLabels;
+    const { prUnderReview, prPendingActions, prMerged, prApproved, readyForProd } = config.lifecycleLabels;
     const lifecycle = Object.values(config.lifecycleLabels);
     const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
       .filter((i) =>
@@ -1330,8 +1355,9 @@ export function findStuckMergedIssues(
         // looked at it — the third door into the same dead zone.
         (hasLabel(i, config.triggerLabel) && !hasLabel(i, "blocked") && !lifecycle.some((l) => hasLabel(i, l))));
     const candidates = issues.filter(
+      // `pr merged` belongs to the verify stage, which owns its retries.
       (i) => !(
-        hasLabel(i, prApproved) || hasLabel(i, readyForProd)
+        hasLabel(i, prMerged) || hasLabel(i, prApproved) || hasLabel(i, readyForProd)
       ),
     );
     if (candidates.length === 0) return [];
@@ -1433,11 +1459,12 @@ export function findOrphanedLifecycleIssues(
 ): number[] {
   if (config.baseBranch === config.featureBranch) return [];
   try {
-    const { prUnderReview, prPendingActions, prApproved, readyForProd } = config.lifecycleLabels;
+    const { prUnderReview, prPendingActions, prMerged, prApproved, readyForProd } = config.lifecycleLabels;
     const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
     const candidates = open.filter(
       (i) =>
         (hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions)) &&
+        !hasLabel(i, prMerged) &&
         !hasLabel(i, prApproved) &&
         !hasLabel(i, readyForProd),
     );
@@ -1511,9 +1538,10 @@ export function findIssuesStillUnderReview(
       const issue = open.find((i) => i.number === num);
       // Absent from the open set = closed. The review closed it out; not stuck.
       if (!issue) return false;
-      const { prUnderReview, prApproved, prPendingActions, readyForProd } = config.lifecycleLabels;
+      const { prUnderReview, prMerged, prApproved, prPendingActions, readyForProd } = config.lifecycleLabels;
       if (!hasLabel(issue, prUnderReview)) return false;
       return !(
+        hasLabel(issue, prMerged) ||
         hasLabel(issue, prApproved) ||
         hasLabel(issue, prPendingActions) ||
         hasLabel(issue, readyForProd)
@@ -1527,8 +1555,12 @@ export function findIssuesStillUnderReview(
   }
 }
 
-/** The two lifecycle states a review can end in, as `LifecycleLabels` keys. */
-export type ReviewOutcome = "prApproved" | "prPendingActions";
+/**
+ * The lifecycle states a review can end in, as `LifecycleLabels` keys.
+ * `prMerged` when dev verification is its own stage (EM#440): the reviewer
+ * merged, and `pr approved` waits on the verifier.
+ */
+export type ReviewOutcome = "prApproved" | "prMerged" | "prPendingActions";
 
 /**
  * The outcome each of `issueNumbers` carries in `issues`: `pr approved` or
@@ -1540,7 +1572,7 @@ export function reviewOutcomesOf(
   issues: ReadonlyArray<{ number: number; labels: ReadonlyArray<{ name: string }> }>,
   issueNumbers: ReadonlyArray<number>,
 ): Map<number, ReviewOutcome> {
-  const { prApproved, prPendingActions, readyForProd } = config.lifecycleLabels;
+  const { prApproved, prMerged, prPendingActions, readyForProd } = config.lifecycleLabels;
   const out = new Map<number, ReviewOutcome>();
   for (const n of issueNumbers) {
     const issue = issues.find((i) => i.number === n);
@@ -1548,6 +1580,7 @@ export function reviewOutcomesOf(
     const has = (name: string) => issue.labels.some((l) => l.name === name);
     if (has(readyForProd)) continue;
     if (has(prApproved)) out.set(n, "prApproved");
+    else if (has(prMerged)) out.set(n, "prMerged");
     else if (has(prPendingActions)) out.set(n, "prPendingActions");
   }
   return out;
@@ -1569,6 +1602,25 @@ export function readReviewOutcomes(
   } catch (err) {
     logger.debug(`readReviewOutcomes failed for ${config.name}: ${err instanceof Error ? err.message : String(err)}`);
     return new Map();
+  }
+}
+
+/**
+ * Open issues waiting on dev verification (EM#440): labelled `prMerged` and not
+ * yet `prApproved` / `ready for prod`. Read fresh — the reviewer that wrote the
+ * label is a foreign process. [] on a failed read: nothing is verified blind.
+ */
+export function findIssuesAwaitingVerify(config: RepoConfig, logger: Logger): number[] {
+  try {
+    const { prMerged, prApproved, readyForProd } = config.lifecycleLabels;
+    dropIssueSnapshot(config.githubRepo);
+    return getOpenIssues(config.githubRepo, config.repoPath, logger)
+      .filter((i) => hasLabel(i, prMerged) && !hasLabel(i, prApproved) && !hasLabel(i, readyForProd))
+      .map((i) => i.number)
+      .sort((a, b) => a - b);
+  } catch (err) {
+    logger.warn(`findIssuesAwaitingVerify failed for ${config.name}: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
   }
 }
 

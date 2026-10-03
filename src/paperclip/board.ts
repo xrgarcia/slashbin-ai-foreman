@@ -24,6 +24,7 @@ export type PaperclipBucket = "todo" | "in_progress" | "in_review" | "blocked" |
 export const SESSION_STAGE = Object.freeze({
   implement: "implementing",
   review: "reviewing",
+  verify: "verifying",
   revise: "revising",
 } as const satisfies Record<string, PaperclipStage>);
 
@@ -31,6 +32,7 @@ export const SESSION_STAGE = Object.freeze({
 export const SESSION_FALLBACK_STAGE = Object.freeze({
   implement: "approved",
   review: "inReview",
+  verify: "merged",
   revise: "changesRequested",
 } as const satisfies Record<keyof typeof SESSION_STAGE, PaperclipStage>);
 
@@ -75,6 +77,7 @@ export function issueStage(
   if (has(lifecycle.readyToClose)) return "done";
   if (inRelease || has(lifecycle.readyForProd)) return "awaitingRelease";
   if (has(lifecycle.prApproved)) return "pendingVerification";
+  if (has(lifecycle.prMerged)) return "merged";
   if (has(lifecycle.prPendingActions)) return "changesRequested";
   if (has(lifecycle.prUnderReview)) return "inReview";
   if (has(triggerLabel)) return "approved";

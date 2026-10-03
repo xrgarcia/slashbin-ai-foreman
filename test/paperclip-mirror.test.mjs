@@ -428,7 +428,7 @@ test("each step hands the card to its configured agent with exactly one stage la
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
-  assert.equal(fake.labels.length, 6, "the five stage labels created once");
+  assert.equal(fake.labels.length, 7, "the six stage labels created once");
 });
 
 test("a review session holds the card in progress under the reviewer, noted by name, and returns it when it ends", async () => {

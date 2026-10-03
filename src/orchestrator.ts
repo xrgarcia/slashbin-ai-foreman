@@ -46,7 +46,7 @@ import {
   readLatestReviewBody,
   type PendingRevisionInfo,
 } from "./github.js";
-import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
+import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, verifyViaSre, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { dispatchStages, isCustomStage, type CustomStage, type StageResult } from "./stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
 import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch, type BranchDivergence } from "./reconciler.js";
@@ -60,10 +60,11 @@ import {
   findRevokedEmGates,
   restoreEmGate,
   findOrphanedLifecycleIssues,
+  findIssuesAwaitingVerify,
   type ReviewOutcome,
 } from "./github.js";
 import type { ReviewTrailer } from "./agent.js";
-import { loadRepoState, saveRepoState, type BranchBlock } from "./state.js";
+import { loadRepoState, saveRepoState, type BranchBlock, type VerifyHold } from "./state.js";
 import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
 
 const MAX_RETRIES = 2;
@@ -202,7 +203,7 @@ const observerEventsSent = new Set<string>();
  */
 async function reportReviewOutcomes(repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
   for (const [n, outcome] of readReviewOutcomes(repoConfig, issueNumbers, logger)) {
-    await notifyObserversState(itemOf(repoConfig, n), "inReview", outcome === "prApproved" ? "approved" : "changesRequested", repoConfig, logger);
+    await notifyObserversState(itemOf(repoConfig, n), "inReview", workStateOf(outcome), repoConfig, logger);
   }
 }
 
@@ -362,13 +363,22 @@ function recoverDeadZonedIssue(
  *
  * `deploy=NA` is a PASS, not an absence: it is what a repo with nothing to deploy
  * (docs, CLI, npm package) is instructed to emit.
+ *
+ * With a verify stage configured (`verifyStage`, EM#440) a passing merge is
+ * `prMerged`, never `prApproved`: approval is the verifier's to give, and a
+ * reviewer's own deploy check does not stand in for it.
  */
-export function labelFromTrailer(t: ReviewTrailer): ReviewOutcome | null {
+export function labelFromTrailer(t: ReviewTrailer, verifyStage = false): ReviewOutcome | null {
   if (!t.merged) return null;
   if (t.verdict !== "APPROVE") return null;
   if (/^(FAIL|FAILURE|FAILED)$/.test(t.deploy)) return "prPendingActions";
-  if (/^(SUCCESS|OK|PASS|PASSED|NA|N\/A|NONE)$/.test(t.deploy)) return "prApproved";
+  if (/^(SUCCESS|OK|PASS|PASSED|NA|N\/A|NONE)$/.test(t.deploy)) return verifyStage ? "prMerged" : "prApproved";
   return null;
+}
+
+/** The work state a review outcome reports. */
+export function workStateOf(outcome: ReviewOutcome): "approved" | "merged" | "changesRequested" {
+  return outcome === "prApproved" ? "approved" : outcome === "prMerged" ? "merged" : "changesRequested";
 }
 
 /**
@@ -402,6 +412,7 @@ async function reconcileReviewOutcomeLabels(
   trailers: ReviewTrailer[],
   logger: Logger,
   events?: CycleEvent[],
+  verifyStage = false,
 ): Promise<number[]> {
   const merged = findIssuesMergedToBase(repoConfig, stuck, logger);
   const byIssue = new Map(merged.map((m) => [m.issueNumber, m]));
@@ -430,7 +441,7 @@ async function reconcileReviewOutcomeLabels(
       held.push({ issue: issueNumber, reason: trailer.hold, pr: ref.prNumber });
       continue;
     }
-    const outcome = labelFromTrailer(trailer);
+    const outcome = labelFromTrailer(trailer, verifyStage);
     if (!outcome) {
       logger.warn(
         `Not reconciling #${issueNumber}: PR #${ref.prNumber}'s trailer is ambiguous (verdict=${trailer.verdict} merged=${trailer.merged} deploy=${trailer.deploy}) — leaving it for a human`,
@@ -438,11 +449,11 @@ async function reconcileReviewOutcomeLabels(
       unresolved.push(issueNumber);
       continue;
     }
-    const to = outcome === "prApproved" ? "approved" : "changesRequested";
+    const to = workStateOf(outcome);
     if (await reportWorkState(itemOf(repoConfig, issueNumber), "inReview", to, repoConfig, logger)) {
       events?.push({
         message: `${repoConfig.githubRepo} #${issueNumber} — review merged PR #${ref.prNumber} without labeling; reconciled to "${repoConfig.lifecycleLabels[outcome]}" from its own trailer`,
-        level: outcome === "prApproved" ? "info" : "warn",
+        level: outcome === "prPendingActions" ? "warn" : "info",
       });
     } else {
       unresolved.push(issueNumber);
@@ -875,7 +886,7 @@ async function runRepoCycle(
     // Review, revise, implement and custom stages each spawn a Claude session.
     // None may START once a shutdown is under way — see `shutdownRequested`.
     // The pass ends there, as it did when the phases were inline.
-    const spawnsClaude = isCustomStage(stage) || stage.type === "review" || stage.type === "revise" || stage.type === "implement";
+    const spawnsClaude = isCustomStage(stage) || stage.type === "review" || stage.type === "verify" || stage.type === "revise" || stage.type === "implement";
     if (spawnsClaude && shutdownRequested) return { outcome: "stop", reason: "shutdown requested" };
 
     if (isCustomStage(stage)) {
@@ -894,6 +905,12 @@ async function runRepoCycle(
       //    outcome-label reconcile (reviewLabelReconcile) runs inside tryReview. ---
       case "review":
         if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
+        break;
+
+      // --- Dev-verify PRs the reviewer merged (`pr merged` → `pr approved`).
+      //    A no-op unless srePath is configured (EM#440). ---
+      case "verify":
+        if (await tryVerify(repoConfig, config, base, cycleNumber, events)) processed++;
         break;
 
       // --- Revise PRs with pending review feedback ---
@@ -1804,6 +1821,154 @@ async function tryRevision(
  *
  * Returns true when a review run was triggered (regardless of verdict).
  */
+/** Hours between verify attempts on a held issue, and how many it gets. */
+export const VERIFY_RETRY_MS = 60 * 60_000;
+export const VERIFY_MAX_ATTEMPTS = 3;
+/** How long a repo's verify waits after both engines were unavailable. */
+const VERIFY_DEFER_MS = 15 * 60_000;
+const verifyDeferredUntil = new Map<string, number>();
+
+/**
+ * The merged PR to verify this pass, or null. Pure, exported for tests.
+ *
+ * One PR per pass, oldest issue first. A PR is skipped while ANY of its issues
+ * is held within its retry window or has spent its attempts: the SRE verifies
+ * the PR, not the issue, so one held issue holds its PR.
+ */
+export function pickVerifyTarget(
+  refs: ReadonlyArray<{ issueNumber: number; prNumber: number }>,
+  held: Readonly<Record<number, VerifyHold>>,
+  now: number,
+): { prNumber: number; issueNumbers: number[] } | null {
+  const byPr = new Map<number, number[]>();
+  for (const r of [...refs].sort((a, b) => a.issueNumber - b.issueNumber)) {
+    byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
+  }
+  for (const [prNumber, issueNumbers] of byPr) {
+    const waiting = issueNumbers.some((n) => {
+      const h = held[n];
+      return h && (h.attempts >= VERIFY_MAX_ATTEMPTS || now - Date.parse(h.heldAt) < VERIFY_RETRY_MS);
+    });
+    if (!waiting) return { prNumber, issueNumbers };
+  }
+  return null;
+}
+
+/**
+ * The verify stage (EM#440): hand one merged PR to the SRE and move its issues
+ * `pr merged` → `pr approved` on a pass. A hold or an error never relabels: the
+ * issue stays `pr merged`, its card goes to Blocked with the reason, and the
+ * stage retries it every VERIFY_RETRY_MS up to VERIFY_MAX_ATTEMPTS, after which
+ * it waits for a person. Nothing here writes `pr pending actions` — a merged PR
+ * has no feature PR left to revise.
+ *
+ * While Claude is backed off the SRE runs Codex-only (`--engine codex`), so a
+ * verify never lands on the session limit; Codex being down too is a deferral,
+ * not a failed attempt.
+ */
+async function tryVerify(
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  logger: Logger,
+  cycleNumber: number,
+  events?: CycleEvent[],
+): Promise<boolean> {
+  if (!config.srePath) return false;
+  if (isUpstreamBlocked("github")) return false;
+  const repoName = repoConfig.name;
+  if ((verifyDeferredUntil.get(repoName) ?? 0) > Date.now()) return false;
+  const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
+
+  const waiting = findIssuesAwaitingVerify(repoConfig, vlog);
+  const state = loadRepoState(repoName);
+  const held: Record<number, VerifyHold> = { ...(state.verifyHeld ?? {}) };
+  // A hold outlives its label only by mistake: a person relabelled the issue,
+  // or it closed. Drop those so a later `pr merged` starts fresh.
+  const stale = Object.keys(held).map(Number).filter((n) => !waiting.includes(n));
+  if (stale.length > 0) {
+    for (const n of stale) delete held[n];
+    saveRepoState(repoName, { ...state, verifyHeld: held });
+  }
+  if (waiting.length === 0) return false;
+
+  const refs = findIssuesMergedToBase(repoConfig, waiting, vlog);
+  const unmatched = waiting.filter((n) => !refs.some((r) => r.issueNumber === n) && !held[n]);
+  for (const n of unmatched) {
+    // Labelled merged, but no merged PR closes it — nothing to verify against.
+    const reason = `"${repoConfig.lifecycleLabels.prMerged}" but no merged PR into ${repoConfig.baseBranch} closes it`;
+    held[n] = { heldAt: new Date().toISOString(), prNumber: 0, reason: "no-merged-pr", attempts: VERIFY_MAX_ATTEMPTS };
+    vlog.warn(`#${n}: ${reason} — needs a person`);
+    await reportWorkBlocked(itemOf(repoConfig, n), reason, repoConfig, vlog);
+  }
+  if (unmatched.length > 0) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });
+
+  const target = pickVerifyTarget(refs, held, Date.now());
+  if (!target) return false;
+
+  const engine = isUpstreamBlocked("claude") ? "codex" : "auto";
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const transcriptPath = resolve(process.cwd(), "logs", "verify", `${repoName}-cycle${cycleNumber}-${ts}.log`);
+  const runAbort = new AbortController();
+  activeRuns.set(repoName, runAbort);
+  const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
+  const session: Omit<SessionEvent, "status"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE" };
+  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the verification ended without a result" };
+  const issues = target.issueNumbers.map((n) => `#${n}`).join(", ");
+  vlog.info(`Verifying ${repoName} PR #${target.prNumber} in dev (issues: ${issues}), transcript: ${transcriptPath}`);
+  events?.push({ message: `Verifying ${repoConfig.githubRepo} PR #${target.prNumber} in dev (issues: ${issues})`, level: "info" });
+
+  try {
+    await notifySession({ ...session, status: "started" }, vlog);
+    const r = await verifyViaSre(repoConfig, config, target.prNumber, engine, vlog, runAbort.signal, transcriptPath)
+      .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
+
+    if (r.kind === "verdict" && r.pass) {
+      const after = loadRepoState(repoName);
+      const kept = { ...(after.verifyHeld ?? {}) };
+      for (const n of target.issueNumbers) {
+        await reportWorkState(itemOf(repoConfig, n), "merged", "approved", repoConfig, vlog);
+        delete kept[n];
+      }
+      saveRepoState(repoName, { ...after, verifyHeld: kept });
+      ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
+      events?.push({ message: `✅ ${repoConfig.githubRepo} PR #${target.prNumber} verified in dev — ${issues} → "${repoConfig.lifecycleLabels.prApproved}"`, level: "info" });
+      return true;
+    }
+
+    if (r.kind === "error" && engine === "codex") {
+      // Codex refused and Claude is backed off: neither engine could run. No
+      // attempt is charged; the repo waits a short while before asking again.
+      verifyDeferredUntil.set(repoName, Date.now() + VERIFY_DEFER_MS);
+      ended = { status: "failed", detail: `deferred — Codex unavailable and Claude backed off: ${r.error}` };
+      vlog.info(`Verify of PR #${target.prNumber} deferred: ${r.error}`);
+      return false;
+    }
+
+    const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
+    const after = loadRepoState(repoName);
+    const kept = { ...(after.verifyHeld ?? {}) };
+    let attempts = 0;
+    for (const n of target.issueNumbers) {
+      attempts = Math.max(attempts, (kept[n]?.attempts ?? 0) + 1);
+    }
+    for (const n of target.issueNumbers) {
+      kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts };
+    }
+    saveRepoState(repoName, { ...after, verifyHeld: kept });
+    const final = attempts >= VERIFY_MAX_ATTEMPTS;
+    const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${VERIFY_MAX_ATTEMPTS}` +
+      (final ? "; no more retries, a person must look" : `; retrying in ${Math.round(VERIFY_RETRY_MS / 60_000)} min`);
+    for (const n of target.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, vlog);
+    ended = { status: "failed", detail: why };
+    vlog.warn(`${repoName}: ${why}`);
+    events?.push({ message: `⏸️ ${repoConfig.githubRepo} ${issues}: ${why}`, level: final ? "error" : "warn" });
+    return false;
+  } finally {
+    activeRuns.delete(repoName);
+    await notifySession({ ...session, ...ended }, vlog);
+  }
+}
+
 async function tryReview(
   repoConfig: RepoConfig,
   config: AgentConfig,
@@ -1816,7 +1981,10 @@ async function tryReview(
   const repoName = repoConfig.name;
   const reviewLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "review" });
 
-  if (isUpstreamBlocked("claude")) return false;
+  // A Claude back-off stops the review only when Claude is the reviewer. With a
+  // Tech Lead configured, Codex reviews on its own subscription and Claude is
+  // claimed later, only if the Tech Lead hands the PR back.
+  if (!config.techLeadPath && isUpstreamBlocked("claude")) return false;
 
   // Failure back-off with cooldown (mirrors the implement phase).
   const failures = reviewFailureCount.get(repoName) ?? 0;
@@ -1876,8 +2044,11 @@ async function tryReview(
   const reviewStartedAt = new Date().toISOString();
 
   // Claim the launch (the one half-open probe, when Claude is recovering)
-  // before any checkout work or "Reviewing" event.
-  if (!tryAcquire("claude")) return false;
+  // before any checkout work or "Reviewing" event — when Claude is the reviewer.
+  if (!config.techLeadPath && !tryAcquire("claude")) return false;
+  // True once a Claude session is the one reviewing; only then is its result
+  // the back-off's to read.
+  let claudeRan = !config.techLeadPath;
 
   // The session reads the code from here rather than cloning one for itself.
   // Prepared before the run so it is warm on arrival; see review-checkout.ts
@@ -1906,6 +2077,14 @@ async function tryReview(
           .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }))
       : { fallback: true as const, reason: "not configured" };
     if (config.techLeadPath && "fallback" in viaTechLead) {
+      if (!tryAcquire("claude")) {
+        // Codex declined and Claude is backed off. Nothing ran and nothing was
+        // written, so no failure is charged; the next pass offers it again.
+        ended = { status: "failed", detail: `Tech Lead declined (${viaTechLead.reason}) and Claude is backed off — retried next pass` };
+        reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead declined and Claude is backed off — no review this pass`);
+        return false;
+      }
+      claudeRan = true;
       reviewer = "Claude";
       await notifySession({ ...session, status: "handoff", reviewer: "Claude", detail: viaTechLead.reason }, reviewLogger);
     }
@@ -1915,7 +2094,7 @@ async function tryReview(
           `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
         ).catch(reportLaunchThrew)
       : viaTechLead;
-    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    if (claudeRan) reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     if (hasObservers()) {
       report = reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
     }
@@ -1960,7 +2139,7 @@ async function tryReview(
           // from a fresh deploy poll was spending minutes to recompute an answer
           // we were holding.
           const unresolved = config.reviewLabelReconcile
-            ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, reviewLogger, events)
+            ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, reviewLogger, events, Boolean(config.srePath))
             : stuck;
 
           if (!config.reviewLabelReconcile && stuck.length > 0) {
@@ -2013,7 +2192,7 @@ async function tryReview(
       );
 
       const unresolved = plan.toReconcile.length > 0 && config.reviewLabelReconcile
-        ? await reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events)
+        ? await reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events, Boolean(config.srePath))
         : plan.toReconcile;
 
       if (unresolved.length > 0) {

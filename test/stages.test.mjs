@@ -1,5 +1,5 @@
 // The stage pipeline: `stages` in config sets which phases a repo pass runs and
-// in what order; omitted, it is the seven built-ins in the order they always
+// in what order; omitted, it is the eight built-ins in the order they always
 // ran. A custom stage `{ id, skillPath }` runs one Claude session on its skill,
 // and a `blocked` or `failed` outcome ends the pass before any later stage.
 //
@@ -18,7 +18,7 @@ import { configureIssueCache } from "../dist/github.js";
 import { setStatePath } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
 
-const DEFAULT = ["reconcile", "review", "revise", "implement", "branch-sync", "dependabot", "promote"];
+const DEFAULT = ["reconcile", "review", "verify", "revise", "implement", "branch-sync", "dependabot", "promote"];
 const logger = createLogger({ format: "text", level: "error" });
 const names = (stages) => stages.map((s) => s.type ?? s.id);
 
@@ -101,7 +101,7 @@ const OPEN_PR = { number: 7, title: "feat: scan target (#3)", body: "Related to 
 
 // --- Config resolution -------------------------------------------------------
 
-test("default stages: a config with no `stages` resolves to the seven built-ins, in order", () => {
+test("default stages: a config with no `stages` resolves to the eight built-ins, in order", () => {
   assert.deepEqual([...BUILTIN_STAGES], DEFAULT);
   assert.deepEqual(names(load({}).stages), DEFAULT);
   assert.deepEqual(names(configSchema.parse({}).stages), DEFAULT);
