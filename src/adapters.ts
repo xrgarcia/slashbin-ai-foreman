@@ -133,6 +133,44 @@ export interface SessionEvent {
   readonly pr?: number;
   readonly reviewer?: string;
   readonly detail?: string;
+  /**
+   * What the session did, for an observer to summarise. Gathered only when an
+   * observer is registered, from what the Foreman already holds: the issue
+   * titles, the session's own final message, the PR, the review. Unredacted
+   * and uncapped: an observer that shows it must redact and cap it.
+   */
+  readonly report?: SessionReport;
+}
+
+/** The material a session's summary is written from. Every field is optional. */
+export interface SessionReport {
+  /** Each item's goal (its issue title), by issue number. */
+  readonly goals?: Readonly<Record<number, string>>;
+  /** The session's own final message (an agent's closing summary). */
+  readonly text?: string;
+  /** The pull request the session produced or worked on. */
+  readonly pr?: SessionPr;
+  /** A review's outcome, from its trailer and the review it posted. */
+  readonly review?: SessionReview;
+}
+
+export interface SessionPr {
+  readonly number: number;
+  readonly url?: string;
+  readonly title?: string;
+  readonly additions?: number;
+  readonly deletions?: number;
+  readonly changedFiles?: number;
+}
+
+export interface SessionReview {
+  readonly verdict: string;
+  readonly merged: boolean;
+  readonly deploy: string;
+  readonly hold?: string;
+  /** The review's opening paragraph. */
+  readonly summary?: string;
+  readonly findings: ReadonlyArray<{ readonly severity: string; readonly title: string; readonly where?: string }>;
 }
 
 /** An item the Foreman is holding back this cycle, and why. */

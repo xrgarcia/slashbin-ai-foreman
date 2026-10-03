@@ -57,7 +57,7 @@ Show the companies by name (one per line, numbered) and let the user pick one. K
 Build the new file in a temp path: the current config with only its `paperclip` block
 changed to `enabled: true`, `url`, `companyId` and `agentName` (keep an existing
 `agentName`, else `Foreman`). Every other key of the block (`identityKeyFormat`,
-`statusMap`) is kept. `agentId` is kept only when the company is unchanged — an agent id
+`statusMap`, `comments`) is kept. `agentId` is kept only when the company is unchanged — an agent id
 from another company would point at the wrong agent. No other top-level key changes.
 
 ```bash
@@ -102,6 +102,23 @@ Build `roles`, `board` (only the stages that change, only the fields that change
 `agentReportsTo` into the same temp file as step 3, show the diff, and write only after a
 clear yes — exactly as in step 3. Do not add `id`s; registration writes them.
 
+## 4b. Choose what each card's thread says
+
+Ask: "Each card's thread gets a short summary per session — the goal when a build
+starts; the PR, diff stat and the agent's own summary when it ends; the review verdict
+and findings; what a revision addressed. Keep that, or post only the one-line note per
+step? And is any kind of comment unwanted?" Show the event table from
+`docs/paperclip.md` → "Session summaries".
+
+- **Keep the defaults** → nothing to write; the block needs no `comments`.
+- **Otherwise** → build `comments` with only what changes: `enabled: false` for the
+  one-line notes, `events.<key>: false` for each unwanted kind (the card still moves),
+  `maxLength` (200–20000, default 3000), `includeDiffStat: false` to drop the diff stat.
+
+Write it into the same temp file as step 3, show the diff, and write only after a clear
+yes — exactly as in step 3. Every comment is redacted and capped whatever is chosen;
+there is no setting that turns redaction off, and none should be offered.
+
 ## 5. Register the Foreman agent and its roles
 
 ```bash
@@ -144,7 +161,8 @@ Print, without doing any of it:
 - Give a GitHub issue in a configured repo its trigger label (`approved` unless the
   config says otherwise).
 - When the Foreman picks it up, its Paperclip task appears, titled `owner/name#N`,
-  in progress and assigned to the Foreman, with a `picked up by Foreman` note. At each
-  step after it gains a note, and moves to the agent, status and stage label its stage
-  maps to (`docs/paperclip.md` → "Board stages" and "Notes per step").
+  in progress and assigned to the Foreman, with a `Foreman started implementing` comment
+  naming the goal (`picked up by Foreman` with `comments.enabled` off). At each step after
+  it gains a summary or note, and moves to the agent, status and stage label its stage
+  maps to (`docs/paperclip.md` → "Board stages", "Notes per step" and "Session summaries").
 - To turn it off later: set `paperclip.enabled` to `false` and restart.

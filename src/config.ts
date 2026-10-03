@@ -84,6 +84,30 @@ const boardStagesSchema = z.object({
   blocked: stage(PAPERCLIP_FOREMAN_ROLE, "blocked", "blocked"),
 }).prefault({});
 
+// The events a card's thread gets a summary comment for. Each is on by default;
+// false drops that event's comment and leaves the card's status moves alone.
+export const PAPERCLIP_COMMENT_EVENTS = [
+  "implementStart", "implementEnd", "reviewStart", "reviewEnd", "reviseStart", "reviseEnd",
+  "progress", "release", "blocked",
+] as const;
+export type PaperclipCommentEvent = (typeof PAPERCLIP_COMMENT_EVENTS)[number];
+const commentsSchema = z.object({
+  enabled: z.boolean().default(true),
+  events: z.object({
+    implementStart: z.boolean().default(true),
+    implementEnd: z.boolean().default(true),
+    reviewStart: z.boolean().default(true),
+    reviewEnd: z.boolean().default(true),
+    reviseStart: z.boolean().default(true),
+    reviseEnd: z.boolean().default(true),
+    progress: z.boolean().default(true),
+    release: z.boolean().default(true),
+    blocked: z.boolean().default(true),
+  } satisfies Record<PaperclipCommentEvent, unknown>).prefault({}),
+  maxLength: z.number().int().min(200).max(20_000).default(3000),
+  includeDiffStat: z.boolean().default(true),
+}).prefault({});
+
 const roleSchema = z.object({
   name: z.string().trim().min(1),
   title: z.string().min(1).optional(),
@@ -138,6 +162,8 @@ const paperclipConfigSchema = z.object({
   stageLabels: stageLabelsSchema,
   // Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way.
   liveLeaseMinutes: z.number().int().positive().default(15),
+  // What a card's thread says: { enabled, events, maxLength, includeDiffStat }. enabled false = the one-line note per step. events turns each comment off by kind (implementStart, implementEnd, reviewStart, reviewEnd, reviseStart, reviseEnd, progress, release, blocked). maxLength caps every comment, includeDiffStat adds the PR's files and +/- lines to the implement summary. Every comment is redacted (known secrets and token-shaped strings) and never repeats the task's latest comment.
+  comments: commentsSchema,
 });
 
 const repoEntrySchema = z.object({

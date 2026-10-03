@@ -145,6 +145,9 @@ export function loadRepoState(repoName: string): RepoState {
       held: { ...(repo.held ?? {}) },
       rejectedBranches: { ...(repo.rejectedBranches ?? {}) },
       ...(repo.branchBlock ? { branchBlock: { ...repo.branchBlock, announced: [...repo.branchBlock.announced] } } : {}),
+      // Dropping this re-announced an open release PR on every promotion pass:
+      // trackRelease saw no saved release each time (foreman issue 74).
+      ...(repo.release ? { release: { ...repo.release, issues: [...repo.release.issues] } } : {}),
     };
   }
 

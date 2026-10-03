@@ -72,6 +72,9 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
       return ok(l, 201);
     }
     m = u.pathname.match(/^\/api\/issues\/([^/]+)\/comments$/);
+    if (m && method === "GET") {
+      return ok((comments[m[1]] ?? []).map((b, i) => ({ id: `c${i}`, body: b, createdAt: new Date(1_700_000_000_000 + i * 1000).toISOString() })));
+    }
     if (m && method === "POST") {
       (comments[m[1]] ??= []).push(body.body);
       const r = rows.find((x) => x.id === m[1]);
@@ -98,7 +101,8 @@ function logger() {
 
 function mirrorOn(fake, extra = {}) {
   const cfg = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
-    identityKeyFormat: "source: {repo}#{N}", ...extra };
+    // The one-line notes these tests were written against; the summaries have their own tests below.
+    identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false }, ...extra };
   const log = logger();
   const client = new PaperclipClient({ url: cfg.url, companyId: CID, fetch: fake.fetch });
   return { mirror: new PaperclipMirror(client, cfg, [SECRET], log), log };
@@ -477,4 +481,103 @@ test("no labels endpoint: the status still moves, and the failure is logged once
   await mirror.onState(item, "inReview", "changesRequested", repoConfig, logger());
   assert.equal(base.rows[0].status, "todo");
   assert.equal(log.lines.filter(([lvl]) => lvl === "warn").length, 1);
+});
+
+// --- Summaries on the card's thread (Foreman issue 74) ---
+
+const rich = (extra = {}) => ({ comments: { enabled: true, events: {}, maxLength: 3000, includeDiffStat: true, ...extra } });
+const implSession = (status, extra = {}) => ({ phase: "implement", status, repo: "example/r", items: [item], ...extra });
+
+test("summaries: implement start names the goal, implement end carries PR, diff stat and the agent's summary, notes held meanwhile follow it", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, rich());
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onSession(implSession("started", { report: { goals: { 7: "Add the widget endpoint" } } }), logger());
+  await mirror.onPrLink(item, "https://github.com/example/r/pull/9", repoConfig, logger());
+  await mirror.onState(item, "new", "inReview", repoConfig, logger());
+  await mirror.onSession(implSession("finished", {
+    detail: "PR https://github.com/example/r/pull/9",
+    report: {
+      text: "Added GET /widgets.\n\nTests: 12 passed.\nFOREMAN_IMPL issue=#7",
+      pr: { number: 9, url: "https://github.com/example/r/pull/9", title: "feat: widgets", additions: 40, deletions: 3, changedFiles: 2 },
+    },
+  }), logger());
+  assert.deepEqual(fake.comments["row-1"], [
+    "**Foreman started implementing**\n\nGoal: Add the widget endpoint",
+    "**Implementation finished** — [PR #9](https://github.com/example/r/pull/9): feat: widgets\n\nDiff: 2 files, +40 −3\n\nAdded GET /widgets.\n\nTests: 12 passed.",
+    "under review",
+  ]);
+  assert.equal(fake.rows[0].status, "in_review", "the state reported during the session applies when it ends");
+});
+
+test("summaries: review end gives the verdict, merge/deploy and findings; the merged note it covers is dropped", async () => {
+  const fake = fakePaperclip([{ id: "r7", status: "in_review", description: "source: example/r#7" }]);
+  const { mirror } = mirrorOn(fake, rich());
+  const ev = (status, extra = {}) => ({ phase: "review", status, repo: "example/r", pr: 9, items: [item], reviewer: "Tech Lead", ...extra });
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onState(item, "inReview", "approved", repoConfig, logger());
+  await mirror.onMerged(item, repoConfig, logger());
+  await mirror.onSession(ev("finished", { report: { review: {
+    verdict: "APPROVE", merged: true, deploy: "NA", summary: "Meets the acceptance matrix.",
+    findings: [{ severity: "S4", title: "Fixture uses names", where: "tests/a.test.ts:12" }],
+  } } }), logger());
+  assert.deepEqual(fake.comments.r7, [
+    "**Tech Lead reviewing PR #9**",
+    "**Tech Lead review: APPROVE** — PR #9 merged · no deploy\n\nMeets the acceptance matrix.\n\n- **S4** · Fixture uses names — `tests/a.test.ts:12`",
+    "approved",
+  ]);
+});
+
+test("summaries: a revision end says what was addressed; a no-commit one says why", async () => {
+  const fake = fakePaperclip([{ id: "r7", status: "todo", description: "source: example/r#7" }]);
+  const { mirror } = mirrorOn(fake, rich());
+  const ev = (status, extra = {}) => ({ phase: "revise", status, repo: "example/r", pr: 9, items: [item], ...extra });
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onSession(ev("finished", { detail: "changes pushed, back to review", report: { text: "Addressed S2: rows now show dataStreamId." } }), logger());
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onSession(ev("finished", { detail: "no commit: branch already correct" }), logger());
+  assert.deepEqual(fake.comments.r7, [
+    "**Revising PR #9** after review feedback",
+    "**Revision pushed** — PR #9, back to review\n\nAddressed S2: rows now show dataStreamId.",
+    "**Revising PR #9** after review feedback",
+    "**Revision: no change made** — PR #9\n\nbranch already correct",
+  ]);
+});
+
+test("no note twice in a row: a repeated release note is dropped, across a restart too", async () => {
+  const fake = fakePaperclip([{ id: "r7", status: "in_review", description: "source: example/r#7" }]);
+  const open = { repo: "example/r", state: "open", pr: 371, issues: [item], productionBranch: "main" };
+  for (let i = 0; i < 3; i++) await mirrorOn(fake, rich()).mirror.onRelease(open, logger());
+  const { mirror } = mirrorOn(fake, rich());
+  await mirror.onRelease(open, logger());
+  await mirror.onRelease(open, logger());
+  assert.deepEqual(fake.comments.r7, ["waiting on release PR #371 to merge to main"]);
+});
+
+test("summaries are capped and redacted (known secrets and token shapes)", async () => {
+  const fake = fakePaperclip([{ id: "r7", status: "todo", description: "source: example/r#7" }]);
+  const { mirror } = mirrorOn(fake, rich({ maxLength: 300 }));
+  const text = `Used ghp_${"a".repeat(36)} and ${SECRET.value}; API_TOKEN=abcdef123456789 ok.\n\n${"x ".repeat(400)}`;
+  await mirror.onSession(implSession("finished", { detail: "commits added to the open PR", report: { text } }), logger());
+  const [c] = fake.comments.r7;
+  assert.ok(c.length <= 300, `capped: ${c.length}`);
+  assert.ok(c.endsWith("… (truncated)"));
+  assert.ok(!c.includes("ghp_aaa") && !c.includes(SECRET.value) && !c.includes("abcdef123456789"), c);
+});
+
+test("comment toggles: an event turned off posts nothing; enabled false gives the one-line notes", async () => {
+  const fake = fakePaperclip([{ id: "r7", status: "in_review", description: "source: example/r#7" }]);
+  const { mirror } = mirrorOn(fake, rich({ events: { reviewStart: false, progress: false } }));
+  const ev = (status, extra = {}) => ({ phase: "review", status, repo: "example/r", pr: 9, items: [item], reviewer: "Tech Lead", ...extra });
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onState(item, "inReview", "approved", repoConfig, logger());
+  await mirror.onSession(ev("finished", { detail: "#9 APPROVE · merged" }), logger());
+  assert.deepEqual(fake.comments.r7, ["**Review finished** — PR #9\n\n#9 APPROVE · merged"]);
+  assert.equal(fake.rows[0].status, "in_review", "the card still moves (approved → pending verification bucket)");
+
+  const fake2 = fakePaperclip();
+  const legacy = mirrorOn(fake2, { comments: { enabled: false } }).mirror;
+  await legacy.onClaim(item, repoConfig, logger());
+  await legacy.onSession(implSession("started", { report: { goals: { 7: "g" } } }), logger());
+  assert.deepEqual(fake2.comments["row-1"], ["picked up by Foreman"]);
 });
