@@ -37,12 +37,14 @@ interface OrphanedCommit {
   message: string;
 }
 
+const GIT_TIMEOUT_MS = 30_000;
+
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
+    timeout: GIT_TIMEOUT_MS,
   }).trim();
 }
 
@@ -60,6 +62,10 @@ function git(args: string[], cwd: string): string {
  * draining. The fetch didn't fail — it was cancelled — and reporting that as a
  * WARN sent one investigation at the clone and the remote before the timestamps
  * ruled both out.
+ *
+ * But Node's own `timeout` also kills with SIGTERM, and reports `code: "ETIMEDOUT"`.
+ * Reading every SIGTERM as a shutdown logged 693 "interrupted by shutdown" lines
+ * across at most 16 real shutdowns (foreman#61) — a slow fetch hidden as a non-event.
  */
 interface GitFailure {
   error: string;
@@ -67,21 +73,25 @@ interface GitFailure {
   signal?: string;
   /** Killed by a shutdown signal rather than failing on its own merits. */
   cancelled: boolean;
+  /** Killed by the helper's own timeout. Never a cancellation. */
+  timedOut?: boolean;
 }
 
 function formatGitError(err: unknown): GitFailure {
-  const e = err as { message?: string; stderr?: unknown; signal?: string | null };
+  const e = err as { message?: string; stderr?: unknown; signal?: string | null; code?: string };
   const stderr = typeof e?.stderr === "string"
     ? e.stderr.trim()
     : Buffer.isBuffer(e?.stderr)
       ? e.stderr.toString("utf-8").trim()
       : "";
   const signal = e?.signal ?? undefined;
+  const timedOut = e?.code === "ETIMEDOUT";
   return {
     error: e?.message ?? String(err),
     ...(stderr ? { stderr } : {}),
     ...(signal ? { signal } : {}),
-    cancelled: signal === "SIGTERM" || signal === "SIGINT",
+    cancelled: !timedOut && (signal === "SIGTERM" || signal === "SIGINT"),
+    ...(timedOut ? { timedOut } : {}),
   };
 }
 
@@ -390,7 +400,9 @@ export function reconcileRepo(
     git(["fetch", "origin"], config.repoPath);
   } catch (err) {
     const failure = formatGitError(err);
-    if (failure.cancelled) {
+    if (failure.timedOut) {
+      logger.warn(`git fetch timed out after ${GIT_TIMEOUT_MS}ms, skipping reconciliation`, { repo: config.name, ...failure });
+    } else if (failure.cancelled) {
       // Shutdown, not a fault. The next start reconciles this repo normally.
       logger.info("Reconciliation cancelled — git fetch was interrupted by shutdown", {
         repo: config.name,

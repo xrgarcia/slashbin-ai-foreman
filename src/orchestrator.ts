@@ -789,9 +789,9 @@ async function runRepoCycle(
       //    post-promotion merge commits. Runs independently of promotion work so
       //    drift is cleared even when no ready-for-prod issues exist. ---
       case "branch-sync":
-        if (!(repoConfig.baseBranch === "main" && repoConfig.featureBranch === "main")) {
+        if (!(repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch)) {
           if (trySyncDrift(repoConfig, base, cycleNumber)) {
-            events.push({ message: `Branch sync on ${repoConfig.githubRepo} (main → develop) — merged`, level: "info" });
+            events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged`, level: "info" });
             processed++;
           }
         }
@@ -805,7 +805,7 @@ async function runRepoCycle(
       //    pre-approved on a repo that opts in (dependencyPreApproved), so it enters
       //    the queue with no human step; bare everywhere else. ---
       case "dependabot":
-        if (repoConfig.baseBranch !== "main") {
+        if (repoConfig.baseBranch !== repoConfig.productionBranch) {
           const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
           if (filed) {
             events.push({
@@ -824,10 +824,10 @@ async function runRepoCycle(
       case "promote": {
         const promotionResult = await tryPromotion(repoConfig, base, cycleNumber);
         if (promotionResult === "promoted") {
-          events.push({ message: `Promotion PR created on ${repoConfig.githubRepo} (develop → main)`, level: "info" });
+          events.push({ message: `Promotion PR created on ${repoConfig.githubRepo} (${repoConfig.baseBranch} → ${repoConfig.productionBranch})`, level: "info" });
           processed++;
         } else if (promotionResult === "synced") {
-          events.push({ message: `Branch sync on ${repoConfig.githubRepo} (main → develop) — merged, promotion will follow`, level: "info" });
+          events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged, promotion will follow`, level: "info" });
           processed++;
         }
         break;
@@ -1832,7 +1832,7 @@ async function tryReview(
       repoConfig, candidate.issueNumbers, reviewStartedAt, reviewLogger,
     );
     const promotionOwnsIt = revoked.length > 0 &&
-      !!findOpenPromotionPR(repoConfig.githubRepo, "main", repoConfig.repoPath, reviewLogger);
+      !!findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, reviewLogger);
     if (promotionOwnsIt) {
       reviewLogger.info(
         `"${repoConfig.lifecycleLabels.readyForProd}" left removed on #${revoked.join(", #")} — an open promotion PR owns it now.`,
@@ -1855,7 +1855,7 @@ function trySyncDrift(
 ): boolean {
   const syncLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "sync" });
 
-  const drift = checkBranchDrift(repoConfig.githubRepo, repoConfig.repoPath, syncLogger);
+  const drift = checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
   if (!drift || drift.developBehindMain === 0) return false;
 
   // An already-open sync PR is a RETRY, not a no-op. The merge attempted at
@@ -1864,7 +1864,7 @@ function trySyncDrift(
   // here meant it was never merged at all. `develop` then stays behind `main`,
   // the next promotion PR goes BEHIND, and branch protection refuses it.
   // (Slashbin-console#779: open 2h48m over ~140 no-op cycles, blocking #782.)
-  const existing = findOpenSyncPR(repoConfig.githubRepo, repoConfig.repoPath, syncLogger);
+  const existing = findOpenSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
   if (existing) {
     if (tryMergeSyncPR(repoConfig.githubRepo, existing.number, repoConfig.repoPath, syncLogger)) {
       syncLogger.info(`Sync PR merged on retry — #${existing.number}: ${existing.url}`);
@@ -1874,8 +1874,8 @@ function trySyncDrift(
     return false;
   }
 
-  syncLogger.info(`develop is ${drift.developBehindMain} commit(s) behind main — creating sync PR`);
-  const syncUrl = createSyncPR(repoConfig.githubRepo, drift.developBehindMain, repoConfig.repoPath, syncLogger);
+  syncLogger.info(`${repoConfig.baseBranch} is ${drift.developBehindMain} commit(s) behind ${repoConfig.productionBranch} — creating sync PR`);
+  const syncUrl = createSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, drift.developBehindMain, repoConfig.repoPath, syncLogger);
   if (syncUrl) {
     // Say what actually happened. This line used to assert "created and
     // auto-merged" unconditionally, which was false whenever branch protection
@@ -1910,7 +1910,7 @@ function tryFileDependencyBatchIssue(
   cycleNumber: number,
 ): number | null {
   const depLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "dependencies" });
-  const bases = dependencyBatchBases(repoConfig.featureBranch, repoConfig.baseBranch);
+  const bases = dependencyBatchBases(repoConfig.featureBranch, repoConfig.baseBranch, repoConfig.productionBranch);
   if (bases.length === 0) return null;
   const featureBranch = repoConfig.featureBranch || bases[0];
 
@@ -1953,7 +1953,7 @@ async function tryPromotion(
   const promoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "promote" });
 
   // Main-only repos (like docs) don't have develop → main promotion
-  if (repoConfig.baseBranch === "main" && repoConfig.featureBranch === "main") {
+  if (repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch) {
     return null;
   }
 
@@ -1972,14 +1972,14 @@ async function tryPromotion(
     const last = lastStallCheckCycle.get(repoName) ?? -Infinity;
     if (cycleNumber - last >= STALL_CHECK_CYCLE_INTERVAL) {
       lastStallCheckCycle.set(repoName, cycleNumber);
-      const drift = checkBranchDrift(repoConfig.githubRepo, repoConfig.repoPath, promoLogger);
+      const drift = checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
       // Gate on CHANGED FILES, never on commit count. Every repo sits 1 commit
       // ahead in the steady state — the main -> develop sync PR's merge commit,
       // which carries no file change. Warning on `ahead > 0` fires on every repo
       // on every check, forever, and a warning that is always on is not a signal.
       if (drift && drift.developAheadFiles > 0) {
         promoLogger.warn(
-          `${repoName}: develop carries ${drift.developAheadFiles} changed file(s) not on main ` +
+          `${repoName}: ${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch} ` +
           `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${repoConfig.lifecycleLabels.readyForProd}" — ` +
           `promotion is STALLED, not idle. Either the EM gate has not been signed yet, or it was signed and revoked.`,
           { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles },
@@ -1992,7 +1992,7 @@ async function tryPromotion(
   promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
   // Check if a promotion PR already exists
-  const existingPR = findOpenPromotionPR(repoConfig.githubRepo, "main", repoConfig.repoPath, promoLogger);
+  const existingPR = findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
   if (existingPR) {
     // Check if the PR body is missing any current ready-for-prod issues
     const listedIssues = new Set(
@@ -2025,7 +2025,7 @@ async function tryPromotion(
   // In that case an issue still labeled `ready for prod release` (because the
   // EM verification script hasn't stripped it yet) would trigger a phantom
   // no-op promotion PR — the ping-pong bug.
-  const diffFiles = countBranchDiffFiles(repoConfig.githubRepo, "main", "develop", repoConfig.repoPath, promoLogger);
+  const diffFiles = countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
   if (diffFiles === 0) {
     // TERMINAL EXIT for the promote lifecycle (slashbin-ai-foreman#32, promote variant).
     //
@@ -2048,8 +2048,8 @@ async function tryPromotion(
     // owns outcome verification; an open issue with no lifecycle label is inert
     // (the Foreman won't re-pick it) and stays visible for that close.
     promoLogger.warn(
-      `Already promoted — ${issues.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but develop has 0 file changes vs main, ` +
-      `so their work is already in main: ${issues.map((i) => `#${i.number}`).join(", ")}. ` +
+      `Already promoted — ${issues.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but ${repoConfig.baseBranch} has 0 file changes vs ${repoConfig.productionBranch}, ` +
+      `so their work is already in ${repoConfig.productionBranch}: ${issues.map((i) => `#${i.number}`).join(", ")}. ` +
       `Stripping the label (nothing left to promote). They remain open for EM outcome-verification + close.`,
     );
     stripReadyForProdLabel(
@@ -2069,7 +2069,8 @@ async function tryPromotion(
 
   const prUrl = createPromotionPR(
     repoConfig.githubRepo,
-    "main",
+    repoConfig.productionBranch,
+    repoConfig.baseBranch,
     issues,
     repoConfig.repoPath,
     promoLogger,

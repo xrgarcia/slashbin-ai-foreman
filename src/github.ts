@@ -1945,12 +1945,13 @@ export interface OpenPromotionPR {
 
 export function findOpenPromotionPR(
   repo: string,
+  productionBranch: string,
   baseBranch: string,
   cwd: string,
   logger?: Logger,
 ): OpenPromotionPR | null {
   try {
-    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: baseBranch, head: "develop", limit: 1 });
+    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: productionBranch, head: baseBranch, limit: 1 });
     return prs.length > 0 ? prs[0] : null;
   } catch (err) {
     logger?.warn("findOpenPromotionPR: gh pr list failed", { ...formatGhError(err) });
@@ -2073,6 +2074,7 @@ export function stripReadyForProdLabel(
 
 export function createPromotionPR(
   repo: string,
+  productionBranch: string,
   baseBranch: string,
   issues: PromotionIssue[],
   cwd: string,
@@ -2098,8 +2100,8 @@ Automated by slashbin-ai-agent`;
     const result = gh([
       "pr", "create",
       "--repo", repo,
-      "--base", baseBranch,
-      "--head", "develop",
+      "--base", productionBranch,
+      "--head", baseBranch,
       "--title", title,
       "--body", body,
     ], cwd);
@@ -2111,6 +2113,7 @@ Automated by slashbin-ai-agent`;
     logger?.warn("createPromotionPR: gh pr create failed", {
       ...formatGhError(err),
       repo,
+      productionBranch,
       baseBranch,
       issueNumbers: issues.map((i) => i.number),
     });
@@ -2200,12 +2203,14 @@ export interface BranchDrift {
  */
 export function checkBranchDrift(
   repo: string,
+  productionBranch: string,
+  baseBranch: string,
   cwd: string,
   logger: Logger,
 ): BranchDrift | null {
   try {
     const json = gh([
-      "api", `repos/${repo}/compare/main...develop`,
+      "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}`,
       "--jq", '{"ahead": .ahead_by, "behind": .behind_by, "files": ((.files // []) | length)}',
     ], cwd);
 
@@ -2237,11 +2242,13 @@ export function checkBranchDrift(
  */
 export function findOpenSyncPR(
   repo: string,
+  productionBranch: string,
+  baseBranch: string,
   cwd: string,
   logger?: Logger,
 ): OpenPromotionPR | null {
   try {
-    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: "develop", head: "main", limit: 1 });
+    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: baseBranch, head: productionBranch, limit: 1 });
     return prs.length > 0 ? prs[0] : null;
   } catch (err) {
     logger?.warn("findOpenSyncPR: gh pr list failed", { ...formatGhError(err) });
@@ -2260,6 +2267,8 @@ export function findOpenSyncPR(
  */
 export function createSyncPR(
   repo: string,
+  productionBranch: string,
+  baseBranch: string,
   behindBy: number,
   cwd: string,
   logger?: Logger,
@@ -2268,10 +2277,10 @@ export function createSyncPR(
     const result = gh([
       "pr", "create",
       "--repo", repo,
-      "--base", "develop",
-      "--head", "main",
-      "--title", "chore: sync develop with main (merge commits backfill)",
-      "--body", `## Branch Sync\n\nSync \`develop\` with \`main\` to backfill ${behindBy} merge commit(s) from prior promotions. No code changes — only merge commit history alignment.\n\n---\nAutomated by slashbin-ai-agent`,
+      "--base", baseBranch,
+      "--head", productionBranch,
+      "--title", `chore: sync ${baseBranch} with ${productionBranch} (merge commits backfill)`,
+      "--body", `## Branch Sync\n\nSync \`${baseBranch}\` with \`${productionBranch}\` to backfill ${behindBy} merge commit(s) from prior promotions. No code changes — only merge commit history alignment.\n\n---\nAutomated by slashbin-ai-agent`,
     ], cwd);
 
     const match = result.match(/https:\/\/github\.com\/[^\s]+/);
@@ -2416,7 +2425,7 @@ export function tryMergeSyncPR(
  * merge while leaving `develop` in it moved the defect one branch over rather
  * than removing it.
  *
- * `main` stays excluded outright: a dependency update must never be worked
+ * The production branch (`main` by default) stays excluded outright: a dependency update must never be worked
  * against the production branch, which is what `jerky_shipping#237` closed on
  * the producing side.
  *
@@ -2425,9 +2434,10 @@ export function tryMergeSyncPR(
 export function dependencyBatchBases(
   featureBranch: string | undefined,
   baseBranch: string | undefined,
+  productionBranch: string,
 ): string[] {
   return [...new Set([featureBranch, baseBranch])]
-    .filter((b): b is string => !!b && b !== "main");
+    .filter((b): b is string => !!b && b !== productionBranch);
 }
 
 export function findDependencyPRs(

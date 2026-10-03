@@ -59,6 +59,7 @@ Environment variables:
   AI_AGENT_SKILL_PATH       Path to skill file
   AI_AGENT_BASE_BRANCH      PR target branch (default: develop)
   AI_AGENT_FEATURE_BRANCH   Commit branch (default: features)
+  AI_AGENT_PRODUCTION_BRANCH  Production branch for sync/promotion (default: main)
   AI_AGENT_MAX_TURNS        Max agent turns (default: 30)
   AI_AGENT_LOG_FORMAT       json or text (default: text)
   AI_AGENT_LOG_LEVEL        debug, info, warn, error (default: info)

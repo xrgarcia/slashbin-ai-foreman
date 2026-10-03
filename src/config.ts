@@ -78,6 +78,7 @@ const repoEntrySchema = z.object({
   githubRepo: z.string().optional(),
   triggerLabel: z.string().optional(),
   baseBranch: z.string().optional(),
+  productionBranch: z.string().optional(),
   featureBranch: z.string().optional(),
   // A repo-relative SKILL.md, or "builtin:" for the generic skill shipped in
   // this package's skills/ directory (see resolveSkill in agent.ts).
@@ -111,6 +112,7 @@ export const configSchema = z.object({
   githubRepo: z.string().optional(),
   triggerLabel: z.string().default("approved"),
   baseBranch: z.string().default("develop"),
+  productionBranch: z.string().default("main"),
   featureBranch: z.string().default("features"),
   skillPath: z.string().optional(),
   revisionSkillPath: z.string().optional(),
@@ -306,6 +308,8 @@ export interface RepoConfig {
   githubRepo: string;
   triggerLabel: string;
   baseBranch: string;
+  /** Branch promotion PRs target; sync PRs merge it back into baseBranch. */
+  productionBranch: string;
   featureBranch: string;
   /** Repo-relative skill path, or "builtin:" for the skill shipped in skills/. */
   skillPath?: string;
@@ -464,6 +468,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     revisionSkillOverlayPath: fileConfig.revisionSkillOverlayPath,
     prompt: process.env.AI_AGENT_PROMPT ?? fileConfig.prompt,
     baseBranch: process.env.AI_AGENT_BASE_BRANCH ?? fileConfig.baseBranch,
+    productionBranch: process.env.AI_AGENT_PRODUCTION_BRANCH ?? fileConfig.productionBranch,
     featureBranch: process.env.AI_AGENT_FEATURE_BRANCH ?? fileConfig.featureBranch,
     maxTurns: process.env.AI_AGENT_MAX_TURNS ?? fileConfig.maxTurns,
     maxDurationMs: process.env.AI_AGENT_MAX_DURATION_MS ?? fileConfig.maxDurationMs,
@@ -538,6 +543,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         githubRepo,
         triggerLabel: entry.triggerLabel ?? parsed.triggerLabel,
         baseBranch: entry.baseBranch ?? parsed.baseBranch,
+        productionBranch: entry.productionBranch ?? parsed.productionBranch,
         featureBranch: entry.featureBranch ?? parsed.featureBranch,
         skillPath: entry.skillPath,
         revisionSkillPath: entry.revisionSkillPath,
@@ -572,6 +578,7 @@ export function loadConfig(configPath?: string): AgentConfig {
       githubRepo,
       triggerLabel: parsed.triggerLabel,
       baseBranch: parsed.baseBranch,
+      productionBranch: parsed.productionBranch,
       featureBranch: parsed.featureBranch,
       skillPath: parsed.skillPath,
       revisionSkillPath: parsed.revisionSkillPath,

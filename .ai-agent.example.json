@@ -37,6 +37,7 @@
   ],
   "triggerLabel": "approved",
   "baseBranch": "develop",
+  "productionBranch": "main",
   "featureBranch": "features",
   "pollIntervalMs": 300000,
   "maxTurns": 30,
