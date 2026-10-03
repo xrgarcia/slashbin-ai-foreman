@@ -32,8 +32,37 @@ const observers: WorkObserver[] = [];
  * event loop, so a 5 s limit expired on a healthy Paperclip during the
  * startup sweep and dropped the note (2026-10-01, first mirror run). A hung
  * observer now delays only the notes queued behind it, never a build step.
+ *
+ * Counted in time the event loop was free, not wall time: the startup
+ * promotion sweep held the loop for 32 s, so a wall-clock 30 s limit fired
+ * before the observer had sent one request, and the abandoned call then ran
+ * alongside the next one (2026-10-02, first live-activity run).
  */
-const OBSERVER_TIMEOUT_MS = 30_000;
+export const OBSERVER_TIMEOUT_MS = 30_000;
+
+/** How often the observer clock ticks; a tick later than twice this means the loop was held, and is not counted. */
+const OBSERVER_TICK_MS = 1_000;
+
+/**
+ * Rejects once `limitMs` of free event-loop time has passed. A late tick (the
+ * loop was blocked by a synchronous call) adds nothing, so a blocked loop can
+ * never expire an observer that has not yet had the chance to run.
+ */
+export function loopTimeout(limitMs: number, onExpire: () => void, tickMs = OBSERVER_TICK_MS): () => void {
+  let used = 0;
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const gap = now - last;
+    last = now;
+    if (gap <= tickMs * 2) used += gap;
+    if (used >= limitMs) {
+      clearInterval(timer);
+      onExpire();
+    }
+  }, tickMs);
+  return () => clearInterval(timer);
+}
 
 /** Events are delivered in order, one at a time, behind the build. */
 let queue: Promise<void> = Promise.resolve();
@@ -74,14 +103,13 @@ async function fanOut<K extends keyof WorkObserver>(
   for (const obs of observers) {
     const fn = obs[method] as ((...a: unknown[]) => Promise<void>) | undefined;
     if (typeof fn !== "function") continue;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stop: (() => void) | undefined;
     try {
       await Promise.race([
         Promise.resolve().then(() => fn.apply(obs, args)),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`observer ${method} timed out after ${OBSERVER_TIMEOUT_MS} ms`)),
-            OBSERVER_TIMEOUT_MS,
+          stop = loopTimeout(OBSERVER_TIMEOUT_MS, () =>
+            reject(new Error(`observer ${method} timed out after ${OBSERVER_TIMEOUT_MS} ms`)),
           );
         }),
       ]);
@@ -92,7 +120,7 @@ async function fanOut<K extends keyof WorkObserver>(
         // a broken logger must not turn an ignored observer error into a thrown one
       }
     } finally {
-      if (timer) clearTimeout(timer);
+      stop?.();
     }
   }
 }
