@@ -139,4 +139,10 @@ export interface SessionEvent {
 export interface WaitingItem {
   readonly item: WorkItem;
   readonly reason: string;
+  /**
+   * Held back because the Foreman gave up on it (a skip still in its back-off):
+   * it needs a person, so it stays in the `blocked` stage with that stage's
+   * owner, not a Foreman-held wait (EM #417, slashbin-cli#142).
+   */
+  readonly skipped?: boolean;
 }

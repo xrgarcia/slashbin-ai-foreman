@@ -32,8 +32,9 @@
 //
 // An issue the Foreman gives up on (an agent declined it, revision retries
 // ran out) goes to the `blocked` stage: held by its configured owner, its
-// reason in the unblock descriptor prefixed "blocked: ". Separately, an issue
-// the Foreman holds back this cycle (a back-off, an occupied branch) is moved to blocked with the
+// reason in the unblock descriptor prefixed "blocked: ", and stays there through
+// the skip's back-off. Separately, an issue the Foreman holds back this cycle
+// for another reason (an occupied branch) is moved to blocked with the
 // reason as Paperclip's unblock descriptor, and back to its stage once it
 // stops waiting. Both are written only on a change — the row's own status and
 // descriptor are the record, so a restart re-derives them instead of repeating.
@@ -429,7 +430,7 @@ export class PaperclipMirror implements WorkObserver {
    * not touched, however many cycles repeat it.
    */
   async onWaiting(repo: string, waiting: ReadonlyArray<WaitingItem>, _logger: Logger): Promise<void> {
-    const cleaned = waiting.map((w) => ({ item: w.item, reason: this.clean(w.reason) }));
+    const cleaned = waiting.map((w) => ({ item: w.item, reason: this.clean(w.reason), skipped: w.skipped === true }));
 
     const keep = new Set<string>();
     for (const w of cleaned) {
@@ -438,6 +439,16 @@ export class PaperclipMirror implements WorkObserver {
       keep.add(id);
       // A card a session holds is not waiting, whatever this cycle's plan says.
       if (this.holds.has(id)) continue;
+      // A skip in its back-off needs a person: it is in (or goes to) the
+      // blocked stage, held by that stage's owner. Re-blocking it as a
+      // Foreman-held wait took it from that owner every cycle (EM #417).
+      if (w.skipped) {
+        if (this.rowState.get(id) === `status:${this.statusName("blocked")}`) continue;
+        const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: w.reason });
+        this.blockedReason.set(id, text);
+        if (await this.move(id, PAPERCLIP_STEPS.blocked.stage)) await this.note(id, text);
+        continue;
+      }
       const want = `waiting\n${w.reason}`;
       if (this.rowState.get(id) === want) continue;
       const step = PAPERCLIP_STEPS.waiting;

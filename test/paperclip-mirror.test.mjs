@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
+import { paperclipBoardDefaults } from "../dist/config.js";
 
 const CID = "company-1";
 const AGENT = "agent-1";
@@ -256,6 +257,22 @@ test("waiting: blocked under its statusMap name with the reason as the unblock a
   assert.equal(writesTo(fake, "r7").length, before, "same reason again writes nothing");
   await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #5" }], logger());
   assert.equal(fake.comments.r7.length, 2, "a new reason is a new note");
+});
+
+test("a skip in its back-off stays with the blocked owner, not the Foreman (EM #417)", async () => {
+  // Live shape of slashbin-cli#142: declined, then the back-off re-blocked it as a Foreman-held wait.
+  const fake = fakePaperclip([row("r7", 7, { status: "blocked", unblockDescriptor: { owner: { agentId: AGENT }, action: "declined: x" } })]);
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { engineeringManager: { id: "em-agent" } }, board: { ...paperclipBoardDefaults().board, blocked: { ...paperclipBoardDefaults().board.blocked, owner: "engineeringManager" } } });
+  await mirror.onWaiting("example/r", [{ item, reason: "declined: x", skipped: true }], logger());
+  const r = fake.rows[0];
+  assert.equal(r.status, "blocked");
+  assert.equal(r.assigneeAgentId, "em-agent");
+  assert.deepEqual(r.unblockDescriptor, { owner: { agentId: "em-agent" }, action: "blocked: declined: x" });
+  const before = writesTo(fake, "r7").length;
+  await mirror.onWaiting("example/r", [{ item, reason: "declined: x", skipped: true }], logger());
+  assert.equal(writesTo(fake, "r7").length, before, "a later back-off cycle writes nothing");
+  await mirror.onWaiting("example/r", [], logger());
+  assert.equal(r.status, "blocked", "the back-off ending does not resume a card a person must clear");
 });
 
 test("a note never moves the row: blocked stays blocked, done stays done", async () => {
