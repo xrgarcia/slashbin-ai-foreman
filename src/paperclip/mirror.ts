@@ -392,7 +392,7 @@ export class PaperclipMirror implements WorkObserver {
       if (!listed.ok) return null;
       const found = (Array.isArray(listed.value) ? listed.value : []).find((p) => p.name === name);
       if (found) return found.id;
-      const made = await this.safeCall("create project", () => this.client.createProject({ name, status: "in_progress" }));
+      const made = await this.safeCall("create project", () => this.client.createProject({ name, status: this.cfg.projectStatus ?? "in_progress" }));
       return made.ok && made.value?.id ? made.value.id : null;
     })();
     this.projectIds.set(name, lookup);

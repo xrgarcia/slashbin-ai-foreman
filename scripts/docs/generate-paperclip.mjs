@@ -349,7 +349,8 @@ With \`projects\` on, every task is filed under a Paperclip project for its repo
 \`projectNameFormat\` (default ${code(defaults.projectNameFormat)}): \`{name}\` is the repo's
 name (\`my-service\`), \`{repo}\` its full \`owner/name\`. The project is looked up by name,
 archived ones included, and created only when none has that name, so renaming the format
-creates new projects rather than renaming old ones. A task the Foreman creates carries the
+creates new projects rather than renaming old ones. A project the Foreman creates gets the status
+\`projectStatus\` (default ${code(defaults.projectStatus)}); an existing project's status is never changed. A task the Foreman creates carries the
 project from the start; at startup, and at every refresh of its task list after, the Foreman
 sets the project on any task with an identity line (its own or another tool's) that lacks it.
 
