@@ -1,5 +1,5 @@
 import { GitHubIssueConnector } from "./github.js";
-import type { PriorState, WorkItem, WorkObserver, WorkSourceAdapter, WorkState } from "./adapters.js";
+import type { PriorState, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkSourceAdapter, WorkState } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 
@@ -160,4 +160,19 @@ export async function notifyBackoffPause(upstream: string, reason: string, logge
 /** An upstream back-off cleared. Observers only. */
 export async function notifyBackoffResume(upstream: string, logger: Logger): Promise<void> {
   enqueue("onBackoffResume", [upstream, logger], logger);
+}
+
+/** A session started, changed hands or ended. Observers only. */
+export async function notifySession(event: SessionEvent, logger: Logger): Promise<void> {
+  enqueue("onSession", [event, logger], logger);
+}
+
+/** The repo's full set of backed-off items this cycle. Observers only. */
+export async function notifyWaiting(repo: string, waiting: ReadonlyArray<WaitingItem>, logger: Logger): Promise<void> {
+  enqueue("onWaiting", [repo, waiting, logger], logger);
+}
+
+/** Promotion on `repo` is stalled (`detail`) or no longer stalled (null). Observers only. */
+export async function notifyPromotionStall(repo: string, detail: string | null, logger: Logger): Promise<void> {
+  enqueue("onPromotionStall", [repo, detail, logger], logger);
 }

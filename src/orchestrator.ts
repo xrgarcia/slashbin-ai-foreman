@@ -2,10 +2,11 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import type { WorkItem } from "./adapters.js";
+import type { SessionEvent, WorkItem } from "./adapters.js";
 import {
   selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked,
   notifyObserversMerged, notifyObserversPromoted,
+  notifySession, notifyWaiting, notifyPromotionStall,
 } from "./work-source.js";
 import {
   GitHubIssueConnector,
@@ -1121,6 +1122,8 @@ async function tryBatchImplementation(
   const offered = (await selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
   let handOff = offered;
   if (offered.length === 0) {
+    // Nothing offered, so nothing waits: observers clear this repo's waits.
+    await notifyWaiting(repoConfig.githubRepo, [], repoLogger);
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1163,6 +1166,7 @@ async function tryBatchImplementation(
   const alreadyImplemented = new Set(repoState.implemented);
   handOff = handOff.filter((n) => !alreadyImplemented.has(n));
   if (handOff.length === 0) {
+    await notifyWaiting(repoConfig.githubRepo, [], repoLogger);
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1213,6 +1217,13 @@ async function tryBatchImplementation(
       `Backing off ${stillBackedOff.length} previously-skipped issue(s): ${stillBackedOff.map(({ n, reason }) => `#${n} (${reason.split("\n")[0].slice(0, 100)})`).join("; ")}`,
     );
   }
+  // The repo's whole waiting set, every cycle that reaches here: an issue that
+  // drops out of it has stopped waiting, which is how an observer clears it.
+  await notifyWaiting(
+    repoConfig.githubRepo,
+    stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0] })),
+    repoLogger,
+  );
   const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
   if (actionableIssues.length === 0) {
     if (failures > 0) failureCount.set(repoName, 0);
@@ -1259,15 +1270,26 @@ async function tryBatchImplementation(
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
+  const session: Omit<SessionEvent, "status"> = {
+    phase: "implement", repo: repoConfig.githubRepo, items: actionableIssues.map((n) => itemOf(repoConfig, n)),
+  };
+  // How the session ended, for observers; anything that leaves without setting it threw.
+  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
 
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
     for (const n of actionableIssues) await claimWork(itemOf(repoConfig, n), repoConfig, repoLogger);
+    await notifySession({ ...session, status: "started" }, repoLogger);
 
     const priorFailure = lastFailureReason.get(repoName) || null;
     const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, handOff)
       .catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    ended = result.success
+      ? { status: "finished", detail: result.prUrl ? `PR ${result.prUrl}` : "commits added to the open PR" }
+      : result.skipped
+        ? { status: "finished", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
+        : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
 
     if (result.success) {
       failureCount.set(repoName, 0);
@@ -1455,6 +1477,7 @@ async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(repoName);
+    await notifySession({ ...session, ...ended }, repoLogger);
   }
 }
 
@@ -1500,13 +1523,22 @@ async function tryRevision(
   const runAbort = new AbortController();
   activeRuns.set(repoName, runAbort);
   revLogger.info(`Triggering PR revision for ${repoName} — PR #${pending.pr.number}, issues: ${pending.issueNumbers.map(n => `#${n}`).join(", ")}`);
+  const session: Omit<SessionEvent, "status"> = {
+    phase: "revise", repo: repoConfig.githubRepo, pr: pending.pr.number,
+    items: pending.issueNumbers.map((n) => itemOf(repoConfig, n)),
+  };
+  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
 
   try {
+    await notifySession({ ...session, status: "started" }, revLogger);
     const result = await revisePRFeedback(
       repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers,
     ).catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    ended = result.success
+      ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
+      : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
 
     if (result.success) {
       revisionFailureCount.set(repoName, 0);
@@ -1588,6 +1620,7 @@ async function tryRevision(
     return null;
   } finally {
     activeRuns.delete(repoName);
+    await notifySession({ ...session, ...ended }, revLogger);
   }
 }
 
@@ -1686,14 +1719,23 @@ async function tryReview(
   activeRuns.set(repoName, runAbort);
   reviewLogger.info(`Triggering review for ${repoName} — PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")}), transcript: ${transcriptPath}`);
   events?.push({ message: `Reviewing ${repoConfig.githubRepo} PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
+  const session: Omit<SessionEvent, "status"> = {
+    phase: "review", repo: repoConfig.githubRepo, pr: candidate.prNumber,
+    items: candidate.issueNumbers.map((n) => itemOf(repoConfig, n)),
+  };
+  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
 
   try {
+    await notifySession({ ...session, status: "started", reviewer: config.techLeadPath ? "Tech Lead" : "Claude" }, reviewLogger);
     // EM#427: the Tech Lead (Codex) takes the review first when configured; on
     // its "wrote nothing" exit the Claude review below runs exactly as before.
     const viaTechLead = config.techLeadPath
       ? await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
           .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }))
       : { fallback: true as const, reason: "not configured" };
+    if (config.techLeadPath && "fallback" in viaTechLead) {
+      await notifySession({ ...session, status: "handoff", reviewer: "Claude", detail: viaTechLead.reason }, reviewLogger);
+    }
     const result = "fallback" in viaTechLead
       ? await reviewOpenPRs(
           repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
@@ -1767,6 +1809,7 @@ async function tryReview(
         ? result.statusLine
         : (result.summary || "review completed").split("\n")[0].slice(0, 240);
       const prefix = result.statusLine ? "" : `PR #${candidate.prNumber} — `;
+      ended = { status: "finished", detail: outcome };
       events?.push({ message: `Reviewed ${repoConfig.githubRepo} — ${prefix}${outcome}`, level: "info" });
       return true;
     }
@@ -1781,7 +1824,9 @@ async function tryReview(
       findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
     );
 
+    ended = { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (plan.workLanded) {
+      ended = { status: "finished", detail: `merged PR #${plan.mergedPrs.join(", #")}, then the run ended: ${result.error}` };
       await notifyObserversOnce("merged", repoConfig, [...new Set(mergedRefs.map((m) => m.issueNumber))], reviewLogger);
       reviewLogger.warn(
         `Review run on ${repoName} ended with "${result.error}" AFTER merging PR #${plan.mergedPrs.join(", #")} — ` +
@@ -1825,6 +1870,7 @@ async function tryReview(
     return false;
   } finally {
     activeRuns.delete(repoName);
+    await notifySession({ ...session, ...ended }, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In
     // `finally` for the same reason as the label repair below: a run that threw
@@ -2009,11 +2055,21 @@ async function tryPromotion(
           `promotion is STALLED, not idle. Either the EM gate has not been signed yet, or it was signed and revoked.`,
           { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles },
         );
+        await notifyPromotionStall(
+          repoConfig.githubRepo,
+          `${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch}; ` +
+          `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`,
+          promoLogger,
+        );
+      } else if (drift) {
+        await notifyPromotionStall(repoConfig.githubRepo, null, promoLogger);
       }
     }
     return null;
   }
 
+  // Issues are ready, so promotion is moving, not stalled.
+  await notifyPromotionStall(repoConfig.githubRepo, null, promoLogger);
   promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
   // Check if a promotion PR already exists

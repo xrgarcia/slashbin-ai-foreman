@@ -40,6 +40,7 @@ function fakePaperclip(rows = []) {
       Object.assign(r, body);
       return ok(r);
     }
+    if (method === "PATCH" && u.pathname === `/api/agents/${AGENT}`) return ok({ id: AGENT, ...body });
     m = u.pathname.match(/^\/api\/issues\/([^/]+)\/comments$/);
     if (m && method === "POST") {
       (comments[m[1]] ??= []).push(body.body);
@@ -200,4 +201,63 @@ test("a second claim before any state change is a retry, not a second pick-up", 
   assert.deepEqual(fake.comments["row-1"], [
     "picked up by Foreman", "retrying: the previous attempt did not finish", "under review", "picked up by Foreman",
   ]);
+});
+
+// --- live activity: waits, sessions, the live task, the agent's status ---
+
+const row = (id, n, extra = {}) => ({ id, status: "in_progress", assigneeAgentId: AGENT, assigneeUserId: null,
+  unblockDescriptor: null, description: `source: example/r#${n}\nGitHub: open`, ...extra });
+const writesTo = (fake, id) => fake.calls.filter((c) => c.method !== "GET" && c.path.startsWith(`/api/issues/${id}`));
+
+test("waiting: blocked under its statusMap name with the reason as the unblock action, once per reason", async () => {
+  const fake = fakePaperclip([row("r7", 7)]);
+  const { mirror } = mirrorOn(fake, { statusMap: { blocked: "on_hold" } });
+  await mirror.onWaiting("example/r", [{ item, reason: `occupied by PR #4\n token ${SECRET.value}` }], logger());
+  const [patch] = statusPatches(fake);
+  assert.equal(patch.body.status, "on_hold");
+  assert.deepEqual(patch.body.unblockDescriptor, { owner: { agentId: AGENT }, action: "occupied by PR #4 token [REDACTED:TEST_TOKEN]" });
+  assert.deepEqual(fake.comments.r7, ["waiting: occupied by PR #4 token [REDACTED:TEST_TOKEN]"]);
+  const before = writesTo(fake, "r7").length;
+  await mirror.onWaiting("example/r", [{ item, reason: `occupied by PR #4\n token ${SECRET.value}` }], logger());
+  assert.equal(writesTo(fake, "r7").length, before, "same reason again writes nothing");
+  await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #5" }], logger());
+  assert.equal(fake.comments.r7.length, 2, "a new reason is a new note");
+});
+
+test("resume touches only rows this agent blocked in this repo", async () => {
+  const blocked = (id, n, extra) => row(id, n, { status: "blocked", unblockDescriptor: { action: "x" }, ...extra });
+  const fake = fakePaperclip([
+    blocked("mine", 7),
+    blocked("other-repo", 7, { description: "source: example/q#7" }),
+    blocked("someone-else", 8, { assigneeAgentId: null, assigneeUserId: "user-1" }),
+  ]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onWaiting("example/r", [], logger());
+  assert.deepEqual(statusPatches(fake).map((c) => [c.path, c.body.status]), [["/api/issues/mine", "in_progress"]]);
+  assert.deepEqual(fake.comments.mine, ["resumed: no longer waiting"]);
+});
+
+test("liveTask and agentStatus off: sessions write notes only", async () => {
+  const fake = fakePaperclip([row("r7", 7)]);
+  const { mirror } = mirrorOn(fake, { liveTask: false, agentStatus: false });
+  await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", items: [item], pr: 3 }, logger());
+  await mirror.onPromotionStall("example/r", "stalled", logger());
+  assert.deepEqual(fake.comments.r7, ["revision started: PR #3"]);
+  assert.equal(fake.rows.length, 1, "no live task");
+  assert.ok(!fake.calls.some((c) => c.path.startsWith("/api/agents/")), "no agent update");
+});
+
+test("an implement session drives the agent status and the live task; start has no per-issue note", async () => {
+  const fake = fakePaperclip([row("r7", 7)]);
+  const { mirror } = mirrorOn(fake, { liveTask: true, liveTaskTitle: "Live", agentStatus: true });
+  await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
+  const live = fake.rows.find((r) => r.description.startsWith(`foreman-live: ${AGENT}`));
+  assert.equal(live.title, "Live");
+  assert.equal(live.assigneeAgentId, AGENT);
+  assert.match(live.description, /example\/r: implement #7/);
+  await mirror.onSession({ phase: "implement", status: "failed", repo: "example/r", items: [item], detail: "exit 1" }, logger());
+  assert.deepEqual(fake.comments.r7, ["implement session failed: exit 1"]);
+  const agentCalls = fake.calls.filter((c) => c.path === `/api/agents/${AGENT}`).map((c) => c.body.status);
+  assert.deepEqual(agentCalls, ["running", "idle"]);
+  assert.match(live.description, /Running now \(0\)/);
 });

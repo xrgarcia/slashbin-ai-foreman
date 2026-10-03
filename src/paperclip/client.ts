@@ -15,6 +15,8 @@ export type PaperclipIssue = {
   /** A board user holding the task; Paperclip allows one assignee, user or agent. */
   assigneeUserId?: string | null;
   assigneeAgentId?: string | null;
+  /** Why a `blocked` task waits and who unblocks it; Paperclip clears it when the task leaves blocked. */
+  unblockDescriptor?: { owner: unknown; action: string } | null;
 };
 
 export type PaperclipComment = {
@@ -41,6 +43,7 @@ export type CreatePaperclipIssue = {
   status: string;
   description?: string;
   assigneeUserId?: string;
+  assigneeAgentId?: string;
 };
 
 export type CreatePaperclipAgent = {
