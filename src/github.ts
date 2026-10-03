@@ -1523,6 +1523,48 @@ export function findIssuesStillUnderReview(
 /** The two lifecycle states a review can end in, as `LifecycleLabels` keys. */
 export type ReviewOutcome = "prApproved" | "prPendingActions";
 
+/**
+ * The outcome each of `issueNumbers` carries in `issues`: `pr approved` or
+ * `pr pending actions`. An issue that is closed, already `ready for prod`, or
+ * has neither is absent. Pure.
+ */
+export function reviewOutcomesOf(
+  config: Pick<RepoConfig, "lifecycleLabels">,
+  issues: ReadonlyArray<{ number: number; labels: ReadonlyArray<{ name: string }> }>,
+  issueNumbers: ReadonlyArray<number>,
+): Map<number, ReviewOutcome> {
+  const { prApproved, prPendingActions, readyForProd } = config.lifecycleLabels;
+  const out = new Map<number, ReviewOutcome>();
+  for (const n of issueNumbers) {
+    const issue = issues.find((i) => i.number === n);
+    if (!issue) continue;
+    const has = (name: string) => issue.labels.some((l) => l.name === name);
+    if (has(readyForProd)) continue;
+    if (has(prApproved)) out.set(n, "prApproved");
+    else if (has(prPendingActions)) out.set(n, "prPendingActions");
+  }
+  return out;
+}
+
+/**
+ * The outcome labels a review run left on its issues, read fresh from GitHub.
+ * Empty when the read fails: the caller only reports, never decides, on it.
+ */
+export function readReviewOutcomes(
+  config: RepoConfig,
+  issueNumbers: number[],
+  logger: Logger,
+): Map<number, ReviewOutcome> {
+  if (issueNumbers.length === 0) return new Map();
+  try {
+    dropIssueSnapshot(config.githubRepo);
+    return reviewOutcomesOf(config, getOpenIssues(config.githubRepo, config.repoPath, logger), issueNumbers);
+  } catch (err) {
+    logger.debug(`readReviewOutcomes failed for ${config.name}: ${err instanceof Error ? err.message : String(err)}`);
+    return new Map();
+  }
+}
+
 export interface TimelineLabelEvent {
   event?: string;
   label?: { name?: string };

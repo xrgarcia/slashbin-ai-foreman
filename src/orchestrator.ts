@@ -5,7 +5,7 @@ import type { Logger } from "./logger.js";
 import type { SessionEvent, WorkItem } from "./adapters.js";
 import {
   selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked,
-  notifyObserversMerged, notifyObserversPromoted,
+  notifyObserversMerged, notifyObserversPromoted, notifyObserversState,
   notifySession, notifyWaiting, notifyPromotionStall, notifyRelease,
 } from "./work-source.js";
 import { trackRelease } from "./release-tracker.js";
@@ -52,6 +52,7 @@ import {
   findIssuesMergedToBase,
   planFailedReviewOutcome,
   findIssuesStillUnderReview,
+  readReviewOutcomes,
   findRevokedEmGates,
   restoreEmGate,
   findOrphanedLifecycleIssues,
@@ -147,6 +148,20 @@ const observerEventsSent = new Set<string>();
  * Best-effort by construction (work-source.ts never rethrows an observer
  * error); with no observer registered this does nothing at all.
  */
+/**
+ * Tell the observers the outcome a review agent wrote on GitHub itself. The
+ * agent labels `pr approved` / `pr pending actions` directly, so no state
+ * change passes through `reportWorkState`; without this a live review card
+ * ends its session back at "in review" until something else re-reads GitHub.
+ * Issues still at `pr under review` carry no outcome and are left to the
+ * reconcile, which reports its own.
+ */
+async function reportReviewOutcomes(repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
+  for (const [n, outcome] of readReviewOutcomes(repoConfig, issueNumbers, logger)) {
+    await notifyObserversState(itemOf(repoConfig, n), "inReview", outcome === "prApproved" ? "approved" : "changesRequested", repoConfig, logger);
+  }
+}
+
 async function notifyObserversOnce(
   kind: "merged" | "promoted",
   repoConfig: RepoConfig,
@@ -1847,6 +1862,7 @@ async function tryReview(
       // where it can re-verify first. Alerting here rather than waiting for the
       // dead-zone sweep skips that path's 15-minute grace window, so a broken
       // run surfaces in the same cycle that produced it.
+      await reportReviewOutcomes(repoConfig, candidate.issueNumbers, reviewLogger);
       const trailers = result.trailers ?? [];
       const mergedPrs = trailers.filter((t) => t.merged).map((t) => t.pr);
       if (mergedPrs.includes(candidate.prNumber)) {
@@ -1910,6 +1926,7 @@ async function tryReview(
     if (plan.workLanded) {
       ended = { status: "finished", detail: `merged PR #${plan.mergedPrs.join(", #")}, then the run ended: ${result.error}` };
       await notifyObserversOnce("merged", repoConfig, [...new Set(mergedRefs.map((m) => m.issueNumber))], reviewLogger);
+      await reportReviewOutcomes(repoConfig, candidate.issueNumbers, reviewLogger);
       reviewLogger.warn(
         `Review run on ${repoName} ended with "${result.error}" AFTER merging PR #${plan.mergedPrs.join(", #")} — ` +
         `the work landed and the run outlived it. Reconciling labels now rather than leaving the dead zone.`,

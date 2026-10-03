@@ -176,3 +176,17 @@ test("extractStreamResult picks the LAST result event and tolerates non-JSON lin
 test("no result event => undefined, so the caller can fall back to stdout", () => {
   assert.equal(extractStreamResult("no json here\n{also not}"), undefined);
 });
+
+test("reviewOutcomesOf reads the outcome a review agent labelled itself", async () => {
+  const { reviewOutcomesOf } = await import("../dist/github.js");
+  const lifecycleLabels = { prApproved: "pr approved", prPendingActions: "pr pending actions", readyForProd: "ready for prod" };
+  const L = (...n) => n.map((name) => ({ name }));
+  const issues = [
+    { number: 1, labels: L("pr under review", "pr approved") },
+    { number: 2, labels: L("pr pending actions") },
+    { number: 3, labels: L("pr under review") },
+    { number: 4, labels: L("ready for prod", "pr approved") },
+  ];
+  const got = Object.fromEntries(reviewOutcomesOf({ lifecycleLabels }, issues, [1, 2, 3, 4, 9]));
+  assert.deepEqual(got, { 1: "prApproved", 2: "prPendingActions" });
+});
