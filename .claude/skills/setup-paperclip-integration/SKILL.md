@@ -14,13 +14,15 @@ match_strength: required
 # Integrate the Foreman into a Paperclip company
 
 Turns on the Foreman's Paperclip mirror: each GitHub issue the Foreman builds gets a
-Paperclip task, assigned to a Foreman agent, with a note at every step. What the mirror
+Paperclip task, held by whichever agent owns its next step (the Foreman, unless the user
+adds roles), with a stage label and a note at every step. What the mirror
 does, field by field, is in `docs/paperclip.md`.
 
 This is configuration only. It never edits Foreman source, never files or labels an
 issue, never starts or restarts the daemon, and starts no build. The only things it
 writes are the `paperclip` block of the config file (after the user confirms the diff)
-and, through `npm run paperclip:register`, the Foreman's agent in Paperclip.
+and, through `npm run paperclip:register`, the Foreman's agent (and any role agents the
+user chose) in Paperclip.
 
 Run every command from the Foreman repo root. The config file is `.ai-agent.json`
 (or `ai-agent.config.json` if that is the one present; use the same path in every
@@ -81,18 +83,38 @@ mv /tmp/ai-agent.paperclip.json .ai-agent.json
 
 On no, delete the temp file and stop; nothing has been written.
 
-## 4. Register the Foreman agent
+## 4. Choose who holds each card
+
+Ask: "Should the Foreman hold every card, or do other agents own some stages — say a
+reviewer for code review, or a lead who verifies and releases?" Show the stage table from
+`docs/paperclip.md` → "Board stages" (stage, meaning, default owner, status, stage label).
+
+- **The Foreman holds every card** (the default) → skip to step 5; the block needs no
+  `roles` or `board`.
+- **Other agents own stages** → for each one ask a role key (a short word, e.g.
+  `reviewer`), its Paperclip agent name (an existing agent of that name is reused, never
+  duplicated), an optional title, and whom it reports to (another role key, or
+  `foreman`). Then ask which stages it owns, and whether any stage should use a different
+  status than its default. Ask too whom the Foreman reports to (`agentReportsTo`), if
+  anyone.
+
+Build `roles`, `board` (only the stages that change, only the fields that change) and
+`agentReportsTo` into the same temp file as step 3, show the diff, and write only after a
+clear yes — exactly as in step 3. Do not add `id`s; registration writes them.
+
+## 5. Register the Foreman agent and its roles
 
 ```bash
 npm run build && npm run paperclip:register
 ```
 
-Registers (or finds) the agent named `agentName` in the company, switches its heartbeat
-and wake-on-demand off, and writes `paperclip.agentId` into the config — that one key,
-diff printed. Report its output verbatim. Do not create, edit or delete agents any other
+Registers (or finds, by name) the agent named `agentName` and each role in the company,
+switches their heartbeat and wake-on-demand off, applies titles and reporting lines, and
+writes `paperclip.agentId` and each `paperclip.roles.<key>.id` into the config — diff
+printed. Report its output verbatim. Do not create, edit or delete agents any other
 way.
 
-## 5. Install the labels
+## 6. Install the labels
 
 ```bash
 npm run labels:install
@@ -101,7 +123,7 @@ npm run labels:install
 Every configured repo gets the trigger label and the lifecycle labels it is missing.
 Report the per-repo lines verbatim.
 
-## 6. Verify with the doctor
+## 7. Verify with the doctor
 
 ```bash
 npm run paperclip:doctor
@@ -113,7 +135,7 @@ It must exit 0. On a non-zero exit, report each `FAIL` line and stop — the int
 not done. Do not patch Paperclip or the config to make a check pass; re-run the step the
 failing check points at.
 
-## 7. Tell the user how to see it work
+## 8. Tell the user how to see it work
 
 Print, without doing any of it:
 
@@ -122,6 +144,7 @@ Print, without doing any of it:
 - Give a GitHub issue in a configured repo its trigger label (`approved` unless the
   config says otherwise).
 - When the Foreman picks it up, its Paperclip task appears, titled `owner/name#N`,
-  assigned to the Foreman, with a `picked up by Foreman` note, and gains a note at each
-  step after (`docs/paperclip.md` → "Notes per step").
+  in progress and assigned to the Foreman, with a `picked up by Foreman` note. At each
+  step after it gains a note, and moves to the agent, status and stage label its stage
+  maps to (`docs/paperclip.md` → "Board stages" and "Notes per step").
 - To turn it off later: set `paperclip.enabled` to `false` and restart.

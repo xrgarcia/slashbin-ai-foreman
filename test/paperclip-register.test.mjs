@@ -156,7 +156,7 @@ test("script: registers, writes only agentId (indent kept), prints the diff; a r
   assert.equal(r2.status, 0, r2.stderr);
   assert.deepEqual(requests.map((q) => q.method), ["GET", "PATCH"]);
   assert.deepEqual(agents[0].runtimeConfig, { heartbeat: { enabled: false, wakeOnDemand: false } });
-  assert.match(r2.stdout, /already records paperclip\.agentId; unchanged/);
+  assert.match(r2.stdout, /already records every agent id; unchanged/);
   assert.equal(readFileSync(p, "utf8"), after);
 });
 
@@ -211,4 +211,28 @@ test("script: unreachable Paperclip: exit 1 naming the URL, file untouched", asy
   assert.equal(r.status, 1);
   assert.match(r.stderr, /127\.0\.0\.1:9/);
   assert.equal(readFileSync(p, "utf8"), before);
+});
+
+test("script: roles found by name (never duplicated), wake off, reportsTo set, their ids written; a re-run rewrites nothing", async () => {
+  agents = [{ id: "fm", name: "Foreman" }, { id: "lead-1", name: "Lead" }]; requests.length = 0; failPatch = false;
+  const cfg = baseCfg({ paperclip: { url: URL_BASE, companyId: CID, agentReportsTo: "lead",
+    roles: { reviewer: { name: "Reviewer", reportsTo: "lead" }, lead: { name: "Lead", role: "general" } } } });
+  const p = writeCfg(cfg);
+  const r1 = await run([p]);
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.deepEqual(agents.map((a) => a.name), ["Foreman", "Lead", "Reviewer"], "only the missing role is created");
+  const by = Object.fromEntries(agents.map((a) => [a.name, a]));
+  assert.equal(by.Foreman.reportsTo, "lead-1");
+  assert.equal(by.Reviewer.reportsTo, "lead-1");
+  for (const a of agents) assert.deepEqual(a.runtimeConfig.heartbeat, { enabled: false, wakeOnDemand: false });
+  const written = JSON.parse(readFileSync(p, "utf8")).paperclip;
+  assert.equal(written.agentId, "fm");
+  assert.equal(written.roles.lead.id, "lead-1");
+  assert.equal(written.roles.reviewer.id, by.Reviewer.id);
+  const after = readFileSync(p, "utf8");
+  requests.length = 0;
+  const r2 = await run([p]);
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(requests.filter((q) => q.method === "POST").length, 0);
+  assert.equal(readFileSync(p, "utf8"), after);
 });

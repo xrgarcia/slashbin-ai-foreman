@@ -1,4 +1,4 @@
-// `paperclip:doctor`: six named read-only checks, all of them always run, one
+// `paperclip:doctor`: seven named read-only checks, all of them always run, one
 // PASS/FAIL line each, non-zero exit on any FAIL.
 //
 // diagnosePaperclip runs against an injected fake fetch; the CLI runs as a
@@ -40,7 +40,7 @@ function fakeFetch(shape = {}) {
       if (shape.company === false) return json(404, {});
       if (shape.agent === false) return json(200, [{ id: "someone-else", name: "Other" }]);
       const heartbeat = shape.heartbeat ?? { enabled: false, wakeOnDemand: false };
-      return json(200, [{ id: AGENT, name: "Foreman", runtimeConfig: { heartbeat } }]);
+      return json(200, [{ id: AGENT, name: "Foreman", runtimeConfig: { heartbeat } }, ...(shape.others ?? [])]);
     }
     return json(404, {});
   };
@@ -49,7 +49,7 @@ function fakeFetch(shape = {}) {
 
 const byName = (results) => Object.fromEntries(results.map((r) => [r.name, r]));
 
-test("all good: six checks, in order, all PASS, GETs only", async () => {
+test("all good: seven checks, in order, all PASS, GETs only", async () => {
   const { fn, calls } = fakeFetch();
   const results = await diagnosePaperclip(cfg(), { fetch: fn });
   assert.deepEqual(results.map((r) => r.name), [...DOCTOR_CHECKS]);
@@ -143,7 +143,7 @@ test("runDoctor prints one PASS/FAIL line per check and returns whether all pass
 
   lines.length = 0;
   assert.equal(await runDoctor({ paperclip: cfg({ enabled: false }) }, { fetch: fakeFetch().fn, print: (l) => lines.push(l) }), false);
-  assert.ok(lines.at(-1).startsWith("FAIL: config-complete — "));
+  assert.ok(lines.some((l) => l.startsWith("FAIL: config-complete — ")));
 });
 
 // --- the CLI, end to end, with no GitHub token ---
@@ -185,12 +185,12 @@ function runCli(args, paperclip) {
   });
 }
 
-test("CLI: all good → six PASS lines, exit 0, no writes, no GitHub token needed", async () => {
+test("CLI: all good → seven PASS lines, exit 0, no writes, no GitHub token needed", async () => {
   await withServer({}, async (url, writes) => {
     const r = await runCli(["paperclip:doctor"], cfg({ url }));
     assert.equal(r.code, 0, r.out);
     const lines = r.out.trim().split("\n");
-    assert.deepEqual(lines.map((l) => l.slice(0, 5)), Array(6).fill("PASS:"));
+    assert.deepEqual(lines.map((l) => l.slice(0, 5)), Array(7).fill("PASS:"));
     assert.deepEqual(writes, []);
   });
 });
@@ -200,7 +200,7 @@ test("CLI: one FAIL → exit 1, every check still printed", async () => {
     const r = await runCli(["paperclip:doctor"], cfg({ url }));
     assert.equal(r.code, 1, r.out);
     assert.match(r.out, /FAIL: wake-on-demand — runtimeConfig\.heartbeat\.wakeOnDemand is true/);
-    assert.equal(r.out.trim().split("\n").length, 6);
+    assert.equal(r.out.trim().split("\n").length, 7);
   });
 });
 
@@ -214,4 +214,18 @@ test("CLI: --help lists paperclip:doctor", async () => {
   const r = await runCli(["--help"], {});
   assert.equal(r.code, 0);
   assert.match(r.out, /paperclip:doctor/);
+});
+
+test("role-agents: each role's agent registered under its name with wake off, else FAIL naming the role", async () => {
+  const off = { runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } } };
+  const roles = { reviewer: { name: "Reviewer", id: "rev-1" }, lead: { name: "Lead", id: "lead-1" } };
+  const good = [{ id: "rev-1", name: "Reviewer", ...off }, { id: "lead-1", name: "Lead", ...off }];
+  let r = byName(await diagnosePaperclip(cfg({ roles }), { fetch: fakeFetch({ others: good }).fn }));
+  assert.equal(r["role-agents"].ok, true, r["role-agents"].detail);
+  const bad = [{ id: "rev-1", name: "Renamed", ...off }, { id: "lead-1", name: "Lead", runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: true } } }];
+  r = byName(await diagnosePaperclip(cfg({ roles: { ...roles, ghost: { name: "Ghost" } } }), { fetch: fakeFetch({ others: bad }).fn }));
+  assert.equal(r["role-agents"].ok, false);
+  assert.match(r["role-agents"].detail, /reviewer: rev-1 is named "Renamed"/);
+  assert.match(r["role-agents"].detail, /lead: heartbeat\.wakeOnDemand is not off/);
+  assert.match(r["role-agents"].detail, /ghost: no id/);
 });

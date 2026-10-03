@@ -1,5 +1,5 @@
 // `paperclip:doctor` (EM#417): a read-only check of the Paperclip integration,
-// run before the mirror is trusted. Six named checks, always all six, in order;
+// run before the mirror is trusted. Seven named checks, always all seven, in order;
 // one `PASS: <name> — ...` or `FAIL: <name> — <reason>` line each.
 //
 // Read-only by construction: every request goes through a fetch that refuses
@@ -18,6 +18,7 @@ export const DOCTOR_CHECKS = [
   "wake-on-demand",
   "heartbeat-enabled",
   "config-complete",
+  "role-agents",
 ] as const;
 
 export type DoctorCheckName = (typeof DOCTOR_CHECKS)[number];
@@ -109,7 +110,7 @@ function flagCheck(
   };
 }
 
-/** Run all six checks against `cfg`. Never throws. */
+/** Run all seven checks against `cfg`. Never throws. */
 export async function diagnosePaperclip(cfg: PaperclipConfig, opts: DoctorOptions = {}): Promise<DoctorResult[]> {
   const timeoutMs = opts.timeoutMs ?? DOCTOR_TIMEOUT_MS;
   const fetchImpl = readOnlyFetch(opts.fetch ?? globalThis.fetch, timeoutMs);
@@ -193,7 +194,37 @@ export async function diagnosePaperclip(cfg: PaperclipConfig, opts: DoctorOption
     ? { name: "config-complete", ok: true, detail: "enabled=true, companyId non-empty, agentId non-empty" }
     : { name: "config-complete", ok: false, detail: missing.join(", ") });
 
+  // 7. role-agents: every agent a board stage hands a card to is registered,
+  // under its configured name, with both wake paths off.
+  results.push(await roleCheck(cfg, companyId ? loadAgents : undefined));
+
   return results;
+}
+
+async function roleCheck(
+  cfg: PaperclipConfig,
+  loadAgents: (() => Promise<{ ok: true; list: unknown } | { ok: false; why: string }>) | undefined,
+): Promise<DoctorResult> {
+  const name = "role-agents";
+  const roles = Object.entries(cfg.roles ?? {});
+  if (roles.length === 0) return { name, ok: true, detail: "no roles configured; the Foreman holds every card" };
+  if (!loadAgents) return { name, ok: false, detail: "no paperclip.companyId to list agents in" };
+  const a = await loadAgents();
+  if (!a.ok) return { name, ok: false, detail: `agents list ${a.why}` };
+  const list = Array.isArray(a.list) ? (a.list as PaperclipAgent[]) : [];
+  const problems: string[] = [];
+  for (const [key, r] of roles) {
+    if (!r.id) { problems.push(`${key}: no id; run npm run paperclip:register`); continue; }
+    const agent = list.find((x) => x?.id === r.id);
+    if (!agent) { problems.push(`${key}: ${r.id} not in agents list`); continue; }
+    if (agent.name !== r.name) problems.push(`${key}: ${r.id} is named "${agent.name}", config says "${r.name}"`);
+    for (const flag of ["wakeOnDemand", "enabled"] as const) {
+      if (heartbeatFlag(agent, flag) !== false) problems.push(`${key}: heartbeat.${flag} is not off; run npm run paperclip:register`);
+    }
+  }
+  return problems.length
+    ? { name, ok: false, detail: problems.join("; ") }
+    : { name, ok: true, detail: `${roles.map(([k, r]) => `${k}=${r.name}`).join(", ")} registered, wake paths off` };
 }
 
 export function formatDoctorResult(r: DoctorResult): string {
