@@ -751,6 +751,23 @@ async function runReconcileStage(
       // --- Recovery first, alert only if it could not be repaired ----------
       // Attempt once per (repo, issue). A second attempt only repeats whatever
       // made the first indeterminate, at the cost of another deploy poll.
+      // With a verify stage, a deploy-only re-check must never write `pr approved`
+      // (EM#441: four issues were approved on 2026-10-01 with no acceptance
+      // evidence). Hand the issue to the verify stage instead; it runs the full
+      // dev verification and owns the move to `pr approved`.
+      if (config.srePath && !tried.has(s.issueNumber)) {
+        tried.add(s.issueNumber);
+        if (await reportWorkState(itemOf(repoConfig, s.issueNumber), "unknown", "merged", repoConfig, reconLogger)) {
+          events.push({
+            message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone: PR #${s.prNumber} merged with the issue left unadvanced → labeled "${labels.prMerged}" for dev verification`,
+            level: "info",
+          });
+          seen.delete(s.issueNumber);
+          current.delete(s.issueNumber);
+          processed++;
+          continue;
+        }
+      }
       if (!tried.has(s.issueNumber)) {
         tried.add(s.issueNumber);
         const verdict = recoverDeadZonedIssue(
@@ -1588,10 +1605,11 @@ async function tryBatchImplementation(
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
         await notifyObserversOnce("merged", repoConfig, mergedNums, repoLogger);
         for (const n of mergedNums) {
-          await reportWorkState(itemOf(repoConfig, n), "new", "approved", repoConfig, repoLogger);
+          // With a verify stage, merged work still owes its acceptance evidence (EM#441).
+          await reportWorkState(itemOf(repoConfig, n), "new", config.srePath ? "merged" : "approved", repoConfig, repoLogger);
         }
         repoLogger.info(
-          `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels.prApproved}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
+          `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels[config.srePath ? "prMerged" : "prApproved"]}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
         );
         events?.push({
           message: `Advanced ${mergedNums.length} already-merged issue(s) on ${repoConfig.githubRepo} to '${repoConfig.lifecycleLabels.prApproved}': ${mergedNums.map((n) => `#${n}`).join(", ")}`,
