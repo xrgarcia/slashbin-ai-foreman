@@ -696,7 +696,7 @@ async function runReconcileStage(
         )) {
           const label = labels[verdict === "pass" ? "prApproved" : "prPendingActions"];
           events.push({
-            message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone auto-recovered: re-verification ${verdict.toUpperCase()} → labeled "${label}" (PR #${s.prNumber} was merged with the issue left at "${labels.prUnderReview}")`,
+            message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone auto-recovered: re-verification ${verdict.toUpperCase()} → labeled "${label}" (PR #${s.prNumber} was merged with the issue left unadvanced)`,
             level: verdict === "pass" ? "info" : "warn",
           });
           seen.delete(s.issueNumber);
@@ -709,11 +709,11 @@ async function runReconcileStage(
       if (seen.has(s.issueNumber)) continue; // already alerted; still stuck
       seen.add(s.issueNumber);
       reconLogger.warn(
-        `Dead-zoned issue #${s.issueNumber}: PR #${s.prNumber} merged to ${repoConfig.baseBranch} but issue still "${labels.prUnderReview}" — post-merge verify never advanced it, and re-verification produced no verdict`,
+        `Dead-zoned issue #${s.issueNumber}: PR #${s.prNumber} merged to ${repoConfig.baseBranch} but the issue never advanced to "${labels.prApproved}", and re-verification produced no verdict`,
         { prUrl: s.prUrl, mergedAt: s.mergedAt },
       );
       events.push({
-        message: `⚠️ ${repoConfig.githubRepo} #${s.issueNumber} dead-zoned: PR #${s.prNumber} merged but issue still "${labels.prUnderReview}", and auto re-verification could not produce a verdict. EM: verify by hand (npm run verify -- --repo ${repoConfig.name} --pr ${s.prNumber} --env development), then advance to "${labels.readyForProd}" or flag "${labels.prPendingActions}".`,
+        message: `⚠️ ${repoConfig.githubRepo} #${s.issueNumber} dead-zoned: PR #${s.prNumber} merged but the issue never advanced to "${labels.prApproved}", and auto re-verification could not produce a verdict. EM: verify by hand (npm run verify -- --repo ${repoConfig.name} --pr ${s.prNumber} --env development), then advance to "${labels.readyForProd}" or flag "${labels.prPendingActions}".`,
         level: "warn",
       });
     }
