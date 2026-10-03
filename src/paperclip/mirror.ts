@@ -39,6 +39,16 @@
 // stops waiting. Both are written only on a change — the row's own status and
 // descriptor are the record, so a restart re-derives them instead of repeating.
 //
+// The thread (Foreman issue 74): with `paperclip.comments.enabled` (the
+// default) each session posts one markdown summary, written by comments.ts
+// from the report the session carries: implement start (the goal), implement
+// end (the PR, its diff stat, the agent's own closing summary), review end
+// (verdict, findings, merged/deployed), revision end. A note a running session
+// triggers (PR opened, under review, approved) waits for the session's own
+// summary, so the thread reads in order. No note is ever posted twice in a
+// row: each task's latest comment is read once per process and a note equal
+// to it is dropped, so neither a poll cycle nor a restart repeats one.
+//
 // The board is the queue: each row's status says what the Foreman is doing
 // with it, and the agent's own status says whether a session is running. Every
 // row is filed under a Paperclip project named for its repo, created on first
@@ -47,13 +57,14 @@
 
 import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkState } from "../adapters.js";
 import { redactAll } from "../agent.js";
-import type { PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
+import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import {
   ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
-import { PaperclipClientError, type PaperclipClient } from "./client.js";
+import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
+import { commentsOf, finishComment, redactComment, sessionComment, sessionCommentEvent, type CommentsConfig } from "./comments.js";
 
 export type { PaperclipBucket } from "./board.js";
 type Bucket = PaperclipBucket;
@@ -161,6 +172,9 @@ const LEASE_RENEW_MS = 4 * 60_000;
 
 type SessionPhase = keyof typeof SESSION_STAGE;
 
+/** How a note is posted: the comment event that gates it, and what kind of step wrote it. */
+type NoteOpts = { readonly event: PaperclipCommentEvent; readonly tag?: "prLink" | "merged" | "session" };
+
 export class PaperclipMirror implements WorkObserver {
   /** Identity key → Paperclip task id, for every task this mirror has resolved. */
   private readonly taskUuidCache = new Map<string, string>();
@@ -203,13 +217,22 @@ export class PaperclipMirror implements WorkObserver {
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
   private agentMetadata: Record<string, unknown> | null = null;
+  /** Task id → its latest comment body, read once per process and kept as notes are posted. */
+  private readonly lastNote = new Map<string, string>();
+  /** Task id → notes due while a session held the card, posted after the session's own summary. */
+  private readonly deferred = new Map<string, Array<{ text: string; opts: NoteOpts }>>();
+  /** Identity keys whose current claim repeats one that did not finish. */
+  private readonly retrying = new Set<string>();
+  private readonly comments: CommentsConfig;
 
   constructor(
     private readonly client: PaperclipClient,
     private readonly cfg: PaperclipConfig,
     private readonly secrets: ReadonlyArray<{ name: string; value: string }>,
     private readonly logger: Logger,
-  ) {}
+  ) {
+    this.comments = commentsOf(cfg);
+  }
 
   async onClaim(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     this.building = item;
@@ -220,8 +243,13 @@ export class PaperclipMirror implements WorkObserver {
     // A second claim before any state change is the same work, retried after a
     // failed attempt: say so once, rather than "picked up" twice.
     const key = this.keyOf(item);
-    await this.note(id, this.claimed.has(key) ? PAPERCLIP_RETRY_NOTE : step.note);
+    const retry = this.claimed.has(key);
+    if (retry) this.retrying.add(key);
+    else this.retrying.delete(key);
     this.claimed.add(key);
+    // With summaries on, the implement session's start comment says it (with the goal).
+    if (this.comments.enabled) return;
+    await this.note(id, retry ? PAPERCLIP_RETRY_NOTE : step.note, { event: "implementStart" });
   }
 
   async onState(item: WorkItem, _from: PriorState, to: WorkState, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
@@ -232,12 +260,12 @@ export class PaperclipMirror implements WorkObserver {
     const id = await this.resolve(item, false);
     if (!id) return;
     await this.move(id, step.stage);
-    await this.note(id, step.note);
+    await this.note(id, step.note, { event: "progress" });
   }
 
   async onPrLink(item: WorkItem, prUrl: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }));
+    if (id) await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }), { event: "progress", tag: "prLink" });
   }
 
   async onBlocked(item: WorkItem, reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
@@ -248,12 +276,12 @@ export class PaperclipMirror implements WorkObserver {
     const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
     await this.move(id, PAPERCLIP_STEPS.blocked.stage);
-    await this.note(id, text);
+    await this.note(id, text, { event: "blocked" });
   }
 
   async onMerged(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, PAPERCLIP_STEPS.merged.note);
+    if (id) await this.note(id, PAPERCLIP_STEPS.merged.note, { event: "progress", tag: "merged" });
   }
 
   /**
@@ -279,7 +307,7 @@ export class PaperclipMirror implements WorkObserver {
       const id = await this.resolve(item, false);
       if (!id) continue;
       if (step.stage && !(await this.move(id, step.stage))) continue;
-      await this.note(id, fill(step.note, vars));
+      await this.note(id, fill(step.note, vars), { event: "release" });
     }
   }
 
@@ -413,13 +441,13 @@ export class PaperclipMirror implements WorkObserver {
   async onBackoffPause(upstream: string, reason: string, _logger: Logger): Promise<void> {
     if (!this.building) return;
     const id = await this.resolve(this.building, false);
-    if (id) await this.note(id, fill(PAPERCLIP_STEPS.backoffPause.note, { upstream, reason }));
+    if (id) await this.note(id, fill(PAPERCLIP_STEPS.backoffPause.note, { upstream, reason }), { event: "progress" });
   }
 
   async onBackoffResume(_upstream: string, _logger: Logger): Promise<void> {
     if (!this.building) return;
     const id = await this.resolve(this.building, false);
-    if (id) await this.note(id, PAPERCLIP_STEPS.backoffResume.note);
+    if (id) await this.note(id, PAPERCLIP_STEPS.backoffResume.note, { event: "progress" });
   }
 
   /**
@@ -446,7 +474,7 @@ export class PaperclipMirror implements WorkObserver {
         if (this.rowState.get(id) === `status:${this.statusName("blocked")}`) continue;
         const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: w.reason });
         this.blockedReason.set(id, text);
-        if (await this.move(id, PAPERCLIP_STEPS.blocked.stage)) await this.note(id, text);
+        if (await this.move(id, PAPERCLIP_STEPS.blocked.stage)) await this.note(id, text, { event: "blocked" });
         continue;
       }
       const want = `waiting\n${w.reason}`;
@@ -461,14 +489,14 @@ export class PaperclipMirror implements WorkObserver {
       });
       if (!ok) continue;
       this.rowState.set(id, want);
-      await this.note(id, fill(step.note, { reason: w.reason }));
+      await this.note(id, fill(step.note, { reason: w.reason }), { event: "progress" });
     }
 
     if (await this.ensureIndex()) {
       for (const [id, state] of this.rowState) {
         if (keep.has(id) || !state.startsWith("waiting\n") || this.rowRepo.get(id) !== repo) continue;
         if (!(await this.move(id, this.rowStage.get(id) ?? "approved"))) continue;
-        await this.note(id, PAPERCLIP_STEPS.resumed.note);
+        await this.note(id, PAPERCLIP_STEPS.resumed.note, { event: "progress" });
       }
     }
   }
@@ -484,7 +512,8 @@ export class PaperclipMirror implements WorkObserver {
 
     const phase = event.phase as SessionPhase;
     const step = SESSION_STEP[`${event.phase}:${event.status}`];
-    const text = step && fill(step.note, {
+    const opts: NoteOpts = { event: sessionCommentEvent(event), tag: "session" };
+    const legacy = step && fill(step.note, {
       pr: event.pr === undefined ? "?" : String(event.pr),
       reviewer: event.reviewer ?? "reviewer",
       detail: this.clean(event.detail ?? "") || event.status,
@@ -493,6 +522,9 @@ export class PaperclipMirror implements WorkObserver {
     for (const item of event.items) {
       const id = await this.resolve(item, false);
       if (!id) continue;
+      const retry = event.phase === "implement" && event.status === "started" && this.retrying.has(this.keyOf(item));
+      const text = this.comments.enabled ? sessionComment(event, item, this.comments, retry) : legacy;
+      let released = false;
       if (event.status === "started" && phase in SESSION_STAGE) {
         const h = this.holds.get(id);
         if (h) h.count++;
@@ -512,9 +544,11 @@ export class PaperclipMirror implements WorkObserver {
           this.holds.delete(id);
           await this.move(id, h.restore ?? SESSION_FALLBACK_STAGE[h.phase]);
           leaseChanged = true;
+          released = true;
         }
       }
-      if (text) await this.note(id, text);
+      if (text) await this.note(id, text, opts);
+      if (released) await this.flushDeferred(id, event);
     }
     if (leaseChanged) await this.writeLease();
     await this.syncAgentStatus();
@@ -531,7 +565,7 @@ export class PaperclipMirror implements WorkObserver {
 
   /** A reason or detail fit to write: secrets redacted, one paragraph, capped. */
   private clean(text: string): string {
-    const one = redactAll(String(text), this.secrets).replace(/\s+/g, " ").trim();
+    const one = redactComment(String(text), this.secrets).replace(/\s+/g, " ").trim();
     return one.length > TEXT_CAP ? `${one.slice(0, TEXT_CAP - 1)}…` : one;
   }
 
@@ -713,16 +747,60 @@ export class PaperclipMirror implements WorkObserver {
    * blocked (2026-10-02, first live check). On such a row the note goes in a
    * PATCH that restates the status, which Paperclip keeps.
    */
-  private async note(id: string, text: string): Promise<void> {
-    const body = redactAll(text, this.secrets);
+  private async note(id: string, text: string, opts: NoteOpts): Promise<void> {
+    if (!this.comments.events[opts.event]) return;
+    // A card a session holds gets its notes after the session's own summary.
+    if (this.comments.enabled && opts.tag !== "session" && this.holds.has(id)) {
+      const q = this.deferred.get(id) ?? [];
+      q.push({ text, opts });
+      this.deferred.set(id, q);
+      return;
+    }
+    const body = finishComment(text, this.comments, this.secrets);
+    if (!body) return;
+    // Never the same note twice in a row (SLA-514 got one four times).
+    if ((await this.latestComment(id)) === body) return;
     const row = await this.safeCall("read task", () => this.client.getIssue(id), id);
     const status = row.ok ? row.value?.status : undefined;
     const held = (["blocked", "done", "cancelled"] as const).map((b) => this.statusName(b));
-    if (status && held.includes(status)) {
-      await this.safeCall("post note", () => this.client.updateIssue(id, { comment: body, status }), id);
-      return;
+    const sent = status && held.includes(status)
+      ? await this.safeCall("post note", () => this.client.updateIssue(id, { comment: body, status }), id)
+      : await this.safeCall("post note", () => this.client.createComment(id, body), id);
+    if (sent.ok) this.lastNote.set(id, body);
+  }
+
+  /**
+   * Post the notes deferred while a session held the card, after its summary.
+   * A note the summary already says is dropped: the PR link when the summary
+   * names the PR, "merged" when the review reports the merge.
+   */
+  private async flushDeferred(id: string, event: SessionEvent): Promise<void> {
+    const q = this.deferred.get(id);
+    this.deferred.delete(id);
+    for (const { text, opts } of q ?? []) {
+      if (opts.tag === "prLink" && event.report?.pr) continue;
+      if (opts.tag === "merged" && event.report?.review?.merged) continue;
+      await this.note(id, text, opts);
     }
-    await this.safeCall("post note", () => this.client.createComment(id, body), id);
+  }
+
+  /**
+   * The task's latest comment body, read from Paperclip once per process and
+   * then kept as notes are posted. Undefined when it could not be read: the
+   * note is then posted, since a missed note is worse than a repeated one.
+   */
+  private async latestComment(id: string): Promise<string | undefined> {
+    if (this.lastNote.has(id)) return this.lastNote.get(id);
+    const r = await this.safeCall("read comments", () => this.client.getIssueComments(id), id);
+    if (!r.ok) return undefined;
+    const list: PaperclipComment[] = Array.isArray(r.value) ? r.value : [];
+    let latest: PaperclipComment | undefined;
+    if (list.length && list.every((c) => c.createdAt)) {
+      latest = list.reduce((a, b) => (Date.parse(b.createdAt!) > Date.parse(a.createdAt!) ? b : a));
+    } else latest = list[list.length - 1];
+    const body = String(latest?.body ?? "").trim();
+    this.lastNote.set(id, body);
+    return body;
   }
 
   /**

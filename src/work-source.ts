@@ -89,6 +89,11 @@ export function addObserver(o: WorkObserver): void {
   observers.push(o);
 }
 
+/** True when any observer is registered: a session's report costs GitHub reads, spent only for someone. */
+export function hasObservers(): boolean {
+  return observers.length > 0;
+}
+
 /**
  * Deliver one event to every observer, in registration order. Each call is
  * awaited on its own, raced against the timeout, and any error is logged at

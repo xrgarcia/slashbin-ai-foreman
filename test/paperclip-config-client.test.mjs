@@ -49,10 +49,29 @@ test("no paperclip block: mirror off, every default applied", () => {
     projectNameFormat: "{name}",
     projectStatus: "in_progress",
     agentStatus: true,
+    comments: {
+      enabled: true,
+      events: {
+        implementStart: true, implementEnd: true, reviewStart: true, reviewEnd: true,
+        reviseStart: true, reviseEnd: true, progress: true, release: true, blocked: true,
+      },
+      maxLength: 3000,
+      includeDiffStat: true,
+    },
   });
   assert.equal(paperclip.statusMap, undefined);
   assert.equal(paperclip.companyId, undefined);
   assert.equal(paperclip.agentId, undefined);
+});
+
+test("paperclip.comments: a partial block keeps the other defaults; a bad maxLength stops startup", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: { comments: { maxLength: 800, events: { progress: false } } } }));
+  assert.equal(paperclip.comments.enabled, true);
+  assert.equal(paperclip.comments.maxLength, 800);
+  assert.equal(paperclip.comments.events.progress, false);
+  assert.equal(paperclip.comments.events.reviewEnd, true);
+  assert.equal(paperclip.comments.includeDiffStat, true);
+  assert.throws(() => loadConfig(cfg({ paperclip: { comments: { maxLength: 10 } } })));
 });
 
 test("block with only companyId keeps the other defaults", () => {

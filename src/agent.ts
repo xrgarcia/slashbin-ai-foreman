@@ -110,6 +110,8 @@ export interface RevisionResult {
   noCommit?: boolean;
   /** The reason given on the trailer. Present only when `noCommit` is true. */
   noCommitReason?: string;
+  /** The session's own final message, for observers (unredacted, uncapped). */
+  summary?: string;
   /**
    * The run was refused by the Claude session limit, not failed on its merits.
    * The orchestrator reports it to the upstream back-off and charges no retry.
@@ -235,6 +237,8 @@ export interface ImplementationResult {
   skipReason?: string;
   // Issues the agent decided to skip. Empty/undefined when no skip was detected.
   skippedIssues?: number[];
+  /** The session's own final message, for observers (unredacted, uncapped). */
+  summary?: string;
   /**
    * The run was refused by the Claude session limit, not failed on its merits.
    * The orchestrator reports it to the upstream back-off and charges no retry.
@@ -1078,6 +1082,7 @@ Work autonomously. Do not ask questions.`;
       return {
         success: false,
         skipped: true,
+        summary: extractStreamResult(result.stdout),
         skipReason: declaredSkip.reason,
         skippedIssues: named !== undefined ? [named] : (issueNumbers ?? []),
         error: `skipped: ${declaredSkip.reason}`,
@@ -1130,7 +1135,7 @@ Work autonomously. Do not ask questions.`;
     }
 
     logger.info(`PR created and verified: ${prUrl}`);
-    return { success: true, prUrl };
+    return { success: true, prUrl, summary: extractStreamResult(result.stdout) };
   }
 
   // If Claude exited cleanly but no new PR was found, check if an existing
@@ -1144,7 +1149,7 @@ Work autonomously. Do not ask questions.`;
   );
   if (existingPR) {
     logger.info("No new PR created, but existing feature PR found — treating as success (commits added to existing PR)");
-    return { success: true };
+    return { success: true, summary: extractStreamResult(result.stdout) };
   }
 
   // Before flagging "no PR" as a failure, check whether the agent deliberately
@@ -1160,6 +1165,7 @@ Work autonomously. Do not ask questions.`;
     return {
       success: false,
       skipped: true,
+      summary: extractStreamResult(result.stdout),
       skipReason: skip.reason,
       skippedIssues: issueNumbers ?? [],
       error: `skipped: ${skip.reason}`,
@@ -1280,7 +1286,7 @@ Work autonomously. Do not ask questions.`;
         `PR revision made no commit BY DECLARATION on ${config.featureBranch} ` +
         `(SHA unchanged at ${beforeSha.slice(0, 10)}): ${reason}`,
       );
-      return { success: true, noCommit: true, noCommitReason: reason };
+      return { success: true, noCommit: true, noCommitReason: reason, summary: extractStreamResult(result.stdout) };
     }
 
     const outputTail = result.stdout.slice(-500).trim();
@@ -1292,7 +1298,7 @@ Work autonomously. Do not ask questions.`;
   }
 
   logger.info(`PR revision completed successfully for ${config.name}`);
-  return { success: true };
+  return { success: true, summary: extractStreamResult(result.stdout) };
 }
 
 /** What a custom stage is handed: the work in flight on the repo when the pass reached it. */

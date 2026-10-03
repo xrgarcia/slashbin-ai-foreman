@@ -2,12 +2,13 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import type { SessionEvent, WorkItem } from "./adapters.js";
+import type { SessionEvent, SessionPr, SessionReport, WorkItem } from "./adapters.js";
 import {
   selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked,
   notifyObserversMerged, notifyObserversPromoted, notifyObserversState,
-  notifySession, notifyWaiting, notifyPromotionStall, notifyRelease,
+  notifySession, notifyWaiting, notifyPromotionStall, notifyRelease, hasObservers,
 } from "./work-source.js";
+import { parseReviewBody } from "./paperclip/comments.js";
 import { trackRelease } from "./release-tracker.js";
 import {
   GitHubIssueConnector,
@@ -40,6 +41,9 @@ import {
   isPrOpen,
   stripReadyForProdLabel,
   findOpenFeaturePR,
+  issueTitles,
+  readPrDigest,
+  readLatestReviewBody,
   type PendingRevisionInfo,
 } from "./github.js";
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
@@ -134,6 +138,46 @@ async function announceDivergence(
 
 function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {
   return { issueNumber, repo: repoConfig.githubRepo };
+}
+
+// --- Session reports (Foreman issue 74) ---
+// What an observer summarises a session from, gathered only when one is
+// registered: each read is a GitHub call, and nothing else uses them. Every
+// helper is best-effort and never throws — a missing report is a shorter
+// comment, never a failed session.
+
+/** The items' goals (their issue titles), for a session's start. */
+function startReport(repoConfig: RepoConfig, issues: ReadonlyArray<number>, logger: Logger): SessionReport | undefined {
+  if (!hasObservers()) return undefined;
+  const goals = issueTitles(repoConfig, issues, logger);
+  return Object.keys(goals).length ? { goals } : undefined;
+}
+
+/** A PR's title and diff stat; `pr` is a number, a URL or a head branch. */
+function prReport(repoConfig: RepoConfig, pr: string | number, logger: Logger): SessionPr | undefined {
+  return readPrDigest(repoConfig.githubRepo, pr, repoConfig.repoPath, logger) ?? undefined;
+}
+
+/** A finished review: its trailer for `pr`, and the review body it posted since `since`. */
+function reviewReport(
+  repoConfig: RepoConfig, pr: number, trailers: ReadonlyArray<ReviewTrailer>, summary: string | undefined,
+  since: Date, logger: Logger,
+): SessionReport {
+  const digest = prReport(repoConfig, pr, logger);
+  const t = trailers.find((x) => x.pr === pr);
+  if (!t) return { ...(digest ? { pr: digest } : {}), ...(summary ? { text: summary } : {}) };
+  // A minute's slack for clock skew between this host and GitHub.
+  const body = readLatestReviewBody(repoConfig.githubRepo, pr, new Date(since.getTime() - 60_000).toISOString(), repoConfig.repoPath, logger);
+  const parsed = parseReviewBody(body ?? summary);
+  return {
+    ...(digest ? { pr: digest } : {}),
+    review: {
+      verdict: t.verdict, merged: t.merged, deploy: t.deploy,
+      ...(t.hold ? { hold: t.hold } : {}),
+      ...(parsed.summary ? { summary: parsed.summary } : {}),
+      findings: body ? parsed.findings : [],
+    },
+  };
 }
 
 // Merged / promoted events already delivered to observers this process, keyed
@@ -1372,11 +1416,13 @@ async function tryBatchImplementation(
   };
   // How the session ended, for observers; anything that leaves without setting it threw.
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
+  let report: SessionReport | undefined;
 
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
     for (const n of actionableIssues) await claimWork(itemOf(repoConfig, n), repoConfig, repoLogger);
-    await notifySession({ ...session, status: "started" }, repoLogger);
+    const goals = startReport(repoConfig, actionableIssues, repoLogger);
+    await notifySession({ ...session, status: "started", ...(goals ? { report: goals } : {}) }, repoLogger);
 
     const priorFailure = lastFailureReason.get(repoName) || null;
     const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, handOff)
@@ -1387,6 +1433,11 @@ async function tryBatchImplementation(
       : result.skipped
         ? { status: "finished", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
         : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
+    if (hasObservers()) {
+      // Commits on the open PR leave no URL: the feature branch names the PR.
+      const pr = result.success ? prReport(repoConfig, result.prUrl ?? repoConfig.featureBranch, repoLogger) : undefined;
+      report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
+    }
 
     if (result.success) {
       failureCount.set(repoName, 0);
@@ -1574,7 +1625,7 @@ async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended }, repoLogger);
+    await notifySession({ ...session, ...ended, ...(report ? { report } : {}) }, repoLogger);
   }
 }
 
@@ -1625,6 +1676,7 @@ async function tryRevision(
     items: pending.issueNumbers.map((n) => itemOf(repoConfig, n)),
   };
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
+  let report: SessionReport | undefined;
 
   try {
     await notifySession({ ...session, status: "started" }, revLogger);
@@ -1636,6 +1688,10 @@ async function tryRevision(
     ended = result.success
       ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
       : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
+    if (hasObservers() && result.success) {
+      const pr = prReport(repoConfig, pending.pr.number, revLogger);
+      report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
+    }
 
     if (result.success) {
       revisionFailureCount.set(repoName, 0);
@@ -1717,7 +1773,7 @@ async function tryRevision(
     return null;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended }, revLogger);
+    await notifySession({ ...session, ...ended, ...(report ? { report } : {}) }, revLogger);
   }
 }
 
@@ -1821,9 +1877,12 @@ async function tryReview(
     items: candidate.issueNumbers.map((n) => itemOf(repoConfig, n)),
   };
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
+  let report: SessionReport | undefined;
+  const reviewSince = new Date();
+  let reviewer = config.techLeadPath ? "Tech Lead" : "Claude";
 
   try {
-    await notifySession({ ...session, status: "started", reviewer: config.techLeadPath ? "Tech Lead" : "Claude" }, reviewLogger);
+    await notifySession({ ...session, status: "started", reviewer }, reviewLogger);
     // EM#427: the Tech Lead (Codex) takes the review first when configured; on
     // its "wrote nothing" exit the Claude review below runs exactly as before.
     const viaTechLead = config.techLeadPath
@@ -1831,6 +1890,7 @@ async function tryReview(
           .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }))
       : { fallback: true as const, reason: "not configured" };
     if (config.techLeadPath && "fallback" in viaTechLead) {
+      reviewer = "Claude";
       await notifySession({ ...session, status: "handoff", reviewer: "Claude", detail: viaTechLead.reason }, reviewLogger);
     }
     const result = "fallback" in viaTechLead
@@ -1840,6 +1900,9 @@ async function tryReview(
         ).catch(reportLaunchThrew)
       : viaTechLead;
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    if (hasObservers()) {
+      report = reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
+    }
 
     if (result.success) {
       reviewFailureCount.set(repoName, 0);
@@ -1969,7 +2032,7 @@ async function tryReview(
     return false;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended }, reviewLogger);
+    await notifySession({ ...session, ...ended, reviewer, ...(report ? { report } : {}) }, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In
     // `finally` for the same reason as the label repair below: a run that threw

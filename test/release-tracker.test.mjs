@@ -52,3 +52,25 @@ test("an issue added to the open PR re-announces it; a new PR settles the old on
   await h.run();
   assert.deepEqual(h.events.slice(1), [["merged", 9, [5, 6]], ["open", 10, [7]]]);
 });
+
+// The saved release must survive a reload, or every promotion pass re-announces
+// an open release PR (SLA-514 got "waiting on release PR #371" four times).
+test("loadRepoState keeps the saved release, so an open release is announced once across passes", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { setStatePath, loadRepoState, saveRepoState } = await import("../dist/state.js");
+  setStatePath(mkdtempSync(join(tmpdir(), "release-state-")));
+  const events = [];
+  const pass = () => trackRelease({
+    repo: "o/r", productionBranch: "main",
+    saved: loadRepoState("r").release,
+    findOpenRelease: () => ({ number: 371, url: "u", body: "Release: #368, #367" }),
+    releaseState: () => "OPEN",
+    save: (v) => { const s = loadRepoState("r"); if (v) s.release = v; else delete s.release; saveRepoState("r", s); },
+    emit: async (e) => { events.push(e.state); },
+  });
+  for (let i = 0; i < 4; i++) await pass();
+  assert.deepEqual(loadRepoState("r").release, { pr: 371, url: "u", issues: [368, 367] });
+  assert.deepEqual(events, ["open"]);
+});

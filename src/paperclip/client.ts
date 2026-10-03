@@ -39,6 +39,7 @@ export type PaperclipComment = {
   id: string;
   body: string;
   authorAgentId: string | null;
+  createdAt?: string;
 };
 
 export type PaperclipAgent = {

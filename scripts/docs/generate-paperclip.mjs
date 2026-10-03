@@ -285,6 +285,37 @@ ${stepRows.join("\n")}
 A task is created only when the Foreman picks an issue up (\`claim\`). A later step on an issue
 that has no task writes nothing.
 
+## Session summaries
+
+With \`comments.enabled\` on (the default) the build, review and revision sessions write a short
+markdown summary in place of their one-line notes above, so a card's thread reads as a record of
+the work rather than a list of transitions. Each is written from what the Foreman already holds —
+no extra model call:
+
+| Event (\`comments.events\` key) | The comment |
+|---|---|
+| \`implementStart\` | **Foreman started implementing**, and the goal: the issue's title. Replaces the \`claim\` note; a retry says so. |
+| \`implementEnd\` | The pull request (link and title), its diff stat (with \`includeDiffStat\`), and the agent's own closing summary: what changed, how, tests and their result, risks or deferrals. A skip gives the agent's reason; a failure the error. |
+| \`reviewStart\` | Who is reviewing which pull request; a hand-off to another reviewer, with the reason. |
+| \`reviewEnd\` | The verdict, whether it merged and deployed, the review's opening paragraph, and each finding as a bullet with its severity and location, read from the review the reviewer posted on the pull request. |
+| \`reviseStart\` / \`reviseEnd\` | The revision starting, then what it addressed (the agent's closing summary), or why it changed nothing. |
+| \`progress\` | The status notes: queued, under review, changes requested, approved, merged, waiting, back-off. |
+| \`release\` | The release notes: waiting on the release pull request, released, in production. |
+| \`blocked\` | Why the Foreman cannot go on, in its own words. |
+
+A note a session triggers while it runs (the pull request opened, the issue under review or
+approved) is posted after that session's summary, so the thread reads in order; one the summary
+already says (the pull request link, a merge) is dropped. An event turned off in
+\`comments.events\` posts nothing and still moves the card. With \`comments.enabled\` off every
+step posts its one-line note from the table above.
+
+Every comment, summary or note, is redacted (secrets the Foreman knows of, and anything shaped
+like a token: GitHub, Anthropic/OpenAI, Slack and AWS keys, bearer tokens, JWTs, a password in a
+URL, a \`*_TOKEN=\`/\`password:\`-style assignment) and capped at \`comments.maxLength\`
+characters, marked \`… (truncated)\` when cut. No comment is posted when it is identical to the
+task's latest comment: the latest is read from Paperclip once per task per process, so neither a
+repeating cycle nor a restart writes the same note twice in a row.
+
 ## Board stages
 
 Paperclip's columns are fixed, so each task carries two things beyond its status: the agent
@@ -400,7 +431,8 @@ role is registered under its name with its wake paths off. It prints one
 
 To see it work, give a GitHub issue in a configured repo its trigger label. When the Foreman
 picks it up, its Paperclip task appears, in progress and assigned to the Foreman, with a
-${code(PAPERCLIP_STEPS.claim.note)} note, and gains a note at each step after.
+\`Foreman started implementing\` comment naming the goal (${code(PAPERCLIP_STEPS.claim.note)} with
+\`comments.enabled\` off), and gains a comment at each step after.
 
 ## Remove
 
