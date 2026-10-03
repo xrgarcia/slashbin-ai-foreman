@@ -30,8 +30,10 @@
 // merges. Promotion used to be a note, so an item waiting only on the release
 // merge read as "in progress" (Slashbin-console#1185 behind PR #1206).
 //
-// The one status no label carries is `blocked`: an issue the Foreman holds
-// back this cycle (a back-off, an occupied branch) is moved to blocked with the
+// An issue the Foreman gives up on (an agent declined it, revision retries
+// ran out) goes to the `blocked` stage: held by its configured owner, its
+// reason in the unblock descriptor prefixed "blocked: ". Separately, an issue
+// the Foreman holds back this cycle (a back-off, an occupied branch) is moved to blocked with the
 // reason as Paperclip's unblock descriptor, and back to its stage once it
 // stops waiting. Both are written only on a change — the row's own status and
 // descriptor are the record, so a restart re-derives them instead of repeating.
@@ -47,7 +49,7 @@ import { redactAll } from "../agent.js";
 import type { PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import {
-  ensureStageLabels, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { PaperclipClientError, type PaperclipClient } from "./client.js";
@@ -58,9 +60,9 @@ type Bucket = PaperclipBucket;
 /**
  * Where a step moves the card: a lifecycle stage (placed by `paperclip.board`),
  * "done" (status done, holder and stage label as before, stage label removed),
- * "blocked" (held by the Foreman, waiting), or null (a note only).
+ * "waiting" (status blocked, held by the Foreman this cycle), or null (a note only).
  */
-export type PaperclipStepMove = PaperclipStage | "done" | "blocked" | null;
+export type PaperclipStepMove = PaperclipStage | "done" | "waiting" | null;
 
 /** One step the mirror writes: where it moves the card, and the note. */
 export type PaperclipStep = { readonly stage: PaperclipStepMove; readonly note: string };
@@ -78,7 +80,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   inReview: { stage: "inReview", note: "under review" },
   changesRequested: { stage: "changesRequested", note: "changes requested" },
   approved: { stage: "pendingVerification", note: "approved" },
-  blocked: { stage: null, note: "blocked: {reason}" },
+  blocked: { stage: "blocked", note: "blocked: {reason}" },
   merged: { stage: null, note: "merged" },
   releaseWaiting: { stage: "awaitingRelease", note: "waiting on release PR #{pr} to merge to {branch}" },
   released: { stage: "done", note: "release PR #{pr} merged to {branch}" },
@@ -86,7 +88,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   releaseClosed: { stage: null, note: "release PR #{pr} closed without merging; waiting for the next release" },
   backoffPause: { stage: null, note: "paused: {upstream} back-off: {reason}" },
   backoffResume: { stage: null, note: "resumed after back-off" },
-  waiting: { stage: "blocked", note: "waiting: {reason}" },
+  waiting: { stage: "waiting", note: "waiting: {reason}" },
   resumed: { stage: null, note: "resumed: no longer waiting" },
   implementFinished: { stage: null, note: "implement session finished: {detail}" },
   implementFailed: { stage: null, note: "implement session failed: {detail}" },
@@ -194,6 +196,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove }>();
   /** Task id → the last lifecycle stage the mirror placed it in, so a resumed card goes back there. */
   private readonly rowStage = new Map<string, PaperclipStage>();
+  /** Task id → why the Foreman blocked it, the unblock descriptor's action when it moves to `blocked`. */
+  private readonly blockedReason = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
@@ -239,7 +243,11 @@ export class PaperclipMirror implements WorkObserver {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, fill(PAPERCLIP_STEPS.blocked.note, { reason }));
+    if (!id) return;
+    const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: this.clean(reason) });
+    this.blockedReason.set(id, text);
+    await this.move(id, PAPERCLIP_STEPS.blocked.stage);
+    await this.note(id, text);
   }
 
   async onMerged(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
@@ -591,7 +599,9 @@ export class PaperclipMirror implements WorkObserver {
         repoOf.set(row.id, m.groups.repo);
         project.set(row.id, row.projectId ?? null);
         const action = row.unblockDescriptor?.action;
-        const blocked = row.status === this.statusName("blocked") && row.assigneeAgentId === this.cfg.agentId;
+        // A Foreman-held blocked row is a waiting hold, unless the Foreman blocked it for good.
+        const blocked = row.status === this.statusName("blocked") && row.assigneeAgentId === this.cfg.agentId
+          && !String(action ?? "").startsWith(FOREMAN_BLOCKED_PREFIX);
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
       }
       return { idx, state, repoOf, project };
@@ -631,7 +641,7 @@ export class PaperclipMirror implements WorkObserver {
    * is best-effort: when the labels cannot be read the status still moves.
    */
   private async move(id: string, to: PaperclipStepMove): Promise<boolean> {
-    if (to === null || to === "blocked") return true;
+    if (to === null || to === "waiting") return true;
     const h = this.holds.get(id);
     if (h) {
       if (to !== SESSION_STAGE[h.phase]) h.restore = to;
@@ -646,6 +656,11 @@ export class PaperclipMirror implements WorkObserver {
       bucket = t.bucket;
       label = t.label;
       if (t.agentId) holder = { assigneeAgentId: t.agentId, assigneeUserId: null };
+      // Paperclip takes `blocked` only with an unblock descriptor.
+      if (bucket === "blocked") {
+        const action = this.blockedReason.get(id) ?? `${FOREMAN_BLOCKED_PREFIX}needs attention`;
+        holder.unblockDescriptor = { owner: t.agentId ? { agentId: t.agentId } : "board", action };
+      }
     }
     const project = await this.projectPatch(id);
     const labelIds = await this.labelIdsFor(id, label);
@@ -653,6 +668,7 @@ export class PaperclipMirror implements WorkObserver {
     if (ok) {
       this.rowState.set(id, `status:${this.statusName(bucket)}`);
       if (to !== "done") this.rowStage.set(id, to);
+      if (bucket !== "blocked") this.blockedReason.delete(id);
       if (project.projectId) this.rowProject.set(id, project.projectId);
     }
     return ok;

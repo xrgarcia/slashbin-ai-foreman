@@ -38,6 +38,7 @@ for (const f of [builtConfig, builtMirror]) if (!existsSync(f)) fail(`${f} not f
 
 const { configSchema, PAPERCLIP_STAGES, PAPERCLIP_FOREMAN_ROLE } = await import(builtConfig);
 const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS, PAPERCLIP_TASK_TITLE_FORMAT } = await import(builtMirror);
+const { FOREMAN_BLOCKED_PREFIX } = await import(builtMirror.replace(/mirror\.js$/, "board.js"));
 const { toJSONSchema } = await import("zod");
 
 // --- The schema ---
@@ -88,7 +89,7 @@ const WHEN = {
   inReview: "The issue's pull request is waiting for review.",
   changesRequested: "The review asked for changes; the Foreman will revise.",
   approved: "The review approved the pull request.",
-  blocked: "The Foreman declines or cannot finish the issue (with its reason).",
+  blocked: "The Foreman declines the issue or runs out of revision retries (with its reason): it needs a person.",
   merged: "The pull request is merged to the base branch.",
   releaseWaiting: "The issue is in an open release pull request (base branch → production branch). Written once per release pull request.",
   released: "That release pull request merges to the production branch.",
@@ -113,10 +114,10 @@ const unknown = stepIds.filter((s) => !(s in WHEN));
 const dropped = Object.keys(WHEN).filter((s) => !stepIds.includes(s));
 if (unknown.length) fail(`PAPERCLIP_STEPS has step(s) this generator does not describe: ${unknown.join(", ")}. Add them to WHEN.`);
 if (dropped.length) fail(`WHEN describes step(s) PAPERCLIP_STEPS no longer has: ${dropped.join(", ")}.`);
-const MOVES = [...PAPERCLIP_STAGES, "done", "blocked"];
+const MOVES = [...PAPERCLIP_STAGES, "done", "waiting"];
 for (const s of stepIds) {
   const st = PAPERCLIP_STEPS[s].stage;
-  if (st !== null && !MOVES.includes(st)) fail(`step ${s} moves to "${st}", which is not a lifecycle stage, done or blocked.`);
+  if (st !== null && !MOVES.includes(st)) fail(`step ${s} moves to "${st}", which is not a lifecycle stage, done or waiting.`);
 }
 
 // What each lifecycle stage means. The key set must equal PAPERCLIP_STAGES.
@@ -129,6 +130,7 @@ const STAGE_WHEN = {
   revising: "A revision session is running on it.",
   pendingVerification: "Approved and merged to the base branch; waiting for verification before release.",
   awaitingRelease: "Verified (or in an open release pull request); waiting for the release to merge.",
+  blocked: "Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries.",
 };
 const stageKeys = [...PAPERCLIP_STAGES];
 if (stageKeys.join() !== Object.keys(STAGE_WHEN).join()) fail(`STAGE_WHEN must describe exactly ${stageKeys.join(", ")}.`);
@@ -150,7 +152,7 @@ const defaultOf = (f) => (defaults[f] === undefined ? "—" : code(JSON.stringif
 const configRows = fields.map((f) =>
   `| ${code(f)} | ${typeOf(props[f])} | ${envOf[f] ? code(envOf[f]) : "none"} | ${defaultOf(f)} | ${cell(descriptions[f])} |`);
 
-const bucketOf = (move) => (move === null ? null : move === "done" || move === "blocked" ? move : defaults.board[move].status);
+const bucketOf = (move) => (move === null ? null : move === "done" ? move : move === "waiting" ? "blocked" : defaults.board[move].status);
 const setters = (b) => {
   const by = stepIds.filter((s) => bucketOf(PAPERCLIP_STEPS[s].stage) === b).map(code);
   if (b === PAPERCLIP_CREATE_STATUS) by.unshift("task creation");
@@ -251,16 +253,23 @@ reads the release pull request each cycle from the GitHub state it already holds
 leaves the open set, one GitHub read says whether it merged or was closed. The pull request
 being waited on is saved per repo, so a merge that lands while the Foreman is down is seen at
 the next start. \`cancelled\` is left to whatever else syncs GitHub issues into the same
-company, and an agent declining an issue is a note (\`blocked\` step).
+company.
 
-\`blocked\` is the one status no GitHub label carries: it means the Foreman is holding the issue
-back right now (\`waiting\`). Paperclip only accepts \`blocked\` with an unblock descriptor, so the
+An issue that needs a person goes to the \`blocked\` stage: the source labels it \`blocked\`,
+or the Foreman declines it or runs out of revision retries (\`blocked\` step). It is held by
+the stage's owner (\`board.blocked\`), with the reason as its unblock descriptor's action,
+prefixed \`${FOREMAN_BLOCKED_PREFIX.trim()}\`, and the stage label \`blocked\`. It stays there until the issue
+moves on (the Foreman picks it up again, or its labels change).
+
+The Foreman also uses the \`blocked\` status for a hold that is not a person's to clear: an
+issue it is holding back right now (\`waiting\`). Paperclip only accepts \`blocked\` with an unblock descriptor, so the
 Foreman sends one owned by its agent, with the reason as the action — the reason shows on the
 task itself. When the issue stops waiting the Foreman moves it back to the stage it was in, and
 Paperclip clears the descriptor. Both are written only when they change: the task's own status
 and descriptor are the record, so a restarted Foreman reads them back instead of repeating
 them. A sync that also writes these tasks should leave a \`blocked\` task held by the Foreman's
-agent alone unless the issue has closed, or the two will flip it back and forth.
+agent, or one whose descriptor starts with \`${FOREMAN_BLOCKED_PREFIX.trim()}\`, alone unless the issue has
+closed or changed stage, or the two will flip it back and forth.
 
 ## Notes per step
 

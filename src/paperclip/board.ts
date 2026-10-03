@@ -37,6 +37,16 @@ export const SESSION_FALLBACK_STAGE = Object.freeze({
 /** The Foreman agent's metadata key holding its live-session lease. */
 export const LIVE_LEASE_KEY = "foremanLive";
 
+/** The source label that blocks an issue (the Foreman never picks one up). */
+export const SOURCE_BLOCKED_LABEL = "blocked";
+
+/**
+ * The unblock-descriptor action of a card the Foreman blocked itself (declined,
+ * or out of retries): the prefix tells it from a transient waiting hold, and
+ * tells a sync to leave the card with its owner until the issue moves on.
+ */
+export const FOREMAN_BLOCKED_PREFIX = "blocked: ";
+
 /** The lease: the cards a running session holds in progress, renewed while any runs. */
 export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE }> };
 
@@ -50,9 +60,9 @@ function filled(cfg: BoardConfig) {
 
 /**
  * The lifecycle stage GitHub labels put an open issue in, latest stage first;
- * "done" once promoted (the close is all that is left); null when the issue is
- * not in the Foreman's lifecycle at all. `inRelease` = an open release PR
- * names it.
+ * "blocked" while the source labels it so, whatever else it carries; "done"
+ * once promoted (the close is all that is left); null when the issue is not in
+ * the Foreman's lifecycle at all. `inRelease` = an open release PR names it.
  */
 export function issueStage(
   labels: readonly string[],
@@ -61,6 +71,7 @@ export function issueStage(
   triggerLabel: string,
 ): PaperclipStage | "done" | null {
   const has = (l: string) => labels.includes(l);
+  if (has(SOURCE_BLOCKED_LABEL)) return "blocked";
   if (has(lifecycle.readyToClose)) return "done";
   if (inRelease || has(lifecycle.readyForProd)) return "awaitingRelease";
   if (has(lifecycle.prApproved)) return "pendingVerification";
