@@ -119,6 +119,10 @@ export class PaperclipClient {
     return this.request("POST", `${this.companyPath()}/issues`, body);
   }
 
+  getIssue(id: string): Promise<PaperclipIssue> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(id)}`);
+  }
+
   updateIssue(id: string, body: Partial<PaperclipIssue> & Record<string, unknown>): Promise<PaperclipIssue> {
     return this.request("PATCH", `/api/issues/${encodeURIComponent(id)}`, body);
   }

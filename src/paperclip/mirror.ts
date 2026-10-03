@@ -465,8 +465,23 @@ export class PaperclipMirror implements WorkObserver {
     return r.ok;
   }
 
+  /**
+   * Post a note without moving the row. Paperclip reads a board user's comment
+   * on an agent-held blocked, done or cancelled row as "please continue" and
+   * moves it to todo, so a "waiting:" note un-blocked the row it had just
+   * blocked (2026-10-02, first live check). On such a row the note goes in a
+   * PATCH that restates the status, which Paperclip keeps.
+   */
   private async note(id: string, text: string): Promise<void> {
-    await this.safeCall("post note", () => this.client.createComment(id, redactAll(text, this.secrets)), id);
+    const body = redactAll(text, this.secrets);
+    const row = await this.safeCall("read task", () => this.client.getIssue(id), id);
+    const status = row.ok ? row.value?.status : undefined;
+    const held = (["blocked", "done", "cancelled"] as const).map((b) => this.statusName(b));
+    if (status && held.includes(status)) {
+      await this.safeCall("post note", () => this.client.updateIssue(id, { comment: body, status }), id);
+      return;
+    }
+    await this.safeCall("post note", () => this.client.createComment(id, body), id);
   }
 
   /**
