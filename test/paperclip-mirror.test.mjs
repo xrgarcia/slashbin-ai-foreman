@@ -359,6 +359,15 @@ test("a created row carries its repo's project, found by name or created once", 
   assert.equal(fake.rows[1].projectId, "proj-2");
 });
 
+test("a created project takes projectStatus, in_progress by default (EM #417)", async () => {
+  const dflt = fakePaperclip();
+  await mirrorOn(dflt, { projects: true, projectNameFormat: "{name}" }).mirror.onClaim(item, repoConfig, logger());
+  assert.equal(dflt.projects[0].status, "in_progress");
+  const planned = fakePaperclip([], [{ id: "p-old", name: "other", status: "backlog" }]);
+  await mirrorOn(planned, { projects: true, projectNameFormat: "{name}", projectStatus: "planned" }).mirror.onClaim(item, repoConfig, logger());
+  assert.deepEqual(planned.projects.map((p) => [p.name, p.status]), [["other", "backlog"], ["r", "planned"]]);
+});
+
 test("housekeep backfills the project on identity rows and cancels the old live task once", async () => {
   const live = { id: "live", status: "in_progress", assigneeAgentId: AGENT, description: `foreman-live: ${AGENT}\n\nbody` };
   const fake = fakePaperclip([row("r7", 7), row("q1", 1, { description: "source: example/q#1", projectId: "p-q" }), live],

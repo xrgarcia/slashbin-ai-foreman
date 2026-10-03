@@ -47,6 +47,7 @@ test("no paperclip block: mirror off, every default applied", () => {
     identityKeyFormat: "source: {repo}#{N}",
     projects: true,
     projectNameFormat: "{name}",
+    projectStatus: "in_progress",
     agentStatus: true,
   });
   assert.equal(paperclip.statusMap, undefined);
