@@ -1,5 +1,5 @@
 import { GitHubIssueConnector } from "./github.js";
-import type { PriorState, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkSourceAdapter, WorkState } from "./adapters.js";
+import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkSourceAdapter, WorkState } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 
@@ -203,4 +203,9 @@ export async function notifyWaiting(repo: string, waiting: ReadonlyArray<Waiting
 /** Promotion on `repo` is stalled (`detail`) or no longer stalled (null). Observers only. */
 export async function notifyPromotionStall(repo: string, detail: string | null, logger: Logger): Promise<void> {
   enqueue("onPromotionStall", [repo, detail, logger], logger);
+}
+
+/** A release PR opened, merged or closed. Observers only. */
+export async function notifyRelease(event: ReleaseEvent, logger: Logger): Promise<void> {
+  enqueue("onRelease", [event, logger], logger);
 }

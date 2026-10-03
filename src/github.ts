@@ -1988,6 +1988,22 @@ export function findOpenPromotionPR(
   }
 }
 
+/**
+ * A PR's state on GitHub, read live: the fleet state holds open PRs only, so a
+ * PR that left it may have merged or been closed unmerged. Null when the read
+ * failed.
+ */
+export function getPrState(repo: string, prNumber: number, cwd: string, logger?: Logger): "OPEN" | "MERGED" | "CLOSED" | null {
+  try {
+    const out = gh(["pr", "view", String(prNumber), "--repo", repo, "--json", "state"], cwd);
+    const state = (JSON.parse(out || "{}") as { state?: string }).state;
+    return state === "OPEN" || state === "MERGED" || state === "CLOSED" ? state : null;
+  } catch (err) {
+    logger?.warn(`getPrState: gh pr view #${prNumber} failed`, { ...formatGhError(err) });
+    return null;
+  }
+}
+
 export function updatePromotionPR(
   repo: string,
   prNumber: number,

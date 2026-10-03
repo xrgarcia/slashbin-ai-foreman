@@ -17,6 +17,14 @@ export type PaperclipIssue = {
   assigneeAgentId?: string | null;
   /** Why a `blocked` task waits and who unblocks it; Paperclip clears it when the task leaves blocked. */
   unblockDescriptor?: { owner: unknown; action: string } | null;
+  /** The project the task belongs to; the mirror gives each repo one. */
+  projectId?: string | null;
+};
+
+export type PaperclipProject = {
+  id: string;
+  name: string;
+  status?: string;
 };
 
 export type PaperclipComment = {
@@ -44,6 +52,7 @@ export type CreatePaperclipIssue = {
   description?: string;
   assigneeUserId?: string;
   assigneeAgentId?: string;
+  projectId?: string;
 };
 
 export type CreatePaperclipAgent = {
@@ -133,6 +142,15 @@ export class PaperclipClient {
 
   createComment(id: string, commentBody: string): Promise<PaperclipComment> {
     return this.request("POST", `/api/issues/${encodeURIComponent(id)}/comments`, { body: commentBody });
+  }
+
+  /** Every project in the company, archived ones included, so a name is never created twice. */
+  listProjects(): Promise<PaperclipProject[]> {
+    return this.request("GET", `${this.companyPath()}/projects?includeArchived=true`);
+  }
+
+  createProject(body: { name: string; status?: string; description?: string }): Promise<PaperclipProject> {
+    return this.request("POST", `${this.companyPath()}/projects`, body);
   }
 
   listAgents(): Promise<PaperclipAgent[]> {

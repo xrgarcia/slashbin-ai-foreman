@@ -99,6 +99,22 @@ export interface WorkObserver {
   onWaiting?(repo: string, waiting: ReadonlyArray<WaitingItem>, logger: Logger): Promise<void>;
   /** Promotion on `repo` is stalled for `detail`, or no longer stalled (null). */
   onPromotionStall?(repo: string, detail: string | null, logger: Logger): Promise<void>;
+  /** A release PR (base → production) opened, merged or closed for these items. */
+  onRelease?(event: ReleaseEvent, logger: Logger): Promise<void>;
+}
+
+/**
+ * A release: the PR promoting the base branch to production, and the items it
+ * carries. `open` is waiting to merge; `merged` is in production (no `pr` when
+ * the base branch was found already in production); `closed` is closed unmerged.
+ */
+export interface ReleaseEvent {
+  readonly repo: string;
+  readonly state: "open" | "merged" | "closed";
+  readonly pr?: number;
+  readonly url?: string;
+  readonly issues: ReadonlyArray<WorkItem>;
+  readonly productionBranch: string;
 }
 
 /** One session the Foreman runs for a repo: building, revising or reviewing. */
