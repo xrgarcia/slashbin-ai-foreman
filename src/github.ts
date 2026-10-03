@@ -591,9 +591,11 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       case "inReview→merged": return this.reviewOutcome(repoConfig, n, "prMerged", logger);
       case "merged→approved": return this.verifyPassed(repoConfig, n, logger);
       case "inReview→changesRequested": return this.reviewOutcome(repoConfig, n, "prPendingActions", logger);
-      case "new→approved": return this.alreadyMerged(repoConfig, n, logger);
+      case "new→approved": return this.alreadyMerged(repoConfig, n, "prApproved", logger);
+      case "new→merged": return this.alreadyMerged(repoConfig, n, "prMerged", logger);
       case "unknown→approved": return this.deadZoneResolve(repoConfig, n, "pass", logger);
       case "unknown→changesRequested": return this.deadZoneResolve(repoConfig, n, "fail", logger);
+      case "unknown→merged": return this.deadZoneResolve(repoConfig, n, "merged", logger);
       case "unknown→queued": return this.orphanRelease(repoConfig, n, logger);
       default:
         logger.warn(`GitHub work source: no transition ${String(from)} → ${String(to)} for #${n} — nothing written`);
@@ -714,16 +716,17 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * "actionable" forever and the Foreman burns a full Claude session every
    * back-off window concluding there is nothing to do.
    */
-  private alreadyMerged(config: RepoConfig, num: number, logger: Logger): boolean {
+  private alreadyMerged(config: RepoConfig, num: number, outcome: "prApproved" | "prMerged", logger: Logger): boolean {
+    const next = config.lifecycleLabels[outcome];
     try {
       gh([
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
         "--remove-label", config.triggerLabel,
-        "--add-label", config.lifecycleLabels.prApproved,
+        "--add-label", next,
       ], config.repoPath);
       logger.info(
-        `Terminal transition on #${num}: removed "${config.triggerLabel}", added "${config.lifecycleLabels.prApproved}" (work already merged to ${config.baseBranch})`,
+        `Terminal transition on #${num}: removed "${config.triggerLabel}", added "${next}" (work already merged to ${config.baseBranch})`,
       );
       return true;
     } catch (err) {
@@ -741,9 +744,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * Deliberately never applies `ready for prod release` — the most this can do is
    * restore the issue to the state a healthy review run would have left it in.
    */
-  private deadZoneResolve(config: RepoConfig, issueNumber: number, verdict: "pass" | "fail", logger: Logger): boolean {
+  private deadZoneResolve(config: RepoConfig, issueNumber: number, verdict: "pass" | "fail" | "merged", logger: Logger): boolean {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
-    const nextLabel = config.lifecycleLabels[verdict === "pass" ? "prApproved" : "prPendingActions"];
+    // "merged": no verdict here — hand the issue to the verify stage (EM#441).
+    const nextLabel = config.lifecycleLabels[verdict === "pass" ? "prApproved" : verdict === "merged" ? "prMerged" : "prPendingActions"];
     try {
       // Remove only what is actually present. `gh` errors on removing an absent
       // label, and since the dead zone covers `pr pending actions` as well as
