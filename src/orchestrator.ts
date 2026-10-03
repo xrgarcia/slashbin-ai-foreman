@@ -1306,7 +1306,7 @@ async function tryBatchImplementation(
   // drops out of it has stopped waiting, which is how an observer clears it.
   // A recorded branch divergence holds everything else back too (foreman#44).
   const waitingSet = (block: BranchBlock | undefined) => [
-    ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0] })),
+    ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0], skipped: true })),
     ...(block ? handOff.map((n) => ({ item: itemOf(repoConfig, n), reason: divergenceReason(block) })) : []),
   ];
   await notifyWaiting(repoConfig.githubRepo, waitingSet(repoState.branchBlock), repoLogger);

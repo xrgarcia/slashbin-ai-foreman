@@ -97,7 +97,7 @@ const WHEN = {
   releaseClosed: "That release pull request is closed without merging; the task stays in review until the next one.",
   backoffPause: "A GitHub or Claude limit pauses the build in progress.",
   backoffResume: "The build in progress resumes after that limit clears.",
-  waiting: "The Foreman holds the issue back this cycle (a back-off after a skip, an occupied branch). Written once per reason, not once per cycle.",
+  waiting: "The Foreman holds the issue back this cycle (an occupied branch, a branch divergence). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner.",
   resumed: "An issue the Foreman had moved to blocked is no longer held back.",
   implementFinished: "The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason).",
   implementFailed: "The build session for the issue fails.",
@@ -259,7 +259,8 @@ An issue that needs a person goes to the \`blocked\` stage: the source labels it
 or the Foreman declines it or runs out of revision retries (\`blocked\` step). It is held by
 the stage's owner (\`board.blocked\`), with the reason as its unblock descriptor's action,
 prefixed \`${FOREMAN_BLOCKED_PREFIX.trim()}\`, and the stage label \`blocked\`. It stays there until the issue
-moves on (the Foreman picks it up again, or its labels change).
+moves on (the Foreman picks it up again, or its labels change) — including through a skip's
+back-off, which keeps it with that owner rather than turning it into a \`waiting\` hold.
 
 The Foreman also uses the \`blocked\` status for a hold that is not a person's to clear: an
 issue it is holding back right now (\`waiting\`). Paperclip only accepts \`blocked\` with an unblock descriptor, so the
