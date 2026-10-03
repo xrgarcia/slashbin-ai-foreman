@@ -170,6 +170,20 @@ export async function reportWorkBlocked(
   enqueue("onBlocked", [item, reason, repoConfig, logger], logger);
 }
 
+/**
+ * `item` moved `from` → `to` and the source already shows it (a review agent
+ * wrote the outcome label itself). Observers only: the source is not written.
+ */
+export async function notifyObserversState(
+  item: WorkItem,
+  from: PriorState,
+  to: WorkState,
+  repoConfig: RepoConfig,
+  logger: Logger,
+): Promise<void> {
+  enqueue("onState", [item, from, to, repoConfig, logger], logger);
+}
+
 /** The feature PR delivering `item` merged to the base branch. Observers only. */
 export async function notifyObserversMerged(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
   enqueue("onMerged", [item, repoConfig, logger], logger);
