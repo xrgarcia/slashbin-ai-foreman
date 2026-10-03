@@ -17,6 +17,7 @@ import {
   getPRCheckVerdict,
   countCiBouncesSinceReview,
   bounceForRedCI,
+  commentOnIssue,
   MAX_CI_BOUNCES,
   getReferencedIssuesFromOpenPR,
   findReadyForProdIssues,
@@ -42,7 +43,7 @@ import {
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { dispatchStages, isCustomStage, type CustomStage, type StageResult } from "./stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
-import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch } from "./reconciler.js";
+import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch, type BranchDivergence } from "./reconciler.js";
 import {
   verifyPRExists,
   findStuckMergedIssues,
@@ -55,12 +56,79 @@ import {
   type ReviewOutcome,
 } from "./github.js";
 import type { ReviewTrailer } from "./agent.js";
-import { loadRepoState, saveRepoState } from "./state.js";
+import { loadRepoState, saveRepoState, type BranchBlock } from "./state.js";
 import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
 
 const MAX_RETRIES = 2;
 
 /** The work item a repo-scoped issue number names. */
+/** One line: why a diverged feature branch holds an item back. */
+function divergenceReason(block: BranchBlock): string {
+  return `${block.featureBranch} diverged from ${block.baseBranch} (${block.ahead} ahead, ${block.behind} behind) — a person must reconcile it`;
+}
+
+/** The comment each held-back issue gets, once per divergence episode. */
+export function divergenceNotice(repoConfig: RepoConfig, block: BranchBlock): string {
+  const { featureBranch: f, baseBranch: b } = block;
+  return [
+    "<!-- foreman:branch-diverged -->",
+    `**The Foreman has stopped implementing on \`${repoConfig.githubRepo}\`: \`${f}\` has diverged from \`${b}\` (${block.ahead} ahead, ${block.behind} behind).**`,
+    "",
+    "This issue is approved and waiting. Building on a diverged branch would build an unknown tree, and the Foreman does not resolve divergence itself. It resumes on the first cycle after the branch is reconciled. This is the only notice for this episode.",
+    "",
+    "To reconcile, a person decides how — for example:",
+    "",
+    "```",
+    `git fetch origin && git checkout ${f} && git merge origin/${b} && git push origin ${f}`,
+    "```",
+  ].join("\n");
+}
+
+/**
+ * Record a diverged feature branch and announce it once per episode
+ * (foreman#44). The first sighting warns; later cycles are debug. Each item
+ * still waiting gets one comment per episode — an item approved mid-episode
+ * gets its own when it first appears. A new merge base is a new episode.
+ */
+async function announceDivergence(
+  repoConfig: RepoConfig,
+  waiting: number[],
+  divergence: BranchDivergence,
+  logger: Logger,
+): Promise<BranchBlock> {
+  const state = loadRepoState(repoConfig.name);
+  const prior = state.branchBlock;
+  const mergeBase = divergence.mergeBase ?? "";
+  const same = !!prior && prior.mergeBase === mergeBase
+    && prior.featureBranch === repoConfig.featureBranch && prior.baseBranch === repoConfig.baseBranch;
+  const block: BranchBlock = same
+    ? { ...prior!, ahead: divergence.ahead ?? prior!.ahead, behind: divergence.behind ?? prior!.behind }
+    : {
+      featureBranch: repoConfig.featureBranch, baseBranch: repoConfig.baseBranch, mergeBase,
+      ahead: divergence.ahead ?? 0, behind: divergence.behind ?? 0, since: new Date().toISOString(), announced: [],
+    };
+  const fresh = waiting.filter((n) => !block.announced.includes(n));
+  if (!same) {
+    logger.warn(
+      `Implementation on ${repoConfig.name} stopped — ${divergenceReason(block)}. Announcing on ${fresh.map((n) => `#${n}`).join(", ") || "no waiting issue"}; this is the only warning for this episode`,
+    );
+  } else {
+    logger.debug(`Implementation on ${repoConfig.name} still stopped — ${divergenceReason(block)}`);
+  }
+  for (const n of fresh) {
+    try {
+      commentOnIssue(repoConfig, n, divergenceNotice(repoConfig, block));
+      block.announced.push(n);
+    } catch (err) {
+      // Not recorded as announced, so the next cycle tries again.
+      logger.warn(`Could not announce the divergence on #${n}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
+  }
+  state.branchBlock = block;
+  saveRepoState(repoConfig.name, state);
+  return block;
+}
+
 function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {
   return { issueNumber, repo: repoConfig.githubRepo };
 }
@@ -1219,11 +1287,12 @@ async function tryBatchImplementation(
   }
   // The repo's whole waiting set, every cycle that reaches here: an issue that
   // drops out of it has stopped waiting, which is how an observer clears it.
-  await notifyWaiting(
-    repoConfig.githubRepo,
-    stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0] })),
-    repoLogger,
-  );
+  // A recorded branch divergence holds everything else back too (foreman#44).
+  const waitingSet = (block: BranchBlock | undefined) => [
+    ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0] })),
+    ...(block ? handOff.map((n) => ({ item: itemOf(repoConfig, n), reason: divergenceReason(block) })) : []),
+  ];
+  await notifyWaiting(repoConfig.githubRepo, waitingSet(repoState.branchBlock), repoLogger);
   const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
   if (actionableIssues.length === 0) {
     if (failures > 0) failureCount.set(repoName, 0);
@@ -1257,12 +1326,23 @@ async function tryBatchImplementation(
   // feature merge. Fast-forward only: an in-flight feature PR (features ahead)
   // is the normal state and is left alone, and a true divergence is reported
   // rather than resolved. See fastForwardFeatureBranch for the full rationale.
-  const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger);
+  const divergence: BranchDivergence = {};
+  const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger, divergence);
   if (ffOutcome === "diverged") {
-    repoLogger.warn(
-      `Skipping ${repoName} implementation — ${repoConfig.featureBranch} diverged from ${repoConfig.baseBranch}; implementing on it would build an unknown tree`,
-    );
+    const block = await announceDivergence(repoConfig, handOff, divergence, repoLogger);
+    await notifyWaiting(repoConfig.githubRepo, waitingSet(block), repoLogger);
     return null;
+  }
+  // "unknown" proves nothing either way, so a recorded block stands.
+  if (ffOutcome !== "unknown" && repoState.branchBlock) {
+    const cleared = loadRepoState(repoName);
+    delete cleared.branchBlock;
+    saveRepoState(repoName, cleared);
+    repoState.branchBlock = undefined;
+    repoLogger.info(
+      `${repoConfig.featureBranch} is reconciled with ${repoConfig.baseBranch} — implementation on ${repoName} resumes`,
+    );
+    await notifyWaiting(repoConfig.githubRepo, waitingSet(undefined), repoLogger);
   }
 
   // Invoke the skill — one Claude session implements all approved issues

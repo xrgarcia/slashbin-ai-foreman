@@ -49,6 +49,29 @@ export interface RepoState {
   // branch (different SHA) is a fresh condition and alerts again.
   // Optional for backward compat with state files written before this field existed.
   rejectedBranches?: Record<string, string>;
+  // Set while the feature branch has diverged from its base. Optional for
+  // backward compat with state files written before this field existed.
+  branchBlock?: BranchBlock;
+}
+
+/**
+ * The shared feature branch has diverged from its base, so implementation on
+ * the repo is stopped until a person reconciles it (foreman#44). Recorded so
+ * the stop is announced once per episode — across daemon restarts — and so it
+ * is state anyone can read rather than a log line. Cleared when a later cycle
+ * finds the branch reconciled.
+ */
+export interface BranchBlock {
+  featureBranch: string;
+  baseBranch: string;
+  /** Identifies the episode: unchanged while commits pile up on either side. */
+  mergeBase: string;
+  ahead: number;
+  behind: number;
+  /** ISO timestamp the episode was first seen. */
+  since: string;
+  /** Work items already told about this episode. */
+  announced: number[];
 }
 
 interface PersistedState {
@@ -116,6 +139,7 @@ export function loadRepoState(repoName: string): RepoState {
       skipped: { ...(repo.skipped ?? {}) },
       held: { ...(repo.held ?? {}) },
       rejectedBranches: { ...(repo.rejectedBranches ?? {}) },
+      ...(repo.branchBlock ? { branchBlock: { ...repo.branchBlock, announced: [...repo.branchBlock.announced] } } : {}),
     };
   }
 
