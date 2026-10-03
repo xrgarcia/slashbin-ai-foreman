@@ -1924,6 +1924,19 @@ export function bounceForRedCI(
   ], config.repoPath);
 }
 
+/**
+ * Comment on a work item's issue. Used for announcements that belong to the
+ * code host rather than the work source — a diverged feature branch (foreman#44)
+ * is a git fact, so it is said on GitHub whatever source supplied the work.
+ */
+export function commentOnIssue(config: RepoConfig, issueNumber: number, body: string): void {
+  gh([
+    "issue", "comment", String(issueNumber),
+    "--repo", config.githubRepo,
+    "--body", body,
+  ], config.repoPath);
+}
+
 // --- Promotion PR Creation ---
 
 export interface PromotionIssue {

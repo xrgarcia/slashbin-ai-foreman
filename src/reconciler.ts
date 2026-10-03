@@ -139,6 +139,17 @@ export function checkLocalBranchDivergence(
   }
 }
 
+/**
+ * Filled by `fastForwardFeatureBranch` when it returns "diverged". The merge
+ * base identifies the episode: commits added on either side keep it, and only
+ * a reconcile (or a rewrite) moves it.
+ */
+export interface BranchDivergence {
+  ahead?: number;
+  behind?: number;
+  mergeBase?: string;
+}
+
 export type FastForwardOutcome =
   | "advanced"       // features moved up to base; origin updated
   | "already-current"
@@ -179,6 +190,7 @@ export type FastForwardOutcome =
 export function fastForwardFeatureBranch(
   config: RepoConfig,
   logger: Logger,
+  divergence?: BranchDivergence,
 ): FastForwardOutcome {
   const { repoPath, baseBranch, featureBranch } = config;
   if (!baseBranch || !featureBranch || baseBranch === featureBranch) {
@@ -199,10 +211,18 @@ export function fastForwardFeatureBranch(
     if (Number.isNaN(ahead) || Number.isNaN(behind)) return "unknown";
 
     if (ahead > 0 && behind > 0) {
-      logger.warn(
+      // Debug, not warn: the orchestrator announces a divergence once per
+      // episode (foreman#44). A warn here repeated every cycle — 837 lines in
+      // a week that nobody read.
+      logger.debug(
         `${featureBranch} has diverged from ${baseBranch} (${ahead} ahead, ${behind} behind) — not fast-forwarding. A human decides this one.`,
         { repo: config.name, ahead, behind },
       );
+      if (divergence) {
+        divergence.ahead = ahead;
+        divergence.behind = behind;
+        divergence.mergeBase = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+      }
       return "diverged";
     }
     if (ahead > 0) return "work-in-flight";
