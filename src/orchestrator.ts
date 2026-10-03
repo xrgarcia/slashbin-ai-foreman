@@ -1044,6 +1044,8 @@ async function tryCustomStage(
         message: `${outcome === "blocked" ? "⛔" : "⚠️"} Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"}. Later stages are held for this repo until \`${repoConfig.featureBranch}\` moves.`,
         level: outcome === "blocked" ? "warn" : "error",
       });
+      const why = `stage "${stage.id}" ${outcome} on PR #${pr.number}: ${result.reason ?? "no reason given"}`;
+      for (const n of pr.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, stageLogger);
     }
     return { outcome, reason: result.reason, ran: true };
   } finally {
@@ -1616,6 +1618,8 @@ async function tryBatchImplementation(
       failureCount.set(repoName, newCount);
       if (newCount >= MAX_RETRIES) {
         failureHitMaxAt.set(repoName, cycleNumber);
+        const why = `implementation failed ${newCount}× — paused until cooldown: ${result.error || "unknown"}`;
+        for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
       }
       lastFailureReason.set(repoName, result.error || "unknown");
       repoLogger.warn(`Batch implementation failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
@@ -1719,6 +1723,9 @@ async function tryRevision(
               `EM: rule on it. Last reason: ${result.noCommitReason ?? "not given"}`,
             level: "error",
           });
+          // Stopped for a person: the board must say so, not leave it "in review".
+          const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule. Last reason: ${result.noCommitReason ?? "not given"}`;
+          for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
           return null;
         }
 
@@ -2026,7 +2033,11 @@ async function tryReview(
     if (result.upstreamLimit || isUpstreamBlocked("github")) return false;
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
-    if (newCount >= MAX_RETRIES) reviewFailureHitMaxAt.set(repoName, cycleNumber);
+    if (newCount >= MAX_RETRIES) {
+      reviewFailureHitMaxAt.set(repoName, cycleNumber);
+      const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused until cooldown: ${result.error}`;
+      for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
+    }
     reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
     return false;
