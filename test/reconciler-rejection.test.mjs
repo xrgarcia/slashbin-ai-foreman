@@ -45,8 +45,10 @@ test("new commits on top of a rejection still reconcile, but say the bundle is d
 
 test("git failures carry stderr and distinguish a shutdown from a fault", () => {
   assert.match(reconciler, /function formatGitError/, "no git error formatter");
-  assert.match(reconciler, /cancelled: signal === "SIGTERM" \|\| signal === "SIGINT"/,
-    "a signal-killed fetch must be reported as cancelled, not failed");
+  assert.match(reconciler, /cancelled: !timedOut && \(signal === "SIGTERM" \|\| signal === "SIGINT"\)/,
+    "a signal-killed fetch must be reported as cancelled, not failed — unless our own timeout killed it");
+  assert.match(reconciler, /timedOut = e\?\.code === "ETIMEDOUT"/,
+    "Node's execFileSync timeout also sends SIGTERM; ETIMEDOUT is what tells it apart (foreman#61)");
   const fetchCatch = reconciler.slice(reconciler.indexOf('git(["fetch", "origin"]'));
   assert.match(fetchCatch.slice(0, 900), /if \(failure\.cancelled\)/,
     "the fetch catch must branch on cancellation");

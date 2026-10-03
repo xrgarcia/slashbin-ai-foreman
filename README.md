@@ -135,6 +135,7 @@ For a single repo, set fields at the root level:
 | `revisionSkillOverlayPath` | — | — | Same, for the revise prompt |
 | `prompt` | `AI_AGENT_PROMPT` | *(built-in)* | Custom prompt template |
 | `baseBranch` | `AI_AGENT_BASE_BRANCH` | `develop` | PR target branch |
+| `productionBranch` | `AI_AGENT_PRODUCTION_BRANCH` | `main` | Branch promotion PRs target; sync PRs merge it back into `baseBranch` |
 | `featureBranch` | `AI_AGENT_FEATURE_BRANCH` | `features` | Branch to commit to |
 | `maxTurns` | `AI_AGENT_MAX_TURNS` | `30` | Max agent turns per issue |
 | `maxDurationMs` | `AI_AGENT_MAX_DURATION_MS` | `1800000` (30 min) | Max implementation time |
@@ -188,7 +189,7 @@ Two consequences worth knowing:
 
 ### Multi-repo mode
 
-Use the `repos` array to manage multiple repos in a single daemon. Each repo entry may override any of: `triggerLabel`, `baseBranch`, `featureBranch`, `skillPath`, `revisionSkillPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs`. Anything not specified on the entry falls back to the top-level value (or its default).
+Use the `repos` array to manage multiple repos in a single daemon. Each repo entry may override any of: `triggerLabel`, `baseBranch`, `featureBranch`, `productionBranch`, `skillPath`, `revisionSkillPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs`. Anything not specified on the entry falls back to the top-level value (or its default).
 
 ```json
 {
@@ -226,7 +227,7 @@ Use the `repos` array to manage multiple repos in a single daemon. Each repo ent
 
 In the example above, `console` and `api` get the top-level `maxTurns: 30` and `maxDurationMs: 1800000`. `big-feature-repo` overrides both to allow longer Claude sessions for larger features in that repo only.
 
-**Resolution order** for `maxTurns` / `maxDurationMs` (and `triggerLabel`, `baseBranch`, `featureBranch`):
+**Resolution order** for `maxTurns` / `maxDurationMs` (and `triggerLabel`, `baseBranch`, `featureBranch`, `productionBranch`):
 
 1. Per-repo entry value (most specific)
 2. Top-level `.ai-agent.json` value (or `AI_AGENT_*` env var, which overrides the file value)
