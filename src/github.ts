@@ -1078,8 +1078,15 @@ export function findPRsNeedingReview(
     const pr = prs[0];
 
     if (hasFreshReview(config, pr.number, reviewerLogin, logger)) {
-      logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin ?? "reviewer"} review — skipping re-review`);
-      return null;
+      // A revision that declares "no code change" returns the issues to review
+      // WITHOUT moving the head, so by commit time the old verdict still looks
+      // current and the PR would sit unreviewed forever (worker#694, 2026-10-03).
+      // The relabel is the reply; a verdict older than it is not current.
+      if (!returnedToReviewSinceVerdict(config, pr.number, reviewable.map((i) => i.number), reviewerLogin, logger)) {
+        logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin ?? "reviewer"} review — skipping re-review`);
+        return null;
+      }
+      logger.info(`${config.name}: PR #${pr.number} was returned to review after its last verdict with no new commit — re-reviewing`);
     }
 
     logger.info(
@@ -1832,6 +1839,49 @@ function readFreshReview(
   } catch (err) {
     logger.debug(`hasFreshReview lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
+  }
+}
+
+/**
+ * True when a linked issue was labelled `prUnderReview` AFTER the reviewer's
+ * latest CHANGES_REQUESTED verdict — the reviser answered without a commit.
+ *
+ * Only a CHANGES_REQUESTED verdict qualifies: an APPROVED PR waiting on merge
+ * is genuinely current. In normal flow CHANGES_REQUESTED moves the issues to
+ * `prPendingActions`, which `findPRsNeedingReview` excludes, so this lookup
+ * runs only in the stuck state it exists for. Lookup failure → false: the
+ * pre-existing behaviour, never a spurious review.
+ */
+function returnedToReviewSinceVerdict(
+  config: RepoConfig,
+  prNumber: number,
+  issueNumbers: number[],
+  reviewerLogin: string | undefined,
+  logger: Logger,
+): boolean {
+  try {
+    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+    };
+    const verdicts = (data.reviews ?? [])
+      .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+      .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
+    const last = verdicts[verdicts.length - 1];
+    if (!last || last.state !== "CHANGES_REQUESTED") return false;
+    const verdictMs = new Date(last.submittedAt!).getTime();
+    const label = config.lifecycleLabels.prUnderReview;
+    for (const n of issueNumbers) {
+      // One timestamp per line: --paginate emits one --jq result per page.
+      const times = gh([
+        "api", `repos/${config.githubRepo}/issues/${n}/events`, "--paginate",
+        "--jq", `.[] | select(.event == "labeled" and .label.name == ${JSON.stringify(label)}) | .created_at`,
+      ], config.repoPath).split("\n").filter(Boolean);
+      if (times.some((t) => new Date(t).getTime() > verdictMs)) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.debug(`returnedToReviewSinceVerdict lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }
 
