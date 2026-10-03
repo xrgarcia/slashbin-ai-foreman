@@ -33,6 +33,7 @@ import {
   findOpenDependencyBatchIssue,
   tryMergeSyncPR,
   countBranchDiffFiles,
+  isPrOpen,
   stripReadyForProdLabel,
   findOpenFeaturePR,
   type PendingRevisionInfo,
@@ -999,22 +1000,46 @@ export async function runCycle(
  *   notice the cause is gone and admit on the next cycle instead of waiting
  *   out the full 30-min back-off.
  *
+ * - "an open PR #N holds the feature branch" (foreman#50) — the session will not
+ *   push a second issue onto a branch another PR owns. Cleared once #N is no
+ *   longer open. The most common skip in the state file: Slashbin-console #1205
+ *   sat out its window 16+ minutes after #1204 merged, Slashbin-io-docs #412 33.
+ *
  * Add new transient patterns here as they are identified. Durable reasons
  * (issue-body says "investigation only", "no immediate code change") MUST
  * stay caught by the default `return false` — those don't go away on retry.
+ * Unknown stays deny: a PR the snapshot cannot vouch for keeps the back-off.
  */
 function isResolvedTransientSkip(
   reason: string,
-  repoPath: string,
+  repoConfig: RepoConfig,
   logger: Logger,
 ): boolean {
   const divergenceMatch = reason.match(/diverged from origin\/(\S+?)\b/i);
   if (divergenceMatch) {
     const branch = divergenceMatch[1];
-    const div = checkLocalBranchDivergence(repoPath, branch, logger);
+    const div = checkLocalBranchDivergence(repoConfig.repoPath, branch, logger);
     return div !== null && div.ahead === 0 && div.behind === 0;
   }
+  const prNumber = prBlockingSkip(reason);
+  if (prNumber !== null) {
+    return isPrOpen(repoConfig.githubRepo, prNumber, repoConfig.repoPath) === false;
+  }
   return false;
+}
+
+/**
+ * The PR a skip reason says is holding the branch, or null. The reason is the
+ * agent's own words, so match the shapes it uses — "occupied by open PR #N",
+ * "open features→develop PR #N … must merge or close" — and require the word
+ * that makes the PR the BLOCKER, so a reason that merely cites a PR is not read
+ * as one. Exported for tests.
+ */
+export function prBlockingSkip(reason: string): number | null {
+  const m = reason.match(/\b(?:occupied|held|blocked)\b[^.;]*?\bPR #(\d+)/i)
+    ?? reason.match(/\bopen\b[^.;#]*?\bPR #(\d+)/i)
+    ?? reason.match(/\bPR #(\d+)\b[^.;]*?\b(?:must merge|is (?:still )?open|still open)/i);
+  return m ? Number(m[1]) : null;
 }
 
 /** Hard ceiling on the escalating skip back-off — 24h. Beyond this the retry rate
@@ -1164,7 +1189,7 @@ async function tryBatchImplementation(
     if (!entry) return true;
     const age = now - new Date(entry.lastSkippedAt).getTime();
     if (Number.isNaN(age) || age >= backoffWindowFor(entry.skipCount, skipBackoffMs)) return true;
-    if (isResolvedTransientSkip(entry.reason, repoConfig.repoPath, repoLogger)) {
+    if (isResolvedTransientSkip(entry.reason, repoConfig, repoLogger)) {
       resolvedTransient.push({ n, reason: entry.reason });
       return true;
     }
