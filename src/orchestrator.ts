@@ -6,8 +6,9 @@ import type { SessionEvent, WorkItem } from "./adapters.js";
 import {
   selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked,
   notifyObserversMerged, notifyObserversPromoted,
-  notifySession, notifyWaiting, notifyPromotionStall,
+  notifySession, notifyWaiting, notifyPromotionStall, notifyRelease,
 } from "./work-source.js";
+import { trackRelease } from "./release-tracker.js";
 import {
   GitHubIssueConnector,
   discoveryBatch,
@@ -22,6 +23,7 @@ import {
   getReferencedIssuesFromOpenPR,
   findReadyForProdIssues,
   findOpenPromotionPR,
+  getPrState,
   createPromotionPR,
   updatePromotionPR,
   checkBranchDrift,
@@ -2108,6 +2110,26 @@ async function tryPromotion(
     return null;
   }
 
+  // Follow the release PR from open to merged, so the items it carries show as
+  // waiting on it and then as done (Slashbin-console#1185 sat "in progress"
+  // behind release PR #1206). Before the ready-for-prod read: a release PR
+  // stays open, and merges, after its issues have lost that label.
+  await trackRelease({
+    repo: repoConfig.githubRepo,
+    productionBranch: repoConfig.productionBranch,
+    saved: loadRepoState(repoName).release,
+    findOpenRelease: () =>
+      findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger),
+    releaseState: (pr) => getPrState(repoConfig.githubRepo, pr, repoConfig.repoPath, promoLogger),
+    save: (v) => {
+      const st = loadRepoState(repoName);
+      if (v) st.release = v;
+      else delete st.release;
+      saveRepoState(repoName, st);
+    },
+    emit: (event) => notifyRelease(event, promoLogger),
+  });
+
   const issues = findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
   );
@@ -2222,6 +2244,12 @@ async function tryPromotion(
     );
     // Confirmed in main: the promotion these issues were waiting for happened.
     await notifyObserversOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
+    await notifyRelease({
+      repo: repoConfig.githubRepo,
+      state: "merged",
+      issues: issues.map((i) => itemOf(repoConfig, i.number)),
+      productionBranch: repoConfig.productionBranch,
+    }, promoLogger);
     return null;
   }
   if (diffFiles < 0) {

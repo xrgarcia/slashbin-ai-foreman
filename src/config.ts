@@ -70,10 +70,10 @@ const paperclipConfigSchema = z.object({
     .default("source: {repo}#{N}"),
   // Per-bucket override of the Paperclip status name. Unset = the bucket names.
   statusMap: z.partialRecord(z.enum(PAPERCLIP_STATUS_BUCKETS), z.string().min(1)).optional(),
-  // Keep one task, held by the Foreman's agent, whose description always shows what the Foreman is doing now: running sessions, waiting issues, stalled promotions, upstream back-offs.
-  liveTask: z.boolean().default(true),
-  // The title of that task.
-  liveTaskTitle: z.string().min(1).default("Foreman — live"),
+  // File every task under a Paperclip project for its repo, created on first use, and backfill the project on rows that lack it.
+  projects: z.boolean().default(true),
+  // The project name for a repo: {name} is the repo name (Slashbin-console), {repo} is owner/name.
+  projectNameFormat: z.string().min(1).default("{name}"),
   // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
   agentStatus: z.boolean().default(true),
 });

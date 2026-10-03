@@ -35,8 +35,7 @@ for (const f of [CONFIG_SRC, MIRROR_SRC]) if (!existsSync(f)) fail(`${f} not fou
 for (const f of [builtConfig, builtMirror]) if (!existsSync(f)) fail(`${f} not found — run \`npm run build\` first.`);
 
 const { configSchema } = await import(builtConfig);
-const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS, PAPERCLIP_TASK_TITLE_FORMAT, PAPERCLIP_LIVE_KEY_FORMAT } = await import(builtMirror);
-if (!PAPERCLIP_LIVE_KEY_FORMAT) fail("the built mirror exports no PAPERCLIP_LIVE_KEY_FORMAT.");
+const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS, PAPERCLIP_TASK_TITLE_FORMAT } = await import(builtMirror);
 const { toJSONSchema } = await import("zod");
 
 // --- The schema ---
@@ -89,7 +88,10 @@ const WHEN = {
   approved: "The review approved the pull request.",
   blocked: "The Foreman declines or cannot finish the issue (with its reason).",
   merged: "The pull request is merged to the base branch.",
-  promoted: "The merged work is handed to promotion to production.",
+  releaseWaiting: "The issue is in an open release pull request (base branch → production branch). Written once per release pull request.",
+  released: "That release pull request merges to the production branch.",
+  inProduction: "Promotion finds the issue's work already on the production branch, with no release pull request left to merge.",
+  releaseClosed: "That release pull request is closed without merging; the task stays in review until the next one.",
   backoffPause: "A GitHub or Claude limit pauses the build in progress.",
   backoffResume: "The build in progress resumes after that limit clears.",
   waiting: "The Foreman holds the issue back this cycle (a back-off after a skip, an occupied branch). Written once per reason, not once per cycle.",
@@ -196,9 +198,14 @@ The Foreman moves a task between six status buckets. Each is sent to Paperclip u
 |---|---|---|
 ${statusRows.join("\n")}
 
-\`done\` and \`cancelled\` follow the GitHub issue closing, which the Foreman never does: they are
-left to whatever else syncs GitHub issues into the same company. Merged and promoted are
-therefore notes, not statuses, and so is an agent declining an issue (\`blocked\` step).
+Merging to the base branch is a note, not a status: the work is not in production yet. Once
+the issue is in a release pull request (base branch → production branch) the task goes to
+\`in_review\` with a note naming that pull request, and to \`done\` when it merges. The Foreman
+reads the release pull request each cycle from the GitHub state it already holds; when it
+leaves the open set, one GitHub read says whether it merged or was closed. The pull request
+being waited on is saved per repo, so a merge that lands while the Foreman is down is seen at
+the next start. \`cancelled\` is left to whatever else syncs GitHub issues into the same
+company, and an agent declining an issue is a note (\`blocked\` step).
 
 \`blocked\` is the one status no GitHub label carries: it means the Foreman is holding the issue
 back right now (\`waiting\`). Paperclip only accepts \`blocked\` with an unblock descriptor, so the
@@ -230,23 +237,25 @@ alone; a task reassigned by hand in Paperclip goes back to the Foreman at its ne
 change. The agent is registered with every wake path off (no heartbeat, no wake-on-demand), so
 assigning a task to it never makes Paperclip start a run.
 
+## Projects
+
+With \`projects\` on, every task is filed under a Paperclip project for its repo, named by
+\`projectNameFormat\` (default ${code(defaults.projectNameFormat)}): \`{name}\` is the repo's
+name (\`Slashbin-console\`), \`{repo}\` its full \`owner/name\`. The project is looked up by name,
+archived ones included, and created only when none has that name, so renaming the format
+creates new projects rather than renaming old ones. A task the Foreman creates carries the
+project from the start; at startup, and at every refresh of its task list after, the Foreman
+sets the project on any task with an identity line (its own or another tool's) that lacks it.
+
 ## Live activity
 
-Per-issue tasks say what happened to each issue. Two more surfaces say what the Foreman is doing
-right now, across every repo:
+The board is the queue: each task's status says what the Foreman is doing with it — building
+(\`in_progress\`), held back with the reason on the task (\`blocked\`), in review or waiting on its
+release (\`in_review\`), shipped (\`done\`). With \`agentStatus\` on, the Foreman's agent is
+\`running\` while any session runs and \`idle\` otherwise, written only on a change.
 
-- **The live task.** With \`liveTask\` on, the Foreman keeps one task, titled \`liveTaskTitle\` and
-  held by its agent, whose description lists the sessions running now (repo, build / revise /
-  review, issues, pull request, reviewer, start time), every issue waiting and why, every repo
-  whose promotion to production is stalled and why, and any upstream back-off. Its first
-  description line is ${code(PAPERCLIP_LIVE_KEY_FORMAT)}, which is how a restarted Foreman finds
-  it again. It is updated in place, only when what it shows changes, and never commented on.
-- **The agent's status.** With \`agentStatus\` on, the Foreman's agent is \`running\` while any
-  session runs and \`idle\` otherwise, written only on a change.
-
-Promotion stalls appear only here: a repo whose base branch carries changed files that no
-issue marked ready for release covers is stalled, not idle, and the per-issue tasks cannot show
-that.
+Earlier versions kept one extra summary task held by the agent; the Foreman cancels it at
+startup.
 
 ## When Paperclip is down
 

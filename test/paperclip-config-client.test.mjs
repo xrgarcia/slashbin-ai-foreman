@@ -40,8 +40,8 @@ test("no paperclip block: mirror off, every default applied", () => {
     url: "http://127.0.0.1:3100",
     agentName: "Foreman",
     identityKeyFormat: "source: {repo}#{N}",
-    liveTask: true,
-    liveTaskTitle: "Foreman — live",
+    projects: true,
+    projectNameFormat: "{name}",
     agentStatus: true,
   });
   assert.equal(paperclip.statusMap, undefined);

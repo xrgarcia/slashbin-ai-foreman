@@ -132,12 +132,15 @@ async function main(): Promise<void> {
   // source. Read once at startup; a config reload does not add or drop it.
   if (config.paperclip.enabled) {
     if (config.paperclip.agentId && config.paperclip.companyId) {
-      addObserver(new PaperclipMirror(
+      const mirror = new PaperclipMirror(
         new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId }),
         config.paperclip,
         secretValues(config.sessionEnv),
         logger,
-      ));
+      );
+      addObserver(mirror);
+      // Housekeeping off the observer queue: project backfill, retiring the old live task.
+      mirror.start();
       logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
     } else {
       logger.info("paperclip mirror enabled but no agentId configured; run npm run paperclip:register");

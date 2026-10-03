@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { SavedRelease } from "./release-tracker.js";
 
 interface FailedIssue {
   count: number;
@@ -52,6 +53,10 @@ export interface RepoState {
   // Set while the feature branch has diverged from its base. Optional for
   // backward compat with state files written before this field existed.
   branchBlock?: BranchBlock;
+  // The release PR (base → production) this repo's promoted issues wait on, so
+  // its merge is seen even when it lands while the daemon is down. Optional for
+  // backward compat with state files written before this field existed.
+  release?: SavedRelease;
 }
 
 /**

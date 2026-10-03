@@ -12,7 +12,7 @@ const SECRET = { name: "TEST_TOKEN", value: "secret-value-0123456789" };
 const item = { issueNumber: 7, repo: "example/r" };
 const repoConfig = { name: "r", githubRepo: "example/r" };
 
-function fakePaperclip(rows = []) {
+function fakePaperclip(rows = [], projects = []) {
   const calls = [];
   const comments = {};
   const fetch = async (url, init = {}) => {
@@ -24,6 +24,12 @@ function fakePaperclip(rows = []) {
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
       return ok(rows.slice(off, off + Number(u.searchParams.get("limit"))));
+    }
+    if (method === "GET" && u.pathname === `/api/companies/${CID}/projects`) return ok(projects);
+    if (method === "POST" && u.pathname === `/api/companies/${CID}/projects`) {
+      const p = { id: `proj-${projects.length + 1}`, ...body };
+      projects.push(p);
+      return ok(p, 201);
     }
     if (method === "POST" && u.pathname === `/api/companies/${CID}/issues`) {
       const r = { id: `row-${rows.length + 1}`, ...body };
@@ -64,7 +70,7 @@ function fakePaperclip(rows = []) {
     }
     return ok({}, 404);
   };
-  return { rows, calls, comments, fetch };
+  return { rows, projects, calls, comments, fetch };
 }
 
 function logger() {
@@ -110,7 +116,7 @@ test("claim adopts the row another writer created; no duplicate", async () => {
   assert.equal(fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues")).length, 0);
 });
 
-test("status per step; merged, promoted and blocked are notes only; secrets redacted", async () => {
+test("status per step; merged and blocked are notes only, promoted writes nothing; secrets redacted", async () => {
   const fake = fakePaperclip();
   const { mirror } = mirrorOn(fake);
   await mirror.onClaim(item, repoConfig, logger());
@@ -137,7 +143,6 @@ test("status per step; merged, promoted and blocked are notes only; secrets reda
     "approved",
     "blocked: bad [REDACTED:TEST_TOKEN]",
     "merged",
-    "promoted to production",
   ]);
 });
 
@@ -242,13 +247,13 @@ test("waiting: blocked under its statusMap name with the reason as the unblock a
 
 test("a note never moves the row: blocked stays blocked, done stays done", async () => {
   const fake = fakePaperclip([row("r7", 7), row("r8", 8, { status: "done" })]);
-  const { mirror } = mirrorOn(fake, { liveTask: false, agentStatus: false });
+  const { mirror } = mirrorOn(fake, { agentStatus: false });
   await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #4" }], logger());
   assert.equal(fake.rows[0].status, "blocked", "the waiting note reopened the row it had just blocked");
   assert.deepEqual(fake.comments.r7, ["waiting: occupied by PR #4"]);
-  await mirror.onPromoted({ issueNumber: 8, repo: "example/r" }, repoConfig, logger());
-  assert.equal(fake.rows[1].status, "done", "the promoted note reopened a done row");
-  assert.deepEqual(fake.comments.r8, ["promoted to production"]);
+  await mirror.onMerged({ issueNumber: 8, repo: "example/r" }, repoConfig, logger());
+  assert.equal(fake.rows[1].status, "done", "the merged note reopened a done row");
+  assert.deepEqual(fake.comments.r8, ["merged"]);
 });
 
 test("resume touches only rows this agent blocked in this repo", async () => {
@@ -264,27 +269,86 @@ test("resume touches only rows this agent blocked in this repo", async () => {
   assert.deepEqual(fake.comments.mine, ["resumed: no longer waiting"]);
 });
 
-test("liveTask and agentStatus off: sessions write notes only", async () => {
+test("agentStatus off: sessions write notes only, and no summary task", async () => {
   const fake = fakePaperclip([row("r7", 7)]);
-  const { mirror } = mirrorOn(fake, { liveTask: false, agentStatus: false });
+  const { mirror } = mirrorOn(fake, { agentStatus: false });
   await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", items: [item], pr: 3 }, logger());
-  await mirror.onPromotionStall("example/r", "stalled", logger());
   assert.deepEqual(fake.comments.r7, ["revision started: PR #3"]);
   assert.equal(fake.rows.length, 1, "no live task");
   assert.ok(!fake.calls.some((c) => c.path.startsWith("/api/agents/")), "no agent update");
 });
 
-test("an implement session drives the agent status and the live task; start has no per-issue note", async () => {
+test("an implement session drives the agent status; start has no per-issue note; no summary task", async () => {
   const fake = fakePaperclip([row("r7", 7)]);
-  const { mirror } = mirrorOn(fake, { liveTask: true, liveTaskTitle: "Live", agentStatus: true });
+  const { mirror } = mirrorOn(fake, { agentStatus: true });
   await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
-  const live = fake.rows.find((r) => r.description.startsWith(`foreman-live: ${AGENT}`));
-  assert.equal(live.title, "Live");
-  assert.equal(live.assigneeAgentId, AGENT);
-  assert.match(live.description, /example\/r: implement #7/);
   await mirror.onSession({ phase: "implement", status: "failed", repo: "example/r", items: [item], detail: "exit 1" }, logger());
   assert.deepEqual(fake.comments.r7, ["implement session failed: exit 1"]);
   const agentCalls = fake.calls.filter((c) => c.path === `/api/agents/${AGENT}`).map((c) => c.body.status);
   assert.deepEqual(agentCalls, ["running", "idle"]);
-  assert.match(live.description, /Running now \(0\)/);
+  assert.equal(fake.rows.length, 1);
+});
+
+// --- release: waiting on the release PR, then done ---
+
+const release = (state, pr, ns) => ({ repo: "example/r", state, pr, productionBranch: "main",
+  issues: ns.map((issueNumber) => ({ issueNumber, repo: "example/r" })) });
+
+test("release open → in_review held by the agent; merged → done and stays done", async () => {
+  const fake = fakePaperclip([row("r7", 7, { assigneeAgentId: null, assigneeUserId: "user-1" })]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onRelease(release("open", 12, [7]), logger());
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.equal(fake.rows[0].assigneeAgentId, AGENT);
+  assert.equal(fake.rows[0].assigneeUserId, null);
+  await mirror.onRelease(release("merged", 12, [7]), logger());
+  assert.equal(fake.rows[0].status, "done");
+  assert.deepEqual(fake.comments.r7, ["waiting on release PR #12 to merge to main", "release PR #12 merged to main"]);
+});
+
+test("release closed unmerged is a note; already in production with no PR is done", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "in_review" }), row("r8", 8)]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onRelease(release("closed", 12, [7]), logger());
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.deepEqual(fake.comments.r7, ["release PR #12 closed without merging; waiting for the next release"]);
+  await mirror.onRelease(release("merged", undefined, [8]), logger());
+  assert.equal(fake.rows[1].status, "done");
+  assert.deepEqual(fake.comments.r8, ["in production (main)"]);
+});
+
+// --- projects: one per repo, backfilled; the old summary task retired ---
+
+test("a created row carries its repo's project, found by name or created once", async () => {
+  const fake = fakePaperclip([], [{ id: "p-old", name: "other" }]);
+  const { mirror } = mirrorOn(fake, { projects: true, projectNameFormat: "{name}" });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onClaim({ issueNumber: 9, repo: "example/r" }, repoConfig, logger());
+  assert.deepEqual(fake.projects.map((p) => p.name), ["other", "r"]);
+  assert.equal(fake.rows[0].projectId, "proj-2");
+  assert.equal(fake.rows[1].projectId, "proj-2");
+});
+
+test("housekeep backfills the project on identity rows and cancels the old live task once", async () => {
+  const live = { id: "live", status: "in_progress", assigneeAgentId: AGENT, description: `foreman-live: ${AGENT}\n\nbody` };
+  const fake = fakePaperclip([row("r7", 7), row("q1", 1, { description: "source: example/q#1", projectId: "p-q" }), live],
+    [{ id: "p-q", name: "q" }]);
+  const { mirror } = mirrorOn(fake, { projects: true, projectNameFormat: "{name}" });
+  await mirror.housekeep();
+  assert.equal(fake.rows[0].projectId, "proj-2");
+  assert.equal(fake.calls.filter((c) => c.method === "PATCH" && c.path === "/api/issues/q1").length, 0, "a row already filed is left alone");
+  assert.equal(live.status, "cancelled");
+  assert.equal(live.projectId, undefined, "the live task is not an issue row");
+  const before = fake.calls.filter((c) => c.method !== "GET").length;
+  await mirror.housekeep();
+  assert.equal(fake.calls.filter((c) => c.method !== "GET").length, before, "a second pass writes nothing");
+});
+
+test("projects off: no project call, no projectId", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { projects: false });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.housekeep();
+  assert.ok(!fake.calls.some((c) => c.path.endsWith("/projects")));
+  assert.equal(fake.rows[0].projectId, undefined);
 });

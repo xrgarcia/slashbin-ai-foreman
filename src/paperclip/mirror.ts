@@ -14,8 +14,12 @@
 // {repo} = owner/name and {N} = the issue number, and created only when no row
 // carries that line. Status is set only where a sync deriving it from GitHub
 // labels would set the same bucket: building → in_progress, any PR-review
-// state → in_review. done / cancelled come from the issue closing, which the
-// Foreman never does, so merged, promoted and blocked are notes only.
+// state → in_review. Merged to the base branch and blocked are notes only.
+//
+// Release: once an item's work is in a release PR (base → production) the row
+// goes to in_review, "waiting on release PR #N", and to done when that PR
+// merges. Promotion used to be a note, so an item waiting only on the release
+// merge read as "in progress" (Slashbin-console#1185 behind PR #1206).
 //
 // The one status no label carries is `blocked`: an issue the Foreman holds
 // back this cycle (a back-off, an occupied branch) is moved to blocked with the
@@ -23,11 +27,13 @@
 // stops waiting. Both are written only on a change — the row's own status and
 // descriptor are the record, so a restart re-derives them instead of repeating.
 //
-// Beside the per-issue rows, one "live" task held by the agent shows the whole
-// Foreman at once (running sessions, waits, stalled promotions, back-offs) and
-// the agent's own status says whether a session is running.
+// The board is the queue: each row's status says what the Foreman is doing
+// with it, and the agent's own status says whether a session is running. Every
+// row is filed under a Paperclip project named for its repo, created on first
+// use; `start()` backfills the project on rows that lack it, and cancels the
+// retired "Foreman — live" summary task.
 
-import type { PriorState, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkState } from "../adapters.js";
+import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkState } from "../adapters.js";
 import { redactAll } from "../agent.js";
 import type { PaperclipConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -55,7 +61,10 @@ export const PAPERCLIP_STEPS = Object.freeze({
   approved: { status: "in_review", note: "approved" },
   blocked: { status: null, note: "blocked: {reason}" },
   merged: { status: null, note: "merged" },
-  promoted: { status: null, note: "promoted to production" },
+  releaseWaiting: { status: "in_review", note: "waiting on release PR #{pr} to merge to {branch}" },
+  released: { status: "done", note: "release PR #{pr} merged to {branch}" },
+  inProduction: { status: "done", note: "in production ({branch})" },
+  releaseClosed: { status: null, note: "release PR #{pr} closed without merging; waiting for the next release" },
   backoffPause: { status: null, note: "paused: {upstream} back-off: {reason}" },
   backoffResume: { status: null, note: "resumed after back-off" },
   waiting: { status: "blocked", note: "waiting: {reason}" },
@@ -80,8 +89,11 @@ export const PAPERCLIP_CREATE_STATUS: Bucket = "todo";
 /** A task's title: {repo} is owner/name, {N} the issue number. */
 export const PAPERCLIP_TASK_TITLE_FORMAT = "{repo}#{N}";
 
-/** The first description line of the live task: one per agent. */
-export const PAPERCLIP_LIVE_KEY_FORMAT = "foreman-live: {agentId}";
+/** The first description line of the retired live task, which `start()` cancels. */
+const LEGACY_LIVE_KEY_FORMAT = "foreman-live: {agentId}";
+
+/** The note that cancels it. */
+const LEGACY_LIVE_NOTE = "retired: the board is the queue now; each task's status shows what the Foreman is doing with it";
 
 /** The step a session event writes on each of its items; implement start is the claim's own note. */
 const SESSION_STEP: Partial<Record<`${SessionEvent["phase"]}:${SessionEvent["status"]}`, PaperclipStep>> = {
@@ -126,19 +138,16 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rowState = new Map<string, string>();
   /** Task id → the repo its identity key names, for rows that key an issue. */
   private readonly rowRepo = new Map<string, string>();
-  /** Repo → the items waiting this cycle, reasons cleaned. */
-  private readonly waiting = new Map<string, ReadonlyArray<WaitingItem>>();
-  /** Repo → why its promotion is stalled. */
-  private readonly stalls = new Map<string, string>();
-  /** Upstream → why it is backed off. */
-  private readonly backoffs = new Map<string, string>();
+  /** Task id → the project id the row carries (null = none), from the last scan. */
+  private readonly rowProject = new Map<string, string | null>();
+  /** Project name → its id, or the lookup in flight, so a name is created once. */
+  private readonly projectIds = new Map<string, Promise<string | null>>();
+  /** True while a housekeeping pass runs, so a slow one is never overlapped. */
+  private housekeeping = false;
   /** Running sessions, by repo + phase + items. */
   private readonly sessions = new Map<string, { event: SessionEvent; since: Date }>();
   /** The agent status last written, so an unchanged one is never re-sent. */
   private agentStatusSent: string | null = null;
-  /** The live task's id, and the body last written to it (without the timestamp line). */
-  private liveId: string | null = null;
-  private liveBody: string | null = null;
   private indexedAt = 0;
   /** Identity keys claimed and not yet moved on by a state change: a repeat claim is a retry. */
   private readonly claimed = new Set<string>();
@@ -195,22 +204,117 @@ export class PaperclipMirror implements WorkObserver {
     if (id) await this.note(id, PAPERCLIP_STEPS.merged.note);
   }
 
-  async onPromoted(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
-    const id = await this.resolve(item, false);
-    if (id) await this.note(id, PAPERCLIP_STEPS.promoted.note);
+  /**
+   * Nothing: promotion fires when the release PR is opened, not when it merges,
+   * so its old "promoted to production" note claimed what had not happened.
+   * `onRelease` carries the release instead.
+   */
+  async onPromoted(_item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {}
+
+  /**
+   * A release PR opened (rows → in_review, waiting on it), merged (→ done) or
+   * closed unmerged (a note; the rows stay in_review for the next release). A
+   * merge with no PR is work found already in production (→ done).
+   */
+  async onRelease(event: ReleaseEvent, _logger: Logger): Promise<void> {
+    const vars = { pr: event.pr === undefined ? "?" : String(event.pr), branch: event.productionBranch };
+    const step = event.state === "open" ? PAPERCLIP_STEPS.releaseWaiting
+      : event.state === "closed" ? PAPERCLIP_STEPS.releaseClosed
+      : event.pr === undefined ? PAPERCLIP_STEPS.inProduction : PAPERCLIP_STEPS.released;
+    for (const item of event.issues) {
+      if (sameItem(this.building, item)) this.building = null;
+      this.claimed.delete(this.keyOf(item));
+      const id = await this.resolve(item, false);
+      if (!id) continue;
+      if (step.status && !(await this.setStatus(id, step.status))) continue;
+      await this.note(id, fill(step.note, vars));
+    }
+  }
+
+  /**
+   * Housekeeping, now and every index refresh after: cancel the retired live
+   * task and backfill each row's project. Started by the daemon, never inside
+   * an observer call, which a full pass over every row would outlast. Returns
+   * a stop function.
+   */
+  start(): () => void {
+    const run = () => void this.housekeep();
+    run();
+    const timer = setInterval(run, INDEX_TTL_MS);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
+
+  /** One housekeeping pass; never throws. */
+  async housekeep(): Promise<void> {
+    if (this.housekeeping) return;
+    this.housekeeping = true;
+    try {
+      if (!(await this.ensureIndex(true))) return;
+      await this.retireLiveTask();
+      if (!this.cfg.projects) return;
+      for (const [id, repo] of [...this.rowRepo]) {
+        const pid = await this.projectFor(repo);
+        if (!pid || this.rowProject.get(id) === pid) continue;
+        if (await this.patch(id, { projectId: pid })) this.rowProject.set(id, pid);
+      }
+    } finally {
+      this.housekeeping = false;
+    }
+  }
+
+  /** Cancel the live summary task an earlier version kept, once. */
+  private async retireLiveTask(): Promise<void> {
+    if (!this.cfg.agentId) return;
+    const id = this.index?.get(fill(LEGACY_LIVE_KEY_FORMAT, { agentId: this.cfg.agentId }));
+    if (!id) return;
+    const row = await this.safeCall("read task", () => this.client.getIssue(id), id);
+    const cancelled = this.statusName("cancelled");
+    if (!row.ok || row.value?.status === cancelled) return;
+    // Status and note in one PATCH: a note alone on an agent-held row reopens it.
+    await this.safeCall("retire live task", () => this.client.updateIssue(id, { status: cancelled, comment: LEGACY_LIVE_NOTE }), id);
+  }
+
+  /**
+   * The id of `repo`'s project, looked up by name (archived included) and
+   * created when missing. One lookup per name per process; a failed one is
+   * forgotten so the next call retries. Null when projects are off or failed.
+   */
+  private projectFor(repo: string): Promise<string | null> {
+    if (!this.cfg.projects) return Promise.resolve(null);
+    const name = fill(this.cfg.projectNameFormat, { repo, name: repo.split("/").pop() ?? repo });
+    const known = this.projectIds.get(name);
+    if (known) return known;
+    const lookup = (async () => {
+      const listed = await this.safeCall("list projects", () => this.client.listProjects());
+      if (!listed.ok) return null;
+      const found = (Array.isArray(listed.value) ? listed.value : []).find((p) => p.name === name);
+      if (found) return found.id;
+      const made = await this.safeCall("create project", () => this.client.createProject({ name, status: "in_progress" }));
+      return made.ok && made.value?.id ? made.value.id : null;
+    })();
+    this.projectIds.set(name, lookup);
+    void lookup.then((id) => {
+      if (!id) this.projectIds.delete(name);
+    });
+    return lookup;
+  }
+
+  /** `{ projectId }` when the row should carry a project it does not yet, else nothing. */
+  private async projectPatch(id: string): Promise<{ projectId?: string }> {
+    const repo = this.rowRepo.get(id);
+    if (!repo) return {};
+    const pid = await this.projectFor(repo);
+    return pid && this.rowProject.get(id) !== pid ? { projectId: pid } : {};
   }
 
   async onBackoffPause(upstream: string, reason: string, _logger: Logger): Promise<void> {
-    this.backoffs.set(upstream, this.clean(reason));
-    await this.refreshLive();
     if (!this.building) return;
     const id = await this.resolve(this.building, false);
     if (id) await this.note(id, fill(PAPERCLIP_STEPS.backoffPause.note, { upstream, reason }));
   }
 
-  async onBackoffResume(upstream: string, _logger: Logger): Promise<void> {
-    this.backoffs.delete(upstream);
-    await this.refreshLive();
+  async onBackoffResume(_upstream: string, _logger: Logger): Promise<void> {
     if (!this.building) return;
     const id = await this.resolve(this.building, false);
     if (id) await this.note(id, PAPERCLIP_STEPS.backoffResume.note);
@@ -225,8 +329,6 @@ export class PaperclipMirror implements WorkObserver {
    */
   async onWaiting(repo: string, waiting: ReadonlyArray<WaitingItem>, _logger: Logger): Promise<void> {
     const cleaned = waiting.map((w) => ({ item: w.item, reason: this.clean(w.reason) }));
-    if (cleaned.length) this.waiting.set(repo, cleaned);
-    else this.waiting.delete(repo);
 
     const keep = new Set<string>();
     for (const w of cleaned) {
@@ -237,6 +339,7 @@ export class PaperclipMirror implements WorkObserver {
       if (this.rowState.get(id) === want) continue;
       const step = PAPERCLIP_STEPS.waiting;
       const ok = await this.patch(id, {
+        ...(await this.projectPatch(id)),
         status: this.statusName("blocked"),
         assigneeAgentId: this.cfg.agentId,
         assigneeUserId: null,
@@ -254,10 +357,9 @@ export class PaperclipMirror implements WorkObserver {
         await this.note(id, PAPERCLIP_STEPS.resumed.note);
       }
     }
-    await this.refreshLive();
   }
 
-  /** A session started, changed hands or ended: one note per item, then the live view and agent status. */
+  /** A session started, changed hands or ended: one note per item, then the agent's status. */
   async onSession(event: SessionEvent, _logger: Logger): Promise<void> {
     const key = `${event.repo}|${event.phase}|${event.items.map((i) => i.issueNumber).join(",")}`;
     if (event.status === "started") this.sessions.set(key, { event, since: new Date() });
@@ -279,14 +381,6 @@ export class PaperclipMirror implements WorkObserver {
       }
     }
     await this.syncAgentStatus();
-    await this.refreshLive();
-  }
-
-  /** Promotion on `repo` is stalled for `detail`, or no longer (null): the live view only. */
-  async onPromotionStall(repo: string, detail: string | null, _logger: Logger): Promise<void> {
-    if (detail) this.stalls.set(repo, this.clean(detail));
-    else this.stalls.delete(repo);
-    await this.refreshLive();
   }
 
   /** The agent's status: running while any session runs, else idle. Written only on a change. */
@@ -296,59 +390,6 @@ export class PaperclipMirror implements WorkObserver {
     if (this.agentStatusSent === want) return;
     const r = await this.safeCall("update agent", () => this.client.updateAgent(this.cfg.agentId!, { status: want }));
     if (r.ok) this.agentStatusSent = want;
-  }
-
-  /** Rewrite the live task's description when what it shows has changed. */
-  private async refreshLive(): Promise<void> {
-    if (!this.cfg.liveTask || !this.cfg.agentId) return;
-    const body = this.renderLive();
-    if (body === this.liveBody) return;
-    const stamp = `Updated ${hhmm(new Date())} UTC.`;
-    const liveKey = fill(PAPERCLIP_LIVE_KEY_FORMAT, { agentId: this.cfg.agentId });
-    const description = `${liveKey}\n\n${body}\n\n${stamp}`;
-
-    if (!this.liveId) {
-      if (!(await this.ensureIndex(true))) return;
-      this.liveId = this.index?.get(liveKey) ?? null;
-      if (!this.liveId) {
-        const made = await this.safeCall("create live task", () =>
-          this.client.createIssue({
-            title: this.cfg.liveTaskTitle,
-            status: this.statusName("in_progress"),
-            description: redactAll(description, this.secrets),
-            assigneeAgentId: this.cfg.agentId,
-          }),
-        );
-        if (!made.ok || !made.value?.id) return;
-        this.liveId = made.value.id;
-        this.index?.set(liveKey, this.liveId);
-        this.liveBody = body;
-        return;
-      }
-    }
-    const id = this.liveId;
-    const ok = await this.patch(id, { title: this.cfg.liveTaskTitle, description: redactAll(description, this.secrets) });
-    if (ok) this.liveBody = body;
-  }
-
-  /** The live task's body: what runs, what waits, what is stalled, what is backed off. */
-  private renderLive(): string {
-    const out: string[] = [];
-    const sessions = [...this.sessions.values()];
-    out.push(`## Running now (${sessions.length})`);
-    if (!sessions.length) out.push("- nothing: the Foreman is idle between cycles");
-    for (const { event: e, since } of sessions) {
-      const items = e.items.map((i) => `#${i.issueNumber}`).join(", ");
-      out.push(`- ${e.repo}: ${e.phase}${items ? ` ${items}` : ""}${e.pr !== undefined ? ` (PR #${e.pr})` : ""}`
-        + `${e.reviewer ? ` by ${e.reviewer}` : ""}, since ${hhmm(since)} UTC`);
-    }
-    const waits = [...this.waiting].flatMap(([repo, ws]) => ws.map((w) => `- ${repo}#${w.item.issueNumber}: ${w.reason}`));
-    out.push("", `## Waiting (${waits.length})`, ...(waits.length ? waits : ["- nothing"]));
-    const stalls = [...this.stalls].map(([repo, d]) => `- ${repo}: ${d}`);
-    out.push("", `## Promotion stalled (${stalls.length})`, ...(stalls.length ? stalls : ["- nothing"]));
-    const offs = [...this.backoffs].map(([u, r]) => `- ${u}: ${r}`);
-    out.push("", `## Upstream back-off (${offs.length})`, ...(offs.length ? offs : ["- nothing"]));
-    return out.join("\n");
   }
 
   /** A reason or detail fit to write: secrets redacted, one paragraph, capped. */
@@ -388,17 +429,22 @@ export class PaperclipMirror implements WorkObserver {
     }
     if (!create) return null;
 
+    const projectId = await this.projectFor(item.repo);
     const made = await this.safeCall("create task", () =>
       this.client.createIssue({
         title: fill(PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, N: String(item.issueNumber) }),
         status: this.statusName(PAPERCLIP_CREATE_STATUS),
         description: `${key}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
+        ...(projectId ? { projectId } : {}),
       }),
     );
     if (!made.ok || !made.value?.id) return null;
-    this.taskUuidCache.set(key, made.value.id);
-    this.index?.set(key, made.value.id);
-    return made.value.id;
+    const id = made.value.id;
+    this.taskUuidCache.set(key, id);
+    this.index?.set(key, id);
+    this.rowRepo.set(id, item.repo);
+    this.rowProject.set(id, projectId);
+    return id;
   }
 
   /**
@@ -414,6 +460,7 @@ export class PaperclipMirror implements WorkObserver {
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
+      const project = new Map<string, string | null>();
       for await (const row of this.client.listIssues()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
         if (!line || idx.has(line)) continue;
@@ -421,11 +468,12 @@ export class PaperclipMirror implements WorkObserver {
         const m = keyRe.exec(line);
         if (!m?.groups) continue;
         repoOf.set(row.id, m.groups.repo);
+        project.set(row.id, row.projectId ?? null);
         const action = row.unblockDescriptor?.action;
         const blocked = row.status === this.statusName("blocked") && row.assigneeAgentId === this.cfg.agentId;
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
       }
-      return { idx, state, repoOf };
+      return { idx, state, repoOf, project };
     });
     if (!scanned.ok) return !!this.index;
     this.index = scanned.value.idx;
@@ -434,6 +482,8 @@ export class PaperclipMirror implements WorkObserver {
     for (const [k, v] of scanned.value.state) this.rowState.set(k, v);
     this.rowRepo.clear();
     for (const [k, v] of scanned.value.repoOf) this.rowRepo.set(k, v);
+    this.rowProject.clear();
+    for (const [k, v] of scanned.value.project) this.rowProject.set(k, v);
     return true;
   }
 
@@ -455,8 +505,12 @@ export class PaperclipMirror implements WorkObserver {
    * row a board user, so taking the row means releasing that user.
    */
   private async setStatus(id: string, bucket: Bucket): Promise<boolean> {
-    const ok = await this.patch(id, { status: this.statusName(bucket), assigneeAgentId: this.cfg.agentId, assigneeUserId: null });
-    if (ok) this.rowState.set(id, `status:${this.statusName(bucket)}`);
+    const project = await this.projectPatch(id);
+    const ok = await this.patch(id, { ...project, status: this.statusName(bucket), assigneeAgentId: this.cfg.agentId, assigneeUserId: null });
+    if (ok) {
+      this.rowState.set(id, `status:${this.statusName(bucket)}`);
+      if (project.projectId) this.rowProject.set(id, project.projectId);
+    }
     return ok;
   }
 
@@ -535,11 +589,6 @@ function reasonOf(body: string): string {
     // not JSON: fall through to the raw body
   }
   return body.trim().slice(0, 300);
-}
-
-/** `date` as HH:MM in UTC. */
-function hhmm(date: Date): string {
-  return date.toISOString().slice(11, 16);
 }
 
 function sameItem(a: WorkItem | null, b: WorkItem): boolean {
