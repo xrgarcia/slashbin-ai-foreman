@@ -210,6 +210,16 @@ export function fastForwardFeatureBranch(
     );
     if (Number.isNaN(ahead) || Number.isNaN(behind)) return "unknown";
 
+    // Base's unique commits change no files — the main→develop back-sync after
+    // a promotion adds merge commits only. That is not divergence: features
+    // already holds base's whole tree, so an in-flight feature PR proceeds.
+    // (jerky_service 2026-10-05: sync PR #85 landed while PR #84 was open, and
+    // every waiting issue stopped as "diverged, 2 ahead 2 behind".)
+    if (ahead > 0 && behind > 0) {
+      const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+      if (git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) === "") return "work-in-flight";
+    }
+
     if (ahead > 0 && behind > 0) {
       // Debug, not warn: the orchestrator announces a divergence once per
       // episode (foreman#44). A warn here repeated every cycle — 837 lines in
