@@ -59,6 +59,7 @@ import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, Wor
 import { redactAll } from "../agent.js";
 import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
+import { loadRepoState } from "../state.js";
 import {
   ensureStageLabels, FOREMAN_BLOCKED_PREFIX, issueStage, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
@@ -330,7 +331,10 @@ export class PaperclipMirror implements WorkObserver {
    * left to events), and leaves alone: a card a session holds, a waiting hold,
    * a cancelled card, and a Foreman block until its issue moves on. A block
    * from before this process started stands while the issue is still at the
-   * trigger label, since nothing on GitHub has moved past it.
+   * trigger label, since nothing on GitHub has moved past it — or while a
+   * persisted verify hold still names it: that block sits at `pr merged`, and
+   * a restart released cmneb_data_publisher#199 to the SRE's To-do after the
+   * SRE had given up on it (2026-10-05).
    */
   async onSnapshot(repoConfig: RepoConfig, issues: ReadonlyArray<{ number: number; labels: readonly string[] }>, logger: Logger): Promise<void> {
     if (!(await this.ensureIndex())) return;
@@ -347,7 +351,7 @@ export class PaperclipMirror implements WorkObserver {
       const want = `status:${this.statusName(stage === "done" ? "done" : stageTarget(this.cfg, stage).bucket)}`;
       if (state === want) continue;
       if (state === blocked && stage !== "blocked") {
-        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved") {
+        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && Boolean(loadRepoState(repoConfig.name).verifyHeld?.[number]))) {
           this.blockedAt.set(id, stage);
           continue;
         }
