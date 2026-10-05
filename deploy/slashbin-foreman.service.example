@@ -14,6 +14,12 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/path/to/slashbin-ai-foreman
+# Create any Foreman label a watched repo is missing, before the daemon starts.
+# A repo added to .ai-agent.json without `npm run labels:install` crashes its
+# first review on the missing label, after the merge (jerky_service, 2026-10-05:
+# no `pr merged`, issues left in the dead zone). Idempotent; the leading `-`
+# means a GitHub hiccup here never keeps the Foreman down.
+ExecStartPre=-/usr/bin/doppler run --project <project> --config <config> -- /path/to/node scripts/install-labels.mjs
 ExecStart=/usr/bin/doppler run --project <project> --config <config> -- /path/to/node dist/cli.js
 Restart=on-failure
 
