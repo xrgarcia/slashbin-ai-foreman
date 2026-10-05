@@ -217,6 +217,14 @@ export class PaperclipMirror implements WorkObserver {
    * of the first, and the stage a state reported meanwhile asks for, applied
    * when the last one ends.
    */
+  /**
+   * Lease recovery, until it settles. A session event waits on it: recovery
+   * read jerky_service#87 as in progress (its implement session had died with
+   * the old process), the new process's review session moved the card to the
+   * Tech Lead meanwhile, and recovery's write then landed last — the card sat
+   * in To-do while the Tech Lead reviewed PR #90 (2026-10-05).
+   */
+  private recovery: Promise<void> = Promise.resolve();
   private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove }>();
   /** Task id → the last lifecycle stage the mirror placed it in, so a resumed card goes back there. */
   private readonly rowStage = new Map<string, PaperclipStage>();
@@ -391,7 +399,8 @@ export class PaperclipMirror implements WorkObserver {
    */
   start(): () => void {
     const run = () => void this.housekeep();
-    void this.recoverLease().then(run);
+    this.recovery = this.recoverLease();
+    void this.recovery.then(run);
     const timer = setInterval(run, INDEX_TTL_MS);
     timer.unref?.();
     const renew = setInterval(() => {
@@ -575,6 +584,7 @@ export class PaperclipMirror implements WorkObserver {
 
   /** A session started, changed hands or ended: one note per item, then the agent's status. */
   async onSession(event: SessionEvent, _logger: Logger): Promise<void> {
+    await this.recovery;
     const key = `${event.repo}|${event.phase}|${event.items.map((i) => i.issueNumber).join(",")}`;
     if (event.status === "started") this.sessions.set(key, { event, since: new Date() });
     else if (event.status === "handoff") {
