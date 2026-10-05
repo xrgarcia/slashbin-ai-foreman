@@ -86,6 +86,8 @@ export interface WorkObserver {
   onState?(item: WorkItem, from: PriorState, to: WorkState, repoConfig: RepoConfig, logger: Logger): Promise<void>;
   onPrLink?(item: WorkItem, prUrl: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
   onBlocked?(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  /** A block on `item` was resolved by one of the Foreman's unblock checks (src/unblock.ts). */
+  onUnblocked?(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
   onMerged?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
   onPromoted?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
   onBackoffPause?(upstream: string, reason: string, logger: Logger): Promise<void>;

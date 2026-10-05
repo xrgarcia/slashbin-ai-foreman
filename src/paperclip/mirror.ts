@@ -298,6 +298,23 @@ export class PaperclipMirror implements WorkObserver {
   }
 
   /**
+   * The Foreman resolved its own block: the card goes back to the column its
+   * GitHub labels call for (approved when none is known yet). Only a card the
+   * Foreman holds Blocked moves; a block a person set, a waiting hold and a
+   * session-held card are left alone.
+   */
+  async onUnblocked(item: WorkItem, reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+    const id = await this.resolve(item, false);
+    if (!id || this.holds.has(id)) return;
+    if (this.rowState.get(id) !== `status:${this.statusName("blocked")}`) return;
+    this.blockedAt.delete(id);
+    this.blockedReason.delete(id);
+    const stage = this.ghStage.get(id) ?? "approved";
+    if (!(await this.move(id, stage))) return;
+    await this.note(id, this.clean(reason), { event: "progress" });
+  }
+
+  /**
    * Put each card in the column its issue's GitHub labels call for. GitHub is
    * the record; events only move a card when the Foreman acts on that issue,
    * so without this a card the Foreman stops touching keeps whatever it last
