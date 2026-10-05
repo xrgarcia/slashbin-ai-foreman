@@ -317,7 +317,8 @@ test("each phase returns before its retry counter when the failure was an upstre
     const start = orch.indexOf(`async function ${fn}(`);
     const inc = orch.indexOf(counter, start);
     assert.ok(start >= 0 && inc > start, fn);
-    const before = orch.slice(Math.max(start, inc - 400), inc);
-    assert.match(before, /if \(result\.upstreamLimit \|\| isUpstreamBlocked\("github"\)\)\s*return\b/, fn);
+    const before = orch.slice(Math.max(start, inc - 900), inc);
+    // Returns before the counter — and moves the card to Blocked first (2026-10-05).
+    assert.match(before, /if \(result\.upstreamLimit \|\| isUpstreamBlocked\("github"\)\)\s*\{[\s\S]{0,500}?reportWorkBlocked\([\s\S]{0,200}?return\b/, fn);
   }
 });
