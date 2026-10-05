@@ -654,3 +654,22 @@ test("snapshot: an issue with no card gets none", async () => {
   assert.equal(fake.rows.length, 0);
 });
 
+
+test("unblock: a Foreman block resolved by a check returns the card to its GitHub column at once", async () => {
+  const fake = fakePaperclip([row7("in_review")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr merged"] }], logger());
+  await mirror.onBlocked(item, "dev verification did not pass; no more retries", ghRepo, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  await mirror.onUnblocked(item, "unblocked: new commits landed on the base branch", ghRepo, logger());
+  assert.equal(fake.rows[0].status, "in_review");
+});
+
+test("unblock: leaves a card that is not Blocked alone", async () => {
+  const fake = fakePaperclip([row7("in_review")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr merged"] }], logger());
+  const before = statusPatches(fake).length;
+  await mirror.onUnblocked(item, "unblocked: x", ghRepo, logger());
+  assert.equal(statusPatches(fake).length, before);
+});

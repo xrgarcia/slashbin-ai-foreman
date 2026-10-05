@@ -971,6 +971,8 @@ export interface PendingRevisionPR {
   number: number;
   url: string;
   headRefName: string;
+  /** The PR's head commit: an unblock check compares it to where the Foreman stopped. */
+  headRefOid?: string;
 }
 
 export interface PendingRevisionInfo {

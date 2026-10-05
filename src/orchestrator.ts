@@ -4,7 +4,7 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { SessionEvent, SessionPr, SessionReport, WorkItem } from "./adapters.js";
 import {
-  selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked,
+  selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked, reportWorkUnblocked,
   notifyObserversMerged, notifyObserversPromoted, notifyObserversState,
   notifySession, notifyWaiting, notifyPromotionStall, notifyRelease, notifySnapshot, hasObservers,
 } from "./work-source.js";
@@ -66,6 +66,7 @@ import {
 } from "./github.js";
 import type { ReviewTrailer, UpstreamLimit } from "./agent.js";
 import { loadRepoState, saveRepoState, type BranchBlock, type VerifyHold } from "./state.js";
+import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "./unblock.js";
 import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
 
 /**
@@ -83,6 +84,38 @@ export function stoppedReason(what: string, result: { error?: string; upstreamLi
   }
   if (githubBlocked) return `${what} stopped: GitHub rate limit — resumes when it lifts`;
   return `${what} failed${attempt ? ` (${attempt})` : ""}: ${result.error || "unknown"} — retrying next cycle`;
+}
+
+/**
+ * Run the unblock checks for one kind of block (src/unblock.ts). On a pass,
+ * move each item's card back out of Blocked and log which check released it;
+ * the caller clears its own state. Returns whether the block was resolved.
+ */
+async function releaseIfResolved(
+  kind: BlockKind,
+  facts: BlockFacts,
+  items: readonly number[],
+  repoConfig: RepoConfig,
+  logger: Logger,
+): Promise<boolean> {
+  const check = passingCheck(kind, facts);
+  if (!check) return false;
+  const why = unblockedReason(check);
+  logger.info(`${kind} block on ${items.map((n) => `#${n}`).join(", ") || repoConfig.name} resolved — ${why}`);
+  for (const n of items) await reportWorkUnblocked(itemOf(repoConfig, n), why, repoConfig, logger);
+  return true;
+}
+
+/**
+ * Whether `origin/<base>` gained a commit after `sinceIso`, read from the local
+ * clone without fetching. Undefined when git cannot say: unknown never unblocks.
+ */
+function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boolean | undefined {
+  const r = spawnSync("git", ["log", "-1", "--format=%cI", `origin/${repoConfig.baseBranch}`], { cwd: repoConfig.repoPath, encoding: "utf8" });
+  const at = Date.parse((r.stdout ?? "").trim());
+  const since = Date.parse(sinceIso);
+  if (r.status !== 0 || Number.isNaN(at) || Number.isNaN(since)) return undefined;
+  return at > since;
 }
 
 const MAX_RETRIES = 2;
@@ -268,6 +301,10 @@ const revisionEscalated = new Set<string>();
 //
 // Cleared whenever a revision actually pushes, or the pending feedback clears.
 const consecutiveNoCommit = new Map<string, number>();
+// The PR head SHA revision stopped on (retries exhausted, or a no-commit
+// stalemate), per repo. A different head later means someone pushed to the PR
+// out of band: the `revision-*` unblock check (src/unblock.ts) resumes on it.
+const revisionStoppedHead = new Map<string, string>();
 const MAX_CONSECUTIVE_NO_COMMIT = 1;
 const reviewFailureCount = new Map<string, number>();
 const reviewFailureHitMaxAt = new Map<string, number>();
@@ -1421,6 +1458,7 @@ async function tryBatchImplementation(
     for (const { n } of resolvedTransient) delete healed.skipped[n];
     saveRepoState(repoName, healed);
     repoState.skipped = healed.skipped;
+    await releaseIfResolved("skip", { transientCauseGone: true }, resolvedTransient.map(({ n }) => n), repoConfig, repoLogger);
   }
   if (stillBackedOff.length > 0) {
     // Promoted DEBUG → INFO so silent skip-cache filtering is visible in the
@@ -1438,12 +1476,11 @@ async function tryBatchImplementation(
   ];
   // A recorded block is re-checked read-only every pass: the fast-forward
   // below sits behind the pending-revision gate and may not run for hours.
-  if (repoState.branchBlock && divergenceStillHolds(repoConfig) === false) {
+  if (repoState.branchBlock && await releaseIfResolved("divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, repoState.branchBlock.announced, repoConfig, repoLogger)) {
     const cleared = loadRepoState(repoName);
     delete cleared.branchBlock;
     saveRepoState(repoName, cleared);
     repoState.branchBlock = undefined;
-    repoLogger.info(`${repoConfig.featureBranch} no longer diverges from ${repoConfig.baseBranch} — divergence block cleared`);
   }
   await notifyWaiting(repoConfig.githubRepo, waitingSet(repoState.branchBlock), repoLogger);
   const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
@@ -1759,7 +1796,7 @@ async function tryRevision(
 
   if (isUpstreamBlocked("claude")) return null;
 
-  const failures = revisionFailureCount.get(repoName) ?? 0;
+  let failures = revisionFailureCount.get(repoName) ?? 0;
 
   // Gate: are there issues with pending review feedback + an open feature PR?
   //
@@ -1776,7 +1813,22 @@ async function tryRevision(
     if (failures > 0) revisionFailureCount.set(repoName, 0);
     revisionEscalated.delete(repoName);
     consecutiveNoCommit.delete(repoName);
+    revisionStoppedHead.delete(repoName);
     return null;
+  }
+
+  // A stopped revision resumes when someone pushes to the PR out of band.
+  const stoppedAt = revisionStoppedHead.get(repoName);
+  if (stoppedAt !== undefined) {
+    const head = pending.pr.headRefOid;
+    const kind: BlockKind = failures >= MAX_RETRIES ? "revision-exhausted" : "revision-stalemate";
+    if (await releaseIfResolved(kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
+      revisionStoppedHead.delete(repoName);
+      revisionFailureCount.set(repoName, 0);
+      revisionEscalated.delete(repoName);
+      consecutiveNoCommit.delete(repoName);
+      failures = 0;
+    }
   }
 
   // Check if this repo has exceeded revision failure retries
@@ -1848,7 +1900,8 @@ async function tryRevision(
             level: "error",
           });
           // Stopped for a person: the board must say so, not leave it "in review".
-          const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule. Last reason: ${result.noCommitReason ?? "not given"}`;
+          if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
+          const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule, or push to the PR and the Foreman resumes. Last reason: ${result.noCommitReason ?? "not given"}`;
           for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
           return null;
         }
@@ -1903,7 +1956,8 @@ async function tryRevision(
             `STOPPED retrying it${issues ? ` (issues ${issues})` : ""}. It needs a human. Last failure: ${result.error ?? "unknown"}`,
           level: "error",
         });
-        const blocked = `Revision retries exhausted on PR #${pending.pr.number}: ${result.error ?? "unknown"}`;
+        if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
+        const blocked = `Revision retries exhausted on PR #${pending.pr.number}: ${result.error ?? "unknown"} — push to the PR and the Foreman resumes`;
         for (const n of pending.issueNumbers) {
           await reportWorkBlocked(itemOf(repoConfig, n), blocked, repoConfig, revLogger);
         }
@@ -1999,6 +2053,19 @@ async function tryVerify(
   if (waiting.length === 0) return false;
 
   const refs = findIssuesMergedToBase(repoConfig, waiting, vlog);
+  // The blocked verify holds, re-checked: a merged PR now closes a
+  // "no merged PR" hold; new commits on base reopen an exhausted one.
+  let released = false;
+  for (const [key, h] of Object.entries(held)) {
+    const n = Number(key);
+    const noPr = h.reason === "no-merged-pr";
+    if (!noPr && h.attempts < VERIFY_MAX_ATTEMPTS) continue;
+    const ok = noPr
+      ? await releaseIfResolved("verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
+      : await releaseIfResolved("verify-exhausted", { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) }, [n], repoConfig, vlog);
+    if (ok) { delete held[n]; released = true; }
+  }
+  if (released) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });
   const unmatched = waiting.filter((n) => !refs.some((r) => r.issueNumber === n) && !held[n]);
   for (const n of unmatched) {
     // Labelled merged, but no merged PR closes it — nothing to verify against.

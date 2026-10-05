@@ -176,6 +176,20 @@ export async function reportWorkBlocked(
 }
 
 /**
+ * An unblock check (src/unblock.ts) found the cause of a block on `item` gone.
+ * Observers only: the work source never recorded the block, so it has nothing
+ * to undo.
+ */
+export async function reportWorkUnblocked(
+  item: WorkItem,
+  reason: string,
+  repoConfig: RepoConfig,
+  logger: Logger,
+): Promise<void> {
+  enqueue("onUnblocked", [item, reason, repoConfig, logger], logger);
+}
+
+/**
  * `item` moved `from` → `to` and the source already shows it (a review agent
  * wrote the outcome label itself). Observers only: the source is not written.
  */
