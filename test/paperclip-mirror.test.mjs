@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
-import { paperclipBoardDefaults } from "../dist/config.js";
+import { defaultLifecycleLabels, paperclipBoardDefaults } from "../dist/config.js";
 
 const CID = "company-1";
 const AGENT = "agent-1";
@@ -581,3 +581,76 @@ test("comment toggles: an event turned off posts nothing; enabled false gives th
   await legacy.onSession(implSession("started", { report: { goals: { 7: "g" } } }), logger());
   assert.deepEqual(fake2.comments["row-1"], ["picked up by Foreman"]);
 });
+
+// --- Snapshot: the board follows GitHub's labels (jerky_service #73, 2026-10-05) ---
+
+const ghRepo = { ...repoConfig, lifecycleLabels: defaultLifecycleLabels(), triggerLabel: "approved" };
+const row7 = (status, extra = {}) => ({ id: "r7", title: "t", status, assigneeAgentId: AGENT, description: "source: example/r#7", ...extra });
+
+test("snapshot: a card in the wrong column moves to the one its labels call for, with a note", async () => {
+  const fake = fakePaperclip([row7("todo")]);
+  const { mirror } = mirrorOn(fake);
+  const log = logger();
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["approved", "pr under review"] }], log);
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.deepEqual(fake.comments.r7, ["moved to match GitHub: approved, pr under review"]);
+  assert.ok(log.lines.some(([, m]) => /todo → in_review to match GitHub/.test(m)));
+});
+
+test("snapshot: a card already in its column is not written", async () => {
+  const fake = fakePaperclip([row7("in_review")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr approved"] }], logger());
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr merged"] }], logger());
+  assert.equal(statusPatches(fake).length, 0);
+});
+
+test("snapshot: an old Foreman block is released once GitHub moved past approved, kept while it has not", async () => {
+  const fake = fakePaperclip([
+    row7("blocked", { unblockDescriptor: { action: "blocked: dev verification did not pass" } }),
+    { id: "r8", title: "t", status: "blocked", assigneeAgentId: AGENT, description: "source: example/r#8", unblockDescriptor: { action: "blocked: open feature PR" } },
+  ]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr merged"] }, { number: 8, labels: ["approved"] }], logger());
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.equal(fake.rows[1].status, "blocked");
+});
+
+test("snapshot: a block made this run stands until the issue moves on, then is released", async () => {
+  const fake = fakePaperclip([row7("in_review")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr merged"] }], logger());
+  await mirror.onBlocked(item, "dev verification did not pass; retrying in 60 min", ghRepo, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr merged"] }], logger());
+  assert.equal(fake.rows[0].status, "blocked", "the snapshot undid a block the Foreman just made");
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["pr approved"] }], logger());
+  assert.equal(fake.rows[0].status, "in_review");
+});
+
+test("snapshot: leaves a session-held card, a waiting hold, a cancelled card and an unlabeled issue alone", async () => {
+  const fake = fakePaperclip([
+    row7("todo"),
+    { id: "r8", title: "t", status: "blocked", assigneeAgentId: AGENT, description: "source: example/r#8", unblockDescriptor: { action: "occupied by PR #4" } },
+    { id: "r9", title: "t", status: "cancelled", assigneeAgentId: AGENT, description: "source: example/r#9" },
+    { id: "r10", title: "t", status: "todo", assigneeAgentId: AGENT, description: "source: example/r#10" },
+  ]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
+  const before = statusPatches(fake).length;
+  await mirror.onSnapshot(ghRepo, [
+    { number: 7, labels: ["pr under review"] },
+    { number: 8, labels: ["pr under review"] },
+    { number: 9, labels: ["approved", "pr under review"] },
+    { number: 10, labels: ["bug"] },
+  ], logger());
+  assert.equal(statusPatches(fake).length, before);
+});
+
+test("snapshot: an issue with no card gets none", async () => {
+  const fake = fakePaperclip([]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot(ghRepo, [{ number: 7, labels: ["approved"] }], logger());
+  assert.equal(fake.rows.length, 0);
+});
+

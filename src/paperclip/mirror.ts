@@ -60,7 +60,7 @@ import { redactAll } from "../agent.js";
 import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import {
-  ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  ensureStageLabels, FOREMAN_BLOCKED_PREFIX, issueStage, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
@@ -108,6 +108,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   reviseStarted: { stage: "revising", note: "revising PR #{pr}" },
   reviseFinished: { stage: null, note: "revision finished: {detail}" },
   reviseFailed: { stage: null, note: "revision failed: {detail}" },
+  synced: { stage: null, note: "moved to match GitHub: {labels}" },
   reviewStarted: { stage: "reviewing", note: "{reviewer} reviewing PR #{pr}" },
   reviewHandoff: { stage: null, note: "review handed to {reviewer}: {detail}" },
   reviewFinished: { stage: null, note: "review finished: {detail}" },
@@ -221,6 +222,14 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rowStage = new Map<string, PaperclipStage>();
   /** Task id → why the Foreman blocked it, the unblock descriptor's action when it moves to `blocked`. */
   private readonly blockedReason = new Map<string, string>();
+  /** Task id → the GitHub stage last seen for its issue, from the cycle snapshot. */
+  private readonly ghStage = new Map<string, PaperclipStage | "done">();
+  /**
+   * Task id → the GitHub stage its issue was at when the Foreman blocked it
+   * (undefined: no snapshot yet). The block stands until the issue moves on,
+   * so a snapshot never undoes a block the Foreman just made.
+   */
+  private readonly blockedAt = new Map<string, PaperclipStage | "done" | undefined>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
@@ -283,8 +292,46 @@ export class PaperclipMirror implements WorkObserver {
     if (!id) return;
     const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
+    this.blockedAt.set(id, this.ghStage.get(id));
     await this.move(id, PAPERCLIP_STEPS.blocked.stage);
     await this.note(id, text, { event: "blocked" });
+  }
+
+  /**
+   * Put each card in the column its issue's GitHub labels call for. GitHub is
+   * the record; events only move a card when the Foreman acts on that issue,
+   * so without this a card the Foreman stops touching keeps whatever it last
+   * showed. Moves only on a column change (the stage tag inside In Review is
+   * left to events), and leaves alone: a card a session holds, a waiting hold,
+   * a cancelled card, and a Foreman block until its issue moves on. A block
+   * from before this process started stands while the issue is still at the
+   * trigger label, since nothing on GitHub has moved past it.
+   */
+  async onSnapshot(repoConfig: RepoConfig, issues: ReadonlyArray<{ number: number; labels: readonly string[] }>, logger: Logger): Promise<void> {
+    if (!(await this.ensureIndex())) return;
+    const blocked = `status:${this.statusName("blocked")}`;
+    for (const { number, labels } of issues) {
+      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel);
+      if (stage === null) continue;
+      const id = await this.resolve({ issueNumber: number, repo: repoConfig.githubRepo }, false);
+      if (!id) continue;
+      this.ghStage.set(id, stage);
+      const state = this.rowState.get(id);
+      if (!state || state.startsWith("waiting\n") || this.holds.has(id)) continue;
+      if (state === `status:${this.statusName("cancelled")}`) continue;
+      const want = `status:${this.statusName(stage === "done" ? "done" : stageTarget(this.cfg, stage).bucket)}`;
+      if (state === want) continue;
+      if (state === blocked && stage !== "blocked") {
+        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved") {
+          this.blockedAt.set(id, stage);
+          continue;
+        }
+      }
+      if (!(await this.move(id, stage))) continue;
+      this.blockedAt.delete(id);
+      logger.info(`Paperclip: ${repoConfig.githubRepo}#${number} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
+      await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { labels: labels.join(", ") || "none" }), { event: "progress" });
+    }
   }
 
   async onMerged(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {

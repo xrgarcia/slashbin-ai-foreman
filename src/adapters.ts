@@ -101,6 +101,8 @@ export interface WorkObserver {
   onPromotionStall?(repo: string, detail: string | null, logger: Logger): Promise<void>;
   /** A release PR (base → production) opened, merged or closed for these items. */
   onRelease?(event: ReleaseEvent, logger: Logger): Promise<void>;
+  /** The repo's open issues and their labels at the end of a cycle: the record a mirror reconciles to. */
+  onSnapshot?(repoConfig: RepoConfig, issues: ReadonlyArray<{ number: number; labels: readonly string[] }>, logger: Logger): Promise<void>;
 }
 
 /**

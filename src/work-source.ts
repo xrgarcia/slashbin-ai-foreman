@@ -228,3 +228,12 @@ export async function notifyPromotionStall(repo: string, detail: string | null, 
 export async function notifyRelease(event: ReleaseEvent, logger: Logger): Promise<void> {
   enqueue("onRelease", [event, logger], logger);
 }
+
+/** The repo's open issues and labels at the end of a cycle. Observers only. */
+export async function notifySnapshot(
+  repoConfig: RepoConfig,
+  issues: ReadonlyArray<{ number: number; labels: readonly string[] }>,
+  logger: Logger,
+): Promise<void> {
+  enqueue("onSnapshot", [repoConfig, issues, logger], logger);
+}

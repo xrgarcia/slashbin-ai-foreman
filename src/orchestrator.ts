@@ -6,12 +6,13 @@ import type { SessionEvent, SessionPr, SessionReport, WorkItem } from "./adapter
 import {
   selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked,
   notifyObserversMerged, notifyObserversPromoted, notifyObserversState,
-  notifySession, notifyWaiting, notifyPromotionStall, notifyRelease, hasObservers,
+  notifySession, notifyWaiting, notifyPromotionStall, notifyRelease, notifySnapshot, hasObservers,
 } from "./work-source.js";
 import { parseReviewBody } from "./paperclip/comments.js";
 import { trackRelease } from "./release-tracker.js";
 import {
   GitHubIssueConnector,
+  openIssueLabels,
   discoveryBatch,
   hasPendingRevisions,
   findPendingRevisions,
@@ -1010,6 +1011,18 @@ async function runRepoCycle(
   if (dispatched.stoppedAt && dispatched.stoppedAt.outcome !== "stop") {
     const { stage, outcome, reason } = dispatched.stoppedAt;
     base.debug(`Pass stopped at stage "${stage}" (${outcome}${reason ? `: ${reason}` : ""}) — later stages skipped this pass`);
+  }
+
+  // Observers mirror GitHub's labels as they stand after the pass. Events move
+  // a card only when the Foreman acts on that issue, so a card it never acts on
+  // again (blocked by an old skip, then advanced by a label heal) stayed wrong
+  // for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
+  if (hasObservers()) {
+    try {
+      await notifySnapshot(repoConfig, openIssueLabels(repoConfig, base), base);
+    } catch (err) {
+      base.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   return { processed, lastImplementation, events };
