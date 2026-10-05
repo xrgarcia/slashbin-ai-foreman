@@ -50,7 +50,7 @@ import {
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, verifyViaSre, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { dispatchStages, isCustomStage, type CustomStage, type StageResult } from "./stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
-import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch, type BranchDivergence } from "./reconciler.js";
+import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch, divergenceStillHolds, type BranchDivergence } from "./reconciler.js";
 import {
   verifyPRExists,
   findStuckMergedIssues,
@@ -1436,6 +1436,15 @@ async function tryBatchImplementation(
     ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0], skipped: true })),
     ...(block ? handOff.map((n) => ({ item: itemOf(repoConfig, n), reason: divergenceReason(block) })) : []),
   ];
+  // A recorded block is re-checked read-only every pass: the fast-forward
+  // below sits behind the pending-revision gate and may not run for hours.
+  if (repoState.branchBlock && divergenceStillHolds(repoConfig) === false) {
+    const cleared = loadRepoState(repoName);
+    delete cleared.branchBlock;
+    saveRepoState(repoName, cleared);
+    repoState.branchBlock = undefined;
+    repoLogger.info(`${repoConfig.featureBranch} no longer diverges from ${repoConfig.baseBranch} — divergence block cleared`);
+  }
   await notifyWaiting(repoConfig.githubRepo, waitingSet(repoState.branchBlock), repoLogger);
   const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
   if (actionableIssues.length === 0) {

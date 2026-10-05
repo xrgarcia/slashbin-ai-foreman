@@ -158,6 +158,30 @@ export type FastForwardOutcome =
   | "unknown";       // a git call failed; caller must not infer anything
 
 /**
+ * Does a recorded divergence still hold? Read-only (fetch + counts + diff, no
+ * checkout, no push), so it is safe while a revision session holds the shared
+ * clone. The implement phase returns at its pending-revision gate before
+ * fastForwardFeatureBranch runs, so without this a block outlives its cause
+ * for as long as a feature PR is in review/revise (jerky_service #76/#79,
+ * 2026-10-05). Returns undefined when git fails: that proves nothing.
+ */
+export function divergenceStillHolds(config: RepoConfig): boolean | undefined {
+  const { repoPath, baseBranch, featureBranch } = config;
+  if (!baseBranch || !featureBranch || baseBranch === featureBranch) return false;
+  try {
+    git(["fetch", "origin", baseBranch, featureBranch, "--quiet"], repoPath);
+    const ahead = parseInt(git(["rev-list", "--count", `origin/${baseBranch}..origin/${featureBranch}`], repoPath), 10);
+    const behind = parseInt(git(["rev-list", "--count", `origin/${featureBranch}..origin/${baseBranch}`], repoPath), 10);
+    if (Number.isNaN(ahead) || Number.isNaN(behind)) return undefined;
+    if (!(ahead > 0 && behind > 0)) return false;
+    const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+    return git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) !== "";
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Fast-forward the shared feature branch onto its base, and push.
  *
  * Why this exists: the implement skill's Phase 0 is `checkout features` +
