@@ -244,6 +244,15 @@ export function dropIssueSnapshot(repo: string): void {
   markRepoDirty(repo);
 }
 
+/**
+ * Each open issue's number and label names, from the same cache as every other
+ * read. What observers mirror the board from: GitHub is the record, so a card
+ * that drifted from it is put back on the next cycle.
+ */
+export function openIssueLabels(config: RepoConfig, logger: Logger): Array<{ number: number; labels: string[] }> {
+  return getOpenIssues(config.githubRepo, config.repoPath, logger).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+}
+
 /** Every open issue in the repo, from cache when warm. */
 function getOpenIssues(repo: string, cwd: string, logger: Logger): IssueSnapshot[] {
   // The fleet-wide state (github-state.ts) answers for every configured repo

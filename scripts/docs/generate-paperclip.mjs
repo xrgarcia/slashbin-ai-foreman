@@ -104,6 +104,7 @@ const WHEN = {
   reviseStarted: "A session starts revising the issue's pull request after review feedback.",
   reviseFinished: "That revision session ends.",
   reviseFailed: "That revision session fails.",
+  synced: "At the end of a pass, the card sits in a different column than its GitHub labels call for (a Foreman block stays until the issue moves on).",
   reviewStarted: "A review of the issue's pull request starts; the note names the reviewer.",
   reviewHandoff: "The first reviewer declines and the review passes to another, with the reason.",
   reviewFinished: "The review ends, with its outcome.",
