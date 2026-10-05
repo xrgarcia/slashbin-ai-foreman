@@ -64,9 +64,26 @@ import {
   findIssuesAwaitingVerify,
   type ReviewOutcome,
 } from "./github.js";
-import type { ReviewTrailer } from "./agent.js";
+import type { ReviewTrailer, UpstreamLimit } from "./agent.js";
 import { loadRepoState, saveRepoState, type BranchBlock, type VerifyHold } from "./state.js";
 import { prepareReviewCheckout, releaseReviewCheckout } from "./review-checkout.js";
+
+/**
+ * Why a run stopped, worded for the card. Every stop — the first failure, a
+ * Claude usage limit, a GitHub rate limit — moves the card to Blocked so the
+ * board shows it the moment it happens, not after retries run out. The next
+ * attempt's session start moves the card back out on its own.
+ */
+export function stoppedReason(what: string, result: { error?: string; upstreamLimit?: UpstreamLimit }, githubBlocked: boolean, attempt?: string): string {
+  if (result.upstreamLimit) {
+    const at = result.upstreamLimit.resetAtMs
+      ? ` — resumes after ${new Date(result.upstreamLimit.resetAtMs).toISOString().slice(11, 16)}Z`
+      : " — resumes when the limit lifts";
+    return `${what} stopped: Claude usage limit (${result.upstreamLimit.reason})${at}`;
+  }
+  if (githubBlocked) return `${what} stopped: GitHub rate limit — resumes when it lifts`;
+  return `${what} failed${attempt ? ` (${attempt})` : ""}: ${result.error || "unknown"} — retrying next cycle`;
+}
 
 const MAX_RETRIES = 2;
 
@@ -1693,11 +1710,19 @@ async function tryBatchImplementation(
       events?.push({ message: `Implementation skipped on ${repoConfig.githubRepo}: ${reason}`, level: "info" });
     } else {
       // An upstream limit refused the run (or a swallowed GitHub back-off made
-      // it look failed) — not a defect, so it charges no retry.
-      if (result.upstreamLimit || isUpstreamBlocked("github")) return null;
+      // it look failed) — not a defect, so it charges no retry. The card still
+      // goes to Blocked: the work has stopped, and the board says why.
+      if (result.upstreamLimit || isUpstreamBlocked("github")) {
+        const why = stoppedReason("Implementation", result, isUpstreamBlocked("github"));
+        for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+        return null;
+      }
       const newCount = (failureCount.get(repoName) ?? 0) + 1;
       failureCount.set(repoName, newCount);
-      if (newCount >= MAX_RETRIES) {
+      if (newCount < MAX_RETRIES) {
+        const why = stoppedReason("Implementation", result, false, `${newCount}/${MAX_RETRIES}`);
+        for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+      } else {
         failureHitMaxAt.set(repoName, cycleNumber);
         const why = `implementation failed ${newCount}× — paused until cooldown: ${result.error || "unknown"}`;
         for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
@@ -1837,10 +1862,19 @@ async function tryRevision(
       return pending;
     } else {
       // An upstream limit refused the run — not a defect, so it charges no retry.
-      if (result.upstreamLimit || isUpstreamBlocked("github")) return null;
+      // The card still goes to Blocked: the work has stopped, and the board says why.
+      if (result.upstreamLimit || isUpstreamBlocked("github")) {
+        const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, isUpstreamBlocked("github"));
+        for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
+        return null;
+      }
       const newCount = failures + 1;
       revisionFailureCount.set(repoName, newCount);
       revLogger.warn(`PR revision failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
+      if (newCount < MAX_RETRIES) {
+        const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, false, `${newCount}/${MAX_RETRIES}`);
+        for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
+      }
 
       // Retries exhausted. This is the end of the automated road for this PR: every
       // later cycle takes the skip branch above and does nothing. Say so out loud,
@@ -2281,11 +2315,18 @@ async function tryReview(
 
     // An upstream limit refused the run — not a defect, so it charges no retry.
     // After the reconciliation above, so a review that merged and then hit the
-    // limit still settles its labels.
-    if (result.upstreamLimit || isUpstreamBlocked("github")) return false;
+    // limit still settles its labels. The card still goes to Blocked.
+    if (result.upstreamLimit || isUpstreamBlocked("github")) {
+      const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, isUpstreamBlocked("github"));
+      for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
+      return false;
+    }
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
-    if (newCount >= MAX_RETRIES) {
+    if (newCount < MAX_RETRIES) {
+      const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, false, `${newCount}/${MAX_RETRIES}`);
+      for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
+    } else {
       reviewFailureHitMaxAt.set(repoName, cycleNumber);
       const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused until cooldown: ${result.error}`;
       for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
