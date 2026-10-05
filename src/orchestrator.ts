@@ -277,6 +277,12 @@ const FAILURE_COOLDOWN_CYCLES = 3; // retry after this many idle cycles
 const lastFailureReason = new Map<string, string>(); // per-repo last failure for retry context
 
 /**
+ * Per repo, the issues held behind an open feature PR and that PR's number.
+ * Observers hear "queued" once per hold, not once per cycle.
+ */
+const queuedBehind = new Map<string, Map<number, number>>();
+
+/**
  * Repair one dead-zoned issue by re-running the post-merge verification the
  * failed review never completed, then labeling from ITS verdict.
  *
@@ -1349,6 +1355,15 @@ async function tryBatchImplementation(
   // re-run the precondition check; if it now passes, admit the issue and clear
   // the stale skip entry. This prevents the cache from pinning a dead-zone
   // 30 minutes past an already-applied manual reconcile.
+  // The open feature PR, if any. Unknown (lookup threw) reads as none: the
+  // session still refuses to bundle, so the old path is the fallback.
+  let featurePr: ReturnType<typeof findOpenFeaturePR> = null;
+  try {
+    featurePr = findOpenFeaturePR(repoConfig);
+  } catch (err) {
+    repoLogger.debug(`Open feature PR lookup failed — not queueing on it this cycle: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   const skippedMap = repoState.skipped ?? {};
   const now = Date.now();
   const stillBackedOff: { n: number; reason: string }[] = [];
@@ -1358,7 +1373,9 @@ async function tryBatchImplementation(
     if (!entry) return true;
     const age = now - new Date(entry.lastSkippedAt).getTime();
     if (Number.isNaN(age) || age >= backoffWindowFor(entry.skipCount, skipBackoffMs)) return true;
-    if (isResolvedTransientSkip(entry.reason, repoConfig, repoLogger)) {
+    // A skip on the open feature PR is the queue gate's to hold, not a skip's.
+    const onFeaturePr = featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number;
+    if (onFeaturePr || isResolvedTransientSkip(entry.reason, repoConfig, repoLogger)) {
       resolvedTransient.push({ n, reason: entry.reason });
       return true;
     }
@@ -1399,9 +1416,6 @@ async function tryBatchImplementation(
     repoLogger.info(`Handing the skill ${handOff.length} work item(s) to choose from: ${handOff.map((n) => `#${n}`).join(", ")}`);
   }
 
-  // Emit event: issues picked up
-  events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoConfig.githubRepo}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
-
   // Gate: if there's a PR awaiting revision (`pr pending actions`), skip implementation.
   // The revision phase (Phase 1) handles these — running implementation would just
   // re-detect the same committed issues and loop without making progress.
@@ -1409,11 +1423,6 @@ async function tryBatchImplementation(
     repoLogger.debug(`Skipping ${repoName} implementation — PR awaiting revision`);
     return null;
   }
-
-  // Note: we do NOT gate on an open feature PR. The features branch accumulates
-  // commits and an open PR auto-updates to include new commits. The skill handles
-  // idempotency — it skips issues already committed on features. If no open PR
-  // exists, the skill creates one. If one exists, new commits are added to it.
 
   // Bring `features` up to `develop` before the session builds on it.
   //
@@ -1441,6 +1450,30 @@ async function tryBatchImplementation(
     );
     await notifyWaiting(repoConfig.githubRepo, waitingSet(undefined), repoLogger);
   }
+
+  // Gate: an open feature PR holds the branch. The skill builds straight on
+  // `features`, so another issue's commit would land in that PR, and the skill
+  // refuses to bundle (Phase 4 rule 3). Launching anyway spent a session per
+  // cycle to learn that, posted "picked up" then "skipped" to Discord, and
+  // bounced the Paperclip card implementing → blocked, for what is just the
+  // queue (jerky_service #66/#70, 2026-10-05). Hold here: the issues show as
+  // queued, say nothing to Discord, and build once the PR merges or closes.
+  const repoQueue = queuedBehind.get(repoName) ?? new Map<number, number>();
+  queuedBehind.set(repoName, repoQueue);
+  const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : [];
+  for (const n of [...repoQueue.keys()]) if (!queued.includes(n)) repoQueue.delete(n);
+  if (featurePr && queued.length > 0) {
+    const fresh = queued.filter((n) => repoQueue.get(n) !== featurePr!.number);
+    for (const n of fresh) {
+      repoQueue.set(n, featurePr.number);
+      await notifyObserversState(itemOf(repoConfig, n), "new", "queued", repoConfig, repoLogger);
+    }
+    repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind open feature PR #${featurePr.number} — builds once it merges or closes`);
+    if (failures > 0) failureCount.set(repoName, 0);
+    return null;
+  }
+
+  events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoConfig.githubRepo}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
 
   // Invoke the skill — one Claude session implements all approved issues
   if (!tryAcquire("claude")) return null;
