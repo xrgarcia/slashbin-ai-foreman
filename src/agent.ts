@@ -271,9 +271,15 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
   // state.skipped[n].reason and is the ONLY input to isResolvedTransientSkip,
   // which recognises a transient divergence solely by matching the agent's own
   // wording. A dropped reason turns a self-clearing skip into a 24h back-off.
-  const line = stdout.match(/FOREMAN_RESULT:\s*skipped[^\n]*/i);
-  if (!line) return { skipped: false };
-  const trailer = line[0];
+  //
+  // The trailer must START a line. Unanchored, prose that merely names it is a
+  // declaration: Slashbin-console 2026-10-01 18:27Z and 19:35Z, an agent wrote
+  // "I left off the `FOREMAN_RESULT: skipped` line on purpose" and was booked as
+  // a batch-wide skip — #1107/#1111/#1115 backed off for 1h, then 2h, for a skip
+  // nobody declared (slashbin-ai-foreman#49). The last trailer line wins.
+  const lines = stdout.match(/^[ \t]*FOREMAN_RESULT:\s*skipped[^\n]*/gim);
+  if (!lines) return { skipped: false };
+  const trailer = lines[lines.length - 1].trim();
   const reason = trailer.match(/\breason="([^"]*)"/i);
   // An OPTIONAL `issue=<N>` scopes the skip to the one issue the agent stopped
   // on. Without it the skip applies to the whole batch we handed over, which is
