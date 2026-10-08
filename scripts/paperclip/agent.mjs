@@ -69,7 +69,7 @@ try {
 }
 if (!paperclip.companyId) fail(`${configPath}: paperclip.companyId is not set.`);
 
-const client = new PaperclipClient({ url: paperclip.url, companyId: paperclip.companyId });
+const client = new PaperclipClient({ url: paperclip.url, companyId: paperclip.companyId, apiKey: paperclip.apiKey });
 let result;
 try {
   result = await registerPaperclipTeam(client, paperclip);

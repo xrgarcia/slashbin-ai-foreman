@@ -229,3 +229,14 @@ test("role-agents: each role's agent registered under its name with wake off, el
   assert.match(r["role-agents"].detail, /lead: heartbeat\.wakeOnDemand is not off/);
   assert.match(r["role-agents"].detail, /ghost: no id/);
 });
+
+test("apiKey: every doctor GET carries the bearer, and it still sends only GETs (EM#512)", async () => {
+  const seen = [];
+  const inner = fakeFetch();
+  const fn = async (url, init = {}) => { seen.push({ method: init.method ?? "GET", auth: init.headers?.authorization }); return inner.fn(url, init); };
+  const results = await diagnosePaperclip(cfg({ apiKey: "pcak_test_0123456789" }), { fetch: fn });
+  assert.ok(results.every((r) => r.ok), JSON.stringify(results));
+  assert.ok(seen.length > 0);
+  assert.ok(seen.every((s) => s.method === "GET" && s.auth === "Bearer pcak_test_0123456789"), JSON.stringify(seen));
+  assert.ok(!JSON.stringify(results).includes("pcak_test_0123456789"));
+});

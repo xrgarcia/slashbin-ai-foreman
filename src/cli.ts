@@ -16,6 +16,20 @@ import { runDoctor } from "./paperclip/doctor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * The session secrets plus the Paperclip key, so a refused response that echoes
+ * the key is logged redacted. The key is kept out of `sessionEnv`, which would
+ * hand it to agent sessions. Same 8-character floor and longest-first order as
+ * secretValues.
+ */
+function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | undefined): Array<{ name: string; value: string }> {
+  const out = secretValues(sessionEnv);
+  if (apiKey && apiKey.length >= 8 && !out.some((s) => s.value === apiKey)) {
+    out.push({ name: "AI_AGENT_PAPERCLIP_API_KEY", value: apiKey });
+  }
+  return out.sort((a, b) => b.value.length - a.value.length);
+}
+
 function getVersion(): string {
   try {
     const pkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8"));
@@ -133,9 +147,9 @@ async function main(): Promise<void> {
   if (config.paperclip.enabled) {
     if (config.paperclip.agentId && config.paperclip.companyId) {
       const mirror = new PaperclipMirror(
-        new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId }),
+        new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId, apiKey: config.paperclip.apiKey }),
         config.paperclip,
-        secretValues(config.sessionEnv),
+        mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
         logger,
       );
       addObserver(mirror);
