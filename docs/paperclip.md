@@ -24,6 +24,7 @@ that one field. The block is read once at startup — restart the daemon after c
 | `companyId` | string | `AI_AGENT_PAPERCLIP_COMPANY_ID` | — | The Paperclip company the Foreman's tasks live in. Required once enabled. |
 | `agentName` | string | `AI_AGENT_PAPERCLIP_AGENT_NAME` | `"Foreman"` | The name the Foreman registers under, and finds itself by, in Paperclip. |
 | `agentId` | string | `AI_AGENT_PAPERCLIP_AGENT_ID` | — | The Foreman's Paperclip agent id, once registered. |
+| `apiKey` | string | `AI_AGENT_PAPERCLIP_API_KEY` | — | The bearer credential sent as `authorization: Bearer` on every request, for an instance that requires sign-in. Unset sends no authorization header. Set it from the environment; it is a secret and is redacted from the mirror's logs. |
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
 | `statusMap` | object | none | — | Per-bucket override of the Paperclip status name. Unset = the bucket names. |
 | `projects` | boolean | none | `true` | File every task under a Paperclip project for its repo, created on first use, and backfill the project on rows that lack it. |

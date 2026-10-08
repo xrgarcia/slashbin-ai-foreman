@@ -79,6 +79,8 @@ export type PaperclipClientOptions = {
   /** Base URL of the Paperclip server, e.g. http://127.0.0.1:3100. */
   url: string;
   companyId: string;
+  /** Sent as `authorization: Bearer <apiKey>` on every request when set. */
+  apiKey?: string;
   /** Injected for tests; defaults to the global fetch. */
   fetch?: typeof fetch;
 };
@@ -105,11 +107,13 @@ export class PaperclipClient {
   private readonly base: string;
   private readonly companyId: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly apiKey: string | undefined;
 
   constructor(opts: PaperclipClientOptions) {
     this.base = opts.url.replace(/\/+$/, "");
     this.companyId = opts.companyId;
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
+    this.apiKey = opts.apiKey || undefined;
   }
 
   /** `GET /api/health`: resolves when the server answers 2xx. */
@@ -201,11 +205,13 @@ export class PaperclipClient {
     const what = `${method} ${path}`;
     let res: Response;
     try {
+      const headers: Record<string, string> = body === undefined
+        ? { accept: "application/json" }
+        : { accept: "application/json", "content-type": "application/json" };
+      if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
       res = await this.fetchImpl(`${this.base}${path}`, {
         method,
-        headers: body === undefined
-          ? { accept: "application/json" }
-          : { accept: "application/json", "content-type": "application/json" },
+        headers,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (err) {

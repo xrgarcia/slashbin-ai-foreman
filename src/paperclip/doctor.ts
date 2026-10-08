@@ -117,7 +117,7 @@ export async function diagnosePaperclip(cfg: PaperclipConfig, opts: DoctorOption
   const url = displayUrl(cfg.url);
   const companyId = cfg.companyId ?? "";
   const agentId = cfg.agentId ?? "";
-  const client = new PaperclipClient({ url: cfg.url, companyId, fetch: fetchImpl });
+  const client = new PaperclipClient({ url: cfg.url, companyId, apiKey: cfg.apiKey, fetch: fetchImpl });
   const results: DoctorResult[] = [];
 
   // 1. health

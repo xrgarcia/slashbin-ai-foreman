@@ -144,6 +144,10 @@ const paperclipConfigSchema = z.object({
   agentName: z.string().min(1).default("Foreman"),
   // The Foreman's Paperclip agent id, once registered.
   agentId: z.string().min(1).optional(),
+  // The bearer credential sent as `authorization: Bearer` on every request, for an
+  // instance that requires sign-in. Unset sends no authorization header. Set it
+  // from the environment; it is a secret and is redacted from the mirror's logs.
+  apiKey: z.string().min(1).optional(),
   // How a Paperclip task names the GitHub issue it mirrors. {repo} is the full
   // owner/name, {N} the issue number. Must match whatever else writes those
   // tasks, or the Foreman creates a second row for an issue that already has one.
@@ -558,6 +562,7 @@ function mergePaperclip(fromFile: unknown): unknown {
     companyId: process.env.AI_AGENT_PAPERCLIP_COMPANY_ID,
     agentName: process.env.AI_AGENT_PAPERCLIP_AGENT_NAME,
     agentId: process.env.AI_AGENT_PAPERCLIP_AGENT_ID,
+    apiKey: process.env.AI_AGENT_PAPERCLIP_API_KEY,
     identityKeyFormat: process.env.AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT,
   }).filter(([, v]) => v !== undefined));
   if (Object.keys(env).length === 0) return fromFile;

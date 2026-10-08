@@ -673,3 +673,21 @@ test("unblock: leaves a card that is not Blocked alone", async () => {
   await mirror.onUnblocked(item, "unblocked: x", ghRepo, logger());
   assert.equal(statusPatches(fake).length, before);
 });
+
+test("a 401 that echoes the Paperclip key is logged with the key redacted (EM#512)", async () => {
+  const KEY = "pcak_test_0123456789";
+  const fake = fakePaperclip([{ id: "synced", title: "t", status: "todo", description: "source: example/r#7" }]);
+  const refuse = async (url, init = {}) => (init.method === "PATCH"
+    ? new Response(JSON.stringify({ error: `key ${KEY} is not valid` }), { status: 401 }) : fake.fetch(url, init));
+  const cfg = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
+    identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false }, apiKey: KEY };
+  const log = logger();
+  const client = new PaperclipClient({ url: cfg.url, companyId: CID, apiKey: KEY, fetch: refuse });
+  const mirror = new PaperclipMirror(client, cfg, [SECRET, { name: "AI_AGENT_PAPERCLIP_API_KEY", value: KEY }], log);
+  await mirror.onClaim(item, repoConfig, logger());
+  const warns = log.lines.filter(([lvl]) => lvl === "warn");
+  assert.equal(warns.length, 1);
+  assert.match(warns[0][1], /401/);
+  assert.ok(!warns[0][1].includes(KEY), warns[0][1]);
+  assert.match(warns[0][1], /\[REDACTED:AI_AGENT_PAPERCLIP_API_KEY\]/);
+});

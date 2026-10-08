@@ -17,6 +17,7 @@ test.after(() => rmSync(tmp, { recursive: true, force: true }));
 const ENV_KEYS = [
   "AI_AGENT_PAPERCLIP_ENABLED", "AI_AGENT_PAPERCLIP_URL", "AI_AGENT_PAPERCLIP_COMPANY_ID",
   "AI_AGENT_PAPERCLIP_AGENT_NAME", "AI_AGENT_PAPERCLIP_AGENT_ID", "AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT",
+  "AI_AGENT_PAPERCLIP_API_KEY",
 ];
 for (const k of ENV_KEYS) delete process.env[k];
 
@@ -92,6 +93,7 @@ test("each AI_AGENT_PAPERCLIP_* var overrides its own leaf over the file", () =>
     ["AI_AGENT_PAPERCLIP_AGENT_NAME", "EnvBot", "agentName", "EnvBot"],
     ["AI_AGENT_PAPERCLIP_AGENT_ID", "env-agent", "agentId", "env-agent"],
     ["AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT", "gh: {repo}#{N}", "identityKeyFormat", "gh: {repo}#{N}"],
+    ["AI_AGENT_PAPERCLIP_API_KEY", "pcak_env_0123456789", "apiKey", "pcak_env_0123456789"],
   ];
   for (const [key, value, field, expected] of cases) {
     const { paperclip } = withEnv({ [key]: value }, () => loadConfig(cfg(file)));
@@ -242,4 +244,47 @@ test("board: a partial stage keeps its defaults; an unknown owner, label or repo
   assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { owner: "nobody" } } } })), /nobody/);
   assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { label: "nope" } } } })), /nope/);
   assert.throws(() => loadConfig(cfg({ paperclip: { agentReportsTo: "ghost" } })), /ghost/);
+});
+
+// EM#512: an instance that requires sign-in gets the key as a bearer on every request.
+function headerFetch() {
+  const seen = [];
+  const fn = async (_url, init = {}) => {
+    seen.push({ method: init.method ?? "GET", headers: { ...(init.headers ?? {}) } });
+    return new Response(JSON.stringify({ id: "x" }), { status: 200 });
+  };
+  return { fn, seen };
+}
+
+test("apiKey set: authorization Bearer on a GET and on a POST", async () => {
+  const { fn, seen } = headerFetch();
+  const c = new PaperclipClient({ url: BASE, companyId: CID, apiKey: "pcak_test_0123456789", fetch: fn });
+  await c.listAgents();
+  await c.createComment("iss", "note");
+  assert.deepEqual(seen.map((s) => [s.method, s.headers.authorization]), [
+    ["GET", "Bearer pcak_test_0123456789"],
+    ["POST", "Bearer pcak_test_0123456789"],
+  ]);
+});
+
+test("apiKey unset: headers are exactly what they were, no authorization", async () => {
+  const { fn, seen } = headerFetch();
+  const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: fn });
+  await c.listAgents();
+  await c.createComment("iss", "note");
+  assert.deepEqual(seen.map((s) => s.headers), [
+    { accept: "application/json" },
+    { accept: "application/json", "content-type": "application/json" },
+  ]);
+});
+
+test("a refused request's error names method, path and status, never the key", async () => {
+  const fn = async () => new Response("bad key pcak_test_0123456789", { status: 401 });
+  const c = new PaperclipClient({ url: BASE, companyId: CID, apiKey: "pcak_test_0123456789", fetch: fn });
+  await assert.rejects(c.listAgents(), (err) => {
+    assert.ok(err instanceof PaperclipClientError);
+    assert.equal(err.status, 401);
+    assert.ok(!err.message.includes("pcak_test_0123456789"), err.message);
+    return true;
+  });
 });
