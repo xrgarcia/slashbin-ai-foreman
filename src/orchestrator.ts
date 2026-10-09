@@ -2192,6 +2192,15 @@ async function tryReview(
     if (failures > 0) reviewFailureCount.set(repoName, 0);
     return false;
   }
+  // Stranded behind a verdict: the review already ran and asked for changes;
+  // only its label move is missing. Make it, so the revise phase picks them up.
+  if (candidate.stranded) {
+    for (const n of candidate.issueNumbers) {
+      await reportWorkState(itemOf(repoConfig, n), "inReview", "changesRequested", repoConfig, reviewLogger);
+    }
+    events?.push({ message: `${repoConfig.githubRepo} — PR #${candidate.prNumber} had a current changes-requested review its labels never followed; sent #${candidate.issueNumbers.join(", #")} to revise.`, level: "warn" });
+    return false;
+  }
   // Orphan adoption: the implement report never landed for these. Report them
   // in review now, before anything else touches the PR.
   for (const n of candidate.adopted) {
