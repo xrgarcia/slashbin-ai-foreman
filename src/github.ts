@@ -2452,6 +2452,21 @@ export function readLatestReviewBody(repo: string, pr: number, since: string, cw
   }
 }
 
+/**
+ * How many CHANGES_REQUESTED reviews a PR has collected — the number of review
+ * rounds it has been sent back on. Read from GitHub each time, never counted
+ * locally. Null when it cannot be read.
+ */
+export function countChangesRequested(repo: string, pr: number, cwd: string, logger: Logger): number | null {
+  try {
+    const out = gh(["api", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd);
+    return (JSON.parse(out || "[]") as Array<{ state?: string }>).filter((r) => r.state === "CHANGES_REQUESTED").length;
+  } catch (err) {
+    logger.debug(`countChangesRequested: PR #${pr} failed: ${formatGhError(err).message}`);
+    return null;
+  }
+}
+
 // --- Post-Implementation Self-Check ---
 
 /**

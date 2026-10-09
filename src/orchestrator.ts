@@ -45,6 +45,7 @@ import {
   issueTitles,
   readPrDigest,
   readLatestReviewBody,
+  countChangesRequested,
   type PendingRevisionInfo,
 } from "./github.js";
 import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, verifyViaSre, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
@@ -306,6 +307,13 @@ const consecutiveNoCommit = new Map<string, number>();
 // out of band: the `revision-*` unblock check (src/unblock.ts) resumes on it.
 const revisionStoppedHead = new Map<string, string>();
 const MAX_CONSECUTIVE_NO_COMMIT = 1;
+// A PR sent back this many times is probably not converging: each round answers
+// the last finding and the reviewer finds a new one in the answer. The retry cap
+// above counts only FAILED revisions, so a spiral of successful ones was silent —
+// slashbin_mcp_services PR 245 (2026-10-09) went six rounds, 3,286 lines, nobody
+// told. This only alerts; the revision still runs. Once per PR per daemon life.
+const REVIEW_ROUNDS_ALERT = 4;
+const reviewRoundsAlerted = new Set<string>();
 const reviewFailureCount = new Map<string, number>();
 const reviewFailureHitMaxAt = new Map<string, number>();
 
@@ -1856,6 +1864,21 @@ async function tryRevision(
   if ((consecutiveNoCommit.get(repoName) ?? 0) > MAX_CONSECUTIVE_NO_COMMIT) {
     revLogger.debug(`Skipping ${repoName} revision — PR #${pending.pr.number} is in a no-commit stalemate awaiting the EM`);
     return null;
+  }
+
+  const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}`;
+  if (!reviewRoundsAlerted.has(roundsKey)) {
+    const rounds = countChangesRequested(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
+    if (rounds !== null && rounds >= REVIEW_ROUNDS_ALERT) {
+      reviewRoundsAlerted.add(roundsKey);
+      revLogger.warn(`PR #${pending.pr.number} has been sent back ${rounds} times — revising again, but it may not be converging`);
+      events.push({
+        message:
+          `⚠️ ${repoConfig.githubRepo} — PR #${pending.pr.number} has had ${rounds} CHANGES_REQUESTED reviews and is being revised again. ` +
+          `If each round's finding sits in the last round's fix, it is not converging. EM: rule on scope.`,
+        level: "warn",
+      });
+    }
   }
 
   // Invoke the revision skill with specific PR and issue context
