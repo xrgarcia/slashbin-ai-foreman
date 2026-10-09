@@ -47,8 +47,6 @@ test("no paperclip block: mirror off, every default applied", () => {
     agentName: "Foreman",
     identityKeyFormat: "source: {repo}#{N}",
     projects: true,
-    projectNameFormat: "{name}",
-    projectStatus: "in_progress",
     agentStatus: true,
     comments: {
       enabled: true,

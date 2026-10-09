@@ -156,12 +156,8 @@ const paperclipConfigSchema = z.object({
     .default("source: {repo}#{N}"),
   // Per-bucket override of the Paperclip status name. Unset = the bucket names.
   statusMap: z.partialRecord(z.enum(PAPERCLIP_STATUS_BUCKETS), z.string().min(1)).optional(),
-  // File every task under a Paperclip project for its repo, created on first use, and backfill the project on rows that lack it.
+  // File each task the Foreman creates under the Unplaced project; off = no `projectId`.
   projects: z.boolean().default(true),
-  // The project name for a repo: {name} is the repo name (my-service), {repo} is owner/name.
-  projectNameFormat: z.string().min(1).default("{name}"),
-  // The status a repo's project is created with (backlog, planned, in_progress, completed, cancelled). Only a project the Foreman creates; an existing one is left as it is.
-  projectStatus: z.enum(["backlog", "planned", "in_progress", "completed", "cancelled"]).default("in_progress"),
   // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
   agentStatus: z.boolean().default(true),
   // Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card.
