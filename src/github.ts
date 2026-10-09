@@ -1077,6 +1077,12 @@ export interface ReviewCandidate {
    * every issue already carries `pr under review`.
    */
   adopted: number[];
+  /**
+   * True when the PR's current verdict is CHANGES_REQUESTED but its issues still
+   * sit at `pr under review`: the review landed, its label move did not. The
+   * caller reports them `inReview → changesRequested` instead of reviewing.
+   */
+  stranded?: boolean;
 }
 
 /**
@@ -1136,6 +1142,14 @@ export function findPRsNeedingReview(
       // current and the PR would sit unreviewed forever (worker#694, 2026-10-03).
       // The relabel is the reply; a verdict older than it is not current.
       if (!returnedToReviewSinceVerdict(config, pr.number, reviewable.map((i) => i.number), reviewerLogin, logger)) {
+        // A review run that dies after posting CHANGES_REQUESTED but before moving
+        // the labels leaves the issues here: reviewed, so never reviewed again, and
+        // never `pr pending actions`, so never revised (mcp_services#240,
+        // 2026-10-09: a TLS timeout on the label step parked it 7 hours).
+        if (currentVerdictRequestsChanges(config, pr.number, reviewerLogin, logger)) {
+          logger.warn(`${config.name}: PR #${pr.number} has a current CHANGES_REQUESTED verdict but its issues are still "${prUnderReview}" — stranded; the review phase sends them to revise`);
+          return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [], stranded: true };
+        }
         logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin ?? "reviewer"} review — skipping re-review`);
         return null;
       }
@@ -1919,6 +1933,32 @@ function readFreshReview(
   } catch (err) {
     logger.debug(`hasFreshReview lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
+  }
+}
+
+/**
+ * True when the reviewer's latest verdict on the PR is CHANGES_REQUESTED. Asked
+ * only once the verdict is known to be current and not answered by a return to
+ * review, so a true here means the verdict's label move never happened. Lookup
+ * failure → false: the pre-existing skip, never a spurious revise.
+ */
+function currentVerdictRequestsChanges(
+  config: RepoConfig,
+  prNumber: number,
+  reviewerLogin: string | undefined,
+  logger: Logger,
+): boolean {
+  try {
+    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+    };
+    const verdicts = (data.reviews ?? [])
+      .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+      .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
+    return verdicts[verdicts.length - 1]?.state === "CHANGES_REQUESTED";
+  } catch (err) {
+    logger.debug(`currentVerdictRequestsChanges lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }
 
