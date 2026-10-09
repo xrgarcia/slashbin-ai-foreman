@@ -321,6 +321,19 @@ interface PrSnapshot {
 
 const prSnapshots = new Map<string, { fetchedAt: number; prs: PrSnapshot[] }>();
 
+/**
+ * Drop what the Foreman holds about `repo`'s open PRs, so the next read asks
+ * GitHub. A session runs `gh pr create` in its own process, which the
+ * mutation hook in `gh()` never sees: without this, the check that the
+ * session's PR exists read the list cached before it, found nothing, and
+ * booked a built PR as "PR creation could not be verified"
+ * (slashbin_mcp_services PR #240, 2026-10-09).
+ */
+export function forgetOpenPrs(repo: string): void {
+  prSnapshots.delete(repo);
+  markRepoDirty(repo);
+}
+
 /** Every open PR in the repo, from cache when warm. */
 function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
   if (issueCacheTtlMs > 0 && isGitHubStateEnabled(repo)) return stateOpenPrs(repo);

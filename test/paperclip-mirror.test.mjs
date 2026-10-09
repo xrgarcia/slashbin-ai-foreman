@@ -691,3 +691,37 @@ test("a 401 that echoes the Paperclip key is logged with the key redacted (EM#51
   assert.ok(!warns[0][1].includes(KEY), warns[0][1]);
   assert.match(warns[0][1], /\[REDACTED:AI_AGENT_PAPERCLIP_API_KEY\]/);
 });
+
+// A run handed two issues builds one. The other was never touched, and telling
+// it "Implementation failed" sent a reader to debug work that was never tried
+// (slashbin_mcp_services #237, 2026-10-09).
+test("summaries: an implement end tells its outcome only to the item it worked; the other is told it was not built", async () => {
+  const item8 = { ...item, issueNumber: 8 };
+  const fake = fakePaperclip([row("r7", 7, { status: "todo" }), row("r8", 8, { status: "todo" })]);
+  const { mirror } = mirrorOn(fake, rich());
+  const ev = (status, extra = {}) => ({ phase: "implement", status, repo: "example/r", items: [item, item8], ...extra });
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onSession(ev("failed", { detail: "PR exists but has no file changes", worked: [7] }), logger());
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onSession(ev("finished", { detail: "PR https://github.com/example/r/pull/9", worked: [7] }), logger());
+  assert.deepEqual(fake.comments.r7, [
+    "**Foreman started implementing**\n\nHanded this run with #8 — a run builds one of them.",
+    "**Implementation failed** — PR exists but has no file changes",
+    "**Foreman started implementing**\n\nHanded this run with #8 — a run builds one of them.",
+    "**Implementation finished** — PR https://github.com/example/r/pull/9",
+  ]);
+  assert.deepEqual(fake.comments.r8.filter((c) => !c.startsWith("**Foreman started")), [
+    "**Not built this run** — the run failed on #7; this issue waits for a later run",
+    "**Not built this run** — the run built #7; this issue waits for a later run",
+  ]);
+});
+
+test("step notes: an untouched item gets no implement-end note", async () => {
+  const item8 = { ...item, issueNumber: 8 };
+  const fake = fakePaperclip([row("r7", 7, { status: "todo" }), row("r8", 8, { status: "todo" })]);
+  const { mirror } = mirrorOn(fake, TEAM);
+  const ev = (status, extra = {}) => ({ phase: "implement", status, repo: "example/r", items: [item, item8], ...extra });
+  await mirror.onSession(ev("started"), logger());
+  await mirror.onSession(ev("failed", { detail: "exit 1", worked: [7] }), logger());
+  assert.equal((fake.comments.r7 ?? []).length - (fake.comments.r8 ?? []).length, 1, "only the worked item carries the failure note");
+});

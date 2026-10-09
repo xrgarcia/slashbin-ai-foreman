@@ -117,6 +117,12 @@ const prRef = (pr: { number: number; url?: string } | undefined, fallback?: numb
 
 const join = (...parts: Array<string | undefined | false>): string => parts.filter((p): p is string => !!p && !!p.trim()).join("\n\n");
 
+/** An implement end that names the items it worked, and `item` is not one of them. */
+export function untouched(event: Pick<SessionEvent, "phase" | "status" | "worked">, item: WorkItem): boolean {
+  return event.phase === "implement" && (event.status === "finished" || event.status === "failed")
+    && event.worked !== undefined && event.worked.length > 0 && !event.worked.includes(item.issueNumber);
+}
+
 /**
  * The comment a session event posts on `item`'s card, or null when it posts
  * none. `retry` marks an implement start that repeats an attempt which did not
@@ -129,12 +135,20 @@ export function sessionComment(event: SessionEvent, item: WorkItem, c: CommentsC
   const reviewer = event.reviewer ?? "Reviewer";
   const key = `${event.phase}:${event.status}`;
 
+  if (untouched(event, item)) {
+    const worked = event.worked!.map((n) => `#${n}`).join(", ");
+    const verb = event.status === "failed" ? "failed on" : /^skipped\b/i.test(detail) ? "stopped on" : "built";
+    return `**Not built this run** — the run ${verb} ${worked}; this issue waits for a later run`;
+  }
+
   switch (key) {
     case "implement:started": {
       const goal = r.goals?.[item.issueNumber];
+      const others = event.items.filter((i) => i.issueNumber !== item.issueNumber).map((i) => `#${i.issueNumber}`);
       return join(
         retry ? "**Foreman started implementing** (retry: the previous attempt did not finish)" : "**Foreman started implementing**",
         goal && `Goal: ${goal}`,
+        others.length > 0 && `Handed this run with ${others.join(", ")} — a run builds one of them.`,
       );
     }
     case "implement:finished": {

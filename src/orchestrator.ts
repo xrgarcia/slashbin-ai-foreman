@@ -1562,6 +1562,9 @@ async function tryBatchImplementation(
   // How the session ended, for observers; anything that leaves without setting it threw.
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
   let report: SessionReport | undefined;
+  // The items the session actually worked. A run builds one of its batch; the
+  // outcome is told only to that one, never to the issues it left alone.
+  let worked: number[] | undefined;
 
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
@@ -1638,6 +1641,7 @@ async function tryBatchImplementation(
 
       const issuesActuallyImplemented =
         matched && matched.length > 0 ? matched : actionableIssues;
+      if (matched && matched.length > 0) worked = matched;
       if (matched && matched.length > 0) {
         const fromBatch = matched.filter((n) => actionableIssues.includes(n));
         const fromBroader = matched.filter((n) => !actionableIssues.includes(n));
@@ -1691,6 +1695,7 @@ async function tryBatchImplementation(
       let skippedSet = result.skippedIssues && result.skippedIssues.length > 0
         ? result.skippedIssues
         : actionableIssues;
+      worked = [...skippedSet];
       const reason = result.skipReason ?? "no reason given";
 
       // --- Case 4 (slashbin-ai-foreman#32): the work is ALREADY MERGED ---------
@@ -1765,13 +1770,20 @@ async function tryBatchImplementation(
       }
       const newCount = (failureCount.get(repoName) ?? 0) + 1;
       failureCount.set(repoName, newCount);
+      // The run failed after its work landed in a PR: the PR names the issue
+      // it was on, and only that issue is told it failed.
+      const onPr = getReferencedIssuesFromOpenPR(
+        repoConfig.githubRepo, repoConfig.featureBranch, repoConfig.baseBranch, repoConfig.repoPath, repoLogger,
+      )?.filter((n) => actionableIssues.includes(n));
+      if (onPr && onPr.length > 0) worked = onPr;
+      const failedOn = worked ?? actionableIssues;
       if (newCount < MAX_RETRIES) {
         const why = stoppedReason("Implementation", result, false, `${newCount}/${MAX_RETRIES}`);
-        for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+        for (const n of failedOn) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
       } else {
         failureHitMaxAt.set(repoName, cycleNumber);
         const why = `implementation failed ${newCount}× — paused until cooldown: ${result.error || "unknown"}`;
-        for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+        for (const n of failedOn) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
       }
       lastFailureReason.set(repoName, result.error || "unknown");
       repoLogger.warn(`Batch implementation failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
@@ -1781,7 +1793,7 @@ async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended, ...(report ? { report } : {}) }, repoLogger);
+    await notifySession({ ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) }, repoLogger);
   }
 }
 

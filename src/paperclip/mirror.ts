@@ -65,7 +65,7 @@ import {
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
-import { commentsOf, finishComment, redactComment, sessionComment, sessionCommentEvent, type CommentsConfig } from "./comments.js";
+import { commentsOf, finishComment, redactComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
 
 export type { PaperclipBucket } from "./board.js";
 type Bucket = PaperclipBucket;
@@ -609,7 +609,8 @@ export class PaperclipMirror implements WorkObserver {
       const id = await this.resolve(item, false);
       if (!id) continue;
       const retry = event.phase === "implement" && event.status === "started" && this.retrying.has(this.keyOf(item));
-      const text = this.comments.enabled ? sessionComment(event, item, this.comments, retry) : legacy;
+      // The step notes speak for the item worked; an untouched one gets none.
+      const text = this.comments.enabled ? sessionComment(event, item, this.comments, retry) : untouched(event, item) ? undefined : legacy;
       let released = false;
       if (event.status === "started" && phase in SESSION_STAGE) {
         const h = this.holds.get(id);
