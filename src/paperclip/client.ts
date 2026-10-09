@@ -33,6 +33,7 @@ export type PaperclipProject = {
   id: string;
   name: string;
   status?: string;
+  description?: string | null;
 };
 
 export type PaperclipComment = {
@@ -161,13 +162,9 @@ export class PaperclipClient {
     return this.request("POST", `/api/issues/${encodeURIComponent(id)}/comments`, { body: commentBody });
   }
 
-  /** Every project in the company, archived ones included, so a name is never created twice. */
+  /** Every project in the company, archived ones included, so the Unplaced lookup sees an archived duplicate too. */
   listProjects(): Promise<PaperclipProject[]> {
     return this.request("GET", `${this.companyPath()}/projects?includeArchived=true`);
-  }
-
-  createProject(body: { name: string; status?: string; description?: string }): Promise<PaperclipProject> {
-    return this.request("POST", `${this.companyPath()}/projects`, body);
   }
 
   listAgents(): Promise<PaperclipAgent[]> {

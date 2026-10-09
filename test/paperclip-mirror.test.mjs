@@ -351,37 +351,46 @@ test("release closed unmerged is a note; already in production with no PR is don
   assert.deepEqual(fake.comments.r8, ["in production (main)"]);
 });
 
-// --- projects: one per repo, backfilled; the old summary task retired ---
+// --- projects: new tasks enter Unplaced; the sync places them (EM #513) ---
 
-test("a created row carries its repo's project, found by name or created once", async () => {
-  const fake = fakePaperclip([], [{ id: "p-old", name: "other" }]);
-  const { mirror } = mirrorOn(fake, { projects: true, projectNameFormat: "{name}" });
+const UNPLACED = { id: "p-un", name: "Unplaced", description: "roadmap-position: unplaced\nIssues whose epic serves no position." };
+
+test("a created row is filed in the Unplaced project, found by description line 1; no project is created", async () => {
+  const fake = fakePaperclip([], [{ id: "p-r", name: "r" }, { id: "p-7", name: "Unplaced", description: "roadmap-position: 7" }, UNPLACED]);
+  const { mirror } = mirrorOn(fake, { projects: true });
   await mirror.onClaim(item, repoConfig, logger());
   await mirror.onClaim({ issueNumber: 9, repo: "example/r" }, repoConfig, logger());
-  assert.deepEqual(fake.projects.map((p) => p.name), ["other", "r"]);
-  assert.equal(fake.rows[0].projectId, "proj-2");
-  assert.equal(fake.rows[1].projectId, "proj-2");
+  assert.deepEqual(fake.rows.map((r) => r.projectId), ["p-un", "p-un"]);
+  assert.ok(!fake.calls.some((c) => c.method === "POST" && c.path.endsWith("/projects")));
 });
 
-test("a created project takes projectStatus, in_progress by default (EM #417)", async () => {
-  const dflt = fakePaperclip();
-  await mirrorOn(dflt, { projects: true, projectNameFormat: "{name}" }).mirror.onClaim(item, repoConfig, logger());
-  assert.equal(dflt.projects[0].status, "in_progress");
-  const planned = fakePaperclip([], [{ id: "p-old", name: "other", status: "backlog" }]);
-  await mirrorOn(planned, { projects: true, projectNameFormat: "{name}", projectStatus: "planned" }).mirror.onClaim(item, repoConfig, logger());
-  assert.deepEqual(planned.projects.map((p) => [p.name, p.status]), [["other", "backlog"], ["r", "planned"]]);
+test("no Unplaced project, or two: no task is created, one warn per count, and a later claim looks again", async () => {
+  const fake = fakePaperclip([], [{ id: "p-r", name: "r" }]);
+  const { mirror, log } = mirrorOn(fake, { projects: true });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.equal(fake.rows.length, 0);
+  assert.equal(log.lines.filter(([lvl, m]) => lvl === "warn" && /Unplaced project not found: found 0 /.test(m)).length, 1);
+  fake.projects.push(UNPLACED, { ...UNPLACED, id: "p-un2" });
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.equal(fake.rows.length, 0);
+  assert.equal(log.lines.filter(([lvl, m]) => lvl === "warn" && /found 2 /.test(m)).length, 1);
+  fake.projects.pop();
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.deepEqual(fake.rows.map((r) => r.projectId), ["p-un"]);
+  assert.ok(!fake.calls.some((c) => c.method === "POST" && c.path.endsWith("/projects")));
 });
 
-test("housekeep backfills the project on identity rows and cancels the old live task once", async () => {
+test("housekeep and status moves never write projectId; housekeep cancels the old live task once", async () => {
   const live = { id: "live", status: "in_progress", assigneeAgentId: AGENT, description: `foreman-live: ${AGENT}\n\nbody` };
-  const fake = fakePaperclip([row("r7", 7), row("q1", 1, { description: "source: example/q#1", projectId: "p-q" }), live],
-    [{ id: "p-q", name: "q" }]);
-  const { mirror } = mirrorOn(fake, { projects: true, projectNameFormat: "{name}" });
+  const fake = fakePaperclip([row("r7", 7, { projectId: "p-7" }), row("q1", 1, { description: "source: example/q#1" }), live],
+    [{ id: "p-7", name: "seven", description: "roadmap-position: 7" }, { id: "p-q", name: "q" }, UNPLACED]);
+  const { mirror } = mirrorOn(fake, { projects: true });
   await mirror.housekeep();
-  assert.equal(fake.rows[0].projectId, "proj-2");
-  assert.equal(fake.calls.filter((c) => c.method === "PATCH" && c.path === "/api/issues/q1").length, 0, "a row already filed is left alone");
+  await mirror.onClaim(item, repoConfig, logger());
   assert.equal(live.status, "cancelled");
-  assert.equal(live.projectId, undefined, "the live task is not an issue row");
+  assert.equal(fake.rows[0].projectId, "p-7", "a placed row stays where the sync put it");
+  assert.ok(!fake.calls.some((c) => c.method === "PATCH" && c.body && "projectId" in c.body), "no PATCH carries projectId");
   const before = fake.calls.filter((c) => c.method !== "GET").length;
   await mirror.housekeep();
   assert.equal(fake.calls.filter((c) => c.method !== "GET").length, before, "a second pass writes nothing");

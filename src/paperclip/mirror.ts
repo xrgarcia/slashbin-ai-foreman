@@ -196,10 +196,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rowState = new Map<string, string>();
   /** Task id → the repo its identity key names, for rows that key an issue. */
   private readonly rowRepo = new Map<string, string>();
-  /** Task id → the project id the row carries (null = none), from the last scan. */
-  private readonly rowProject = new Map<string, string | null>();
-  /** Project name → its id, or the lookup in flight, so a name is created once. */
-  private readonly projectIds = new Map<string, Promise<string | null>>();
+  /** The Unplaced project's id, or the lookup in flight; cleared when it finds none or an ambiguous set. */
+  private unplacedLookup: Promise<string | null> | null = null;
   /** True while a housekeeping pass runs, so a slow one is never overlapped. */
   private housekeeping = false;
   /** Running sessions, by repo + phase + items. */
@@ -467,12 +465,6 @@ export class PaperclipMirror implements WorkObserver {
     try {
       if (!(await this.ensureIndex(true))) return;
       await this.retireLiveTask();
-      if (!this.cfg.projects) return;
-      for (const [id, repo] of [...this.rowRepo]) {
-        const pid = await this.projectFor(repo);
-        if (!pid || this.rowProject.get(id) === pid) continue;
-        if (await this.patch(id, { projectId: pid })) this.rowProject.set(id, pid);
-      }
     } finally {
       this.housekeeping = false;
     }
@@ -491,36 +483,34 @@ export class PaperclipMirror implements WorkObserver {
   }
 
   /**
-   * The id of `repo`'s project, looked up by name (archived included) and
-   * created when missing. One lookup per name per process; a failed one is
-   * forgotten so the next call retries. Null when projects are off or failed.
+   * The id of the one project whose description line 1 is `roadmap-position:
+   * unplaced` — where every task the Foreman creates is filed; the EM's sync
+   * then places it in its roadmap position's project (EM #513). The Foreman
+   * never creates a project and never moves a task between projects. Only a
+   * found id is kept: none, two or more, or a failed listing is looked up again
+   * on the next call, with one warn per count per process.
    */
-  private projectFor(repo: string): Promise<string | null> {
-    if (!this.cfg.projects) return Promise.resolve(null);
-    const name = fill(this.cfg.projectNameFormat, { repo, name: repo.split("/").pop() ?? repo });
-    const known = this.projectIds.get(name);
-    if (known) return known;
+  private unplacedProjectId(): Promise<string | null> {
+    if (this.unplacedLookup) return this.unplacedLookup;
     const lookup = (async () => {
       const listed = await this.safeCall("list projects", () => this.client.listProjects());
       if (!listed.ok) return null;
-      const found = (Array.isArray(listed.value) ? listed.value : []).find((p) => p.name === name);
-      if (found) return found.id;
-      const made = await this.safeCall("create project", () => this.client.createProject({ name, status: this.cfg.projectStatus ?? "in_progress" }));
-      return made.ok && made.value?.id ? made.value.id : null;
+      const found = (Array.isArray(listed.value) ? listed.value : []).filter(
+        (p) => (p.description ?? "").split("\n")[0] === "roadmap-position: unplaced",
+      );
+      if (found.length === 1) return found[0].id;
+      const once = `unplaced ${found.length}`;
+      if (!this.rejectionsLogged.has(once)) {
+        this.rejectionsLogged.add(once);
+        this.log("warn", `Paperclip mirror: Unplaced project not found: found ${found.length} projects whose description line 1 is "roadmap-position: unplaced"`);
+      }
+      return null;
     })();
-    this.projectIds.set(name, lookup);
+    this.unplacedLookup = lookup;
     void lookup.then((id) => {
-      if (!id) this.projectIds.delete(name);
+      if (!id) this.unplacedLookup = null;
     });
     return lookup;
-  }
-
-  /** `{ projectId }` when the row should carry a project it does not yet, else nothing. */
-  private async projectPatch(id: string): Promise<{ projectId?: string }> {
-    const repo = this.rowRepo.get(id);
-    if (!repo) return {};
-    const pid = await this.projectFor(repo);
-    return pid && this.rowProject.get(id) !== pid ? { projectId: pid } : {};
   }
 
   async onBackoffPause(upstream: string, reason: string, _logger: Logger): Promise<void> {
@@ -566,7 +556,6 @@ export class PaperclipMirror implements WorkObserver {
       if (this.rowState.get(id) === want) continue;
       const step = PAPERCLIP_STEPS.waiting;
       const ok = await this.patch(id, {
-        ...(await this.projectPatch(id)),
         status: this.statusName("blocked"),
         assigneeAgentId: this.cfg.agentId,
         assigneeUserId: null,
@@ -690,7 +679,8 @@ export class PaperclipMirror implements WorkObserver {
     }
     if (!create) return null;
 
-    const projectId = await this.projectFor(item.repo);
+    const projectId = this.cfg.projects ? await this.unplacedProjectId() : null;
+    if (this.cfg.projects && !projectId) return null;
     const made = await this.safeCall("create task", () =>
       this.client.createIssue({
         title: fill(PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, N: String(item.issueNumber) }),
@@ -704,7 +694,6 @@ export class PaperclipMirror implements WorkObserver {
     this.taskUuidCache.set(key, id);
     this.index?.set(key, id);
     this.rowRepo.set(id, item.repo);
-    this.rowProject.set(id, projectId);
     return id;
   }
 
@@ -721,7 +710,6 @@ export class PaperclipMirror implements WorkObserver {
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
-      const project = new Map<string, string | null>();
       for await (const row of this.client.listIssues()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
         if (!line || idx.has(line)) continue;
@@ -729,14 +717,13 @@ export class PaperclipMirror implements WorkObserver {
         const m = keyRe.exec(line);
         if (!m?.groups) continue;
         repoOf.set(row.id, m.groups.repo);
-        project.set(row.id, row.projectId ?? null);
         const action = row.unblockDescriptor?.action;
         // A Foreman-held blocked row is a waiting hold, unless the Foreman blocked it for good.
         const blocked = row.status === this.statusName("blocked") && row.assigneeAgentId === this.cfg.agentId
           && !String(action ?? "").startsWith(FOREMAN_BLOCKED_PREFIX);
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
       }
-      return { idx, state, repoOf, project };
+      return { idx, state, repoOf };
     });
     if (!scanned.ok) return !!this.index;
     this.index = scanned.value.idx;
@@ -745,8 +732,6 @@ export class PaperclipMirror implements WorkObserver {
     for (const [k, v] of scanned.value.state) this.rowState.set(k, v);
     this.rowRepo.clear();
     for (const [k, v] of scanned.value.repoOf) this.rowRepo.set(k, v);
-    this.rowProject.clear();
-    for (const [k, v] of scanned.value.project) this.rowProject.set(k, v);
     return true;
   }
 
@@ -794,14 +779,12 @@ export class PaperclipMirror implements WorkObserver {
         holder.unblockDescriptor = { owner: t.agentId ? { agentId: t.agentId } : "board", action };
       }
     }
-    const project = await this.projectPatch(id);
     const labelIds = await this.labelIdsFor(id, label);
-    const ok = await this.patch(id, { ...project, status: this.statusName(bucket), ...holder, ...(labelIds ? { labelIds } : {}) });
+    const ok = await this.patch(id, { status: this.statusName(bucket), ...holder, ...(labelIds ? { labelIds } : {}) });
     if (ok) {
       this.rowState.set(id, `status:${this.statusName(bucket)}`);
       if (to !== "done") this.rowStage.set(id, to);
       if (bucket !== "blocked") this.blockedReason.delete(id);
-      if (project.projectId) this.rowProject.set(id, project.projectId);
     }
     return ok;
   }
