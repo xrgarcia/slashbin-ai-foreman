@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
+import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha, forgetOpenPrs } from "./github.js";
 import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
@@ -1023,6 +1023,8 @@ Work autonomously. Do not ask questions.`;
   const transcriptPath = phaseTranscriptPath("implement", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
   const result = await spawnClaude(prompt, config, logger, abortSignal, transcriptPath);
+  // The session may have opened a PR the cached list predates.
+  forgetOpenPrs(config.githubRepo);
 
   if (result.timedOut) {
     return { success: false, error: "timed out" };

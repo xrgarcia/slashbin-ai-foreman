@@ -138,6 +138,13 @@ export interface SessionEvent {
   readonly reviewer?: string;
   readonly detail?: string;
   /**
+   * On an implement end: the items the session actually worked — built,
+   * skipped, or failed on. A session handed several items builds one, so the
+   * rest were never touched and must not be told this outcome. Absent when
+   * the Foreman cannot tell; the outcome then applies to every item.
+   */
+  readonly worked?: ReadonlyArray<number>;
+  /**
    * What the session did, for an observer to summarise. Gathered only when an
    * observer is registered, from what the Foreman already holds: the issue
    * titles, the session's own final message, the PR, the review. Unredacted
