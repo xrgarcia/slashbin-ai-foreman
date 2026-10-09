@@ -383,14 +383,13 @@ wake-on-demand), so assigning a task to it never makes Paperclip start a run.
 
 ## Projects
 
-With \`projects\` on, every task is filed under a Paperclip project for its repo, named by
-\`projectNameFormat\` (default ${code(defaults.projectNameFormat)}): \`{name}\` is the repo's
-name (\`my-service\`), \`{repo}\` its full \`owner/name\`. The project is looked up by name,
-archived ones included, and created only when none has that name, so renaming the format
-creates new projects rather than renaming old ones. A project the Foreman creates gets the status
-\`projectStatus\` (default ${code(defaults.projectStatus)}); an existing project's status is never changed. A task the Foreman creates carries the
-project from the start; at startup, and at every refresh of its task list after, the Foreman
-sets the project on any task with an identity line (its own or another tool's) that lacks it.
+With \`projects\` on, a task the Foreman creates is filed under the Unplaced project: the one
+project whose description line 1 is \`roadmap-position: unplaced\`, archived ones included in the
+lookup. The EM's Paperclip sync then places it in the project of the roadmap position its epic
+serves. The Foreman never creates a project and never moves a task between projects. When no
+Unplaced project exists, or more than one does, the Foreman logs one warning and creates no task;
+the GitHub side is unaffected, and the next claim looks again. With \`projects\` off, a task is
+created with no project.
 
 ## Live activity
 

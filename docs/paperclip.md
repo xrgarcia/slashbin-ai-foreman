@@ -27,9 +27,7 @@ that one field. The block is read once at startup — restart the daemon after c
 | `apiKey` | string | `AI_AGENT_PAPERCLIP_API_KEY` | — | The bearer credential sent as `authorization: Bearer` on every request, for an instance that requires sign-in. Unset sends no authorization header. Set it from the environment; it is a secret and is redacted from the mirror's logs. |
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
 | `statusMap` | object | none | — | Per-bucket override of the Paperclip status name. Unset = the bucket names. |
-| `projects` | boolean | none | `true` | File every task under a Paperclip project for its repo, created on first use, and backfill the project on rows that lack it. |
-| `projectNameFormat` | string | none | `"{name}"` | The project name for a repo: {name} is the repo name (my-service), {repo} is owner/name. |
-| `projectStatus` | string | none | `"in_progress"` | The status a repo's project is created with (backlog, planned, in_progress, completed, cancelled). Only a project the Foreman creates; an existing one is left as it is. |
+| `projects` | boolean | none | `true` | File each task the Foreman creates under the Unplaced project; off = no `projectId`. |
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
@@ -288,14 +286,13 @@ wake-on-demand), so assigning a task to it never makes Paperclip start a run.
 
 ## Projects
 
-With `projects` on, every task is filed under a Paperclip project for its repo, named by
-`projectNameFormat` (default `{name}`): `{name}` is the repo's
-name (`my-service`), `{repo}` its full `owner/name`. The project is looked up by name,
-archived ones included, and created only when none has that name, so renaming the format
-creates new projects rather than renaming old ones. A project the Foreman creates gets the status
-`projectStatus` (default `in_progress`); an existing project's status is never changed. A task the Foreman creates carries the
-project from the start; at startup, and at every refresh of its task list after, the Foreman
-sets the project on any task with an identity line (its own or another tool's) that lacks it.
+With `projects` on, a task the Foreman creates is filed under the Unplaced project: the one
+project whose description line 1 is `roadmap-position: unplaced`, archived ones included in the
+lookup. The EM's Paperclip sync then places it in the project of the roadmap position its epic
+serves. The Foreman never creates a project and never moves a task between projects. When no
+Unplaced project exists, or more than one does, the Foreman logs one warning and creates no task;
+the GitHub side is unaffected, and the next claim looks again. With `projects` off, a task is
+created with no project.
 
 ## Live activity
 
