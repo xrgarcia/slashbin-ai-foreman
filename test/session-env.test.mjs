@@ -13,6 +13,7 @@ import {
   SESSION_ENV_ESSENTIALS,
   buildSessionEnv,
   buildTechLeadEnv,
+  buildSreEnv,
   secretValues,
   redactAll,
   createStreamRedactor,
@@ -85,6 +86,25 @@ test("buildTechLeadEnv: its own token and TECH_LEAD_* only — never the Foreman
   for (const n of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "GH_TOKEN", "TEST_UNLISTED"]) assert.equal(n in env, false, n);
 });
 
+test("buildSreEnv: its own token and SRE_* only — never the Tech Lead's, the Foreman's, the EM's or GH_TOKEN", () => {
+  process.env.SRE_GITHUB_KEY = "sre-token-value";
+  process.env.SRE_CODEX_MODEL = "m";
+  process.env.TECHLEAD_GITHUB_KEY = "tech-lead-token-value";
+  process.env.TECH_LEAD_MODEL = "m";
+  process.env.GH_TOKEN = "parent-gh-token-value";
+  const env = buildSreEnv(
+    { sessionEnv: ["TEST_LISTED"], emRepoPath: "/em" },
+    { triggerLabel: "approved", lifecycleLabels: labels },
+  );
+  assert.equal(env.SRE_GITHUB_KEY, "sre-token-value");
+  assert.equal(env.SRE_CODEX_MODEL, "m");
+  assert.equal(env.SRE_EM_REPO, "/em");
+  assert.equal(env.TEST_LISTED, "listed-value");
+  assert.equal(env.FOREMAN_TRIGGER_LABEL, "approved");
+  assert.deepEqual(JSON.parse(env.FOREMAN_LIFECYCLE_LABELS), labels);
+  for (const n of ["TECHLEAD_GITHUB_KEY", "TECH_LEAD_MODEL", "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "GH_TOKEN", "TEST_UNLISTED"]) assert.equal(n in env, false, n);
+});
+
 test("loadConfig: sessionEnv may not name a GitHub token; omitted resolves to []", () => {
   const dir = mkdtempSync(join(tmpdir(), "foreman-session-env-"));
   try {
@@ -93,7 +113,7 @@ test("loadConfig: sessionEnv may not name a GitHub token; omitted resolves to []
       writeFileSync(p, JSON.stringify({ repos: [{ name: "r", repoPath: dir, githubRepo: "o/r" }], ...extra }));
       return p;
     };
-    for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY"]) {
+    for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY"]) {
       assert.throws(() => loadConfig(cfg({ sessionEnv: [name] })), new RegExp(`sessionEnv must not name a GitHub token: "${name}"`));
     }
     const omitted = loadConfig(cfg({}));
@@ -112,6 +132,11 @@ test("secretValues: both tokens and listed names, 8+ characters, longest first",
   const s = secretValues(["TEST_LISTED", "TEST_SHORT", "TEST_ABSENT"]);
   assert.deepEqual(s.map((x) => x.name).sort(), ["EM_GITHUB_TOKEN", "FOREMAN_GITHUB_TOKEN", "TEST_LISTED"]);
   for (let i = 1; i < s.length; i++) assert.ok(s[i - 1].value.length >= s[i].value.length);
+});
+
+test("secretValues: the SRE's token is redacted like every other agent's", () => {
+  process.env.SRE_GITHUB_KEY = "dummysre_0a1b2c3d4e5f";
+  assert.equal(redactAll(`x dummysre_0a1b2c3d4e5f y`, secretValues([])), "x [REDACTED:SRE_GITHUB_KEY] y");
 });
 
 test("redactAll replaces every occurrence with the name", () => {
