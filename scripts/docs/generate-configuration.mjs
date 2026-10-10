@@ -23,6 +23,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OUT = join(root, "docs", "configuration.md");
 const CONFIG_SRC = join(root, "src", "config.ts");
 const BACKOFF_SRC = join(root, "src", "backoff.ts");
+const GITHUB_SRC = join(root, "src", "github", "conventions.ts");
 const builtConfig = join(root, "dist", "config.js");
 const builtBackoff = join(root, "dist", "backoff.js");
 
@@ -31,12 +32,13 @@ function fail(msg) {
   process.exit(1);
 }
 
-for (const f of [CONFIG_SRC, BACKOFF_SRC]) if (!existsSync(f)) fail(`${f} not found.`);
+for (const f of [CONFIG_SRC, BACKOFF_SRC, GITHUB_SRC]) if (!existsSync(f)) fail(`${f} not found.`);
 for (const f of [builtConfig, builtBackoff]) if (!existsSync(f)) fail(`${f} not found — run \`npm run build\` first.`);
 
 const { configSchema, defaultLifecycleLabels } = await import(builtConfig);
 const { DEFAULT_BACKOFF, backoffDelay, backoffEnvName, formatWait } = await import(builtBackoff);
 const { BUILTIN_STAGES } = await import(join(root, "dist", "stages.js"));
+const { DEFAULT_GITHUB_CONVENTIONS } = await import(join(root, "dist", "github", "conventions.js"));
 const { toJSONSchema } = await import("zod");
 
 // --- Reading a `z.object({ ... })` block's comments ---
@@ -87,6 +89,7 @@ const top = readBlock(configSrc, "configSchema", "src/config.ts");
 const repo = readBlock(configSrc, "repoEntrySchema", "src/config.ts");
 const labels = readBlock(configSrc, "lifecycleLabelsSchema", "src/config.ts");
 const backoff = readBlock(backoffSrc, "backoffConfigSchema", "src/backoff.ts");
+const github = readBlock(readFileSync(GITHUB_SRC, "utf8"), "githubConventionsSchema", "src/github/conventions.ts");
 
 const load = configSrc.match(/export function loadConfig\([\s\S]*?\n\}/);
 if (!load) fail("could not find `export function loadConfig` in src/config.ts.");
@@ -108,10 +111,12 @@ const undocumented = [
   ...missing(top, ""),
   ...missing(labels, "lifecycleLabels."),
   ...missing(backoff, "backoff."),
+  ...missing(github, "github."),
   ...repo.fields.filter((f) => !(f.key in shape) && !f.text).map((f) => `repos[].${f.key}`),
 ];
 if (undocumented.length) fail(`no comment above: ${undocumented.join(", ")} — describe each setting where it is declared.`);
 for (const k of Object.keys(shape)) if (!top.fields.some((f) => f.key === k)) fail(`configSchema.${k} was not found in the source block.`);
+for (const k of Object.keys(DEFAULT_GITHUB_CONVENTIONS)) if (!github.fields.some((f) => f.key === k)) fail(`github.${k} was not found in src/github/conventions.ts.`);
 for (const k of Object.keys(DEFAULT_BACKOFF)) if (!backoff.fields.some((f) => f.key === k)) fail(`backoff.${k} was not found in src/backoff.ts.`);
 
 // --- Rendering ---
@@ -122,6 +127,7 @@ const human = (key, v) => (/Ms$/.test(key) && typeof v === "number" && v > 0 ? `
 const SEE = {
   lifecycleLabels: "see [Lifecycle labels](#lifecycle-labels-lifecyclelabels)",
   paperclip: "see [paperclip.md](paperclip.md)",
+  github: "see [GitHub conventions](#github-conventions-github)",
   stages: `the built-ins in order: ${BUILTIN_STAGES.map(code).join(" → ")}`,
 };
 function shown(key, v) {
@@ -283,6 +289,19 @@ out(
   "| Key | Default | Meaning |",
   "|---|---|---|",
   ...labels.fields.map((f) => `| ${code(f.key)} | ${code(labelDefaults[f.key])} | ${f.text.replace(/\n+/g, " ")} |`),
+  "",
+  "## GitHub conventions (`github`)",
+  "",
+  "Every other name the Foreman reads or writes on GitHub. Top-level only, like the lifecycle labels.",
+  "Set any subset; each default is what the Foreman has always used. In a title, `{name}` is replaced",
+  "as the key says and an unknown `{name}` is left as written. Not configurable, on purpose: the",
+  "markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVIEW`,",
+  "`<!-- foreman-ci-gate -->`, \"Related to #N\"); renaming one side would break the other.",
+  "`npm run labels:install` also creates `blockedLabel`.",
+  "",
+  "| Key | Default | Meaning |",
+  "|---|---|---|",
+  ...github.fields.map((f) => `| ${code(f.key)} | ${code(JSON.stringify(DEFAULT_GITHUB_CONVENTIONS[f.key]))} | ${f.text.replace(/\n+/g, " ")} |`),
   "",
   "## Elsewhere",
   "",

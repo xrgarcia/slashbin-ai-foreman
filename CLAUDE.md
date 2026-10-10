@@ -102,6 +102,18 @@ scans, upstream back-off) reads `backoffSettings()`, which the daemon refreshes 
 and on every config reload. **A new wait is a new group there, never a constant in a
 phase.** Groups, defaults and env names: `docs/configuration.md` (generated).
 
+## GitHub names
+
+Every label, branch prefix, title and signature the Foreman reads or writes on GitHub
+is config: the trigger label, `lifecycleLabels`, or the `github` block
+(`src/github/conventions.ts`), each defaulting to the name it always had. Phases pass
+`repoConfig.github`; `src/github/*` functions take it as a trailing parameter defaulting
+to `DEFAULT_GITHUB_CONVENTIONS`. Sessions get every label name as `FOREMAN_*_LABEL(S)`
+env vars (`setLabelEnv` in `agent.ts`), so no skill types one. **A new GitHub name is a
+key there, never a literal.** The markers the Foreman and its skills talk through
+(`FOREMAN_RESULT`, `FOREMAN_REVIEW`, `<!-- foreman-ci-gate -->`, "Related to #N") stay
+fixed on purpose.
+
 ## Architecture
 
 ```

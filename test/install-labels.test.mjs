@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(root, "scripts", "install-labels.mjs");
-const DEFAULTS = ["approved", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release", "ready to close"];
+const DEFAULTS = ["approved", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release", "ready to close", "blocked"];
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-install-labels-test-"));
 const bin = join(tmp, "bin");
@@ -78,13 +78,13 @@ test("creates only the missing configured labels, then nothing on a rerun", () =
   assert.deepEqual(r1.posts.filter((p) => p.startsWith("acme/b:")).map((p) => p.slice(7)).sort(),
     DEFAULTS.filter((l) => l !== "approved" && l !== "pr approved").sort());
   assert.ok(r1.calls.every((c) => ["GET", "POST"].includes(c.args[c.args.indexOf("-X") + 1])), "only GET and POST");
-  assert.match(r1.out, /acme\/a: created 7, present 0/);
-  assert.match(r1.out, /acme\/b: created 5, present 2/);
+  assert.match(r1.out, /acme\/a: created 8, present 0/);
+  assert.match(r1.out, /acme\/b: created 6, present 2/);
 
   const r2 = run();
   assert.equal(r2.status, 0, r2.out);
   assert.deepEqual(r2.posts, []);
-  assert.match(r2.out, /acme\/a: created 0, present 7/);
+  assert.match(r2.out, /acme\/a: created 0, present 8/);
 });
 
 test("names come from config: per-repo triggerLabel and renamed lifecycle labels", () => {
@@ -100,6 +100,14 @@ test("names come from config: per-repo triggerLabel and renamed lifecycle labels
   assert.ok(d.includes("build-me") && !d.includes("go"));
 });
 
+test("the github block's blocked label is installed under its configured name", () => {
+  const run = setup({ github: { blockedLabel: "on hold" }, repos: [{ name: "e", githubRepo: "acme/e" }] }, { "acme/e": [] });
+  const r = run();
+  assert.equal(r.status, 0, r.out);
+  const e = r.posts.map((p) => p.slice(7));
+  assert.ok(e.includes("on hold") && !e.includes("blocked"));
+});
+
 test("a failed repo or label is reported, the rest still run, exit is 1", () => {
   const run = setup({ repos: [{ name: "x", githubRepo: "acme/down" }, { name: "y", githubRepo: "acme/y" }] },
     { "acme/down": "FAIL", "acme/y": [], rejectPost: "ready to close" });
@@ -108,7 +116,7 @@ test("a failed repo or label is reported, the rest still run, exit is 1", () => 
   assert.equal(r.posts.filter((p) => p.startsWith("acme/y:")).length, DEFAULTS.length);
   assert.match(r.out, /acme\/down: could not read labels — HTTP 404: Not Found\n/);
   assert.match(r.out, /acme\/y: could not create "ready to close" — HTTP 422/);
-  assert.match(r.out, /acme\/y: created 6, present 0/);
+  assert.match(r.out, /acme\/y: created 7, present 0/);
 });
 
 test("gh runs as the Foreman when FOREMAN_GITHUB_TOKEN is set", () => {

@@ -7,6 +7,7 @@ import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 import {
   paperclipConfigSchema, mergePaperclip, resolvePaperclipConfig, type PaperclipConfig,
 } from "./paperclip/config.js";
+import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./github/conventions.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
 
 // --- Schemas ---
@@ -284,6 +285,13 @@ export const configSchema = z.object({
   // work to each other by label, one pipeline for the fleet.
   stages: stagesSchema,
 
+  // The other GitHub names the Foreman reads and writes: the blocked label, the
+  // priority labels, the dependency-PR branch prefixes, and the titles and
+  // signature of the PRs and issues it files. Set any subset; each default is
+  // what the Foreman always used. Global, like lifecycleLabels. See
+  // [GitHub conventions](#github-conventions-github).
+  github: githubConventionsSchema,
+
   // The optional Paperclip board mirror, off unless `enabled` (docs/paperclip.md).
   // Global, never per repo: one Foreman is one Paperclip agent. prefault for
   // the same reason as above.
@@ -346,6 +354,8 @@ export interface RepoConfig {
   dependencyPreApproved: boolean;
   /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
   lifecycleLabels: LifecycleLabels;
+  /** The fleet-wide GitHub conventions (`github` block) — the global value. */
+  github: GithubConventions;
 }
 
 /**
@@ -386,6 +396,7 @@ export interface AgentConfig {
   reviewerLogin?: string;
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
+  github: GithubConventions;
   /** The stages each repo pass runs, in order. Defaults to the eight built-ins. */
   stages: readonly StageEntry[];
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
@@ -485,6 +496,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewLabelReconcile: process.env.AI_AGENT_REVIEW_LABEL_RECONCILE ?? fileConfig.reviewLabelReconcile,
     lifecycleLabels: fileConfig.lifecycleLabels,
     stages: fileConfig.stages,
+    github: fileConfig.github,
     paperclip: mergePaperclip(fileConfig.paperclip),
   };
 
@@ -507,11 +519,13 @@ export function loadConfig(configPath?: string): AgentConfig {
   // Global settings shared by all repos (used as fallback when a per-repo entry
   // doesn't specify its own value)
   const lifecycleLabels: LifecycleLabels = Object.freeze({ ...parsed.lifecycleLabels });
+  const github = freezeGithubConventions(parsed.github);
   const globals = {
     allowedTools: [...parsed.allowedTools],
     builderMcpConfig: parsed.builderMcpConfig ? resolve(parsed.builderMcpConfig) : undefined,
     sessionEnv: [...parsed.sessionEnv],
     lifecycleLabels,
+    github,
   };
 
   let repos: RepoConfig[];
@@ -610,7 +624,13 @@ export function loadConfig(configPath?: string): AgentConfig {
   if (new Set(names).size !== names.length) {
     throw new Error(`lifecycleLabels must be distinct names; got ${JSON.stringify(lifecycleLabels)}`);
   }
+  if (names.includes(github.blockedLabel)) {
+    throw new Error(`github.blockedLabel "${github.blockedLabel}" is also a lifecycle label — every issue at that stage would read as blocked.`);
+  }
   for (const r of repos) {
+    if (r.triggerLabel === github.blockedLabel) {
+      throw new Error(`triggerLabel "${r.triggerLabel}" for repo "${r.name}" is also github.blockedLabel — every issue it selects would be held back.`);
+    }
     if (names.includes(r.triggerLabel)) {
       throw new Error(
         `triggerLabel "${r.triggerLabel}" for repo "${r.name}" is also a lifecycle label — ` +
@@ -644,6 +664,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     reviewerLogin: parsed.reviewerLogin,
     reviewLabelReconcile: parsed.reviewLabelReconcile,
     lifecycleLabels,
+    github,
     stages,
     paperclip,
   });

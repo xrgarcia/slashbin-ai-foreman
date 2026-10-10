@@ -4,7 +4,8 @@
 // skill runs exactly that).
 //
 // The label set is never written down here: it is each repo's resolved
-// `triggerLabel` plus every value of `lifecycleLabels`, read through the BUILT
+// `triggerLabel`, every value of `lifecycleLabels` and `github.blockedLabel`
+// (the priority labels are read, never written, so they are not installed), read through the BUILT
 // `loadConfig` — the same defaults, per-repo overrides and `githubRepo`
 // inference the daemon applies, so the names installed are the names the daemon
 // will use. Run `npm run build` first.
@@ -78,7 +79,7 @@ try {
   process.exit(1);
 }
 
-const lifecycle = Object.values(config.lifecycleLabels);
+const lifecycle = [...Object.values(config.lifecycleLabels), config.github.blockedLabel];
 const failures = [];
 
 for (const repo of config.repos) {

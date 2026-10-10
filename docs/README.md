@@ -10,6 +10,7 @@ stale), so they describe what runs, not what was meant to.
 | Know what the Foreman does and set it up | [../README.md](../README.md) — Quick start, Daemon management |
 | Change any setting: what it does, its default, its env var | [configuration.md](configuration.md) *(generated)* |
 | Make it retry sooner or later, or give up after more tries | [configuration.md#back-offs](configuration.md#back-offs) — the `backoff` block |
+| Rename the blocked or priority labels, or change the PR titles and signature the Foreman writes | [configuration.md#github-conventions-github](configuration.md#github-conventions-github) — the `github` block |
 | Know which state an issue is in, what moves it, what each event means | [lifecycle.md](lifecycle.md) *(generated)* |
 | Turn the Paperclip board mirror on, map its columns, check it | [paperclip.md](paperclip.md) *(generated)* |
 | Reorder the pipeline or add a stage that runs your own skill | README "Pipeline stages" and "Custom stages"; `src/stages.ts` |
@@ -44,5 +45,7 @@ The CLI itself: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`, a
 - Every state change is a named move in `src/lifecycle.ts`; nothing else writes lifecycle labels.
 - Every retry wait comes from the `backoff` config block through one formula in `src/backoff.ts`;
   a new wait is a new group there, never a constant in a phase.
+- Every GitHub name the Foreman reads or writes is a config key: the trigger label, `lifecycleLabels`,
+  or the `github` block (`src/github/conventions.ts`); a new one goes there, never a literal in a phase.
 - Every setting is commented where it is declared; the config doc generator refuses an
   undocumented key.

@@ -3,6 +3,7 @@
 import type { Logger } from "../logger.js";
 import { IssueSnapshot, PrSnapshot, formatGhError, getOpenIssues, getOpenPrs } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
+import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./conventions.js";
 
 
 // --- Dependency PRs (Dependabot) ---
@@ -69,11 +70,13 @@ export function findDependencyPRs(
   cwd: string,
   bases: readonly string[],
   logger?: Logger,
+  conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
 ): PrSnapshot[] {
   const allowed = new Set(bases);
+  const prefixes = conventions.dependencyBranchPrefixes;
   try {
     return getOpenPrs(repo, cwd).filter(
-      (p) => allowed.has(p.baseRefName) && p.headRefName.startsWith("dependabot/"),
+      (p) => allowed.has(p.baseRefName) && prefixes.some((x) => p.headRefName.startsWith(x)),
     );
   } catch (err) {
     if (isBackoffRefusal(err)) {
@@ -95,7 +98,7 @@ export function findDependencyPRs(
  * off the open-issue snapshot that is already fetched every cycle. No marker
  * label to create on twenty repos, no extra API call, and nothing to drift.
  */
-export const DEPENDENCY_BATCH_TITLE_PREFIX = "chore(deps): validate and land ";
+export const DEPENDENCY_BATCH_TITLE_PREFIX = DEFAULT_GITHUB_CONVENTIONS.dependencyBatchTitlePrefix;
 
 /** One dependency PR, reduced to what the issue body needs to say about it. */
 export interface DependencyChange {
@@ -175,11 +178,13 @@ export function isMajorBump(from: string, to: string): boolean {
 export function buildDependencyBatchIssue(
   featureBranch: string,
   changes: readonly DependencyChange[],
+  conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
+  baseBranch = "develop",
 ): { title: string; body: string } {
   const majors = changes.filter((c) => c.major);
   const n = changes.length;
   const title =
-    `${DEPENDENCY_BATCH_TITLE_PREFIX}${n} dependency update${n === 1 ? "" : "s"} on \`${featureBranch}\`` +
+    `${conventions.dependencyBatchTitlePrefix}${n} dependency update${n === 1 ? "" : "s"} on \`${featureBranch}\`` +
     (majors.length > 0 ? ` (${majors.length} major)` : "");
 
   const row = (c: DependencyChange) => {
@@ -192,7 +197,7 @@ export function buildDependencyBatchIssue(
     `## Problem`,
     ``,
     `${n} Dependabot pull request${n === 1 ? "" : "s"} target \`${featureBranch}\` and ${n === 1 ? "is" : "are"} not merged.`,
-    `They do not reach \`develop\` on their own: a bump aimed at the feature branch has no`,
+    `They do not reach \`${baseBranch}\` on their own: a bump aimed at the feature branch has no`,
     `mechanical merge path, because a CI check rollup proves the code compiles and never`,
     `proves the application still runs.`,
     ``,
@@ -258,9 +263,10 @@ export function findOpenDependencyBatchIssue(
   repo: string,
   cwd: string,
   logger: Logger,
+  conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
 ): IssueSnapshot | undefined {
   return getOpenIssues(repo, cwd, logger)
-    .find((i) => i.title.startsWith(DEPENDENCY_BATCH_TITLE_PREFIX));
+    .find((i) => i.title.startsWith(conventions.dependencyBatchTitlePrefix));
 }
 
 /**
