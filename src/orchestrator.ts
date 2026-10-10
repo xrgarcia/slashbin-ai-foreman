@@ -48,7 +48,7 @@ import {
   countChangesRequested,
   type PendingRevisionInfo,
 } from "./github.js";
-import { implementApprovedIssues, revisePRFeedback, reviewOpenPRs, reviewViaTechLead, verifyViaSre, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
+import { implementApprovedIssues, revisePRFeedback, reviewViaTechLead, verifyViaSre, runCustomStage, type ImplementationResult, type RevisionResult } from "./agent.js";
 import { dispatchStages, isCustomStage, type CustomStage, type StageResult } from "./stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "./upstream-backoff.js";
 import { reconcileRepo, checkLocalBranchDivergence, fastForwardFeatureBranch, divergenceStillHolds, type BranchDivergence } from "./reconciler.js";
@@ -2223,10 +2223,13 @@ async function tryReview(
   const repoName = repoConfig.name;
   const reviewLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "review" });
 
-  // A Claude back-off stops the review only when Claude is the reviewer. With a
-  // Tech Lead configured, Codex is the only reviewer (no Claude fallback, Ray
-  // 2026-10-10); when it could not take a PR, the repo waits REVIEW_DEFER_MS.
-  if (!config.techLeadPath && isUpstreamBlocked("claude")) return false;
+  // The Tech Lead is the only reviewer, on Codex (Ray, 2026-10-10). There is no
+  // Claude review and no EM-account review: without a Tech Lead nothing reviews,
+  // and when it could not take a PR the repo waits REVIEW_DEFER_MS.
+  if (!config.techLeadPath) {
+    reviewLogger.warn("review skipped: techLeadPath is not configured, and the Tech Lead is the only reviewer");
+    return false;
+  }
   if ((reviewDeferredUntil.get(repoName) ?? 0) > Date.now()) return false;
 
   // Failure back-off with cooldown (mirrors the implement phase).
@@ -2295,13 +2298,6 @@ async function tryReview(
   // it is precisely the case a pre-run snapshot cannot see.
   const reviewStartedAt = new Date().toISOString();
 
-  // Claim the launch (the one half-open probe, when Claude is recovering)
-  // before any checkout work or "Reviewing" event — when Claude is the reviewer.
-  if (!config.techLeadPath && !tryAcquire("claude")) return false;
-  // True once a Claude session is the one reviewing; only then is its result
-  // the back-off's to read.
-  const claudeRan = !config.techLeadPath;
-
   // The session reads the code from here rather than cloning one for itself.
   // Prepared before the run so it is warm on arrival; see review-checkout.ts
   // for why an unmanaged clone per review took the whole box down.
@@ -2318,31 +2314,21 @@ async function tryReview(
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
   let report: SessionReport | undefined;
   const reviewSince = new Date();
-  const reviewer = config.techLeadPath ? "Tech Lead" : "Claude";
+  const reviewer = "Tech Lead";
 
   try {
     await notifySession({ ...session, status: "started", reviewer }, reviewLogger);
-    // EM#427: with a Tech Lead configured it is the reviewer, on Codex only. Its
-    // "wrote nothing" exit (Codex unavailable) is a wait, never a hand-off to
-    // Claude (Ray, 2026-10-10): no failure is charged and the repo asks again
-    // after REVIEW_DEFER_MS. Without a Tech Lead the Claude review runs as before.
-    const viaTechLead = config.techLeadPath
-      ? await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
-          .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }))
-      : { fallback: true as const, reason: "not configured" };
-    if (config.techLeadPath && "fallback" in viaTechLead) {
+    // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
+    // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
+    // failure is charged and the repo asks again after REVIEW_DEFER_MS.
+    const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
+      .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
+    if ("fallback" in result) {
       reviewDeferredUntil.set(repoName, Date.now() + REVIEW_DEFER_MS);
-      ended = { status: "failed", detail: `Tech Lead could not take it (${viaTechLead.reason}) — retried in ${REVIEW_DEFER_MS / 60_000} min` };
-      reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${viaTechLead.reason}) — no review this pass, retry in ${REVIEW_DEFER_MS / 60_000} min`);
+      ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${REVIEW_DEFER_MS / 60_000} min` };
+      reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${REVIEW_DEFER_MS / 60_000} min`);
       return false;
     }
-    const result = "fallback" in viaTechLead
-      ? await reviewOpenPRs(
-          repoConfig, config, reviewLogger, runAbort.signal, transcriptPath,
-          `PR #${candidate.prNumber} on ${repoConfig.githubRepo}`,
-        ).catch(reportLaunchThrew)
-      : viaTechLead;
-    if (claudeRan) reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     if (hasObservers()) {
       report = reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
     }

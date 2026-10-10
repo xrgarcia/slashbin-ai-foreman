@@ -20,7 +20,7 @@ import {
   configureIssueCache,
   GitHubIssueConnector,
 } from "../dist/github.js";
-import { reviewOpenPRs } from "../dist/agent.js";
+import { revisePRFeedback } from "../dist/agent.js";
 import { createLogger } from "../dist/logger.js";
 
 const CUSTOM = {
@@ -181,10 +181,8 @@ test("dead-zone recovery writes configured names and never the production gate",
 // --- The spawned session is told the names ----------------------------------------
 
 test("every claude session receives FOREMAN_TRIGGER_LABEL and FOREMAN_LIFECYCLE_LABELS", async () => {
-  // reviewSkillPath has no default since EM#425; the review session needs one.
-  const c = load({ triggerLabel: "build-me", reviewSkillPath: "review/SKILL.md", lifecycleLabels: { prUnderReview: "in-review" } });
-  const result = await reviewOpenPRs(c.repos[0], c, logger);
-  assert.equal(result.success, true, result.error);
+  const c = load({ triggerLabel: "build-me", lifecycleLabels: { prUnderReview: "in-review" } });
+  await revisePRFeedback(c.repos[0], logger, undefined, 1, [9]);
   const env = JSON.parse(readFileSync(CLAUDE_ENV, "utf8"));
   assert.equal(env.FOREMAN_TRIGGER_LABEL, "build-me");
   assert.deepEqual(JSON.parse(env.FOREMAN_LIFECYCLE_LABELS), { ...c.lifecycleLabels });
