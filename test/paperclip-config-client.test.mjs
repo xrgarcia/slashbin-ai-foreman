@@ -17,7 +17,7 @@ test.after(() => rmSync(tmp, { recursive: true, force: true }));
 const ENV_KEYS = [
   "AI_AGENT_PAPERCLIP_ENABLED", "AI_AGENT_PAPERCLIP_URL", "AI_AGENT_PAPERCLIP_COMPANY_ID",
   "AI_AGENT_PAPERCLIP_AGENT_NAME", "AI_AGENT_PAPERCLIP_AGENT_ID", "AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT",
-  "AI_AGENT_PAPERCLIP_API_KEY",
+  "AI_AGENT_PAPERCLIP_API_KEY", "AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT", "AI_AGENT_PAPERCLIP_PROJECT_ID",
 ];
 for (const k of ENV_KEYS) delete process.env[k];
 
@@ -46,7 +46,8 @@ test("no paperclip block: mirror off, every default applied", () => {
     url: "http://127.0.0.1:3100",
     agentName: "Foreman",
     identityKeyFormat: "source: {repo}#{N}",
-    projects: true,
+    taskTitleFormat: "{repo}#{N}",
+    projects: false,
     agentStatus: true,
     comments: {
       enabled: true,
@@ -61,6 +62,22 @@ test("no paperclip block: mirror off, every default applied", () => {
   assert.equal(paperclip.statusMap, undefined);
   assert.equal(paperclip.companyId, undefined);
   assert.equal(paperclip.agentId, undefined);
+});
+
+test("paperclip placement, title and scope: file and env set them; a bad value stops startup", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: { projectId: "p-1", taskTitleFormat: "{name} #{N}", repos: ["example/r"] } }));
+  assert.equal(paperclip.projectId, "p-1");
+  assert.equal(paperclip.taskTitleFormat, "{name} #{N}");
+  assert.deepEqual(paperclip.repos, ["example/r"]);
+  assert.ok(Object.isFrozen(paperclip.repos));
+  const env = withEnv({ AI_AGENT_PAPERCLIP_PROJECT_ID: "p-env", AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT: "#{N}" },
+    () => loadConfig(cfg({ paperclip: { projectId: "p-1" } })).paperclip);
+  assert.equal(env.projectId, "p-env");
+  assert.equal(env.taskTitleFormat, "#{N}");
+  assert.throws(() => loadConfig(cfg({ paperclip: { taskTitleFormat: "{repo}" } })), /must contain \{N\}/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["example/typo"] } })), /"example\/typo" is not a configured githubRepo/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["no-owner"] } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { repos: [] } })));
 });
 
 test("paperclip.comments: a partial block keeps the other defaults; a bad maxLength stops startup", () => {

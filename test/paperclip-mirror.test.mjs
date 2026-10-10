@@ -407,6 +407,47 @@ test("projects off: no project call, no projectId", async () => {
   assert.equal(fake.rows[0].projectId, undefined);
 });
 
+test("projectId: every new task goes there, with no Unplaced lookup, and wins over projects", async () => {
+  const fake = fakePaperclip([], [UNPLACED]);
+  const { mirror } = mirrorOn(fake, { projects: true, projectId: "p-mine" });
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.equal(fake.rows[0].projectId, "p-mine");
+  assert.ok(!fake.calls.some((c) => c.path.endsWith("/projects")));
+});
+
+test("projects unset (the parsed default is off): a task is still created, with no project", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake);
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.equal(fake.rows.length, 1);
+  assert.equal(fake.rows[0].projectId, undefined);
+});
+
+test("taskTitleFormat titles a new task from {repo}, {owner}, {name} and {N}", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { taskTitleFormat: "{name} #{N} ({owner}, {repo})" });
+  await mirror.onClaim(item, repoConfig, logger());
+  assert.equal(fake.rows[0].title, "r #7 (example, example/r)");
+  const plain = fakePaperclip();
+  await mirrorOn(plain).mirror.onClaim(item, repoConfig, logger());
+  assert.equal(plain.rows[0].title, "example/r#7", "unset keeps the old title");
+});
+
+test("repos: a repo left out gets no card and no write; a listed one and daemon-wide events still do", async () => {
+  const fake = fakePaperclip([row("q1", 1, { description: "source: example/q#1" })]);
+  const { mirror } = mirrorOn(fake, { repos: ["example/r"] });
+  const other = { issueNumber: 1, repo: "example/q" };
+  const writes = () => fake.calls.filter((c) => c.method !== "GET").length;
+  await mirror.onEvent({ kind: "claim", item: other }, logger());
+  await mirror.onEvent({ kind: "blocked", item: other, reason: "x" }, logger());
+  await mirror.onEvent({ kind: "session", session: { phase: "implement", status: "started", repo: "example/q", items: [other] } }, logger());
+  await mirror.onEvent({ kind: "snapshot", repo: "example/q", items: [] }, logger());
+  assert.equal(writes(), 0, "nothing written for the repo left out");
+  assert.equal(fake.rows.length, 1);
+  await mirror.onEvent({ kind: "claim", item }, logger());
+  assert.equal(fake.rows.length, 2, "the listed repo gets its card");
+});
+
 // --- board stages: holder, status and one stage label per step ---
 
 const TEAM = {

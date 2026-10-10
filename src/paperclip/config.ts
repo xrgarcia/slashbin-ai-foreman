@@ -122,8 +122,26 @@ export const paperclipConfigSchema = z.object({
     .default("source: {repo}#{N}"),
   // Per-bucket override of the Paperclip status name. Unset = the bucket names.
   statusMap: z.partialRecord(z.enum(PAPERCLIP_STATUS_BUCKETS), z.string().min(1)).optional(),
-  // File each task the Foreman creates under the Unplaced project; off = no `projectId`.
-  projects: z.boolean().default(true),
+  // How a task the Foreman creates is titled. {repo} is the full owner/name,
+  // {owner} and {name} its two halves, {N} the issue number; {N} is required so
+  // two issues never share a title. Only new tasks: an existing title is never
+  // rewritten, and matching goes by identityKeyFormat, never by title.
+  taskTitleFormat: z.string()
+    .refine((f) => f.includes("{N}"), "taskTitleFormat must contain {N}")
+    .default("{repo}#{N}"),
+  // The Paperclip project every task the Foreman creates is filed under. Wins
+  // over `projects`. Unset (and `projects` off) = tasks are created with no
+  // project. The Foreman never moves an existing task between projects.
+  projectId: z.string().min(1).optional(),
+  // File each new task under the Unplaced project: the one project whose
+  // description line 1 is "roadmap-position: unplaced", for a roadmap sync that
+  // places it from there. With no such project, or two, no task is created
+  // until one exists. Off (the default) = no project, or `projectId`.
+  projects: z.boolean().default(false),
+  // Only issues in these repos (owner/name, as in githubRepo) get a card. Unset
+  // = every configured repo. A repo left out is never touched in Paperclip; its
+  // existing cards stay as they are.
+  repos: z.array(z.string().regex(/^[\w.-]+\/[\w.-]+$/, "a repo as owner/name")).min(1).optional(),
   // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
   agentStatus: z.boolean().default(true),
   // Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card.
@@ -157,8 +175,8 @@ export type PaperclipConfig = Readonly<z.infer<typeof paperclipConfigSchema>>;
 
 /**
  * The `paperclip` block with its AI_AGENT_PAPERCLIP_* overrides applied, one env
- * var per leaf. `statusMap` has none. Undefined when neither the file nor the
- * env sets anything, so the schema's prefault applies. A file value that is not
+ * var per leaf. `statusMap`, `projects`, `repos` and the nested blocks have none.
+ * Undefined when neither the file nor the env sets anything, so the schema's prefault applies. A file value that is not
  * an object is passed through untouched for the schema to reject.
  */
 export function mergePaperclip(fromFile: unknown): unknown {
@@ -170,6 +188,8 @@ export function mergePaperclip(fromFile: unknown): unknown {
     agentId: process.env.AI_AGENT_PAPERCLIP_AGENT_ID,
     apiKey: process.env.AI_AGENT_PAPERCLIP_API_KEY,
     identityKeyFormat: process.env.AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT,
+    taskTitleFormat: process.env.AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT,
+    projectId: process.env.AI_AGENT_PAPERCLIP_PROJECT_ID,
   }).filter(([, v]) => v !== undefined));
   if (Object.keys(env).length === 0) return fromFile;
   if (fromFile === undefined) return env;
@@ -179,9 +199,10 @@ export function mergePaperclip(fromFile: unknown): unknown {
 
 /**
  * The parsed block, checked and frozen. Throws on a mirror with nowhere to
- * write, or a board stage that names a role or label that does not exist.
+ * write, a board stage that names a role or label that does not exist, or a
+ * `repos` entry that is none of `knownRepos` (the configured owner/name list).
  */
-export function resolvePaperclipConfig(pc: z.infer<typeof paperclipConfigSchema>): PaperclipConfig {
+export function resolvePaperclipConfig(pc: z.infer<typeof paperclipConfigSchema>, knownRepos?: ReadonlyArray<string>): PaperclipConfig {
   // Fail fast on a mirror with nowhere to write: every Paperclip route the
   // Foreman uses is scoped to one company.
   if (pc.enabled && !pc.companyId) {
@@ -197,9 +218,15 @@ export function resolvePaperclipConfig(pc: z.infer<typeof paperclipConfigSchema>
   for (const [key, role] of [...Object.entries(pc.roles), ["agentReportsTo", { reportsTo: pc.agentReportsTo }] as const]) {
     if (role.reportsTo !== undefined && !roleKeys.has(role.reportsTo)) throw new Error(`paperclip ${key}: reportsTo "${role.reportsTo}" is not "${PAPERCLIP_FOREMAN_ROLE}" or a key of paperclip.roles.`);
   }
+  // A misspelled repo would mirror nothing for it, silently.
+  if (pc.repos && knownRepos) {
+    const unknown = pc.repos.filter((r) => !knownRepos.includes(r));
+    if (unknown.length) throw new Error(`paperclip.repos ${unknown.map((r) => `"${r}"`).join(", ")} is not a configured githubRepo.`);
+  }
   const paperclip: PaperclipConfig = Object.freeze({
     ...pc,
     ...(pc.statusMap ? { statusMap: Object.freeze({ ...pc.statusMap }) } : {}),
+    ...(pc.repos ? { repos: Object.freeze([...pc.repos]) as string[] } : {}),
   });
   return paperclip;
 }

@@ -27,7 +27,10 @@ that one field. The block is read once at startup — restart the daemon after c
 | `apiKey` | string | `AI_AGENT_PAPERCLIP_API_KEY` | — | The bearer credential sent as `authorization: Bearer` on every request, for an instance that requires sign-in. Unset sends no authorization header. Set it from the environment; it is a secret and is redacted from the mirror's logs. |
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
 | `statusMap` | object | none | — | Per-bucket override of the Paperclip status name. Unset = the bucket names. |
-| `projects` | boolean | none | `true` | File each task the Foreman creates under the Unplaced project; off = no `projectId`. |
+| `taskTitleFormat` | string | `AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT` | `"{repo}#{N}"` | How a task the Foreman creates is titled. {repo} is the full owner/name, {owner} and {name} its two halves, {N} the issue number; {N} is required so two issues never share a title. Only new tasks: an existing title is never rewritten, and matching goes by identityKeyFormat, never by title. |
+| `projectId` | string | `AI_AGENT_PAPERCLIP_PROJECT_ID` | — | The Paperclip project every task the Foreman creates is filed under. Wins over `projects`. Unset (and `projects` off) = tasks are created with no project. The Foreman never moves an existing task between projects. |
+| `projects` | boolean | none | `false` | File each new task under the Unplaced project: the one project whose description line 1 is "roadmap-position: unplaced", for a roadmap sync that places it from there. With no such project, or two, no task is created until one exists. Off (the default) = no project, or `projectId`. |
+| `repos` | array | none | — | Only issues in these repos (owner/name, as in githubRepo) get a card. Unset = every configured repo. A repo left out is never touched in Paperclip; its existing cards stay as they are. |
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
@@ -63,8 +66,10 @@ from `identityKeyFormat` (default `source: {repo}#{N}`): `{repo}` is the issue's
 full `owner/name` and `{N}` its number. Before creating a task the Foreman scans the company's
 tasks for one whose description starts with that line, and adopts it if found — so a task
 another tool created for the same issue is reused, not duplicated, **provided both use the same
-format**. A task the Foreman creates is titled `{repo}#{N}`, its
-description is the identity line, a blank line, and the issue's GitHub URL.
+format**. A task the Foreman creates is titled from `taskTitleFormat` (default
+`{repo}#{N}`; `{owner}` and `{name}` are the two halves of `{repo}`), its
+description is the identity line, a blank line, and the issue's GitHub URL. The title is only
+ever written at creation, and never used to find a task, so changing the format renames nothing.
 
 ## Status mapping
 
@@ -286,13 +291,22 @@ wake-on-demand), so assigning a task to it never makes Paperclip start a run.
 
 ## Projects
 
-With `projects` on, a task the Foreman creates is filed under the Unplaced project: the one
-project whose description line 1 is `roadmap-position: unplaced`, archived ones included in the
-lookup. The EM's Paperclip sync then places it in the project of the roadmap position its epic
-serves. The Foreman never creates a project and never moves a task between projects. When no
-Unplaced project exists, or more than one does, the Foreman logs one warning and creates no task;
-the GitHub side is unaffected, and the next claim looks again. With `projects` off, a task is
-created with no project.
+A task the Foreman creates is filed by the first of these that applies; an existing task is
+never moved between projects, and the Foreman never creates a project.
+
+- `projectId` set: every new task goes into that project.
+- `projects` on: every new task goes into the Unplaced project, the one project whose
+  description line 1 is `roadmap-position: unplaced` (archived ones included), for a roadmap
+  sync to place from there. When no such project exists, or more than one does, the Foreman logs
+  one warning and creates no task; the GitHub side is unaffected, and the next claim looks again.
+- Neither (the default): the task is created with no project.
+
+## Scope
+
+`repos` limits the mirror to the listed repos, each `owner/name` as in `githubRepo`; a name that
+is not a configured repo stops startup. An issue in a repo left out never gets a card and its
+existing cards are left as they are. Unset, every configured repo is mirrored. The Foreman's own
+agent status and upstream back-off notes are daemon-wide and are not scoped.
 
 ## Live activity
 

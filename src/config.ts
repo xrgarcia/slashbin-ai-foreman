@@ -619,7 +619,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     }
   }
 
-  const paperclip = resolvePaperclipConfig(parsed.paperclip);
+  const paperclip = resolvePaperclipConfig(parsed.paperclip, repos.map((r) => r.githubRepo));
 
   return Object.freeze({
     repos: Object.freeze(repos),

@@ -39,7 +39,7 @@ for (const f of [builtConfig, builtMirror, builtPaperclipConfig]) if (!existsSyn
 
 const { configSchema } = await import(builtConfig);
 const { PAPERCLIP_STAGES, PAPERCLIP_FOREMAN_ROLE } = await import(builtPaperclipConfig);
-const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS, PAPERCLIP_TASK_TITLE_FORMAT } = await import(builtMirror);
+const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS } = await import(builtMirror);
 const { FOREMAN_BLOCKED_PREFIX } = await import(builtMirror.replace(/mirror\.js$/, "board.js"));
 const { toJSONSchema } = await import("zod");
 
@@ -242,8 +242,10 @@ from \`identityKeyFormat\` (default ${code(defaults.identityKeyFormat)}): \`{rep
 full \`owner/name\` and \`{N}\` its number. Before creating a task the Foreman scans the company's
 tasks for one whose description starts with that line, and adopts it if found — so a task
 another tool created for the same issue is reused, not duplicated, **provided both use the same
-format**. A task the Foreman creates is titled ${code(PAPERCLIP_TASK_TITLE_FORMAT)}, its
-description is the identity line, a blank line, and the issue's GitHub URL.
+format**. A task the Foreman creates is titled from \`taskTitleFormat\` (default
+${code(defaults.taskTitleFormat)}; \`{owner}\` and \`{name}\` are the two halves of \`{repo}\`), its
+description is the identity line, a blank line, and the issue's GitHub URL. The title is only
+ever written at creation, and never used to find a task, so changing the format renames nothing.
 
 ## Status mapping
 
@@ -385,13 +387,22 @@ wake-on-demand), so assigning a task to it never makes Paperclip start a run.
 
 ## Projects
 
-With \`projects\` on, a task the Foreman creates is filed under the Unplaced project: the one
-project whose description line 1 is \`roadmap-position: unplaced\`, archived ones included in the
-lookup. The EM's Paperclip sync then places it in the project of the roadmap position its epic
-serves. The Foreman never creates a project and never moves a task between projects. When no
-Unplaced project exists, or more than one does, the Foreman logs one warning and creates no task;
-the GitHub side is unaffected, and the next claim looks again. With \`projects\` off, a task is
-created with no project.
+A task the Foreman creates is filed by the first of these that applies; an existing task is
+never moved between projects, and the Foreman never creates a project.
+
+- \`projectId\` set: every new task goes into that project.
+- \`projects\` on: every new task goes into the Unplaced project, the one project whose
+  description line 1 is \`roadmap-position: unplaced\` (archived ones included), for a roadmap
+  sync to place from there. When no such project exists, or more than one does, the Foreman logs
+  one warning and creates no task; the GitHub side is unaffected, and the next claim looks again.
+- Neither (the default): the task is created with no project.
+
+## Scope
+
+\`repos\` limits the mirror to the listed repos, each \`owner/name\` as in \`githubRepo\`; a name that
+is not a configured repo stops startup. An issue in a repo left out never gets a card and its
+existing cards are left as they are. Unset, every configured repo is mirrored. The Foreman's own
+agent status and upstream back-off notes are daemon-wide and are not scoped.
 
 ## Live activity
 
