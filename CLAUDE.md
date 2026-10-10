@@ -107,7 +107,9 @@ src/
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
 ├── state.ts         # Disk persistence (.agent-state.json)
 ├── stages.ts        # Stage schema, default order, dispatch loop
-├── orchestrator.ts  # Stage pass per repo, failure cooldowns; reports every step via emit/advance
+├── orchestrator.ts  # Stage pass per repo, failure cooldowns, the session slot; dispatches to phases/
+├── phases/          # One file per stage: reconcile, implement, revise, verify, review, promote, custom;
+│                    #   common.ts holds what they share. Each reports every step via emit/advance
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
 ├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
 ├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)

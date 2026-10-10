@@ -11,10 +11,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { orchestratorSource } from "./orchestrator-source.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
-const orchestrator = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
+const orchestrator = orchestratorSource();
 const state = readFileSync(join(root, "src/state.ts"), "utf-8");
 
 test("the reconciler looks up closed-unmerged PRs, not only open ones", () => {

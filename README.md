@@ -483,11 +483,17 @@ src/
 ├── cli.ts             # CLI entry point
 ├── config.ts          # Configuration loading + Zod validation
 ├── logger.ts          # Structured logging (JSON/text)
+├── lifecycle.ts       # The state machine: stages and named moves (docs/lifecycle.md)
+├── adapters.ts        # Data contract: WorkEvent, WorkSourceAdapter, WorkObserver
+├── work-source.ts     # emit()/advance(): one event → work source + observers
 ├── github.ts          # GitHub API (polling, PRs, labels, dual-token ops)
+├── github-work-source.ts # GitHub issues as the work source: a move → its labels
 ├── agent.ts           # Claude Code CLI spawner
 ├── reviewer.ts        # PR review feedback handler
 ├── stages.ts          # Stage schema, default order, dispatch loop
-├── orchestrator.ts    # Stage pass per repo, failure cooldowns, state tracking
+├── orchestrator.ts    # Stage pass per repo, failure cooldowns, session slot
+├── phases/            # One file per stage (reconcile, implement, revise, verify, review, promote, custom)
+├── paperclip/         # Optional Paperclip board plugin (a WorkObserver)
 ├── state.ts           # Persistent state management
 ├── daemon.ts          # Poll loop, graceful shutdown, Discord bridge
 ├── bridge-client.ts   # WebSocket client for Discord notifications
