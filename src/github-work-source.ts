@@ -293,11 +293,11 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         }
       }
       if (!hasLabel(issue, nextLabel)) args.push("--add-label", nextLabel);
-      // Kept exactly as it was before the move behind the adapter (byte-for-byte
-      // GitHub behaviour). NOTE: the base argv is 5 long, so this never fires and
-      // an already-resolved issue gets a flagless `gh issue edit` that fails into
-      // the catch below — still `false`, but via a failed call, not no call.
-      if (args.length === 4) {
+      // Nothing to strip or add: the issue is already where recovery would put it.
+      // (The base argv is 5 long; this compared against 4 and so never fired,
+      // sending a flagless `gh issue edit` that GitHub rejects — same `false`,
+      // one wasted call and a misleading "failed" warning.)
+      if (args.length === 5) {
         logger.debug(`Dead-zone resolve on #${issueNumber} is already in the target state`);
         return false;
       }

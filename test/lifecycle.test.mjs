@@ -85,7 +85,8 @@ const LABELS = [
   ["recoverFailed", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr pending actions"]],
   ["recoverFailed", "pr merged", true, ["--add-label", "pr pending actions"]],
   ["recoverMerged", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr merged"]],
-  ["recoverMerged", "pr merged", true, []],
+  // Was a flagless edit (GitHub rejects it: false); fixed 2026-10-10 to make no call.
+  ["recoverMerged", "pr merged", false, null],
   ["release", "pr under review", true, ["--remove-label", "pr under review"]],
   ["release", "pr merged", false, null],
 ];
