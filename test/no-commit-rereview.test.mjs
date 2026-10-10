@@ -12,9 +12,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { githubSource } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const github = readFileSync(join(root, "src/github.ts"), "utf-8");
+const github = githubSource();
 const fn = github.slice(github.indexOf("function returnedToReviewSinceVerdict"));
 const body = fn.slice(0, fn.indexOf("\n}\n"));
 

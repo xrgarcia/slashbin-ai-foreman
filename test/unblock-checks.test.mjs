@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { UNBLOCK_CHECKS, passingCheck, unblockedReason } from "../dist/unblock.js";
-import { orchestratorSource } from "./orchestrator-source.mjs";
+import { orchestratorSource } from "./source-text.mjs";
 
 const src = orchestratorSource();
 

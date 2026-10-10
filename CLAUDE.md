@@ -99,7 +99,8 @@ src/
 ├── lifecycle.ts     # THE state machine: stages, moves, session stages (generates docs/lifecycle.md)
 ├── adapters.ts      # The data contract: WorkEvent, WorkSourceAdapter, WorkObserver (no source-specific code)
 ├── work-source.ts   # emit()/advance(): one event → the work source records it, observers are told
-├── github.ts        # gh-CLI helpers (issues, PRs, labels, branch drift, review gate)
+├── github.ts        # gh-CLI public surface; the code is in github/, one file per concern
+│                    #   (gh runner, caches, discovery, review queue, lifecycle scans, CI gate, promotion, …)
 ├── github-work-source.ts # GitHubIssueConnector: a move → its `gh issue edit`; labels → stages for snapshot
 ├── redact.ts / review-report.ts # Core helpers shared by the agent runner and plugins
 ├── agent.ts         # Spawns claude CLI (implement / revise / review)

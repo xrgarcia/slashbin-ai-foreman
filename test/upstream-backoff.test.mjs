@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { detectUpstreamLimit, parseClaudeReset } from "../dist/agent.js";
-import { orchestratorSource } from "./orchestrator-source.mjs";
+import { orchestratorSource } from "./source-text.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 const url = (f) => pathToFileURL(join(DIST, f)).href;

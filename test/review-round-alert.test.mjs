@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { orchestratorSource } from "./orchestrator-source.mjs";
+import { githubSource, orchestratorSource } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const orchestrator = orchestratorSource();
@@ -28,6 +28,6 @@ test("the alert does not stop the revision", () => {
 });
 
 test("the round count is read from GitHub, not kept locally", () => {
-  const gh = readFileSync(join(root, "src/github.ts"), "utf-8");
+  const gh = githubSource();
   assert.match(gh, /export function countChangesRequested[\s\S]{0,400}CHANGES_REQUESTED/);
 });
