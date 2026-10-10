@@ -65,7 +65,9 @@ reviews anyway). Running → wait a pass. No CI → review as before.
 Gating (`findPRsNeedingReview`): an open `featureBranch → baseBranch` PR whose linked
 issue is `pr under review` (not `pr pending actions`) and with no review by
 `reviewerLogin` newer than the PR's latest commit (freshness guard against re-review
-loops). Every run's full turn-by-turn interaction (`--output-format stream-json`) is
+loops). A feature PR that names no open approved issue is reviewed with none —
+implement queues everything behind any open feature PR, so one review ignored holds
+the repo. Every run's full turn-by-turn interaction (`--output-format stream-json`) is
 written to `logs/review/<repo>-cycle<N>-<ts>.log` for debugging.
 
 Disabled by default; opt in per repo with `reviewEnabled`, which needs `techLeadPath`
