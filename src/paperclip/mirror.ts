@@ -127,7 +127,7 @@ export const PAPERCLIP_RETRY_NOTE = "retrying: the previous attempt did not fini
 /** The status a task is created with, before the claim moves it on. */
 export const PAPERCLIP_CREATE_STATUS: Bucket = "todo";
 
-/** A task's title: {repo} is owner/name, {N} the issue number. */
+/** A new task's title when `taskTitleFormat` is unset: {repo} is owner/name, {N} the issue number. */
 export const PAPERCLIP_TASK_TITLE_FORMAT = "{repo}#{N}";
 
 /** The first description line of the retired live task, which `start()` cancels. */
@@ -265,6 +265,12 @@ export class PaperclipMirror implements WorkObserver {
    * below. The handlers stay public so a test can drive one step directly.
    */
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
+    if (!this.mirrors(event)) {
+      // A claim outside `repos` is still the one build running: forget the last
+      // one, so a back-off note never lands on a card it is not about.
+      if (event.kind === "claim") this.building = null;
+      return;
+    }
     switch (event.kind) {
       case "claim": return this.onClaim(event.item);
       case "transition": return this.onState(event.item, event.from, event.to);
@@ -285,6 +291,17 @@ export class PaperclipMirror implements WorkObserver {
         return never;
       }
     }
+  }
+
+  /** Whether `event` is about a repo `repos` mirrors. Daemon-wide events (back-off) always are. */
+  private mirrors(event: WorkEvent): boolean {
+    if (!this.cfg.repos) return true;
+    const repo = "item" in event ? event.item.repo
+      : event.kind === "session" ? event.session.repo
+      : event.kind === "release" ? event.release.repo
+      : "repo" in event ? event.repo
+      : null;
+    return repo === null || this.cfg.repos.includes(repo);
   }
 
   async onClaim(item: WorkItem, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
@@ -699,11 +716,14 @@ export class PaperclipMirror implements WorkObserver {
     }
     if (!create) return null;
 
-    const projectId = this.cfg.projects ? await this.unplacedProjectId() : null;
-    if (this.cfg.projects && !projectId) return null;
+    // An explicit project wins; the Unplaced lookup files nothing until it finds one.
+    const unplaced = !this.cfg.projectId && this.cfg.projects;
+    const projectId = this.cfg.projectId ?? (unplaced ? await this.unplacedProjectId() : null);
+    if (unplaced && !projectId) return null;
+    const [owner = "", name = ""] = item.repo.split("/");
     const made = await this.safeCall("create task", () =>
       this.client.createIssue({
-        title: fill(PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, N: String(item.issueNumber) }),
+        title: fill(this.cfg.taskTitleFormat ?? PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, owner, name, N: String(item.issueNumber) }),
         status: this.statusName(PAPERCLIP_CREATE_STATUS),
         description: `${key}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
         ...(projectId ? { projectId } : {}),

@@ -160,7 +160,9 @@ Print, without doing any of it:
   (`npm run restart`, or however it is run here) for the mirror to start.
 - Give a GitHub issue in a configured repo its trigger label (`approved` unless the
   config says otherwise).
-- When the Foreman picks it up, its Paperclip task appears, titled `owner/name#N`,
+- When the Foreman picks it up, its Paperclip task appears, titled `owner/name#N`
+  (`taskTitleFormat` changes it; `projectId` files it in one project; `repos` limits which
+  repos get cards — `docs/paperclip.md` "Configuration", "Projects", "Scope"),
   in progress and assigned to the Foreman, with a `Foreman started implementing` comment
   naming the goal (`picked up by Foreman` with `comments.enabled` off). At each step after
   it gains a summary or note, and moves to the agent, status and stage label its stage
