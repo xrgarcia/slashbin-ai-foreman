@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, VERIFY_RETRY_MS, VERIFY_MAX_ATTEMPTS } from "../dist/orchestrator.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, VERIFY_RETRY_MS, VERIFY_MAX_ATTEMPTS } from "../dist/orchestrator.js";
 import { issueStage } from "../dist/paperclip/board.js";
 import { BUILTIN_STAGES } from "../dist/stages.js";
 
@@ -49,6 +49,22 @@ test("pickVerifyTarget: oldest PR first, one PR's issues together, held PRs skip
 
   const capped = { ...due, attempts: VERIFY_MAX_ATTEMPTS };
   assert.equal(pickVerifyTarget([refs[1]], { 3: capped }, now), null, "capped waits for a person");
+});
+
+test("verifyHoldPlan: a run that could not happen, or a named wait, costs no attempt", () => {
+  assert.deepEqual(verifyHoldPlan("codex-unavailable"), { kind: "defer" });
+  assert.deepEqual(verifyHoldPlan("em-mirror-unavailable"), { kind: "defer" });
+  assert.deepEqual(verifyHoldPlan("wait-until-20261010T1215Z"), { kind: "wait", retryAt: "2026-10-10T12:15:00.000Z" });
+  assert.deepEqual(verifyHoldPlan("wait-until-soon"), { kind: "charge" });
+  assert.deepEqual(verifyHoldPlan("healthcheck-red"), { kind: "charge" });
+});
+
+test("pickVerifyTarget: a wait-until hold is skipped until its time, then picked", () => {
+  const now = Date.parse("2026-10-10T12:00:00Z");
+  const refs = [{ issueNumber: 3, prNumber: 40 }];
+  const waiting = { heldAt: new Date(now - 2 * VERIFY_RETRY_MS).toISOString(), prNumber: 40, reason: "wait-until-20261010T1215Z", attempts: 0, retryAt: "2026-10-10T12:15:00.000Z" };
+  assert.equal(pickVerifyTarget(refs, { 3: waiting }, now), null, "before its time, even past the hourly window");
+  assert.deepEqual(pickVerifyTarget(refs, { 3: waiting }, Date.parse("2026-10-10T12:15:00Z")), { prNumber: 40, issueNumbers: [3] });
 });
 
 test("board: `pr merged` is the merged stage; `pr approved` still wins over it", () => {

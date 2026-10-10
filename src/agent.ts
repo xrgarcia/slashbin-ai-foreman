@@ -1719,7 +1719,7 @@ export const SRE_VERIFY_MAX_DURATION_MS = 90 * 60_000;
 export type VerifyResult =
   /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
   | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string }
-  /** No verdict: an error, a timeout, or the requested engine refused. Nothing was written. */
+  /** No verdict: an error or a timeout. Nothing was written. */
   | { kind: "error"; error: string };
 
 /**
@@ -1739,15 +1739,13 @@ export function verifyVerdict(t: ReviewTrailer): { pass: boolean; reason?: strin
  * verification (EM#440). The SRE posts the evidence comment and writes no label;
  * the Foreman reads the trailer it prints last and moves the label itself.
  *
- * `engine: "codex"` is what the orchestrator passes while Claude is backed off:
- * the SRE then refuses (exit 1, nothing written) instead of falling back onto
- * the session limit that is already refusing work.
+ * The SRE runs on Codex only. When Codex cannot run it still exits 0, with
+ * `hold=codex-unavailable` in the trailer; the orchestrator defers on that.
  */
 export async function verifyViaSre(
   repoConfig: RepoConfig,
   agentConfig: AgentConfig,
   prNumber: number,
-  engine: "auto" | "codex",
   logger: Logger,
   abortSignal?: AbortSignal,
   transcriptPath?: string,
@@ -1757,8 +1755,8 @@ export async function verifyViaSre(
   if (!process.env.EM_GITHUB_TOKEN) {
     return { kind: "error", error: "EM_GITHUB_TOKEN not set — refusing to verify without EM-account attribution" };
   }
-  const args = [join(sre, "bin/sre.mjs"), "verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--engine", engine];
-  logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification (engine ${engine})`);
+  const args = [join(sre, "bin/sre.mjs"), "verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
+  logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification`);
 
   const secrets = secretValues(agentConfig.sessionEnv ?? []);
   const outRedactor = createStreamRedactor(secrets);
