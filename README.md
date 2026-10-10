@@ -37,7 +37,7 @@ Reconcile → Review → Revise → Implement → Branch Sync → Dependabot →
 ```
 
 1. **Reconcile** — detects orphaned commits on the features branch with no PR and creates one
-2. **Review** *(opt-in)* — when `reviewEnabled` is set, invokes a review skill on open feature PRs awaiting review. The review skill runs in a **separate review repo** (`emRepoPath`) under a separate GitHub token, and owns its own merge + label decisions; its label side effects (approve → `pr approved`; request-changes → `pr pending actions`) feed the Promote and Revise phases, and the Foreman reconciles the outcome label from the run's trailer if the skill merged without setting it. Disabled by default — see [Review phase](#review-phase-opt-in)
+2. **Review** *(opt-in)* — when `reviewEnabled` is set, hands each open feature PR awaiting review to the **Tech Lead** (`techLeadPath`), which reviews under its own GitHub token and owns its own merge + label decisions; its label side effects (approve → `pr approved`; request-changes → `pr pending actions`) feed the Promote and Revise phases, and the Foreman reconciles the outcome label from the run's trailer if the skill merged without setting it. Disabled by default — see [Review phase](#review-phase-opt-in)
 3. **Revise** — finds PRs with pending review feedback and revises them (prioritized over new work)
 4. **Implement** — picks up approved issues and invokes the repo's implementation skill via Claude Code (up to 3 issues per cycle; 1 in greenfield repos)
 5. **Branch Sync** — merges main → develop to keep branches aligned after promotions
@@ -61,25 +61,30 @@ The Foreman is one layer in an AI engineering pipeline:
 4. **Reviewers** (human or AI) provide feedback on PRs — Foreman revises automatically
 5. **Foreman** promotes merged work from develop → main via promotion PRs
 
-The Foreman uses a **dual-token model**: one GitHub token for its own operations (creating PRs, managing labels) and a second token for the Engineering Manager (approving and merging PRs that require branch protection). This prevents the Foreman from self-approving its own work.
+The Foreman uses a **dual-token model**: one GitHub token for its own operations (creating PRs, managing labels) and a second token for the reviewer, the Tech Lead (approving and merging PRs that require branch protection). This prevents the Foreman from self-approving its own work.
 
 This is the pattern behind [www.slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-foreman_body) — structured context in, autonomous execution out. The Foreman doesn't need to understand your business. It reads the issue, reads the repo's CLAUDE.md, and invokes the skill.
 
 ## Quick start
 
 ```bash
-# 1. Clone and install
 git clone https://github.com/xrgarcia/slashbin-ai-foreman.git
 cd slashbin-ai-foreman
-npm install && npm run build
-
-# 2. Ensure claude and gh CLIs are installed and authenticated
-claude --version
-gh auth status
-
-# 3. Start the daemon
-npm start
 ```
+
+Then either open Claude Code here and say **"set up the Foreman"** — it asks which
+repos, branches and labels to use, writes `.ai-agent.json` after showing it to you,
+and runs setup — or do it by hand:
+
+```bash
+cp .ai-agent.example.json .ai-agent.json   # keep only your repos; see docs/setup.md
+npm run setup                              # install, build, create the labels, run the doctor
+npm start                                  # once the doctor says Ready
+```
+
+**[docs/setup.md](docs/setup.md)** lists what you need first (Node 18+, the `claude`
+and `gh` CLIs, a checkout of each repo, three branches, the GitHub tokens) and the
+smallest working config. `npm run doctor` re-checks everything at any time, read-only.
 
 ## Daemon management
 
@@ -285,8 +290,9 @@ Set these environment variables to enable status updates in Discord. The Foreman
 
 | Env Var | Description |
 |---|---|
-| `FOREMAN_GITHUB_TOKEN` | Token for Foreman operations (create PRs, manage labels) |
-| `EM_GITHUB_TOKEN` | Token for Engineering Manager operations (approve/merge PRs behind branch protection) |
+| `FOREMAN_GITHUB_TOKEN` | The Foreman's own account: opens PRs, moves labels. Unset, gh's logged-in account is used |
+| `TECHLEAD_GITHUB_KEY` | The reviewer's account: reviews and merges PRs, and merges sync PRs. Required when review is on |
+| `SRE_GITHUB_KEY` | The verifier's account. Required when `srePath` is set |
 
 ### Prompt template variables
 
@@ -298,9 +304,9 @@ The prompt supports these placeholders:
 
 ## Session security
 
-Sessions run with `--dangerously-skip-permissions`. Each receives one GitHub token as `GH_TOKEN` — the Foreman token for implement, revise and custom stages, the EM token for review — plus `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TERM`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK` when set, `FOREMAN_TRIGGER_LABEL`, `FOREMAN_LIFECYCLE_LABELS`, a custom stage's `FOREMAN_STAGE_*`, and the names in the top-level `sessionEnv` list. `sessionEnv` may not name a GitHub token. Values of `FOREMAN_GITHUB_TOKEN`, `EM_GITHUB_TOKEN` and `sessionEnv` names (8+ characters) are replaced by `[REDACTED:<NAME>]` in the Foreman's own transcripts under `logs/`, its log lines and the errors it returns. The Claude CLI's own session log under `~/.claude/projects/` is not touched — that is where the 2026-10-01 leak landed, and the allowlist is what keeps a token out of it. This narrows what a session holds in its environment; it does not stop a session reading what `HOME` grants (`~/.ssh`, the Doppler CLI login, `~/.claude`).
+Sessions run with `--dangerously-skip-permissions`. Each receives one GitHub token as `GH_TOKEN` — the Foreman token for implement, revise and custom stages, the Tech Lead its own `TECHLEAD_GITHUB_KEY` — plus `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TERM`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK` when set, `FOREMAN_TRIGGER_LABEL`, `FOREMAN_LIFECYCLE_LABELS`, a custom stage's `FOREMAN_STAGE_*`, and the names in the top-level `sessionEnv` list. `sessionEnv` may not name a GitHub token. Values of `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY` and `sessionEnv` names (8+ characters) are replaced by `[REDACTED:<NAME>]` in the Foreman's own transcripts under `logs/`, its log lines and the errors it returns. The Claude CLI's own session log under `~/.claude/projects/` is not touched — that is where the 2026-10-01 leak landed, and the allowlist is what keeps a token out of it. This narrows what a session holds in its environment; it does not stop a session reading what `HOME` grants (`~/.ssh`, the Doppler CLI login, `~/.claude`).
 
-The Tech Lead hand-off gets the same essentials and `sessionEnv` names, `EM_GITHUB_TOKEN`, its own `TECH_LEAD_*` settings and the two label vars — never `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
+The Tech Lead hand-off gets the same essentials and `sessionEnv` names, `TECHLEAD_GITHUB_KEY`, its own `TECH_LEAD_*` settings and the two label vars — never `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
 
 ## Using with skills
 
@@ -352,8 +358,8 @@ seven built-ins in the order above — an existing config runs unchanged:
 Leave a built-in out and it never runs; reorder them and you give up what the
 default order guarantees (review before implement, so review only sees PRs
 labeled in an earlier pass; promote last, so it sees labels this pass just set).
-Each stage may appear once. The review stage needs `reviewSkillPath` for every
-`reviewEnabled` repo only when `review` is in `stages`.
+Each stage may appear once. A `reviewEnabled` repo needs `techLeadPath` only when
+`review` is in `stages`.
 
 ### Custom stages
 
@@ -392,24 +398,22 @@ revise is what moves the head and re-runs the check.
 
 ## Review phase (opt-in)
 
-The Review phase closes the loop between Implementation and Revision by invoking a
-**review skill** on open feature PRs awaiting review — automating the human/agent
+The Review phase closes the loop between Implementation and Revision by handing
+open feature PRs awaiting review to the **Tech Lead** (`techLeadPath`) — automating the human/agent
 reviewer step. It is **disabled by default** (`reviewEnabled: false`); a vanilla
 config keeps the original five-phase behavior unchanged.
 
 It differs from Implementation/Revision in three ways, because review is a
 decision-layer workflow rather than an in-repo edit:
 
-- **Runs in a separate review repo — optionally.** With `emRepoPath` set, the review
-  skill is invoked with its working directory set to that repo, not the service repo —
-  so it has the reviewer's own tooling (MCP servers, verification scripts, context
-  docs) available. Without it, the session runs in the repo's managed review checkout
-  (`reviewCheckoutRoot/<name>`), so a review skill shipped inside the service repo
-  needs no second repo.
+- **Runs as a separate program.** The Foreman runs `bin/tech-lead.mjs review-pr` in
+  the Tech Lead's checkout, which carries its own review procedure. When it cannot
+  take a review (its model is unavailable), the PR waits and is offered again after
+  a `backoff.agentUnavailable` wait.
 - **Runs under a separate token.** Reviews and merges are attributed to the account
-  behind `EM_GITHUB_TOKEN` (distinct from `FOREMAN_GITHUB_TOKEN`), keeping the
+  behind `TECHLEAD_GITHUB_KEY` (distinct from `FOREMAN_GITHUB_TOKEN`), keeping the
   reviewer identity separate from the implementer identity.
-- **Owns its own outcomes.** The skill posts the verdict, merges approved PRs, and
+- **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
   transitions issue labels itself. The label side effects feed the other phases:
   approve → `pr approved` (awaiting the human release gate); request-changes →
   `pr pending actions` (Revise). The Foreman reconciles the label as a backstop
@@ -474,14 +478,13 @@ it has an open `featureBranch → baseBranch` PR, and there is no review by
 `reviewerLogin` newer than the PR's latest commit (a freshness guard against
 re-review loops).
 
-Review config keys (global; `reviewEnabled`, `reviewSkillPath` and `reviewerLogin`
-can also be set per repo, and a per-repo value wins):
+Review config keys (global; `reviewEnabled` and `reviewerLogin` can also be set per
+repo, and a per-repo value wins):
 
 | Key | Default | Description |
 |---|---|---|
 | `reviewEnabled` | `false` | Enable the Review phase (per-repo override supported) |
-| `emRepoPath` | — | Working dir for the review skill (the review repo). Optional; unset = the repo's review checkout |
-| `reviewSkillPath` | — | Review skill. **Required for every review-enabled repo** (startup fails otherwise). Absolute, `~/…`, or relative to the session's working dir (`emRepoPath` when set, else the repo's review checkout) |
+| `techLeadPath` | — | The Tech Lead's checkout. **Required when any repo has review on** (startup fails otherwise) |
 | `reviewModel` | — | Model override for review runs (independent of `model`) |
 | `reviewMaxTurns` | `200` | Max turns (review + verify is long-running) |
 | `reviewMaxDurationMs` | `3600000` (60 min) | Max review duration |
@@ -489,7 +492,7 @@ can also be set per repo, and a per-repo value wins):
 | `reviewerLogin` | — | GitHub login the review runs as (freshness guard). Unset = a verdict by any reviewer counts as current |
 | `reviewLabelReconcile` | `true` | Set the outcome label from the run's own trailer when the skill merged without labeling. Env: `AI_AGENT_REVIEW_LABEL_RECONCILE` |
 
-Requires `EM_GITHUB_TOKEN` in the environment when enabled.
+Requires `techLeadPath` and `TECHLEAD_GITHUB_KEY` in the environment when enabled.
 
 ## Image handling in issue bodies
 

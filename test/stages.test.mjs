@@ -127,9 +127,9 @@ test("invalid stages are refused at startup", () => {
 });
 
 test("review guard follows the stages: required only when `review` is configured", () => {
-  assert.throws(() => load({ stages: [{ type: "review" }] }, { reviewEnabled: true }), /reviewSkillPath/);
+  assert.throws(() => load({ stages: [{ type: "review" }] }, { reviewEnabled: true }), /techLeadPath/);
   assert.doesNotThrow(() => load({ stages: [{ type: "implement" }] }, { reviewEnabled: true }));
-  assert.throws(() => load({}, { reviewEnabled: true }), /reviewSkillPath/, "default stages include review");
+  assert.throws(() => load({}, { reviewEnabled: true }), /techLeadPath/, "default stages include review");
 });
 
 // --- Dispatch loop -----------------------------------------------------------

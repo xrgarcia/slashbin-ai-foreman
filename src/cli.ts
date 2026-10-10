@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
+import { findConfigFile, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
@@ -54,6 +54,9 @@ Options:
   --help           Show this help message
 
 Commands:
+  npm run setup     Install, build, install the labels, then run the doctor (needs a config)
+  npm run doctor    Is the Foreman ready to run? Tools, tokens, config, and per repo the
+                    checkout, branches, skills and labels (read-only; exits non-zero on any FAIL)
   paperclip:doctor  Check Paperclip reachability, company, agent registration, and config
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
 
@@ -114,6 +117,19 @@ async function main(): Promise<void> {
     }
     const allPassed = await runDoctor(doctorConfig);
     process.exit(allPassed ? 0 : 1);
+  }
+
+  // No config file and no repo in the env: loadConfig would default repoPath to
+  // "." and infer githubRepo from this checkout's remote — the Foreman would
+  // build issues on its own repo. Refuse, and say how to set it up.
+  if (!findConfigFile(configPath) && !process.env.AI_AGENT_REPO_PATH) {
+    console.error(
+      configPath
+        ? `Configuration error: ${configPath} not found.`
+        : "Configuration error: no .ai-agent.json (or ai-agent.config.json) in this directory, and AI_AGENT_REPO_PATH is unset.\n" +
+          "Set the Foreman up first: see docs/setup.md, or ask Claude to \"set up the Foreman\". Then run `npm run setup`.",
+    );
+    process.exit(1);
   }
 
   let config;

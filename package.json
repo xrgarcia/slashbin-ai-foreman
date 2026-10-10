@@ -28,6 +28,8 @@
     "once": "node dist/cli.js --once",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "setup": "npm install && npm run build && node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "labels:install": "node scripts/install-labels.mjs",
     "paperclip:register": "node scripts/paperclip/agent.mjs",
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",

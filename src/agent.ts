@@ -360,6 +360,11 @@ The Authorization header is required for private-repo URLs (github.com/.../raw/.
 export const BUILTIN_SKILL = "builtin:";
 const FOREMAN_SKILLS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills");
 
+/** The priority tiers as one line, e.g. `S1 > security > S2+bug > … > chore`. */
+function priorityOrder(github: GithubConventions): string {
+  return github.priorityLabels.map((tier) => tier.join("+")).join(" > ");
+}
+
 type PromptPart = { ok: true; text: string } | { ok: false; error: string };
 
 /**
@@ -368,11 +373,6 @@ type PromptPart = { ok: true; text: string } | { ok: false; error: string };
  * SKILL.md instead of pointing at it: the text the session follows is then the
  * text this Foreman build shipped with, wherever the package is installed.
  */
-/** The priority tiers as one line, e.g. `S1 > security > S2+bug > … > chore`. */
-function priorityOrder(github: GithubConventions): string {
-  return github.priorityLabels.map((tier) => tier.join("+")).join(" > ");
-}
-
 function skillInstruction(config: RepoConfig, skillPath: string, builtin: "implement" | "revise"): PromptPart {
   if (skillPath !== BUILTIN_SKILL) return { ok: true, text: `Read and follow the skill at ${skillPath}.` };
   const file = join(FOREMAN_SKILLS_DIR, builtin, "SKILL.md");

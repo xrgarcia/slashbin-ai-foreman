@@ -46,14 +46,13 @@ time (`implementing` mutex) for git-state safety.
 The Review phase is categorically different from Implement/Revise, because review is a
 decision-layer workflow rather than an in-repo edit:
 
-- **Runs in a separate review repo when one is set.** With `emRepoPath`, the review
-  skill is spawned with its working directory there (not the service repo), so it has
-  the reviewer's own MCP servers, verification scripts, and context docs. Without it,
-  the cwd is the repo's review checkout (`reviewSessionCwd`). A relative
-  `reviewSkillPath` resolves against that same cwd (`resolveReviewSkillPath`).
-- **Runs under a separate token.** Reviews/merges are attributed to `EM_GITHUB_TOKEN`
+- **Runs as the Tech Lead, only.** `reviewViaTechLead` runs `bin/tech-lead.mjs
+  review-pr` in `techLeadPath`; when it cannot take a review the PR waits a
+  `backoff.agentUnavailable` window — there is no Claude review session.
+  `reviewSkillPath` and `emRepoPath` are accepted but no longer read.
+- **Runs under a separate token.** Reviews/merges are attributed to `TECHLEAD_GITHUB_KEY`
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
-- **Owns its own outcomes.** The skill posts the verdict, merges approved PRs, and
+- **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
   transitions issue labels itself; the orchestrator does **not** relabel afterward. Its
   label side effects feed the other phases (approve → `ready for prod release` → Promote;
   request-changes → `pr pending actions` → Revise).
@@ -69,9 +68,8 @@ issue is `pr under review` (not `pr pending actions`) and with no review by
 loops). Every run's full turn-by-turn interaction (`--output-format stream-json`) is
 written to `logs/review/<repo>-cycle<N>-<ts>.log` for debugging.
 
-Disabled by default; opt in per repo with `reviewEnabled` and give each such repo a
-`reviewSkillPath` (global or per repo — there is no default, startup fails without
-one). `reviewSkillPath` and `reviewerLogin` cascade per repo like `model`. See
+Disabled by default; opt in per repo with `reviewEnabled`, which needs `techLeadPath`
+(startup fails without it). `reviewerLogin` cascades per repo like `model`. See
 README "Review phase (opt-in)" for the full config table.
 
 ## State (persisted to disk)
@@ -146,12 +144,15 @@ src/
 └── index.ts         # Public API exports
 ```
 
-## Prerequisites
+## Setup
 
-- `claude` CLI installed and authenticated
-- `gh` CLI installed; tokens supplied via env (`FOREMAN_GITHUB_TOKEN`; `EM_GITHUB_TOKEN`
-  when the Review phase is enabled)
-- Node.js >= 18
+`docs/setup.md` is what a new install needs; the `setup-foreman` skill interviews the
+user and writes the config. `npm run setup` builds, installs the labels and runs
+`npm run doctor` (`scripts/doctor.mjs`, read-only PASS/WARN/FAIL per check). With no
+config file and no `AI_AGENT_REPO_PATH` the daemon refuses to start rather than work
+on its own checkout. **A new precondition the daemon needs is a doctor check.**
+Tokens: `FOREMAN_GITHUB_TOKEN`; `TECHLEAD_GITHUB_KEY` for review and sync merges;
+`SRE_GITHUB_KEY` with `srePath`.
 
 ## Key design decisions
 

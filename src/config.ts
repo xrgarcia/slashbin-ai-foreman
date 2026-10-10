@@ -180,14 +180,11 @@ export const configSchema = z.object({
   // .ai-agent.json keeps the original reconcile/revise/implement/sync/promote
   // behavior with no review step. We opt in via our own .ai-agent.json.
   //
-  // The review phase invokes a review skill in a headless Claude session under
-  // the EM GitHub token (reviewer attribution). emRepoPath is optional: when set,
-  // the session's cwd is that repo (NOT the service repo) so it has the
-  // reviewer's MCP servers, npm scripts, and context/docs; when unset, the cwd is
-  // the repo's managed review checkout (see reviewSessionCwd in agent.ts).
+  // The review phase hands each PR to the Tech Lead (techLeadPath), which runs
+  // under TECHLEAD_GITHUB_KEY (reviewer attribution).
 
-  // The review session's working directory (the reviewer's own repo). Unset, it
-  // is the repo's managed review checkout.
+  // No longer read: review runs through the Tech Lead, never a Claude session
+  // in this directory. Accepted so an older config still loads.
   emRepoPath: z.string().optional(),
   // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
   // review is offered to it FIRST — Codex judges, its code posts and merges.
@@ -202,11 +199,8 @@ export const configSchema = z.object({
   srePath: z.string().optional(),
   // Run the review stage. Off by default; per repo too, where it wins.
   reviewEnabled: z.boolean().default(false),
-  // The review skill. No default: a review-enabled repo must get one from here
-  // or its own entry, or loadConfig refuses to start. A relative path resolves
-  // against the review session's cwd — emRepoPath when set, else the repo's
-  // review checkout — exactly as the session itself would read it
-  // (resolveReviewSkillPath in agent.ts). Per-repo override supported.
+  // No longer read: review runs through the Tech Lead (techLeadPath), which
+  // carries its own review procedure. Accepted so an older config still loads.
   reviewSkillPath: z.string().optional(),
   // Model for review sessions, independent of `model`. Omit for the CLI default.
   reviewModel: z.string().optional(),
@@ -428,17 +422,21 @@ function inferGithubRepo(repoPath: string): string | undefined {
   }
 }
 
-function loadConfigFile(configPath?: string): Record<string, unknown> {
+/**
+ * The config file `loadConfig` reads: `configPath` when given, else
+ * `.ai-agent.json`, else `ai-agent.config.json`, in the working directory.
+ * Undefined when none exists — `loadConfig` then runs on env and defaults alone.
+ */
+export function findConfigFile(configPath?: string): string | undefined {
   const paths = configPath
     ? [resolve(configPath)]
     : [resolve(".ai-agent.json"), resolve("ai-agent.config.json")];
+  return paths.find((p) => existsSync(p));
+}
 
-  for (const p of paths) {
-    if (existsSync(p)) {
-      return JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
-    }
-  }
-  return {};
+function loadConfigFile(configPath?: string): Record<string, unknown> {
+  const p = findConfigFile(configPath);
+  return p ? (JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>) : {};
 }
 
 
@@ -605,15 +603,16 @@ export function loadConfig(configPath?: string): AgentConfig {
   // Resolve emRepoPath to absolute once (used by the review phase as the spawn cwd).
   const emRepoPath = parsed.emRepoPath ? resolve(parsed.emRepoPath) : undefined;
 
-  // Fail fast on misconfiguration: review enabled for a repo with no skill to run.
-  // Only when the review stage is configured at all — without it `reviewEnabled`
-  // selects nothing, so there is no session to need a skill.
+  // Fail fast on misconfiguration: review enabled with no reviewer to run it.
+  // Review runs only through the Tech Lead (techLeadPath); without one every
+  // review would wait forever. Only when the review stage is configured at all —
+  // without it `reviewEnabled` selects nothing.
   const stages: readonly StageEntry[] = Object.freeze(parsed.stages.map((s) => Object.freeze({ ...s })));
-  const unskilled = hasStage(stages, "review") ? repos.filter((r) => r.reviewEnabled && !r.reviewSkillPath) : [];
-  if (unskilled.length > 0) {
+  const unreviewed = hasStage(stages, "review") && !parsed.techLeadPath ? repos.filter((r) => r.reviewEnabled) : [];
+  if (unreviewed.length > 0) {
     throw new Error(
-      `reviewEnabled is true for repo(s) ${unskilled.map((r) => `"${r.name}"`).join(", ")} but no reviewSkillPath is set for them. ` +
-      "Set reviewSkillPath globally or per repo."
+      `reviewEnabled is true for repo(s) ${unreviewed.map((r) => `"${r.name}"`).join(", ")} but techLeadPath is not set. ` +
+      "Review runs through the Tech Lead: set techLeadPath, or turn reviewEnabled off."
     );
   }
 
