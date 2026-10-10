@@ -2207,6 +2207,10 @@ async function tryVerify(
   }
 }
 
+/** How long a repo's review waits after the Tech Lead could not take a PR. */
+const REVIEW_DEFER_MS = 15 * 60_000;
+const reviewDeferredUntil = new Map<string, number>();
+
 async function tryReview(
   repoConfig: RepoConfig,
   config: AgentConfig,
@@ -2220,9 +2224,10 @@ async function tryReview(
   const reviewLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "review" });
 
   // A Claude back-off stops the review only when Claude is the reviewer. With a
-  // Tech Lead configured, Codex reviews on its own subscription and Claude is
-  // claimed later, only if the Tech Lead hands the PR back.
+  // Tech Lead configured, Codex is the only reviewer (no Claude fallback, Ray
+  // 2026-10-10); when it could not take a PR, the repo waits REVIEW_DEFER_MS.
   if (!config.techLeadPath && isUpstreamBlocked("claude")) return false;
+  if ((reviewDeferredUntil.get(repoName) ?? 0) > Date.now()) return false;
 
   // Failure back-off with cooldown (mirrors the implement phase).
   const failures = reviewFailureCount.get(repoName) ?? 0;
@@ -2295,7 +2300,7 @@ async function tryReview(
   if (!config.techLeadPath && !tryAcquire("claude")) return false;
   // True once a Claude session is the one reviewing; only then is its result
   // the back-off's to read.
-  let claudeRan = !config.techLeadPath;
+  const claudeRan = !config.techLeadPath;
 
   // The session reads the code from here rather than cloning one for itself.
   // Prepared before the run so it is warm on arrival; see review-checkout.ts
@@ -2313,27 +2318,23 @@ async function tryReview(
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
   let report: SessionReport | undefined;
   const reviewSince = new Date();
-  let reviewer = config.techLeadPath ? "Tech Lead" : "Claude";
+  const reviewer = config.techLeadPath ? "Tech Lead" : "Claude";
 
   try {
     await notifySession({ ...session, status: "started", reviewer }, reviewLogger);
-    // EM#427: the Tech Lead (Codex) takes the review first when configured; on
-    // its "wrote nothing" exit the Claude review below runs exactly as before.
+    // EM#427: with a Tech Lead configured it is the reviewer, on Codex only. Its
+    // "wrote nothing" exit (Codex unavailable) is a wait, never a hand-off to
+    // Claude (Ray, 2026-10-10): no failure is charged and the repo asks again
+    // after REVIEW_DEFER_MS. Without a Tech Lead the Claude review runs as before.
     const viaTechLead = config.techLeadPath
       ? await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
           .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }))
       : { fallback: true as const, reason: "not configured" };
     if (config.techLeadPath && "fallback" in viaTechLead) {
-      if (!tryAcquire("claude")) {
-        // Codex declined and Claude is backed off. Nothing ran and nothing was
-        // written, so no failure is charged; the next pass offers it again.
-        ended = { status: "failed", detail: `Tech Lead declined (${viaTechLead.reason}) and Claude is backed off — retried next pass` };
-        reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead declined and Claude is backed off — no review this pass`);
-        return false;
-      }
-      claudeRan = true;
-      reviewer = "Claude";
-      await notifySession({ ...session, status: "handoff", reviewer: "Claude", detail: viaTechLead.reason }, reviewLogger);
+      reviewDeferredUntil.set(repoName, Date.now() + REVIEW_DEFER_MS);
+      ended = { status: "failed", detail: `Tech Lead could not take it (${viaTechLead.reason}) — retried in ${REVIEW_DEFER_MS / 60_000} min` };
+      reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${viaTechLead.reason}) — no review this pass, retry in ${REVIEW_DEFER_MS / 60_000} min`);
+      return false;
     }
     const result = "fallback" in viaTechLead
       ? await reviewOpenPRs(

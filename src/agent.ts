@@ -492,15 +492,14 @@ export function buildSessionEnv(opts: SpawnOptions): Record<string, string> {
 
 /**
  * The Tech Lead hand-off's environment. It reads EM_GITHUB_TOKEN by name and
- * sets GH_TOKEN itself, then starts its own Claude session from what it gets
- * here — so it receives the EM token and never the Foreman's, plus its own
- * TECH_LEAD_* settings and the configured label names.
+ * sets GH_TOKEN itself — so it receives the EM token and never the Foreman's,
+ * plus its own TECH_LEAD_* settings and the configured label names. It reads
+ * nothing from the EM checkout (review moved wholly to it, 2026-10-10).
  */
 export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("TECH_LEAD_")), env);
   pickEnv(["EM_GITHUB_TOKEN"], env);
-  env.TECH_LEAD_EM_REPO = agentConfig.emRepoPath ?? "";
   // The configured label names, exactly as every Claude session gets them
   // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
   if (repoConfig.triggerLabel) env.FOREMAN_TRIGGER_LABEL = repoConfig.triggerLabel;
@@ -1617,8 +1616,7 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
 }
 
 /**
- * Offer one PR's review to the Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427)
- * before spending a Claude session on it.
+ * Hand one PR's review to the Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427).
  *
  * The Tech Lead judges on Codex inside a read-only sandbox and does the writes in
  * its own code; it emits the same FOREMAN_REVIEW trailer this phase already
@@ -1626,9 +1624,9 @@ ${IMAGE_HANDLING_INSTRUCTIONS}`;
  *
  * Exit 3 is its "I could not take this, and I wrote NOTHING" signal (Codex signed
  * out, out of allowance, timed out, or a path it does not cover). That returns
- * `{ fallback: true }` and the caller runs `reviewOpenPRs` as before — a review
- * never waits on Codex. Any other non-zero exit is an ordinary failure: it may
- * have written, so it is NOT retried on Claude in the same cycle.
+ * `{ fallback: true }` and the caller waits and offers the PR again — never to
+ * Claude (Ray, 2026-10-10). Any other non-zero exit is an ordinary failure: it
+ * may have written.
  */
 export async function reviewViaTechLead(
   repoConfig: RepoConfig,
@@ -1678,7 +1676,7 @@ export async function reviewViaTechLead(
 
   if (out.code === 3) {
     const reason = out.stdout.trim().split("\n").pop() || "Codex unavailable";
-    logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — falling back to the Claude review`);
+    logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — retried later`);
     return { fallback: true, reason };
   }
   if (out.timedOut) return { success: false, error: "Tech Lead review timed out" };

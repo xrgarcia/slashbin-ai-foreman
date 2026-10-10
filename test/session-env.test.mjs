@@ -78,7 +78,7 @@ test("buildTechLeadEnv: EM token and TECH_LEAD_* only — never the Foreman toke
   );
   assert.equal(env.EM_GITHUB_TOKEN, EM);
   assert.equal(env.TECH_LEAD_MODEL, "m");
-  assert.equal(env.TECH_LEAD_EM_REPO, "/em");
+  assert.equal("TECH_LEAD_EM_REPO" in env, false, "the Tech Lead reads nothing from the EM checkout");
   assert.equal(env.TEST_LISTED, "listed-value");
   assert.equal(env.FOREMAN_TRIGGER_LABEL, "approved");
   for (const n of ["FOREMAN_GITHUB_TOKEN", "GH_TOKEN", "TEST_UNLISTED"]) assert.equal(n in env, false, n);
