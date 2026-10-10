@@ -3,6 +3,7 @@
 import type { Logger } from "../logger.js";
 import { findOpenPrs, formatGhError } from "./cache.js";
 import { gh, ghAsTechLead, isBackoffRefusal } from "./gh.js";
+import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
 import { OpenPromotionPR } from "./promotion.js";
 
 
@@ -157,6 +158,7 @@ export function createSyncPR(
   behindBy: number,
   cwd: string,
   logger?: Logger,
+  conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
 ): string | null {
   try {
     const result = gh([
@@ -164,8 +166,8 @@ export function createSyncPR(
       "--repo", repo,
       "--base", baseBranch,
       "--head", productionBranch,
-      "--title", `chore: sync ${baseBranch} with ${productionBranch} (merge commits backfill)`,
-      "--body", `## Branch Sync\n\nSync \`${baseBranch}\` with \`${productionBranch}\` to backfill ${behindBy} merge commit(s) from prior promotions. No code changes — only merge commit history alignment.\n\n---\nAutomated by slashbin-ai-agent`,
+      "--title", fillTitle(conventions.syncTitle, { base: baseBranch, production: productionBranch }),
+      "--body", signed(`## Branch Sync\n\nSync \`${baseBranch}\` with \`${productionBranch}\` to backfill ${behindBy} merge commit(s) from prior promotions. No code changes — only merge commit history alignment.`, conventions),
     ], cwd);
 
     const match = result.match(/https:\/\/github\.com\/[^\s]+/);
@@ -189,7 +191,7 @@ export function createSyncPR(
         "pr", "review", prNumber,
         "--repo", repo,
         "--approve",
-        "--body", "Branch sync: head is `main`, so there is no new code to review.",
+        "--body", `Branch sync: head is \`${productionBranch}\`, so there is no new code to review.`,
       ], cwd);
 
       ghAsTechLead([
@@ -241,6 +243,7 @@ export function tryMergeSyncPR(
   prNumber: number,
   cwd: string,
   logger?: Logger,
+  productionBranch = "main",
 ): boolean {
   try {
     // Re-approve defensively: on the retry path the original approval is already
@@ -250,7 +253,7 @@ export function tryMergeSyncPR(
         "pr", "review", String(prNumber),
         "--repo", repo,
         "--approve",
-        "--body", "Branch sync: head is `main`, so there is no new code to review.",
+        "--body", `Branch sync: head is \`${productionBranch}\`, so there is no new code to review.`,
       ], cwd);
     } catch {
       // Already approved, or approval not required. Not a reason to skip the merge.

@@ -12,8 +12,8 @@ The prompt that carried this skill names the repository, its **feature branch**,
 ## Labels come from the environment
 
 Never type a label name from memory. `FOREMAN_LIFECYCLE_LABELS` holds the configured
-lifecycle labels as JSON; the one that marks a PR as waiting on revision is
-`prPendingActions`:
+lifecycle labels as JSON; the one that marks a PR's linked issue as waiting on
+revision is `prPendingActions` (labels are on issues, never on the PR):
 
 ```
 node -e 'console.log(JSON.parse(process.env.FOREMAN_LIFECYCLE_LABELS).prPendingActions)'
@@ -25,14 +25,15 @@ whether you pushed.
 ## Phase 0: Inventory
 
 1. If the prompt names a PR number, that is the PR to revise.
-2. Otherwise list the open PRs waiting on revision:
+2. Otherwise find the issues waiting on revision, then the open feature PR:
 
    ```
    PENDING=$(node -e 'console.log(JSON.parse(process.env.FOREMAN_LIFECYCLE_LABELS).prPendingActions)')
-   gh pr list --label "$PENDING" --state open --json number,title,url,headRefName,body
+   gh issue list --label "$PENDING" --state open --json number,title
+   gh pr list --head <feature> --base <base> --state open --json number,title,url,headRefName,body
    ```
 
-3. If none are found, report that nothing is pending revision and stop.
+3. If either list is empty, report that nothing is pending revision and stop.
 
 ## Phase 1: Read Feedback
 

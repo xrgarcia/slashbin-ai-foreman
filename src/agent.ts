@@ -10,6 +10,7 @@ import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
 import { redactAll } from "./redact.js";
+import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./github/conventions.js";
 export { redactAll };
 
 const FOREMAN_OVERRIDES = resolve(
@@ -367,6 +368,11 @@ type PromptPart = { ok: true; text: string } | { ok: false; error: string };
  * SKILL.md instead of pointing at it: the text the session follows is then the
  * text this Foreman build shipped with, wherever the package is installed.
  */
+/** The priority tiers as one line, e.g. `S1 > security > S2+bug > … > chore`. */
+function priorityOrder(github: GithubConventions): string {
+  return github.priorityLabels.map((tier) => tier.join("+")).join(" > ");
+}
+
 function skillInstruction(config: RepoConfig, skillPath: string, builtin: "implement" | "revise"): PromptPart {
   if (skillPath !== BUILTIN_SKILL) return { ok: true, text: `Read and follow the skill at ${skillPath}.` };
   const file = join(FOREMAN_SKILLS_DIR, builtin, "SKILL.md");
@@ -374,7 +380,8 @@ function skillInstruction(config: RepoConfig, skillPath: string, builtin: "imple
     const body = readFileSync(file, "utf8").trim();
     // The built-in skill is the same text for every repo, so the per-repo
     // facts it cannot carry are stated here. Labels are not among them: they
-    // reach the session as FOREMAN_TRIGGER_LABEL / FOREMAN_LIFECYCLE_LABELS.
+    // reach the session as FOREMAN_TRIGGER_LABEL / FOREMAN_LIFECYCLE_LABELS /
+    // FOREMAN_BLOCKED_LABEL / FOREMAN_PRIORITY_LABELS.
     return {
       ok: true,
       text: `Follow the skill below — the Foreman's built-in skills/${builtin}/SKILL.md.\n\n` +
@@ -415,6 +422,8 @@ export interface SpawnOptions {
   triggerLabel: string;
   /** The configured lifecycle labels, handed to the session as FOREMAN_LIFECYCLE_LABELS. */
   lifecycleLabels: LifecycleLabels;
+  /** The `github` block: its blocked and priority labels reach the session as FOREMAN_BLOCKED_LABEL / FOREMAN_PRIORITY_LABELS. */
+  github?: GithubConventions;
   model?: string;
   allowedTools: string[];
   /** MCP client config to load (`--mcp-config`); each server it names is allowed. */
@@ -486,10 +495,27 @@ export function buildSessionEnv(opts: SpawnOptions): Record<string, string> {
   // literals. Labels as one JSON map (`JSON.parse` once, iterate the set); the
   // trigger label on its own, since it selects work and a skill uses it alone in
   // `--label`.
-  env.FOREMAN_TRIGGER_LABEL = opts.triggerLabel;
-  env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(opts.lifecycleLabels);
+  setLabelEnv(env, opts.triggerLabel, opts.lifecycleLabels, opts.github);
   if (opts.extraEnv) Object.assign(env, opts.extraEnv);
   return env;
+}
+
+/**
+ * Every label name a session may read or write: the trigger label alone (it is
+ * used alone in `--label`), the lifecycle labels and the priority tiers as JSON,
+ * and the blocked label. Set the same way for the builder, the Tech Lead and the
+ * SRE, so no skill falls back on a literal name.
+ */
+function setLabelEnv(
+  env: Record<string, string>,
+  triggerLabel: string | undefined,
+  lifecycleLabels: LifecycleLabels | undefined,
+  github: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
+): void {
+  if (triggerLabel) env.FOREMAN_TRIGGER_LABEL = triggerLabel;
+  if (lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(lifecycleLabels);
+  env.FOREMAN_BLOCKED_LABEL = github.blockedLabel;
+  env.FOREMAN_PRIORITY_LABELS = JSON.stringify(github.priorityLabels);
 }
 
 /**
@@ -505,8 +531,7 @@ export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfi
   pickEnv(["TECHLEAD_GITHUB_KEY"], env);
   // The configured label names, exactly as every Claude session gets them
   // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
-  if (repoConfig.triggerLabel) env.FOREMAN_TRIGGER_LABEL = repoConfig.triggerLabel;
-  if (repoConfig.lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(repoConfig.lifecycleLabels);
+  setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
   return env;
 }
 
@@ -775,6 +800,7 @@ function spawnClaude(
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       triggerLabel: config.triggerLabel,
       lifecycleLabels: config.lifecycleLabels,
+      github: config.github,
       model: config.model,
       allowedTools: config.allowedTools,
       mcpConfig: config.builderMcpConfig,
@@ -984,7 +1010,7 @@ export async function implementApprovedIssues(
   } else {
     const issueScope = issueNumbers && issueNumbers.length > 0
       ? `Implement ONLY these issues: ${issueNumbers.map(n => `#${n}`).join(", ")}. Read each issue with \`gh issue view <number>\` to understand the requirements.`
-      : `Implement all open GitHub issues labeled "${config.triggerLabel}" in this repository.\n\n1. Query GitHub for them: gh issue list --label ${JSON.stringify(config.triggerLabel)} --state open --json number,title,body,labels\n2. Prioritize by severity (S1 > security > S2+bug > ... > chore).`;
+      : `Implement all open GitHub issues labeled "${config.triggerLabel}" in this repository.\n\n1. Query GitHub for them: gh issue list --label ${JSON.stringify(config.triggerLabel)} --state open --json number,title,body,labels\n2. Skip any labeled ${JSON.stringify(config.github.blockedLabel)}. Prioritize by labels, highest first: ${priorityOrder(config.github)}.`;
 
     prompt = `${issueScope}
 
@@ -1359,6 +1385,7 @@ export async function runCustomStage(
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       triggerLabel: config.triggerLabel,
       lifecycleLabels: config.lifecycleLabels,
+      github: config.github,
       model: config.model,
       allowedTools: config.allowedTools,
       mcpConfig: config.builderMcpConfig,
@@ -1478,8 +1505,7 @@ export async function reviewViaTechLead(
  */
 export function buildSreEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
-  if (repoConfig.triggerLabel) env.FOREMAN_TRIGGER_LABEL = repoConfig.triggerLabel;
-  if (repoConfig.lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(repoConfig.lifecycleLabels);
+  setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("SRE_")), env);
   if (agentConfig.emRepoPath && !env.SRE_EM_REPO) env.SRE_EM_REPO = agentConfig.emRepoPath;
   return env;

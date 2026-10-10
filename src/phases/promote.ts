@@ -44,7 +44,7 @@ export function trySyncDrift(
   // (Slashbin-console#779: open 2h48m over ~140 no-op cycles, blocking #782.)
   const existing = findOpenSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
   if (existing) {
-    if (tryMergeSyncPR(repoConfig.githubRepo, existing.number, repoConfig.repoPath, syncLogger)) {
+    if (tryMergeSyncPR(repoConfig.githubRepo, existing.number, repoConfig.repoPath, syncLogger, repoConfig.productionBranch)) {
       syncLogger.info(`Sync PR merged on retry — #${existing.number}: ${existing.url}`);
       return true;
     }
@@ -53,7 +53,7 @@ export function trySyncDrift(
   }
 
   syncLogger.info(`${repoConfig.baseBranch} is ${drift.developBehindMain} commit(s) behind ${repoConfig.productionBranch} — creating sync PR`);
-  const syncUrl = createSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, drift.developBehindMain, repoConfig.repoPath, syncLogger);
+  const syncUrl = createSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, drift.developBehindMain, repoConfig.repoPath, syncLogger, repoConfig.github);
   if (syncUrl) {
     // Say what actually happened. This line used to assert "created and
     // auto-merged" unconditionally, which was false whenever branch protection
@@ -92,10 +92,10 @@ export function tryFileDependencyBatchIssue(
   if (bases.length === 0) return null;
   const featureBranch = repoConfig.featureBranch || bases[0];
 
-  const prs = findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger);
+  const prs = findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger, repoConfig.github);
   if (prs.length === 0) return null;
 
-  const existing = findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, depLogger);
+  const existing = findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, depLogger, repoConfig.github);
   if (existing) {
     depLogger.debug(
       `${prs.length} dependency PR(s) on ${bases.join("/")}; batch issue #${existing.number} is already open`,
@@ -104,7 +104,7 @@ export function tryFileDependencyBatchIssue(
   }
 
   const changes = prs.map((p) => describeDependencyPR(p.number, p.title));
-  const { title, body } = buildDependencyBatchIssue(featureBranch, changes);
+  const { title, body } = buildDependencyBatchIssue(featureBranch, changes, repoConfig.github, repoConfig.baseBranch);
   const number = createDependencyBatchIssue(
     repoConfig.githubRepo, repoConfig.repoPath, title, body,
     repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, depLogger,
@@ -210,7 +210,7 @@ export async function tryPromotion(
 
     if (missingIssues.length > 0) {
       const updated = updatePromotionPR(
-        repoConfig.githubRepo, existingPR.number, issues, repoConfig.repoPath
+        repoConfig.githubRepo, existingPR.number, issues, repoConfig.repoPath, repoConfig.github,
       );
       if (updated) {
         promoLogger.info(
@@ -288,6 +288,7 @@ export async function tryPromotion(
     issues,
     repoConfig.repoPath,
     promoLogger,
+    repoConfig.github,
   );
 
   if (prUrl) {

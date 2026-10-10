@@ -10,9 +10,10 @@ import {
 } from "./github.js";
 import type { Move, StageOrDone } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
+import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 
-/** The source label that blocks an issue (the Foreman never picks one up). */
-export const SOURCE_BLOCKED_LABEL = "blocked";
+/** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
+export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
 
 /**
  * The lifecycle stage GitHub labels put an open issue in, latest stage first;
@@ -25,9 +26,10 @@ export function issueStage(
   inRelease: boolean,
   lifecycle: LifecycleLabels,
   triggerLabel: string,
+  blockedLabel: string = SOURCE_BLOCKED_LABEL,
 ): StageOrDone | null {
   const has = (l: string) => labels.includes(l);
-  if (has(SOURCE_BLOCKED_LABEL)) return "blocked";
+  if (has(blockedLabel)) return "blocked";
   if (has(lifecycle.readyToClose)) return "done";
   if (inRelease || has(lifecycle.readyForProd)) return "awaitingRelease";
   if (has(lifecycle.prApproved)) return "pendingVerification";
@@ -107,7 +109,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   async snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]> {
     const out: SnapshotItem[] = [];
     for (const { number, labels } of openIssueLabels(repoConfig, logger)) {
-      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel);
+      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel, repoConfig.github.blockedLabel);
       if (stage === null) continue;
       out.push({ item: { issueNumber: number, repo: repoConfig.githubRepo }, stage, detail: labels.join(", ") || "none" });
     }
@@ -393,7 +395,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     const actionable: number[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
-      if (labels.includes("blocked")) continue;
+      if (labels.includes(config.github.blockedLabel)) continue;
       if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
       actionable.push(issue.number);
     }

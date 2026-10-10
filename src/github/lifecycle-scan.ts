@@ -154,7 +154,7 @@ export function findStuckMergedIssues(
         // Trigger label only, no lifecycle label: implement skips it as covered
         // once its PR merged, and before slashbin-ai-foreman#73 nothing else
         // looked at it — the third door into the same dead zone.
-        (hasLabel(i, config.triggerLabel) && !hasLabel(i, "blocked") && !lifecycle.some((l) => hasLabel(i, l))));
+        (hasLabel(i, config.triggerLabel) && !hasLabel(i, config.github.blockedLabel) && !lifecycle.some((l) => hasLabel(i, l))));
     const candidates = issues.filter(
       // `pr merged` belongs to the verify stage, which owns its retries.
       (i) => !(

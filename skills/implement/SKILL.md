@@ -16,9 +16,12 @@ Never type a label name from memory. The Foreman hands you the configured names:
 
 - `FOREMAN_TRIGGER_LABEL` — the label that marks an issue as ready to build.
 - `FOREMAN_LIFECYCLE_LABELS` — a JSON object of the lifecycle labels
-  (`prUnderReview`, `prPendingActions`, `prApproved`, `readyForProd`, `readyToClose`).
-  Read one with, for example:
+  (`prUnderReview`, `prMerged`, `prPendingActions`, `prApproved`, `readyForProd`,
+  `readyToClose`). Read one with, for example:
   `node -e 'console.log(JSON.parse(process.env.FOREMAN_LIFECYCLE_LABELS).prUnderReview)'`
+- `FOREMAN_BLOCKED_LABEL` — the label that holds an issue back (default `blocked`).
+- `FOREMAN_PRIORITY_LABELS` — a JSON array of priority tiers, highest first. Each
+  tier is the labels an issue must all carry, e.g. `[["S1"],["security"],["S2","bug"],…]`.
 
 You do not set lifecycle labels in this skill — the Foreman transitions them after
 you finish. You only read them.
@@ -69,11 +72,13 @@ you finish. You only read them.
 
 ## Phase 2: Analysis & Ordering
 
-1. Skip an issue labelled `blocked`, or one whose acceptance criteria are unclear.
-2. Priority, highest first:
-   - **P1** `S1` (production broken) · **P2** `security` · **P3** `S2` + `bug` ·
-     **P4** `S2` + `enhancement` · **P5** `S2` + `feature` · **P6** `bug` ·
-     **P7** `enhancement` · **P8** `feature` · **P9** `S3` · **P10** `chore`
+1. Skip an issue carrying `$FOREMAN_BLOCKED_LABEL`, or one whose acceptance criteria
+   are unclear.
+2. Priority, highest first, is `$FOREMAN_PRIORITY_LABELS`: an issue takes the first
+   tier whose labels it all carries; one matching no tier comes after every tier.
+   Unconfigured, the tiers are: **P1** `S1` (production broken) · **P2** `security` ·
+   **P3** `S2` + `bug` · **P4** `S2` + `enhancement` · **P5** `S2` + `feature` ·
+   **P6** `bug` · **P7** `enhancement` · **P8** `feature` · **P9** `S3` · **P10** `chore`
 3. Within a tier: dependencies first, schema changes before the code that uses them,
    smaller scope first.
 4. Read the body's sections deliberately:

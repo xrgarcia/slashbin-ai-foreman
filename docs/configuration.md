@@ -272,6 +272,12 @@ Type: object[] · Default: the built-ins in order: `reconcile` → `review` → 
 
 The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the eight built-ins in today's order, so an existing .ai-agent.json runs exactly as before. A custom stage is `{ id, skillPath }`: one Claude session on that skill when the pass reaches it. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
+### `github`
+
+Type: object · Default: see [GitHub conventions](#github-conventions-github)
+
+The other GitHub names the Foreman reads and writes: the blocked label, the priority labels, the dependency-PR branch prefixes, and the titles and signature of the PRs and issues it files. Set any subset; each default is what the Foreman always used. Global, like lifecycleLabels. See [GitHub conventions](#github-conventions-github).
+
 ### `paperclip`
 
 Type: object · Default: see [paperclip.md](paperclip.md)
@@ -446,6 +452,28 @@ The names must be distinct, and none may equal a repo's `triggerLabel`. Every se
 | `prApproved` | `pr approved` | Merged and verified in dev; awaiting the EM outcome-gate. |
 | `readyForProd` | `ready for prod release` | The EM outcome-gate's signature — authorizes production. The daemon never applies it on its own judgement (see GitHubIssueConnector.reportState); it only puts back one a review run removed (restoreEmGate). |
 | `readyToClose` | `ready to close` | Promoted; awaiting the close. Read here only to keep such issues out of the actionable set. |
+
+## GitHub conventions (`github`)
+
+Every other name the Foreman reads or writes on GitHub. Top-level only, like the lifecycle labels.
+Set any subset; each default is what the Foreman has always used. In a title, `{name}` is replaced
+as the key says and an unknown `{name}` is left as written. Not configurable, on purpose: the
+markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVIEW`,
+`<!-- foreman-ci-gate -->`, "Related to #N"); renaming one side would break the other.
+`npm run labels:install` also creates `blockedLabel`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `blockedLabel` | `"blocked"` | The label that holds an issue back. An issue carrying it is never built, never reported stuck after a merge, and shows as Blocked to an observer. Sessions get it as FOREMAN_BLOCKED_LABEL. Must differ from every trigger and lifecycle label. |
+| `priorityLabels` | `[["S1"],["security"],["S2","bug"],["S2","enhancement"],["S2","feature"],["bug"],["enhancement"],["feature"],["S3"],["chore"]]` | The order the implement session picks among several approved issues, highest first. Each tier is the labels an issue must all carry; an issue takes the first tier it matches. Sessions get it as FOREMAN_PRIORITY_LABELS (JSON). An issue matching no tier comes after every tier. |
+| `dependencyBranchPrefixes` | `["dependabot/"]` | Head-branch prefixes that mark a dependency-update PR, for the dependency-batch issue. A branch, never a label: any account can apply a label, only the bot writes its own branches. Renovate's is "renovate/". |
+| `dependencyBatchTitlePrefix` | `"chore(deps): validate and land "` | The title every dependency-batch issue starts with. It is also how an open batch is found, so changing it while one is open files a second. |
+| `promotionTitle` | `"release: {title}"` | Title of a promotion PR (base → production) carrying one issue. {title} is the issue's title, {N} its number. |
+| `promotionBatchTitle` | `"release: promote {n} changes to production"` | Title of a promotion PR carrying several issues. {n} is how many. |
+| `syncTitle` | `"chore: sync {base} with {production} (merge commits backfill)"` | Title of the PR that merges production back into base after a promotion. {base} and {production} are the two branch names. |
+| `reconcileTitle` | `"feat: implement #{N}"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number. |
+| `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the feature branch. |
+| `signature` | `"Automated by slashbin-ai-agent"` | The last line of every PR body the Foreman writes. Empty writes none. No "#<number>": every #N in a promotion PR's body is read as an issue it carries. |
 
 ## Elsewhere
 

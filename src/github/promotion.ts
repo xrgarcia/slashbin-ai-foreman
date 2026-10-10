@@ -4,6 +4,7 @@ import type { LifecycleLabels } from "../config.js";
 import type { Logger } from "../logger.js";
 import { findOpenPrs, formatGhError, getOpenIssues, hasLabel } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
+import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
 
 
 // --- Promotion PR Creation ---
@@ -78,22 +79,20 @@ export function updatePromotionPR(
   prNumber: number,
   issues: PromotionIssue[],
   cwd: string,
+  conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
 ): boolean {
   const issueList = issues
     .map((i) => `- #${i.number}: ${i.title}`)
     .join("\n");
 
   const title = issues.length === 1
-    ? `release: ${issues[0].title}`
-    : `release: promote ${issues.length} changes to production`;
+    ? fillTitle(conventions.promotionTitle, { title: issues[0].title, N: issues[0].number })
+    : fillTitle(conventions.promotionBatchTitle, { n: issues.length });
 
-  const body = `## Production Promotion
+  const body = signed(`## Production Promotion
 
 ### Issues included
-${issueList}
-
----
-Automated by slashbin-ai-agent`;
+${issueList}`, conventions);
 
   // REST, NOT `gh pr edit` (2026-07-27).
   //
@@ -193,22 +192,20 @@ export function createPromotionPR(
   issues: PromotionIssue[],
   cwd: string,
   logger?: Logger,
+  conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
 ): string | null {
   const issueList = issues
     .map((i) => `- #${i.number}: ${i.title}`)
     .join("\n");
 
   const title = issues.length === 1
-    ? `release: ${issues[0].title}`
-    : `release: promote ${issues.length} changes to production`;
+    ? fillTitle(conventions.promotionTitle, { title: issues[0].title, N: issues[0].number })
+    : fillTitle(conventions.promotionBatchTitle, { n: issues.length });
 
-  const body = `## Production Promotion
+  const body = signed(`## Production Promotion
 
 ### Issues included
-${issueList}
-
----
-Automated by slashbin-ai-agent`;
+${issueList}`, conventions);
 
   try {
     const result = gh([

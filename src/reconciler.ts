@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { gh, knownOpenPr, verifyPRExists } from "./github.js";
+import { fillTitle, signed } from "./github/conventions.js";
 
 export interface ReconciliationResult {
   reconciled: boolean;
@@ -403,10 +404,10 @@ function createReconciliationPR(
     : "_No linked issues found in commit messages_";
 
   const title = issueNumbers.length === 1
-    ? `feat: implement #${issueNumbers[0]}`
-    : `feat: implement ${commitCount} change(s) from ${headBranch}`;
+    ? fillTitle(config.github.reconcileTitle, { N: issueNumbers[0] })
+    : fillTitle(config.github.reconcileBatchTitle, { n: commitCount, branch: headBranch });
 
-  const body = `## Feature PR (Reconciled)
+  const body = signed(`## Feature PR (Reconciled)
 
 This PR was created automatically by Foreman's reconciliation phase.
 Orphaned commits were found on \`${headBranch}\` with no open PR targeting \`${config.baseBranch}\`.
@@ -415,10 +416,7 @@ Orphaned commits were found on \`${headBranch}\` with no open PR targeting \`${c
 ${issueList}
 
 ### Commits
-${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\`
-
----
-_Automated by slashbin-ai-agent (reconciler)_`;
+${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``, config.github, " (reconciler)");
 
   try {
     const result = gh([
