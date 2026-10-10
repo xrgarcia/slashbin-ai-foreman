@@ -36,6 +36,8 @@ export interface VerifyHold {
   reason: string;
   /** Verify runs spent on this issue so far. */
   attempts: number;
+  /** ISO time the SRE said the criterion becomes observable (`hold=wait-until-…`); not retried before it. */
+  retryAt?: string;
 }
 
 export interface RepoState {

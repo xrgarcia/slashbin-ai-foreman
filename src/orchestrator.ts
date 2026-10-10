@@ -2020,8 +2020,28 @@ async function tryRevision(
 /** Hours between verify attempts on a held issue, and how many it gets. */
 export const VERIFY_RETRY_MS = 60 * 60_000;
 export const VERIFY_MAX_ATTEMPTS = 3;
-/** How long a repo's verify waits after both engines were unavailable. */
+/** How long a repo's verify waits after the SRE could not run at all. */
 const VERIFY_DEFER_MS = 15 * 60_000;
+
+/**
+ * What a non-passing verify costs. Pure, exported for tests.
+ *
+ * - `defer`: the SRE could not run (Codex or its EM spec mirror unavailable) —
+ *   nothing was verified, so no attempt is charged; the repo asks again shortly.
+ * - `wait`: the SRE verified what it could and named the time the rest becomes
+ *   observable (`wait-until-YYYYMMDDTHHMMZ`) — not a failure, so no attempt is
+ *   charged; the PR is not picked again before that time.
+ * - `charge`: a real hold or error — one attempt spent.
+ */
+export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wait"; retryAt: string } | { kind: "charge" } {
+  if (/^(codex-unavailable|em-mirror-unavailable)$/.test(reason)) return { kind: "defer" };
+  const m = /^wait-until-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z$/.exec(reason);
+  if (m) {
+    const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z`);
+    if (Number.isFinite(t)) return { kind: "wait", retryAt: new Date(t).toISOString() };
+  }
+  return { kind: "charge" };
+}
 const verifyDeferredUntil = new Map<string, number>();
 
 /**
@@ -2043,7 +2063,10 @@ export function pickVerifyTarget(
   for (const [prNumber, issueNumbers] of byPr) {
     const waiting = issueNumbers.some((n) => {
       const h = held[n];
-      return h && (h.attempts >= VERIFY_MAX_ATTEMPTS || now - Date.parse(h.heldAt) < VERIFY_RETRY_MS);
+      if (!h) return false;
+      if (h.attempts >= VERIFY_MAX_ATTEMPTS) return true;
+      if (h.retryAt) return now < Date.parse(h.retryAt);
+      return now - Date.parse(h.heldAt) < VERIFY_RETRY_MS;
     });
     if (!waiting) return { prNumber, issueNumbers };
   }
@@ -2058,9 +2081,8 @@ export function pickVerifyTarget(
  * it waits for a person. Nothing here writes `pr pending actions` — a merged PR
  * has no feature PR left to revise.
  *
- * While Claude is backed off the SRE runs Codex-only (`--engine codex`), so a
- * verify never lands on the session limit; Codex being down too is a deferral,
- * not a failed attempt.
+ * The SRE runs on Codex only (Ray, 2026-10-10). A run that could not happen, or
+ * one waiting on a named time, costs no attempt — see verifyHoldPlan.
  */
 async function tryVerify(
   repoConfig: RepoConfig,
@@ -2114,7 +2136,6 @@ async function tryVerify(
   const target = pickVerifyTarget(refs, held, Date.now());
   if (!target) return false;
 
-  const engine = isUpstreamBlocked("claude") ? "codex" : "auto";
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const transcriptPath = resolve(process.cwd(), "logs", "verify", `${repoName}-cycle${cycleNumber}-${ts}.log`);
   const runAbort = new AbortController();
@@ -2128,7 +2149,7 @@ async function tryVerify(
 
   try {
     await notifySession({ ...session, status: "started" }, vlog);
-    const r = await verifyViaSre(repoConfig, config, target.prNumber, engine, vlog, runAbort.signal, transcriptPath)
+    const r = await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
 
     if (r.kind === "verdict" && r.pass) {
@@ -2144,18 +2165,26 @@ async function tryVerify(
       return true;
     }
 
-    if (r.kind === "error" && engine === "codex") {
-      // Codex refused and Claude is backed off: neither engine could run. No
-      // attempt is charged; the repo waits a short while before asking again.
+    const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
+    const plan = r.kind === "verdict" ? verifyHoldPlan(reason) : { kind: "charge" as const };
+    if (plan.kind === "defer") {
       verifyDeferredUntil.set(repoName, Date.now() + VERIFY_DEFER_MS);
-      ended = { status: "failed", detail: `deferred — Codex unavailable and Claude backed off: ${r.error}` };
-      vlog.info(`Verify of PR #${target.prNumber} deferred: ${r.error}`);
+      ended = { status: "failed", detail: `deferred — the SRE could not run (${reason})` };
+      vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason}`);
       return false;
     }
-
-    const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
     const after = loadRepoState(repoName);
     const kept = { ...(after.verifyHeld ?? {}) };
+    if (plan.kind === "wait") {
+      for (const n of target.issueNumbers) {
+        kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts: kept[n]?.attempts ?? 0, retryAt: plan.retryAt };
+      }
+      saveRepoState(repoName, { ...after, verifyHeld: kept });
+      ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
+      vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
+      events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
+      return false;
+    }
     let attempts = 0;
     for (const n of target.issueNumbers) {
       attempts = Math.max(attempts, (kept[n]?.attempts ?? 0) + 1);
