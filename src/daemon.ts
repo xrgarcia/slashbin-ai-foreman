@@ -71,12 +71,17 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   // The Foreman's own in-flight work, beside the GitHub view: every step the work
   // source reports lands in the same state file, and each one re-syncs that repo.
   addObserver({
-    onClaim: async (item, rc) => recordActivity(rc.githubRepo, item.issueNumber, "claimed"),
-    onState: async (item, _from, to, rc) => recordActivity(rc.githubRepo, item.issueNumber, String(to)),
-    onPrLink: async (item, prUrl, rc) => recordActivity(rc.githubRepo, item.issueNumber, "pr-linked", prUrl),
-    onBlocked: async (item, _reason, rc) => recordActivity(rc.githubRepo, item.issueNumber, "blocked"),
-    onMerged: async (item, rc) => recordActivity(rc.githubRepo, item.issueNumber, "merged"),
-    onPromoted: async (item, rc) => clearActivity(rc.githubRepo, item.issueNumber),
+    onEvent: async (event) => {
+      switch (event.kind) {
+        case "claim": return recordActivity(event.item.repo, event.item.issueNumber, "claimed");
+        case "transition": return recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
+        case "prLink": return recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
+        case "blocked": return recordActivity(event.item.repo, event.item.issueNumber, "blocked");
+        case "merged": return recordActivity(event.item.repo, event.item.issueNumber, "merged");
+        case "promoted": return clearActivity(event.item.repo, event.item.issueNumber);
+        default: return;
+      }
+    },
   });
 
   // One daemon-wide back-off per upstream (GitHub rate limit, Claude session

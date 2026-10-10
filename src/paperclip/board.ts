@@ -1,9 +1,9 @@
 // Where a card sits on the Paperclip board: the one mapping from an issue's
 // lifecycle stage to the agent holding the card, its status and its stage
-// label, read from `paperclip.board`. The mirror applies it as each step
-// happens; anything else that writes the same rows (a periodic sync from
-// GitHub) imports these functions so the two can never place a card
-// differently.
+// label, read from `paperclip.board`. The mirror applies it both as each
+// event arrives and on each snapshot, so the two can never place a card
+// differently. The stage itself comes from core (lifecycle.ts) or, for a
+// snapshot, from the work source: this plugin never reads GitHub labels.
 //
 // Pure, apart from `ensureStageLabels`, which reads and creates the company's
 // labels.
@@ -11,36 +11,20 @@
 import {
   PAPERCLIP_FOREMAN_ROLE,
   paperclipBoardDefaults,
-  type LifecycleLabels,
   type PaperclipConfig,
   type PaperclipStage,
 } from "../config.js";
+import type { SESSION_STAGE } from "../lifecycle.js";
 import type { PaperclipClient } from "./client.js";
 
 /** A Paperclip status bucket; `statusMap` may rename each one. */
 export type PaperclipBucket = "todo" | "in_progress" | "in_review" | "blocked" | "done" | "cancelled";
 
-/** A session phase and the stage it puts its card in while it runs. */
-export const SESSION_STAGE = Object.freeze({
-  implement: "implementing",
-  review: "reviewing",
-  verify: "verifying",
-  revise: "revising",
-} as const satisfies Record<string, PaperclipStage>);
-
-/** The stage a card returns to when a session ends and nothing newer said where it belongs. */
-export const SESSION_FALLBACK_STAGE = Object.freeze({
-  implement: "approved",
-  review: "inReview",
-  verify: "merged",
-  revise: "changesRequested",
-} as const satisfies Record<keyof typeof SESSION_STAGE, PaperclipStage>);
+// The session stages are the core lifecycle's (lifecycle.ts); re-exported for the mirror and any sync.
+export { SESSION_FALLBACK_STAGE, SESSION_STAGE } from "../lifecycle.js";
 
 /** The Foreman agent's metadata key holding its live-session lease. */
 export const LIVE_LEASE_KEY = "foremanLive";
-
-/** The source label that blocks an issue (the Foreman never picks one up). */
-export const SOURCE_BLOCKED_LABEL = "blocked";
 
 /**
  * The unblock-descriptor action of a card the Foreman blocked itself (declined,
@@ -58,30 +42,6 @@ type BoardConfig = Pick<PaperclipConfig, "agentId"> & Partial<Pick<PaperclipConf
 function filled(cfg: BoardConfig) {
   const d = paperclipBoardDefaults();
   return { board: cfg.board ?? d.board, roles: cfg.roles ?? d.roles, stageLabels: cfg.stageLabels ?? d.stageLabels };
-}
-
-/**
- * The lifecycle stage GitHub labels put an open issue in, latest stage first;
- * "blocked" while the source labels it so, whatever else it carries; "done"
- * once promoted (the close is all that is left); null when the issue is not in
- * the Foreman's lifecycle at all. `inRelease` = an open release PR names it.
- */
-export function issueStage(
-  labels: readonly string[],
-  inRelease: boolean,
-  lifecycle: LifecycleLabels,
-  triggerLabel: string,
-): PaperclipStage | "done" | null {
-  const has = (l: string) => labels.includes(l);
-  if (has(SOURCE_BLOCKED_LABEL)) return "blocked";
-  if (has(lifecycle.readyToClose)) return "done";
-  if (inRelease || has(lifecycle.readyForProd)) return "awaitingRelease";
-  if (has(lifecycle.prApproved)) return "pendingVerification";
-  if (has(lifecycle.prMerged)) return "merged";
-  if (has(lifecycle.prPendingActions)) return "changesRequested";
-  if (has(lifecycle.prUnderReview)) return "inReview";
-  if (has(triggerLabel)) return "approved";
-  return null;
 }
 
 /** The agent id a role key resolves to: the Foreman's own for "foreman" or a role with no id yet. */

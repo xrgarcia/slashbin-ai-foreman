@@ -2,7 +2,8 @@
 // stage → holder/status/label, the live-session lease, one stage label per card.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { issueStage, stageTarget, liveRows, withStage, ensureStageLabels } from "../dist/paperclip/board.js";
+import { stageTarget, liveRows, withStage, ensureStageLabels } from "../dist/paperclip/board.js";
+import { issueStage } from "../dist/github-work-source.js";
 
 const L = { prUnderReview: "pr under review", prPendingActions: "pr pending actions", prApproved: "pr approved",
   readyForProd: "ready for prod release", readyToClose: "ready to close" };

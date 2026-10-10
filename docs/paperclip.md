@@ -137,7 +137,7 @@ knows of are redacted from every note before it is sent.
 | `reviseStarted` | A session starts revising the issue's pull request after review feedback. | `revising` | `revising PR #{pr}` |
 | `reviseFinished` | That revision session ends. | unchanged | `revision finished: {detail}` |
 | `reviseFailed` | That revision session fails. | unchanged | `revision failed: {detail}` |
-| `synced` | At the end of a pass, the card sits in a different column than its GitHub labels call for (a Foreman block stays until the issue moves on). | unchanged | `moved to match GitHub: {labels}` |
+| `synced` | At the end of a pass, the card sits in a different column than its GitHub labels call for (a Foreman block stays until the issue moves on). | unchanged | `moved to match GitHub: {detail}` |
 | `reviewStarted` | A review of the issue's pull request starts; the note names the reviewer. | `reviewing` | `{reviewer} reviewing PR #{pr}` |
 | `reviewHandoff` | The first reviewer declines and the review passes to another, with the reason. | unchanged | `review handed to {reviewer}: {detail}` |
 | `reviewFinished` | The review ends, with its outcome. | unchanged | `review finished: {detail}` |

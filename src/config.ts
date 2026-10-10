@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
+import { STAGES, type Stage } from "./lifecycle.js";
 
 // --- Schemas ---
 
@@ -46,13 +47,11 @@ const lifecycleLabelsSchema = z.object({
 // `statusMap` renames any of them for an instance whose workflow uses other names.
 const PAPERCLIP_STATUS_BUCKETS = ["todo", "in_progress", "in_review", "blocked", "done", "cancelled"] as const;
 
-// The board's lifecycle stages: where an issue is between "authorized" and
-// "shipped". Each maps to who holds the card (a role), its Paperclip status,
-// and the stage label it carries. The `…ing` stages are a live session.
-export const PAPERCLIP_STAGES = [
-  "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising", "merged", "verifying", "pendingVerification", "awaitingRelease", "blocked",
-] as const;
-export type PaperclipStage = (typeof PAPERCLIP_STAGES)[number];
+// The board's columns are the core lifecycle's stages (lifecycle.ts). Each
+// maps to who holds the card (a role), its Paperclip status, and the stage
+// label it carries.
+export const PAPERCLIP_STAGES = STAGES;
+export type PaperclipStage = Stage;
 
 /** The role every stage defaults to: the Foreman's own agent. */
 export const PAPERCLIP_FOREMAN_ROLE = "foreman";

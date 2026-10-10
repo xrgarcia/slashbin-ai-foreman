@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
 import { runRepoPass } from "../dist/orchestrator.js";
-import { configureIssueCache, GitHubIssueConnector, discoveryBatch } from "../dist/github.js";
+import { configureIssueCache, discoveryBatch } from "../dist/github.js";
+import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { setStatePath } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
 

@@ -1,7 +1,9 @@
-import { GitHubIssueConnector } from "./github.js";
-import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkSourceAdapter, WorkState } from "./adapters.js";
+import { GitHubIssueConnector } from "./github-work-source.js";
+import type { WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
+import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
+import { loadRepoState } from "./state.js";
 
 /**
  * The work source each repo selects from and reports to. GitHub issues unless
@@ -9,9 +11,10 @@ import type { Logger } from "./logger.js";
  * imports a connector.
  *
  * Also the one dispatch point for observers (EM#417). The orchestrator reports
- * through the wrappers below, never through the adapter directly, so a report
- * can never reach the source and miss the observers. With no observer
- * registered every wrapper is exactly the adapter call it replaced.
+ * every event through `emit` (a lifecycle move through `advance`), never
+ * through the adapter directly, so an event can never reach the source and
+ * miss the observers. The orchestrator never knows whether any observer — the
+ * Paperclip plugin or another — is registered.
  */
 let registered: WorkSourceAdapter | null = null;
 
@@ -19,7 +22,7 @@ export function registerWorkSource(adapter: WorkSourceAdapter | null): void {
   registered = adapter;
 }
 
-/** The active adapter. The orchestrator uses the wrappers below instead. */
+/** The active adapter. The orchestrator uses `emit` / `advance` instead. */
 export function workSourceFor(_repoConfig: RepoConfig): WorkSourceAdapter {
   return registered ?? new GitHubIssueConnector();
 }
@@ -67,13 +70,9 @@ export function loopTimeout(limitMs: number, onExpire: () => void, tickMs = OBSE
 /** Events are delivered in order, one at a time, behind the build. */
 let queue: Promise<void> = Promise.resolve();
 
-function enqueue<K extends keyof WorkObserver>(
-  method: K,
-  args: Parameters<NonNullable<WorkObserver[K]>>,
-  logger: Logger,
-): void {
+function enqueue(event: WorkEvent, logger: Logger): void {
   if (observers.length === 0) return;
-  queue = queue.then(() => fanOut(method, args, logger));
+  queue = queue.then(() => fanOut(event, logger));
 }
 
 /** Resolves when every queued event has been delivered (tests, shutdown). */
@@ -100,27 +99,21 @@ export function hasObservers(): boolean {
  * info and dropped, so one bad observer neither fails the caller nor stops the
  * observers after it. Never rejects.
  */
-async function fanOut<K extends keyof WorkObserver>(
-  method: K,
-  args: Parameters<NonNullable<WorkObserver[K]>>,
-  logger: Logger,
-): Promise<void> {
+async function fanOut(event: WorkEvent, logger: Logger): Promise<void> {
   for (const obs of observers) {
-    const fn = obs[method] as ((...a: unknown[]) => Promise<void>) | undefined;
-    if (typeof fn !== "function") continue;
     let stop: (() => void) | undefined;
     try {
       await Promise.race([
-        Promise.resolve().then(() => fn.apply(obs, args)),
+        Promise.resolve().then(() => obs.onEvent(event, logger)),
         new Promise<never>((_, reject) => {
           stop = loopTimeout(OBSERVER_TIMEOUT_MS, () =>
-            reject(new Error(`observer ${method} timed out after ${OBSERVER_TIMEOUT_MS} ms`)),
+            reject(new Error(`observer ${event.kind} timed out after ${OBSERVER_TIMEOUT_MS} ms`)),
           );
         }),
       ]);
     } catch (err) {
       try {
-        logger.info(`observer ${method} failed (ignored): ${err instanceof Error ? err.message : String(err)}`);
+        logger.info(`observer ${event.kind} failed (ignored): ${err instanceof Error ? err.message : String(err)}`);
       } catch {
         // a broken logger must not turn an ignored observer error into a thrown one
       }
@@ -138,116 +131,47 @@ export async function selectWork(
   return workSourceFor(repoConfig).selectWork(repoConfig, config, logger);
 }
 
-export async function claimWork(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  await workSourceFor(repoConfig).claim(item, repoConfig, logger);
-  enqueue("onClaim", [item, repoConfig, logger], logger);
+/**
+ * The one way an event leaves the core. With a repo, the work source records
+ * it first (an `observed` transition excepted: the source already shows it);
+ * then every observer is told, in order, off the build path. Resolves what
+ * the source returned: `true` when it recorded a change.
+ */
+export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logger: Logger): Promise<boolean> {
+  const recorded = repoConfig && !(event.kind === "transition" && event.observed)
+    ? await workSourceFor(repoConfig).record(event, repoConfig, logger)
+    : false;
+  enqueue(event, logger);
+  return recorded;
 }
 
-export async function reportWorkState(
+/**
+ * Make lifecycle move `move` on `item` (lifecycle.ts holds the table). With
+ * `observed`, the move already happened on the source (a review agent wrote
+ * the outcome label itself), so only observers hear of it.
+ */
+export function advance(
   item: WorkItem,
-  from: PriorState,
-  to: WorkState,
+  move: Move,
   repoConfig: RepoConfig,
   logger: Logger,
+  opts: { observed?: boolean } = {},
 ): Promise<boolean> {
-  const changed = await workSourceFor(repoConfig).reportState(item, from, to, repoConfig, logger);
-  enqueue("onState", [item, from, to, repoConfig, logger], logger);
-  return changed;
-}
-
-export async function reportWorkPrLink(
-  item: WorkItem,
-  prUrl: string,
-  repoConfig: RepoConfig,
-  logger: Logger,
-): Promise<void> {
-  await workSourceFor(repoConfig).reportPrLink(item, prUrl, repoConfig, logger);
-  enqueue("onPrLink", [item, prUrl, repoConfig, logger], logger);
-}
-
-export async function reportWorkBlocked(
-  item: WorkItem,
-  reason: string,
-  repoConfig: RepoConfig,
-  logger: Logger,
-): Promise<void> {
-  await workSourceFor(repoConfig).reportBlocked(item, reason, repoConfig, logger);
-  enqueue("onBlocked", [item, reason, repoConfig, logger], logger);
+  return emit({ kind: "transition", item, observed: opts.observed === true, ...transition(move) }, repoConfig, logger);
 }
 
 /**
- * An unblock check (src/unblock.ts) found the cause of a block on `item` gone.
- * Observers only: the work source never recorded the block, so it has nothing
- * to undo.
+ * Tell observers where every open item stands on the source, so a card the
+ * Foreman stopped acting on is put back where it belongs. Reads the source
+ * only when someone is listening.
  */
-export async function reportWorkUnblocked(
-  item: WorkItem,
-  reason: string,
-  repoConfig: RepoConfig,
-  logger: Logger,
-): Promise<void> {
-  enqueue("onUnblocked", [item, reason, repoConfig, logger], logger);
-}
-
-/**
- * `item` moved `from` → `to` and the source already shows it (a review agent
- * wrote the outcome label itself). Observers only: the source is not written.
- */
-export async function notifyObserversState(
-  item: WorkItem,
-  from: PriorState,
-  to: WorkState,
-  repoConfig: RepoConfig,
-  logger: Logger,
-): Promise<void> {
-  enqueue("onState", [item, from, to, repoConfig, logger], logger);
-}
-
-/** The feature PR delivering `item` merged to the base branch. Observers only. */
-export async function notifyObserversMerged(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  enqueue("onMerged", [item, repoConfig, logger], logger);
-}
-
-/** `item` was handed to promotion (develop → main). Observers only. */
-export async function notifyObserversPromoted(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  enqueue("onPromoted", [item, repoConfig, logger], logger);
-}
-
-/** An upstream (github / claude) started refusing work. Observers only. */
-export async function notifyBackoffPause(upstream: string, reason: string, logger: Logger): Promise<void> {
-  enqueue("onBackoffPause", [upstream, reason, logger], logger);
-}
-
-/** An upstream back-off cleared. Observers only. */
-export async function notifyBackoffResume(upstream: string, logger: Logger): Promise<void> {
-  enqueue("onBackoffResume", [upstream, logger], logger);
-}
-
-/** A session started, changed hands or ended. Observers only. */
-export async function notifySession(event: SessionEvent, logger: Logger): Promise<void> {
-  enqueue("onSession", [event, logger], logger);
-}
-
-/** The repo's full set of backed-off items this cycle. Observers only. */
-export async function notifyWaiting(repo: string, waiting: ReadonlyArray<WaitingItem>, logger: Logger): Promise<void> {
-  enqueue("onWaiting", [repo, waiting, logger], logger);
-}
-
-/** Promotion on `repo` is stalled (`detail`) or no longer stalled (null). Observers only. */
-export async function notifyPromotionStall(repo: string, detail: string | null, logger: Logger): Promise<void> {
-  enqueue("onPromotionStall", [repo, detail, logger], logger);
-}
-
-/** A release PR opened, merged or closed. Observers only. */
-export async function notifyRelease(event: ReleaseEvent, logger: Logger): Promise<void> {
-  enqueue("onRelease", [event, logger], logger);
-}
-
-/** The repo's open issues and labels at the end of a cycle. Observers only. */
-export async function notifySnapshot(
-  repoConfig: RepoConfig,
-  issues: ReadonlyArray<{ number: number; labels: readonly string[] }>,
-  logger: Logger,
-): Promise<void> {
-  enqueue("onSnapshot", [repoConfig, issues, logger], logger);
+export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  if (!hasObservers()) return;
+  const items = await workSourceFor(repoConfig).snapshot(repoConfig, logger);
+  const held = loadRepoState(repoConfig.name).verifyHeld ?? {};
+  await emit({
+    kind: "snapshot",
+    repo: repoConfig.githubRepo,
+    items: items.map((i) => (held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i)),
+  }, null, logger);
 }
