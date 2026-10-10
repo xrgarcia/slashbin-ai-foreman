@@ -7,8 +7,8 @@
 // Nothing a reader needs to trust is written down here:
 //   - the config fields, their types and defaults come from the BUILT
 //     `configSchema` (its `paperclip` block, parsed from `{}`);
-//   - each field's description is the comment above it in `src/config.ts`;
-//   - each env override is read from `mergePaperclip` in `src/config.ts`;
+//   - each field's description is the comment above it in `src/paperclip/config.ts`;
+//   - each env override is read from `mergePaperclip` in `src/paperclip/config.ts`;
 //   - the six status buckets come from the schema's `statusMap` keys;
 //   - every step's move and note text come from `PAPERCLIP_STEPS` in the
 //     built `src/paperclip/mirror.ts`, the table the mirror itself runs on;
@@ -23,10 +23,11 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OUT = join(root, "docs", "paperclip.md");
-const CONFIG_SRC = join(root, "src", "config.ts");
+const CONFIG_SRC = join(root, "src", "paperclip", "config.ts");
 const MIRROR_SRC = join(root, "src", "paperclip", "mirror.ts");
 const builtConfig = join(root, "dist", "config.js");
 const builtMirror = join(root, "dist", "paperclip", "mirror.js");
+const builtPaperclipConfig = join(root, "dist", "paperclip", "config.js");
 
 function fail(msg) {
   console.error(`generate-paperclip: ${msg}`);
@@ -34,9 +35,10 @@ function fail(msg) {
 }
 
 for (const f of [CONFIG_SRC, MIRROR_SRC]) if (!existsSync(f)) fail(`${f} not found.`);
-for (const f of [builtConfig, builtMirror]) if (!existsSync(f)) fail(`${f} not found — run \`npm run build\` first.`);
+for (const f of [builtConfig, builtMirror, builtPaperclipConfig]) if (!existsSync(f)) fail(`${f} not found — run \`npm run build\` first.`);
 
-const { configSchema, PAPERCLIP_STAGES, PAPERCLIP_FOREMAN_ROLE } = await import(builtConfig);
+const { configSchema } = await import(builtConfig);
+const { PAPERCLIP_STAGES, PAPERCLIP_FOREMAN_ROLE } = await import(builtPaperclipConfig);
 const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS, PAPERCLIP_TASK_TITLE_FORMAT } = await import(builtMirror);
 const { FOREMAN_BLOCKED_PREFIX } = await import(builtMirror.replace(/mirror\.js$/, "board.js"));
 const { toJSONSchema } = await import("zod");
@@ -58,7 +60,7 @@ if (buckets.length !== 6) fail(`expected exactly six status buckets in paperclip
 
 const configSrc = readFileSync(CONFIG_SRC, "utf8");
 const block = configSrc.match(/const paperclipConfigSchema = z\.object\(\{\n([\s\S]*?)\n\}\);/);
-if (!block) fail("could not find `const paperclipConfigSchema = z.object({ ... });` in src/config.ts.");
+if (!block) fail("could not find `const paperclipConfigSchema = z.object({ ... });` in src/paperclip/config.ts.");
 const descriptions = {};
 let pending = [];
 for (const line of block[1].split("\n")) {
@@ -71,11 +73,11 @@ for (const line of block[1].split("\n")) {
   }
 }
 const merge = configSrc.match(/function mergePaperclip\([\s\S]*?\n\}/);
-if (!merge) fail("could not find `function mergePaperclip` in src/config.ts.");
+if (!merge) fail("could not find `function mergePaperclip` in src/paperclip/config.ts.");
 const envOf = {};
 for (const [, field, env] of merge[0].matchAll(/^\s+(\w+): process\.env\.(\w+),/gm)) envOf[field] = env;
 
-for (const f of fields) if (!descriptions[f]) fail(`paperclip.${f} has no comment above it in src/config.ts.`);
+for (const f of fields) if (!descriptions[f]) fail(`paperclip.${f} has no comment above it in src/paperclip/config.ts.`);
 for (const f of Object.keys(envOf)) if (!fields.includes(f)) fail(`mergePaperclip maps ${envOf[f]} to paperclip.${f}, which the schema does not have.`);
 
 // --- The steps ---

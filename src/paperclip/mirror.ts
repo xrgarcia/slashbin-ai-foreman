@@ -59,7 +59,7 @@ import type {
   PriorState, ReleaseEvent, SessionEvent, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
 } from "../adapters.js";
 import { redactAll } from "../redact.js";
-import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "../config.js";
+import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./config.js";
 import { STATE_STAGE } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {

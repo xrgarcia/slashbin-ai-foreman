@@ -9,7 +9,7 @@
 
 import type { SessionEvent, SessionReview, WorkItem } from "../adapters.js";
 import { redactAll } from "../redact.js";
-import type { PaperclipCommentEvent, PaperclipConfig } from "../config.js";
+import type { PaperclipCommentEvent, PaperclipConfig } from "./config.js";
 
 export type CommentsConfig = PaperclipConfig["comments"];
 

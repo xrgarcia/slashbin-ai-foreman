@@ -10,7 +10,7 @@
 // ON, so a create alone is not enough. The flags are re-applied with a PATCH on
 // every run, which also repairs an agent someone has since switched back on.
 
-import { PAPERCLIP_FOREMAN_ROLE, type PaperclipConfig } from "../config.js";
+import { PAPERCLIP_FOREMAN_ROLE, type PaperclipConfig } from "./config.js";
 import type { PaperclipAgent, PaperclipClient } from "./client.js";
 
 export const PAPERCLIP_AGENT_ROLE = "engineer";

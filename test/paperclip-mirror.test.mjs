@@ -5,7 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
-import { defaultLifecycleLabels, paperclipBoardDefaults } from "../dist/config.js";
+import { defaultLifecycleLabels } from "../dist/config.js";
+import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
 
 const CID = "company-1";
