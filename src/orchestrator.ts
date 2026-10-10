@@ -4,15 +4,13 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { SessionEvent, SessionPr, SessionReport, WorkItem } from "./adapters.js";
 import {
-  selectWork, claimWork, reportWorkState, reportWorkPrLink, reportWorkBlocked, reportWorkUnblocked,
-  notifyObserversMerged, notifyObserversPromoted, notifyObserversState,
-  notifySession, notifyWaiting, notifyPromotionStall, notifyRelease, notifySnapshot, hasObservers,
+  selectWork, emit, advance, publishSnapshot, hasObservers,
 } from "./work-source.js";
-import { parseReviewBody } from "./paperclip/comments.js";
+import { reviewMove } from "./lifecycle.js";
+import { parseReviewBody } from "./review-report.js";
 import { trackRelease } from "./release-tracker.js";
+import { GitHubIssueConnector } from "./github-work-source.js";
 import {
-  GitHubIssueConnector,
-  openIssueLabels,
   discoveryBatch,
   hasPendingRevisions,
   findPendingRevisions,
@@ -103,7 +101,7 @@ async function releaseIfResolved(
   if (!check) return false;
   const why = unblockedReason(check);
   logger.info(`${kind} block on ${items.map((n) => `#${n}`).join(", ") || repoConfig.name} resolved — ${why}`);
-  for (const n of items) await reportWorkUnblocked(itemOf(repoConfig, n), why, repoConfig, logger);
+  for (const n of items) await emit({ kind: "unblocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, logger);
   return true;
 }
 
@@ -241,25 +239,25 @@ function reviewReport(
 const observerEventsSent = new Set<string>();
 
 /**
- * Tell observers each issue merged / was handed to promotion, once per issue.
- * Best-effort by construction (work-source.ts never rethrows an observer
- * error); with no observer registered this does nothing at all.
- */
-/**
  * Tell the observers the outcome a review agent wrote on GitHub itself. The
  * agent labels `pr approved` / `pr pending actions` directly, so no state
- * change passes through `reportWorkState`; without this a live review card
+ * change passes through `advance` (it is an *observed* move); without this a live review card
  * ends its session back at "in review" until something else re-reads GitHub.
  * Issues still at `pr under review` carry no outcome and are left to the
  * reconcile, which reports its own.
  */
 async function reportReviewOutcomes(repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
   for (const [n, outcome] of readReviewOutcomes(repoConfig, issueNumbers, logger)) {
-    await notifyObserversState(itemOf(repoConfig, n), "inReview", workStateOf(outcome), repoConfig, logger);
+    await advance(itemOf(repoConfig, n), reviewMove(workStateOf(outcome)), repoConfig, logger, { observed: true });
   }
 }
 
-async function notifyObserversOnce(
+/**
+ * Tell observers each issue merged / was handed to promotion, once per issue.
+ * Best-effort by construction (work-source.ts never rethrows an observer
+ * error); with no observer registered this does nothing at all.
+ */
+async function notifyOnce(
   kind: "merged" | "promoted",
   repoConfig: RepoConfig,
   issueNumbers: number[],
@@ -269,8 +267,7 @@ async function notifyObserversOnce(
     const key = `${kind}:${repoConfig.githubRepo}#${n}`;
     if (observerEventsSent.has(key)) continue;
     observerEventsSent.add(key);
-    if (kind === "merged") await notifyObserversMerged(itemOf(repoConfig, n), repoConfig, logger);
-    else await notifyObserversPromoted(itemOf(repoConfig, n), repoConfig, logger);
+    await emit({ kind, item: itemOf(repoConfig, n) }, repoConfig, logger);
   }
 }
 
@@ -519,7 +516,7 @@ async function reconcileReviewOutcomeLabels(
       continue;
     }
     const to = workStateOf(outcome);
-    if (await reportWorkState(itemOf(repoConfig, issueNumber), "inReview", to, repoConfig, logger)) {
+    if (await advance(itemOf(repoConfig, issueNumber), reviewMove(to), repoConfig, logger)) {
       events?.push({
         message: `${repoConfig.githubRepo} #${issueNumber} — review merged PR #${ref.prNumber} without labeling; reconciled to "${repoConfig.lifecycleLabels[outcome]}" from its own trailer`,
         level: outcome === "prPendingActions" ? "warn" : "info",
@@ -723,8 +720,8 @@ async function runReconcileStage(
       // PR is verified, as when the reconciler wrote the label itself.
       for (const n of result.issueNumbers) {
         const item = itemOf(repoConfig, n);
-        if (result.prUrl) await reportWorkPrLink(item, result.prUrl, repoConfig, reconLogger);
-        await reportWorkState(item, "new", "inReview", repoConfig, reconLogger);
+        if (result.prUrl) await emit({ kind: "prLink", item, prUrl: result.prUrl }, repoConfig, reconLogger);
+        await advance(item, "implemented", repoConfig, reconLogger);
       }
       reconLogger.info(
         `Reconciled ${result.commitCount} orphaned commit(s) — PR created: ${result.prUrl}`,
@@ -802,7 +799,7 @@ async function runReconcileStage(
 
     for (const s of stuck) {
       // Its PR merged — whatever happens to the label next.
-      await notifyObserversOnce("merged", repoConfig, [s.issueNumber], reconLogger);
+      await notifyOnce("merged", repoConfig, [s.issueNumber], reconLogger);
       const hold = heldIssues[s.issueNumber];
       if (hold) {
         if (!seen.has(s.issueNumber)) {
@@ -826,7 +823,7 @@ async function runReconcileStage(
       // dev verification and owns the move to `pr approved`.
       if (config.srePath && !tried.has(s.issueNumber)) {
         tried.add(s.issueNumber);
-        if (await reportWorkState(itemOf(repoConfig, s.issueNumber), "unknown", "merged", repoConfig, reconLogger)) {
+        if (await advance(itemOf(repoConfig, s.issueNumber), "recoverMerged", repoConfig, reconLogger)) {
           events.push({
             message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone: PR #${s.prNumber} merged with the issue left unadvanced → labeled "${labels.prMerged}" for dev verification`,
             level: "info",
@@ -846,8 +843,8 @@ async function runReconcileStage(
           s.prNumber,
           reconLogger,
         );
-        if (verdict !== "indeterminate" && await reportWorkState(
-          itemOf(repoConfig, s.issueNumber), "unknown", verdict === "pass" ? "approved" : "changesRequested",
+        if (verdict !== "indeterminate" && await advance(
+          itemOf(repoConfig, s.issueNumber), verdict === "pass" ? "recoverPassed" : "recoverFailed",
           repoConfig, reconLogger,
         )) {
           const label = labels[verdict === "pass" ? "prApproved" : "prPendingActions"];
@@ -896,7 +893,7 @@ async function runReconcileStage(
     // return it to the queue. Safe precisely BECAUSE nothing merged —
     // re-implementing cannot duplicate work that was never done.
     for (const num of findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
-      if (await reportWorkState(itemOf(repoConfig, num), "unknown", "queued", repoConfig, reconLogger)) {
+      if (await advance(itemOf(repoConfig, num), "release", repoConfig, reconLogger)) {
         events.push({
           message: `${repoConfig.githubRepo} #${num} released back to the implement queue — it carried a lifecycle label but no PR covers it and nothing merged, so the work never landed.`,
           level: "warn",
@@ -1081,7 +1078,7 @@ async function runRepoCycle(
   // for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
   if (hasObservers()) {
     try {
-      await notifySnapshot(repoConfig, openIssueLabels(repoConfig, base), base);
+      await publishSnapshot(repoConfig, base);
     } catch (err) {
       base.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1160,7 +1157,7 @@ async function tryCustomStage(
         level: outcome === "blocked" ? "warn" : "error",
       });
       const why = `stage "${stage.id}" ${outcome} on PR #${pr.number}: ${result.reason ?? "no reason given"}`;
-      for (const n of pr.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, stageLogger);
+      for (const n of pr.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, stageLogger);
     }
     return { outcome, reason: result.reason, ran: true };
   } finally {
@@ -1369,7 +1366,7 @@ async function tryBatchImplementation(
   let handOff = offered;
   if (offered.length === 0) {
     // Nothing offered, so nothing waits: observers clear this repo's waits.
-    await notifyWaiting(repoConfig.githubRepo, [], repoLogger);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: [] }, null, repoLogger);
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1412,7 +1409,7 @@ async function tryBatchImplementation(
   const alreadyImplemented = new Set(repoState.implemented);
   handOff = handOff.filter((n) => !alreadyImplemented.has(n));
   if (handOff.length === 0) {
-    await notifyWaiting(repoConfig.githubRepo, [], repoLogger);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: [] }, null, repoLogger);
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -1490,7 +1487,7 @@ async function tryBatchImplementation(
     saveRepoState(repoName, cleared);
     repoState.branchBlock = undefined;
   }
-  await notifyWaiting(repoConfig.githubRepo, waitingSet(repoState.branchBlock), repoLogger);
+  await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(repoState.branchBlock) }, null, repoLogger);
   const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
   if (actionableIssues.length === 0) {
     if (failures > 0) failureCount.set(repoName, 0);
@@ -1520,7 +1517,7 @@ async function tryBatchImplementation(
   const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger, divergence);
   if (ffOutcome === "diverged") {
     const block = await announceDivergence(repoConfig, handOff, divergence, repoLogger);
-    await notifyWaiting(repoConfig.githubRepo, waitingSet(block), repoLogger);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(block) }, null, repoLogger);
     return null;
   }
   // "unknown" proves nothing either way, so a recorded block stands.
@@ -1532,7 +1529,7 @@ async function tryBatchImplementation(
     repoLogger.info(
       `${repoConfig.featureBranch} is reconciled with ${repoConfig.baseBranch} — implementation on ${repoName} resumes`,
     );
-    await notifyWaiting(repoConfig.githubRepo, waitingSet(undefined), repoLogger);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(undefined) }, null, repoLogger);
   }
 
   // Gate: an open feature PR holds the branch. The skill builds straight on
@@ -1550,7 +1547,7 @@ async function tryBatchImplementation(
     const fresh = queued.filter((n) => repoQueue.get(n) !== featurePr!.number);
     for (const n of fresh) {
       repoQueue.set(n, featurePr.number);
-      await notifyObserversState(itemOf(repoConfig, n), "new", "queued", repoConfig, repoLogger);
+      await advance(itemOf(repoConfig, n), "queue", repoConfig, repoLogger);
     }
     repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind open feature PR #${featurePr.number} — builds once it merges or closes`);
     if (failures > 0) failureCount.set(repoName, 0);
@@ -1576,9 +1573,9 @@ async function tryBatchImplementation(
 
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
-    for (const n of actionableIssues) await claimWork(itemOf(repoConfig, n), repoConfig, repoLogger);
+    for (const n of actionableIssues) await emit({ kind: "claim", item: itemOf(repoConfig, n) }, repoConfig, repoLogger);
     const goals = startReport(repoConfig, actionableIssues, repoLogger);
-    await notifySession({ ...session, status: "started", ...(goals ? { report: goals } : {}) }, repoLogger);
+    await emit({ kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
 
     const priorFailure = lastFailureReason.get(repoName) || null;
     const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, handOff)
@@ -1687,8 +1684,8 @@ async function tryBatchImplementation(
       // label) so the EM knows the PR is ready. One item at a time, in order.
       for (const n of issuesActuallyImplemented) {
         const item = itemOf(repoConfig, n);
-        if (result.prUrl) await reportWorkPrLink(item, result.prUrl, repoConfig, repoLogger);
-        await reportWorkState(item, "new", "inReview", repoConfig, repoLogger);
+        if (result.prUrl) await emit({ kind: "prLink", item, prUrl: result.prUrl }, repoConfig, repoLogger);
+        await advance(item, "implemented", repoConfig, repoLogger);
       }
 
       repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")} in state`, { prUrl: result.prUrl });
@@ -1725,10 +1722,10 @@ async function tryBatchImplementation(
       const alreadyMerged = findIssuesMergedToBase(repoConfig, skippedSet, repoLogger);
       if (alreadyMerged.length > 0) {
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
-        await notifyObserversOnce("merged", repoConfig, mergedNums, repoLogger);
+        await notifyOnce("merged", repoConfig, mergedNums, repoLogger);
         for (const n of mergedNums) {
           // With a verify stage, merged work still owes its acceptance evidence (EM#441).
-          await reportWorkState(itemOf(repoConfig, n), "new", config.srePath ? "merged" : "approved", repoConfig, repoLogger);
+          await advance(itemOf(repoConfig, n), config.srePath ? "alreadyMerged" : "alreadyApproved", repoConfig, repoLogger);
         }
         repoLogger.info(
           `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels[config.srePath ? "prMerged" : "prApproved"]}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
@@ -1760,7 +1757,7 @@ async function tryBatchImplementation(
       saveRepoState(repoName, updatedState);
       // The agent declined these; the source hears why. On GitHub this writes
       // nothing — the agent posts its own skip comment.
-      for (const n of skippedSet) await reportWorkBlocked(itemOf(repoConfig, n), reason, repoConfig, repoLogger);
+      for (const n of skippedSet) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
@@ -1773,7 +1770,7 @@ async function tryBatchImplementation(
       // goes to Blocked: the work has stopped, and the board says why.
       if (result.upstreamLimit || isUpstreamBlocked("github")) {
         const why = stoppedReason("Implementation", result, isUpstreamBlocked("github"));
-        for (const n of actionableIssues) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+        for (const n of actionableIssues) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
         return null;
       }
       const newCount = (failureCount.get(repoName) ?? 0) + 1;
@@ -1787,11 +1784,11 @@ async function tryBatchImplementation(
       const failedOn = worked ?? actionableIssues;
       if (newCount < MAX_RETRIES) {
         const why = stoppedReason("Implementation", result, false, `${newCount}/${MAX_RETRIES}`);
-        for (const n of failedOn) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+        for (const n of failedOn) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       } else {
         failureHitMaxAt.set(repoName, cycleNumber);
         const why = `implementation failed ${newCount}× — paused until cooldown: ${result.error || "unknown"}`;
-        for (const n of failedOn) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, repoLogger);
+        for (const n of failedOn) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       }
       lastFailureReason.set(repoName, result.error || "unknown");
       repoLogger.warn(`Batch implementation failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
@@ -1801,7 +1798,7 @@ async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) }, repoLogger);
+    await emit({ kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }
 }
 
@@ -1894,7 +1891,7 @@ async function tryRevision(
   let report: SessionReport | undefined;
 
   try {
-    await notifySession({ ...session, status: "started" }, revLogger);
+    await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
     const result = await revisePRFeedback(
       repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers,
@@ -1937,7 +1934,7 @@ async function tryRevision(
           // Stopped for a person: the board must say so, not leave it "in review".
           if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
           const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule, or push to the PR and the Foreman resumes. Last reason: ${result.noCommitReason ?? "not given"}`;
-          for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
+          for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
           return null;
         }
 
@@ -1952,7 +1949,7 @@ async function tryRevision(
       // The orchestrator owns this because the skill runs in the service repo
       // and may not have the right context to find the issue labels.
       for (const n of pending.issueNumbers) {
-        await reportWorkState(itemOf(repoConfig, n), "changesRequested", "inReview", repoConfig, revLogger);
+        await advance(itemOf(repoConfig, n), "revised", repoConfig, revLogger);
       }
 
       revLogger.info("PR revision succeeded");
@@ -1962,7 +1959,7 @@ async function tryRevision(
       // The card still goes to Blocked: the work has stopped, and the board says why.
       if (result.upstreamLimit || isUpstreamBlocked("github")) {
         const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, isUpstreamBlocked("github"));
-        for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
+        for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
         return null;
       }
       const newCount = failures + 1;
@@ -1970,7 +1967,7 @@ async function tryRevision(
       revLogger.warn(`PR revision failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
       if (newCount < MAX_RETRIES) {
         const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, false, `${newCount}/${MAX_RETRIES}`);
-        for (const n of pending.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, revLogger);
+        for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
       }
 
       // Retries exhausted. This is the end of the automated road for this PR: every
@@ -1994,7 +1991,7 @@ async function tryRevision(
         if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
         const blocked = `Revision retries exhausted on PR #${pending.pr.number}: ${result.error ?? "unknown"} — push to the PR and the Foreman resumes`;
         for (const n of pending.issueNumbers) {
-          await reportWorkBlocked(itemOf(repoConfig, n), blocked, repoConfig, revLogger);
+          await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blocked }, repoConfig, revLogger);
         }
       }
     }
@@ -2002,7 +1999,7 @@ async function tryRevision(
     return null;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended, ...(report ? { report } : {}) }, revLogger);
+    await emit({ kind: "session", session: { ...session, ...ended, ...(report ? { report } : {}) } }, null, revLogger);
   }
 }
 
@@ -2129,7 +2126,7 @@ async function tryVerify(
     const reason = `"${repoConfig.lifecycleLabels.prMerged}" but no merged PR into ${repoConfig.baseBranch} closes it`;
     held[n] = { heldAt: new Date().toISOString(), prNumber: 0, reason: "no-merged-pr", attempts: VERIFY_MAX_ATTEMPTS };
     vlog.warn(`#${n}: ${reason} — needs a person`);
-    await reportWorkBlocked(itemOf(repoConfig, n), reason, repoConfig, vlog);
+    await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, vlog);
   }
   if (unmatched.length > 0) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });
 
@@ -2148,7 +2145,7 @@ async function tryVerify(
   events?.push({ message: `Verifying ${repoConfig.githubRepo} PR #${target.prNumber} in dev (issues: ${issues})`, level: "info" });
 
   try {
-    await notifySession({ ...session, status: "started" }, vlog);
+    await emit({ kind: "session", session: { ...session, status: "started" } }, null, vlog);
     const r = await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
 
@@ -2156,7 +2153,7 @@ async function tryVerify(
       const after = loadRepoState(repoName);
       const kept = { ...(after.verifyHeld ?? {}) };
       for (const n of target.issueNumbers) {
-        await reportWorkState(itemOf(repoConfig, n), "merged", "approved", repoConfig, vlog);
+        await advance(itemOf(repoConfig, n), "verifyPassed", repoConfig, vlog);
         delete kept[n];
       }
       saveRepoState(repoName, { ...after, verifyHeld: kept });
@@ -2196,14 +2193,14 @@ async function tryVerify(
     const final = attempts >= VERIFY_MAX_ATTEMPTS;
     const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${VERIFY_MAX_ATTEMPTS}` +
       (final ? "; no more retries, a person must look" : `; retrying in ${Math.round(VERIFY_RETRY_MS / 60_000)} min`);
-    for (const n of target.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, vlog);
+    for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
     ended = { status: "failed", detail: why };
     vlog.warn(`${repoName}: ${why}`);
     events?.push({ message: `⏸️ ${repoConfig.githubRepo} ${issues}: ${why}`, level: final ? "error" : "warn" });
     return false;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended }, vlog);
+    await emit({ kind: "session", session: { ...session, ...ended } }, null, vlog);
   }
 }
 
@@ -2256,7 +2253,7 @@ async function tryReview(
   // only its label move is missing. Make it, so the revise phase picks them up.
   if (candidate.stranded) {
     for (const n of candidate.issueNumbers) {
-      await reportWorkState(itemOf(repoConfig, n), "inReview", "changesRequested", repoConfig, reviewLogger);
+      await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
     }
     events?.push({ message: `${repoConfig.githubRepo} — PR #${candidate.prNumber} had a current changes-requested review its labels never followed; sent #${candidate.issueNumbers.join(", #")} to revise.`, level: "warn" });
     return false;
@@ -2264,7 +2261,7 @@ async function tryReview(
   // Orphan adoption: the implement report never landed for these. Report them
   // in review now, before anything else touches the PR.
   for (const n of candidate.adopted) {
-    await reportWorkState(itemOf(repoConfig, n), "new", "inReview", repoConfig, reviewLogger);
+    await advance(itemOf(repoConfig, n), "implemented", repoConfig, reviewLogger);
   }
 
   // CI gate: never spend a review session on a PR its own CI already rejects.
@@ -2279,7 +2276,7 @@ async function tryReview(
       const names = checks.failing.map((f) => f.name).join(", ");
       bounceForRedCI(repoConfig, candidate.prNumber, checks);
       for (const n of candidate.issueNumbers) {
-        await reportWorkState(itemOf(repoConfig, n), "inReview", "changesRequested", repoConfig, reviewLogger);
+        await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
       }
       reviewLogger.info(`PR #${candidate.prNumber} CI red (${names}) — sent back to revise without a review (bounce ${bounces + 1}/${MAX_CI_BOUNCES})`);
       events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: CI red (${names}) — sent back to the builder before review`, level: "info" });
@@ -2317,7 +2314,7 @@ async function tryReview(
   const reviewer = "Tech Lead";
 
   try {
-    await notifySession({ ...session, status: "started", reviewer }, reviewLogger);
+    await emit({ kind: "session", session: { ...session, status: "started", reviewer } }, null, reviewLogger);
     // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
     // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
     // failure is charged and the repo asks again after REVIEW_DEFER_MS.
@@ -2358,7 +2355,7 @@ async function tryReview(
       const trailers = result.trailers ?? [];
       const mergedPrs = trailers.filter((t) => t.merged).map((t) => t.pr);
       if (mergedPrs.includes(candidate.prNumber)) {
-        await notifyObserversOnce("merged", repoConfig, candidate.issueNumbers, reviewLogger);
+        await notifyOnce("merged", repoConfig, candidate.issueNumbers, reviewLogger);
       }
       if (mergedPrs.length > 0) {
         const stuck = findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger);
@@ -2417,7 +2414,7 @@ async function tryReview(
     ended = { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (plan.workLanded) {
       ended = { status: "finished", detail: `merged PR #${plan.mergedPrs.join(", #")}, then the run ended: ${result.error}` };
-      await notifyObserversOnce("merged", repoConfig, [...new Set(mergedRefs.map((m) => m.issueNumber))], reviewLogger);
+      await notifyOnce("merged", repoConfig, [...new Set(mergedRefs.map((m) => m.issueNumber))], reviewLogger);
       await reportReviewOutcomes(repoConfig, candidate.issueNumbers, reviewLogger);
       reviewLogger.warn(
         `Review run on ${repoName} ended with "${result.error}" AFTER merging PR #${plan.mergedPrs.join(", #")} — ` +
@@ -2454,25 +2451,25 @@ async function tryReview(
     // limit still settles its labels. The card still goes to Blocked.
     if (result.upstreamLimit || isUpstreamBlocked("github")) {
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, isUpstreamBlocked("github"));
-      for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
       return false;
     }
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
     if (newCount < MAX_RETRIES) {
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, false, `${newCount}/${MAX_RETRIES}`);
-      for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
     } else {
       reviewFailureHitMaxAt.set(repoName, cycleNumber);
       const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused until cooldown: ${result.error}`;
-      for (const n of candidate.issueNumbers) await reportWorkBlocked(itemOf(repoConfig, n), why, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
     }
     reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
     return false;
   } finally {
     activeRuns.delete(repoName);
-    await notifySession({ ...session, ...ended, reviewer, ...(report ? { report } : {}) }, reviewLogger);
+    await emit({ kind: "session", session: { ...session, ...ended, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In
     // `finally` for the same reason as the label repair below: a run that threw
@@ -2647,7 +2644,7 @@ async function tryPromotion(
       else delete st.release;
       saveRepoState(repoName, st);
     },
-    emit: (event) => notifyRelease(event, promoLogger),
+    emit: async (release) => { await emit({ kind: "release", release }, null, promoLogger); },
   });
 
   const issues = findReadyForProdIssues(
@@ -2677,21 +2674,21 @@ async function tryPromotion(
           `promotion is STALLED, not idle. Either the EM gate has not been signed yet, or it was signed and revoked.`,
           { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles },
         );
-        await notifyPromotionStall(
-          repoConfig.githubRepo,
-          `${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch}; ` +
-          `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`,
-          promoLogger,
-        );
+        await emit({
+          kind: "promotionStall",
+          repo: repoConfig.githubRepo,
+          detail: `${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch}; ` +
+            `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`,
+        }, null, promoLogger);
       } else if (drift) {
-        await notifyPromotionStall(repoConfig.githubRepo, null, promoLogger);
+        await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
       }
     }
     return null;
   }
 
   // Issues are ready, so promotion is moving, not stalled.
-  await notifyPromotionStall(repoConfig.githubRepo, null, promoLogger);
+  await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
   promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
   // Check if a promotion PR already exists
@@ -2763,13 +2760,13 @@ async function tryPromotion(
       promoLogger,
     );
     // Confirmed in main: the promotion these issues were waiting for happened.
-    await notifyObserversOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
-    await notifyRelease({
+    await notifyOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
+    await emit({ kind: "release", release: {
       repo: repoConfig.githubRepo,
       state: "merged",
       issues: issues.map((i) => itemOf(repoConfig, i.number)),
       productionBranch: repoConfig.productionBranch,
-    }, promoLogger);
+    } }, null, promoLogger);
     return null;
   }
   if (diffFiles < 0) {
@@ -2800,7 +2797,7 @@ async function tryPromotion(
       repoConfig.lifecycleLabels,
       promoLogger,
     );
-    await notifyObserversOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
+    await notifyOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
     return "promoted";
   } else {
     promoLogger.warn("Failed to create promotion PR");

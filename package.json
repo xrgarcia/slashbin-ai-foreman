@@ -31,8 +31,8 @@
     "labels:install": "node scripts/install-labels.mjs",
     "paperclip:register": "node scripts/paperclip/agent.mjs",
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",
-    "docs:generate": "node scripts/docs/generate-paperclip.mjs",
-    "docs:check": "node scripts/docs/generate-paperclip.mjs --check"
+    "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs",
+    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check"
   },
   "engines": {
     "node": ">=18"

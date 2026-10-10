@@ -55,13 +55,15 @@
 // use; `start()` backfills the project on rows that lack it, and cancels the
 // retired "Foreman — live" summary task.
 
-import type { PriorState, ReleaseEvent, SessionEvent, WaitingItem, WorkItem, WorkObserver, WorkState } from "../adapters.js";
-import { redactAll } from "../agent.js";
-import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage, RepoConfig } from "../config.js";
+import type {
+  PriorState, ReleaseEvent, SessionEvent, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
+} from "../adapters.js";
+import { redactAll } from "../redact.js";
+import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "../config.js";
+import { STATE_STAGE } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
-import { loadRepoState } from "../state.js";
 import {
-  ensureStageLabels, FOREMAN_BLOCKED_PREFIX, issueStage, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
@@ -109,7 +111,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   reviseStarted: { stage: "revising", note: "revising PR #{pr}" },
   reviseFinished: { stage: null, note: "revision finished: {detail}" },
   reviseFailed: { stage: null, note: "revision failed: {detail}" },
-  synced: { stage: null, note: "moved to match GitHub: {labels}" },
+  synced: { stage: null, note: "moved to match GitHub: {detail}" },
   reviewStarted: { stage: "reviewing", note: "{reviewer} reviewing PR #{pr}" },
   reviewHandoff: { stage: null, note: "review handed to {reviewer}: {detail}" },
   reviewFinished: { stage: null, note: "review finished: {detail}" },
@@ -153,8 +155,8 @@ const SESSION_STEP: Partial<Record<`${SessionEvent["phase"]}:${SessionEvent["sta
 /** The longest reason or detail written; Paperclip caps an unblock action at 2000. */
 const TEXT_CAP = 500;
 
-/** The step for each state the Foreman can report. */
-const STATE_STEP: Record<WorkState, PaperclipStep> = {
+/** The step for each state the Foreman can report; each lands the card in the core's stage for that state (STATE_STAGE). */
+const STATE_STEP: { readonly [S in WorkState]: PaperclipStep & { readonly stage: (typeof STATE_STAGE)[S] } } = {
   queued: PAPERCLIP_STEPS.queued,
   inReview: PAPERCLIP_STEPS.inReview,
   changesRequested: PAPERCLIP_STEPS.changesRequested,
@@ -258,7 +260,34 @@ export class PaperclipMirror implements WorkObserver {
     this.comments = commentsOf(cfg);
   }
 
-  async onClaim(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+  /**
+   * The one entry point: each event the Foreman emits goes to its handler
+   * below. The handlers stay public so a test can drive one step directly.
+   */
+  async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
+    switch (event.kind) {
+      case "claim": return this.onClaim(event.item);
+      case "transition": return this.onState(event.item, event.from, event.to);
+      case "prLink": return this.onPrLink(event.item, event.prUrl);
+      case "blocked": return this.onBlocked(event.item, event.reason);
+      case "unblocked": return this.onUnblocked(event.item, event.reason);
+      case "merged": return this.onMerged(event.item);
+      case "session": return this.onSession(event.session, logger);
+      case "waiting": return this.onWaiting(event.repo, event.items, logger);
+      case "release": return this.onRelease(event.release, logger);
+      case "backoff": return event.paused ? this.onBackoffPause(event.upstream, event.reason ?? "", logger) : this.onBackoffResume(event.upstream, logger);
+      case "snapshot": return this.onSnapshot(event.repo, event.items, logger);
+      // A promotion PR owns the item; its card moves on the release event, not here.
+      case "promoted": return;
+      case "promotionStall": return;
+      default: {
+        const never: never = event;
+        return never;
+      }
+    }
+  }
+
+  async onClaim(item: WorkItem, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     this.building = item;
     const id = await this.resolve(item, true);
     if (!id) return;
@@ -276,7 +305,7 @@ export class PaperclipMirror implements WorkObserver {
     await this.note(id, retry ? PAPERCLIP_RETRY_NOTE : step.note, { event: "implementStart" });
   }
 
-  async onState(item: WorkItem, _from: PriorState, to: WorkState, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+  async onState(item: WorkItem, _from: PriorState, to: WorkState, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const step = STATE_STEP[to];
     if (!step) return;
     if (to !== "queued" && sameItem(this.building, item)) this.building = null;
@@ -287,12 +316,12 @@ export class PaperclipMirror implements WorkObserver {
     await this.note(id, step.note, { event: "progress" });
   }
 
-  async onPrLink(item: WorkItem, prUrl: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+  async onPrLink(item: WorkItem, prUrl: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const id = await this.resolve(item, false);
     if (id) await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }), { event: "progress", tag: "prLink" });
   }
 
-  async onBlocked(item: WorkItem, reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+  async onBlocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
@@ -310,7 +339,7 @@ export class PaperclipMirror implements WorkObserver {
    * Foreman holds Blocked moves; a block a person set, a waiting hold and a
    * session-held card are left alone.
    */
-  async onUnblocked(item: WorkItem, reason: string, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+  async onUnblocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const id = await this.resolve(item, false);
     if (!id || this.holds.has(id)) return;
     if (this.rowState.get(id) !== `status:${this.statusName("blocked")}`) return;
@@ -334,13 +363,11 @@ export class PaperclipMirror implements WorkObserver {
    * a restart released cmneb_data_publisher#199 to the SRE's To-do after the
    * SRE had given up on it (2026-10-05).
    */
-  async onSnapshot(repoConfig: RepoConfig, issues: ReadonlyArray<{ number: number; labels: readonly string[] }>, logger: Logger): Promise<void> {
+  async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger): Promise<void> {
     if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
-    for (const { number, labels } of issues) {
-      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel);
-      if (stage === null) continue;
-      const id = await this.resolve({ issueNumber: number, repo: repoConfig.githubRepo }, false);
+    for (const { item, stage, detail, verifyHeld } of items) {
+      const id = await this.resolve(item, false);
       if (!id) continue;
       this.ghStage.set(id, stage);
       const state = this.rowState.get(id);
@@ -349,29 +376,22 @@ export class PaperclipMirror implements WorkObserver {
       const want = `status:${this.statusName(stage === "done" ? "done" : stageTarget(this.cfg, stage).bucket)}`;
       if (state === want) continue;
       if (state === blocked && stage !== "blocked") {
-        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && Boolean(loadRepoState(repoConfig.name).verifyHeld?.[number]))) {
+        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && verifyHeld === true)) {
           this.blockedAt.set(id, stage);
           continue;
         }
       }
       if (!(await this.move(id, stage))) continue;
       this.blockedAt.delete(id);
-      logger.info(`Paperclip: ${repoConfig.githubRepo}#${number} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
-      await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { labels: labels.join(", ") || "none" }), { event: "progress" });
+      logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
+      await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress" });
     }
   }
 
-  async onMerged(item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {
+  async onMerged(item: WorkItem, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const id = await this.resolve(item, false);
     if (id) await this.note(id, PAPERCLIP_STEPS.merged.note, { event: "progress", tag: "merged" });
   }
-
-  /**
-   * Nothing: promotion fires when the release PR is opened, not when it merges,
-   * so its old "promoted to production" note claimed what had not happened.
-   * `onRelease` carries the release instead.
-   */
-  async onPromoted(_item: WorkItem, _repoConfig: RepoConfig, _logger: Logger): Promise<void> {}
 
   /**
    * A release PR opened (rows → in_review, waiting on it), merged (→ done) or

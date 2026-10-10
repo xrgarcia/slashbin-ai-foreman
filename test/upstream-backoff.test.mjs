@@ -319,6 +319,6 @@ test("each phase returns before its retry counter when the failure was an upstre
     assert.ok(start >= 0 && inc > start, fn);
     const before = orch.slice(Math.max(start, inc - 900), inc);
     // Returns before the counter — and moves the card to Blocked first (2026-10-05).
-    assert.match(before, /if \(result\.upstreamLimit \|\| isUpstreamBlocked\("github"\)\)\s*\{[\s\S]{0,500}?reportWorkBlocked\([\s\S]{0,200}?return\b/, fn);
+    assert.match(before, /if \(result\.upstreamLimit \|\| isUpstreamBlocked\("github"\)\)\s*\{[\s\S]{0,500}?kind: "blocked"[\s\S]{0,200}?return\b/, fn);
   }
 });

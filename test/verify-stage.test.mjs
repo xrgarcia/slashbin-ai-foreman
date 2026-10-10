@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
 import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, VERIFY_RETRY_MS, VERIFY_MAX_ATTEMPTS } from "../dist/orchestrator.js";
-import { issueStage } from "../dist/paperclip/board.js";
+import { issueStage } from "../dist/github-work-source.js";
 import { BUILTIN_STAGES } from "../dist/stages.js";
 
 const trailer = (s) => parseReviewTrailerRecords(`FOREMAN_REVIEW pr=#7 ${s}`)[0];

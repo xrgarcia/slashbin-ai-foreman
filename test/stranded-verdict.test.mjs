@@ -42,7 +42,7 @@ test("lookup failure keeps the skip instead of sending work to revise blind", ()
 test("the review phase reports stranded issues inReview → changesRequested and does not review", () => {
   const phase = orchestrator.slice(orchestrator.indexOf("if (candidate.stranded)"));
   const block = phase.slice(0, phase.indexOf("\n  }\n"));
-  assert.match(block, /reportWorkState\(itemOf\(repoConfig, n\), "inReview", "changesRequested"/);
+  assert.match(block, /advance\(itemOf\(repoConfig, n\), "changesRequested"/);
   assert.match(block, /return false;/);
   assert.ok(orchestrator.indexOf("if (candidate.stranded)") < orchestrator.indexOf("getPRCheckVerdict(repoConfig, candidate.prNumber"),
     "before the CI gate and the review run");

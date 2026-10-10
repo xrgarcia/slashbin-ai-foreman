@@ -16,10 +16,9 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig, defaultLifecycleLabels } from "../dist/config.js";
-import {
-  configureIssueCache,
-  GitHubIssueConnector,
-} from "../dist/github.js";
+import { configureIssueCache } from "../dist/github.js";
+import { GitHubIssueConnector } from "../dist/github-work-source.js";
+import { transition } from "../dist/lifecycle.js";
 import { revisePRFeedback } from "../dist/agent.js";
 import { createLogger } from "../dist/logger.js";
 
@@ -157,7 +156,8 @@ test("implementation applies the configured under-review label", async () => {
   const c = load({ lifecycleLabels: CUSTOM });
   resetGh();
   const item = { issueNumber: 7, repo: "example/acceptance" };
-  assert.equal(await new GitHubIssueConnector().reportState(item, "new", "inReview", c.repos[0], logger), true);
+  assert.equal(await new GitHubIssueConnector().record(
+    { kind: "transition", item, observed: false, ...transition("implemented") }, c.repos[0], logger), true);
   const [call] = ghCalls();
   assert.deepEqual(call, ["issue", "edit", "7", "--repo", "example/acceptance", "--add-label", "in-review"]);
 });
@@ -168,9 +168,10 @@ test("dead-zone recovery writes configured names and never the production gate",
   const c = load({ lifecycleLabels: CUSTOM });
   for (const [verdict, added] of [["pass", "dev-verified"], ["fail", "changes-requested"]]) {
     resetGh([issue(9, "approved", "in-review")]);
-    const to = verdict === "pass" ? "approved" : "changesRequested";
-    assert.equal(await new GitHubIssueConnector().reportState(
-      { issueNumber: 9, repo: "example/acceptance" }, "unknown", to, c.repos[0], logger), true, verdict);
+    const move = verdict === "pass" ? "recoverPassed" : "recoverFailed";
+    assert.equal(await new GitHubIssueConnector().record(
+      { kind: "transition", item: { issueNumber: 9, repo: "example/acceptance" }, observed: false, ...transition(move) },
+      c.repos[0], logger), true, verdict);
     const edit = ghCalls().find((a) => a[0] === "issue" && a[1] === "edit");
     assert.deepEqual(edit, ["issue", "edit", "9", "--repo", "example/acceptance",
       "--remove-label", "in-review", "--add-label", added], verdict);

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { GhResource } from "./gh-usage.js";
 import type { Logger } from "./logger.js";
-import { notifyBackoffPause, notifyBackoffResume } from "./work-source.js";
+import { emit } from "./work-source.js";
 
 /**
  * Daemon-wide back-off for upstreams that refuse work: the GitHub API rate limit
@@ -171,7 +171,7 @@ function enter(u: Upstream, reason: string, resetAtMs?: number): void {
   // Not awaited: the state machine is synchronous and must not wait on an
   // observer. The fan-out awaits each observer under its own timeout and never
   // rejects.
-  void notifyBackoffPause(u, reason, observerLogger);
+  void emit({ kind: "backoff", upstream: u, paused: true, reason }, null, observerLogger);
 }
 
 function extend(u: Upstream, resetAtMs?: number): void {
@@ -201,7 +201,7 @@ function clear(u: Upstream): void {
   s.trippedResource = undefined;
   s.lastClearedAt = Date.now();
   notify(`Foreman ${NAMES[u]} back-off cleared — resuming`, "info");
-  void notifyBackoffResume(u, observerLogger);
+  void emit({ kind: "backoff", upstream: u, paused: false }, null, observerLogger);
   releaseWaiters(u);
 }
 

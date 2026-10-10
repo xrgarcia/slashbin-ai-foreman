@@ -96,18 +96,22 @@ src/
 ├── cli.ts           # CLI entry point (--once, --repo, --help, --version, paperclip:doctor)
 ├── config.ts        # Zod-validated config from .ai-agent.json + env vars
 ├── logger.ts        # Structured logging (JSON/text, levels, child contexts)
-├── adapters.ts      # WorkSourceAdapter / WorkItem — the work-source seam (no source-specific code)
-├── github.ts        # gh-CLI helpers (issues, PRs, labels, branch drift, review gate) + GitHubIssueConnector
+├── lifecycle.ts     # THE state machine: stages, moves, session stages (generates docs/lifecycle.md)
+├── adapters.ts      # The data contract: WorkEvent, WorkSourceAdapter, WorkObserver (no source-specific code)
+├── work-source.ts   # emit()/advance(): one event → the work source records it, observers are told
+├── github.ts        # gh-CLI helpers (issues, PRs, labels, branch drift, review gate)
+├── github-work-source.ts # GitHubIssueConnector: a move → its `gh issue edit`; labels → stages for snapshot
+├── redact.ts / review-report.ts # Core helpers shared by the agent runner and plugins
 ├── agent.ts         # Spawns claude CLI (implement / revise / review)
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
 ├── state.ts         # Disk persistence (.agent-state.json)
 ├── stages.ts        # Stage schema, default order, dispatch loop
-├── orchestrator.ts  # Stage pass per repo, failure cooldowns, label transitions
+├── orchestrator.ts  # Stage pass per repo, failure cooldowns; reports every step via emit/advance
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
 ├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
 ├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
-├── paperclip/mirror.ts # PaperclipMirror: WorkObserver writing each step to the issue's task; best-effort
+├── paperclip/mirror.ts # PaperclipMirror: a WorkObserver (plugin) — each event → the issue's card; best-effort
 ├── paperclip/doctor.ts # Read-only check of the integration, six named PASS/FAIL checks (`npm run paperclip:doctor`)
 └── index.ts         # Public API exports
 ```
@@ -125,6 +129,11 @@ src/
   lives in skills (in the service repo for implement/revise, in `emRepoPath` for review),
   not in TypeScript. The daemon discovers work, spawns Claude on the right skill, and
   reconciles labels/state.
+- **One state machine, one call.** Every state change is a named move in `src/lifecycle.ts`;
+  the orchestrator calls `advance(item, "<move>")` and reports everything else with `emit()`.
+  The work source (GitHub labels) records the event; observers (Paperclip, when enabled) get
+  the same event. Only `cli.ts` (the wiring) imports `paperclip/`; the connector and the
+  plugin never read each other. A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
 - **One Claude session at a time** — resource + git-state safety.
 - **Phase order is the priority order** — reconcile and review settle prior-cycle state
   before new implementation starts. The default `stages` keeps it; a config that

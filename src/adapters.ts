@@ -1,5 +1,6 @@
 import type { RepoConfig, AgentConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import type { StageOrDone, Transition } from "./lifecycle.js";
 
 /**
  * One unit of work a source hands to the pipeline. Deliberately minimal: the
@@ -28,12 +29,12 @@ export type WorkState = "queued" | "inReview" | "changesRequested" | "merged" | 
 export type PriorState = "new" | "inReview" | "changesRequested" | "merged" | "unknown";
 
 /**
- * Where the Foreman's work comes from, and where it reports progress on that
- * work. The implement stage asks the source which items to build this pass
- * and hands exactly those to the agent; every later change to an item's
- * state goes back through the same source. GitHub issues are the first
- * connector (`GitHubIssueConnector` in github.ts); this module must stay free
- * of any source-specific code so another connector can import it alone.
+ * Where the Foreman's work comes from, and where its lifecycle is recorded.
+ * The implement stage asks the source which items to build this pass; every
+ * later event on an item goes back through `record`, the same event every
+ * observer receives. GitHub issues are the first connector
+ * (`GitHubIssueConnector` in github-work-source.ts); this module must stay
+ * free of any source-specific code so another connector can import it alone.
  *
  * PR-level operations (open / merge / review a PR, PR labels and comments,
  * branch sync, promotion) are code-host work, not work-source reporting, and
@@ -46,65 +47,80 @@ export interface WorkSourceAdapter {
     logger: Logger,
   ): Promise<WorkItem[]>;
 
-  /** The Foreman is starting work on `item`. */
-  claim(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-
-  /** The PR that delivers `item` exists at `prUrl`. */
-  reportPrLink(item: WorkItem, prUrl: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+  /**
+   * Record `event` on the source. Resolves `true` when the source recorded a
+   * change, `false` when it wrote nothing (already there, no longer open, a
+   * failed write, or an event this source keeps no record of). Never throws.
+   * An `observed` transition is never passed here: the source already shows it.
+   */
+  record(event: WorkEvent, repoConfig: RepoConfig, logger: Logger): Promise<boolean>;
 
   /**
-   * Move `item` from `from` to `to`. Resolves `true` when the source recorded
-   * a change, `false` when it wrote nothing (already there, no longer open, a
-   * failed write, or a pair it does not support). Never throws.
+   * Every open item in the lifecycle and the stage the source shows it at,
+   * with the source's own words for that state (`detail`), for observers to
+   * reconcile to. Items outside the lifecycle are left out.
    */
-  reportState(
-    item: WorkItem,
-    from: PriorState,
-    to: WorkState,
-    repoConfig: RepoConfig,
-    logger: Logger,
-  ): Promise<boolean>;
+  snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]>;
+}
 
-  /** The Foreman cannot proceed on `item`; `reason` says why. */
-  reportBlocked(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+/** One item as the work source shows it at the end of a cycle. */
+export interface SnapshotItem {
+  readonly item: WorkItem;
+  readonly stage: StageOrDone;
+  /** What the source shows, in its own terms (GitHub: the issue's labels). */
+  readonly detail: string;
+  /** A verify session gave up on it and holds it: the block stands at `merged`. */
+  readonly verifyHeld?: boolean;
 }
 
 /**
- * Something that watches the Foreman work without being a work source (EM#417:
- * the Paperclip mirror). It receives every report the work source receives, in
- * the same order and with the same arguments, plus the events the source never
- * sees: a feature PR merged, work handed to promotion, an upstream back-off
- * starting or ending.
- *
- * Every method is optional and best-effort. The dispatcher (work-source.ts)
- * awaits each one under a hard timeout and logs, never rethrows, its errors, so
- * an observer can neither fail nor stall a build. It never decides anything:
- * GitHub stays the only work source.
+ * Everything the Foreman does to a work item, and everything else an observer
+ * may show: one event type, delivered to the work source (`record`) and to
+ * every observer (`onEvent`) in the same order. A `transition` is a move from
+ * the lifecycle table (lifecycle.ts); `observed` marks one the source already
+ * shows, because something outside the Foreman made it (a review agent wrote
+ * the outcome label), so only observers hear of it.
  */
-export interface WorkObserver {
-  onClaim?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-  onState?(item: WorkItem, from: PriorState, to: WorkState, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-  onPrLink?(item: WorkItem, prUrl: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-  onBlocked?(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
+export type WorkEvent =
+  | { readonly kind: "claim"; readonly item: WorkItem }
+  | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
+  | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
+  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string }
   /** A block on `item` was resolved by one of the Foreman's unblock checks (src/unblock.ts). */
-  onUnblocked?(item: WorkItem, reason: string, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-  onMerged?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-  onPromoted?(item: WorkItem, repoConfig: RepoConfig, logger: Logger): Promise<void>;
-  onBackoffPause?(upstream: string, reason: string, logger: Logger): Promise<void>;
-  onBackoffResume?(upstream: string, logger: Logger): Promise<void>;
-  /** A Claude (or Tech Lead) session on a repo started, changed hands, or ended. */
-  onSession?(event: SessionEvent, logger: Logger): Promise<void>;
+  | { readonly kind: "unblocked"; readonly item: WorkItem; readonly reason: string }
+  /** The feature PR delivering `item` merged to the base branch. */
+  | { readonly kind: "merged"; readonly item: WorkItem }
+  | { readonly kind: "promoted"; readonly item: WorkItem }
+  /** A Claude (or Tech Lead / SRE) session on a repo started, changed hands, or ended. */
+  | { readonly kind: "session"; readonly session: SessionEvent }
   /**
    * The repo's FULL set of items waiting out a back-off this cycle, each with
    * the reason it waits. An item missing from a later set has stopped waiting.
    */
-  onWaiting?(repo: string, waiting: ReadonlyArray<WaitingItem>, logger: Logger): Promise<void>;
-  /** Promotion on `repo` is stalled for `detail`, or no longer stalled (null). */
-  onPromotionStall?(repo: string, detail: string | null, logger: Logger): Promise<void>;
+  | { readonly kind: "waiting"; readonly repo: string; readonly items: ReadonlyArray<WaitingItem> }
   /** A release PR (base → production) opened, merged or closed for these items. */
-  onRelease?(event: ReleaseEvent, logger: Logger): Promise<void>;
-  /** The repo's open issues and their labels at the end of a cycle: the record a mirror reconciles to. */
-  onSnapshot?(repoConfig: RepoConfig, issues: ReadonlyArray<{ number: number; labels: readonly string[] }>, logger: Logger): Promise<void>;
+  | { readonly kind: "release"; readonly release: ReleaseEvent }
+  /** Promotion on `repo` is stalled for `detail`, or no longer stalled (null). */
+  | { readonly kind: "promotionStall"; readonly repo: string; readonly detail: string | null }
+  /** An upstream (github / claude) started refusing work (`reason`), or stopped. */
+  | { readonly kind: "backoff"; readonly upstream: string; readonly paused: boolean; readonly reason?: string }
+  /** The repo's open items at the end of a cycle, as the source shows them: the record a mirror reconciles to. */
+  | { readonly kind: "snapshot"; readonly repo: string; readonly items: ReadonlyArray<SnapshotItem> };
+
+export type WorkEventKind = WorkEvent["kind"];
+
+/**
+ * Something that watches the Foreman work without being a work source (EM#417:
+ * the Paperclip mirror). It receives every event the work source receives, in
+ * the same order, plus the ones the source keeps no record of.
+ *
+ * Best-effort. The dispatcher (work-source.ts) awaits each call under a hard
+ * timeout and logs, never rethrows, its errors, so an observer can neither
+ * fail nor stall a build. It never decides anything: the work source stays
+ * the only record.
+ */
+export interface WorkObserver {
+  onEvent(event: WorkEvent, logger: Logger): Promise<void>;
 }
 
 /**

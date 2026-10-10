@@ -8,7 +8,7 @@
 // plus anything shaped like a token) and capped before it leaves.
 
 import type { SessionEvent, SessionReview, WorkItem } from "../adapters.js";
-import { redactAll } from "../agent.js";
+import { redactAll } from "../redact.js";
 import type { PaperclipCommentEvent, PaperclipConfig } from "../config.js";
 
 export type CommentsConfig = PaperclipConfig["comments"];
@@ -90,24 +90,8 @@ export function agentText(text: string | undefined): string {
     .trim();
 }
 
-/** A finding line in a review body: `**[S2] Title** — \`path:line\``. */
-const FINDING_RE = /\*\*\[(S\d)\]\s*(.+?)\*\*(?:\s*[—-]\s*`([^`]+)`)?/g;
-
-/**
- * The opening paragraph and the findings of a review body as the Tech Lead
- * writes it. A body in another shape gives its first paragraph and no findings.
- */
-export function parseReviewBody(body: string | null | undefined): { summary?: string; findings: SessionReview["findings"] } {
-  const text = String(body ?? "").replace(/\r\n/g, "\n").trim();
-  if (!text) return { findings: [] };
-  const first = text.split(/\n\s*\n/)[0].trim();
-  const summary = /^(#|\*\*\[S\d\]|<sub>)/.test(first) ? undefined : first;
-  const findings: Array<{ severity: string; title: string; where?: string }> = [];
-  for (const m of text.matchAll(FINDING_RE)) {
-    findings.push({ severity: m[1], title: m[2].trim(), ...(m[3] ? { where: m[3] } : {}) });
-  }
-  return { ...(summary ? { summary } : {}), findings };
-}
+// `parseReviewBody` is core (review-report.ts); re-exported for existing importers.
+export { parseReviewBody } from "../review-report.js";
 
 const prRef = (pr: { number: number; url?: string } | undefined, fallback?: number): string => {
   if (pr?.url) return `[PR #${pr.number}](${pr.url})`;

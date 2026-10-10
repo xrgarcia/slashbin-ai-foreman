@@ -9,6 +9,8 @@ import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha, forgetOpenPrs } 
 import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
+import { redactAll } from "./redact.js";
+export { redactAll };
 
 const FOREMAN_OVERRIDES = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -525,15 +527,6 @@ export function secretValues(sessionEnv: readonly string[]): Array<{ name: strin
     }
   }
   return out.sort((a, b) => b.value.length - a.value.length);
-}
-
-/** Replace every occurrence of each secret value with `[REDACTED:<NAME>]`. */
-export function redactAll(text: string, secrets: ReadonlyArray<{ name: string; value: string }>): string {
-  let out = text;
-  for (const { name, value } of secrets) {
-    if (out.includes(value)) out = out.split(value).join(`[REDACTED:${name}]`);
-  }
-  return out;
 }
 
 /**

@@ -16,11 +16,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
 
 const gateAt = src.indexOf("Gate: an open feature PR holds the branch");
-const block = src.slice(gateAt, src.indexOf("// Invoke the skill", gateAt));
+// The gate itself: from its comment to the end of the `if (featurePr && queued…)`
+// branch. Ending at "// Invoke the skill" swept in the post-gate "Picked up" push.
+const block = src.slice(gateAt, src.indexOf("\n  }\n", src.indexOf("if (featurePr && queued.length > 0)", gateAt)) + 4);
 
 test("the queue gate runs before any claim, event or session", () => {
   assert.ok(gateAt > 0, "the open-feature-PR gate is gone");
-  const claimAt = src.indexOf("await claimWork(itemOf(repoConfig, n)", gateAt);
+  const claimAt = src.indexOf('await emit({ kind: "claim", item: itemOf(repoConfig, n) }', gateAt);
   const pickedAt = src.indexOf("Picked up ${actionableIssues.length}");
   const sessionAt = src.indexOf("implementApprovedIssues(repoConfig", gateAt);
   assert.ok(pickedAt > gateAt, "\"Picked up\" is posted to Discord before the gate");
@@ -29,8 +31,8 @@ test("the queue gate runs before any claim, event or session", () => {
 });
 
 test("a queued issue is reported as queued, never blocked, and returns quietly", () => {
-  assert.match(block, /notifyObserversState\(itemOf\(repoConfig, n\), "new", "queued"/, "queued issues must reach observers as `queued`");
-  assert.doesNotMatch(block, /reportWorkBlocked|notifyWaiting|events\?\.push/,
+  assert.match(block, /advance\(itemOf\(repoConfig, n\), "queue"/, "queued issues must reach observers as `queued`");
+  assert.doesNotMatch(block, /kind: "blocked"|kind: "waiting"|events\?\.push/,
     "a queued issue must not be blocked, waited, or announced to Discord");
   assert.match(block, /return null;/);
 });
