@@ -69,19 +69,20 @@ test("buildSessionEnv: extraEnv names are present", () => {
   assert.equal(env.FOREMAN_STAGE_ID, "lint");
 });
 
-test("buildTechLeadEnv: EM token and TECH_LEAD_* only — never the Foreman token or GH_TOKEN", () => {
+test("buildTechLeadEnv: its own token and TECH_LEAD_* only — never the Foreman's, the EM's or GH_TOKEN", () => {
+  process.env.TECHLEAD_GITHUB_KEY = "tech-lead-token-value";
   process.env.TECH_LEAD_MODEL = "m";
   process.env.GH_TOKEN = "parent-gh-token-value";
   const env = buildTechLeadEnv(
     { sessionEnv: ["TEST_LISTED"], emRepoPath: "/em" },
     { triggerLabel: "approved", lifecycleLabels: labels },
   );
-  assert.equal(env.EM_GITHUB_TOKEN, EM);
+  assert.equal(env.TECHLEAD_GITHUB_KEY, "tech-lead-token-value");
   assert.equal(env.TECH_LEAD_MODEL, "m");
   assert.equal("TECH_LEAD_EM_REPO" in env, false, "the Tech Lead reads nothing from the EM checkout");
   assert.equal(env.TEST_LISTED, "listed-value");
   assert.equal(env.FOREMAN_TRIGGER_LABEL, "approved");
-  for (const n of ["FOREMAN_GITHUB_TOKEN", "GH_TOKEN", "TEST_UNLISTED"]) assert.equal(n in env, false, n);
+  for (const n of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "GH_TOKEN", "TEST_UNLISTED"]) assert.equal(n in env, false, n);
 });
 
 test("loadConfig: sessionEnv may not name a GitHub token; omitted resolves to []", () => {
@@ -92,7 +93,7 @@ test("loadConfig: sessionEnv may not name a GitHub token; omitted resolves to []
       writeFileSync(p, JSON.stringify({ repos: [{ name: "r", repoPath: dir, githubRepo: "o/r" }], ...extra }));
       return p;
     };
-    for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN"]) {
+    for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY"]) {
       assert.throws(() => loadConfig(cfg({ sessionEnv: [name] })), new RegExp(`sessionEnv must not name a GitHub token: "${name}"`));
     }
     const omitted = loadConfig(cfg({}));

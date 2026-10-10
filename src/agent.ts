@@ -491,15 +491,16 @@ export function buildSessionEnv(opts: SpawnOptions): Record<string, string> {
 }
 
 /**
- * The Tech Lead hand-off's environment. It reads EM_GITHUB_TOKEN by name and
- * sets GH_TOKEN itself — so it receives the EM token and never the Foreman's,
+ * The Tech Lead hand-off's environment. It reads TECHLEAD_GITHUB_KEY by name and
+ * sets GH_TOKEN itself — so it receives its own token (account slasbhin-techlead)
+ * and never the Foreman's or the EM's,
  * plus its own TECH_LEAD_* settings and the configured label names. It reads
  * nothing from the EM checkout (review moved wholly to it, 2026-10-10).
  */
 export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("TECH_LEAD_")), env);
-  pickEnv(["EM_GITHUB_TOKEN"], env);
+  pickEnv(["TECHLEAD_GITHUB_KEY"], env);
   // The configured label names, exactly as every Claude session gets them
   // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
   if (repoConfig.triggerLabel) env.FOREMAN_TRIGGER_LABEL = repoConfig.triggerLabel;
@@ -517,7 +518,7 @@ const MIN_SECRET_LENGTH = 8;
  */
 export function secretValues(sessionEnv: readonly string[]): Array<{ name: string; value: string }> {
   const out: Array<{ name: string; value: string }> = [];
-  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", ...sessionEnv]) {
+  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", ...sessionEnv]) {
     const value = process.env[name];
     if (value !== undefined && value.length >= MIN_SECRET_LENGTH && !out.some((s) => s.value === value)) {
       out.push({ name, value });
@@ -1638,8 +1639,8 @@ export async function reviewViaTechLead(
 ): Promise<ReviewResult | { fallback: true; reason: string }> {
   const techLead = agentConfig.techLeadPath;
   if (!techLead) return { fallback: true, reason: "techLeadPath not configured" };
-  if (!process.env.EM_GITHUB_TOKEN) {
-    return { success: false, error: "EM_GITHUB_TOKEN not set — refusing to run review without EM-account attribution" };
+  if (!process.env.TECHLEAD_GITHUB_KEY) {
+    return { success: false, error: "TECHLEAD_GITHUB_KEY not set — refusing to run review without Tech Lead attribution" };
   }
   const args = [join(techLead, "bin/tech-lead.mjs"), "review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
   logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead (Codex)`);
