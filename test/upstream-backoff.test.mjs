@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { detectUpstreamLimit, parseClaudeReset } from "../dist/agent.js";
+import { orchestratorSource } from "./orchestrator-source.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 const url = (f) => pathToFileURL(join(DIST, f)).href;
@@ -308,7 +309,7 @@ test("parseClaudeReset resolves the next wall-clock occurrence in the stated zon
 // --- Retry counters ---------------------------------------------------------
 
 test("each phase returns before its retry counter when the failure was an upstream limit", () => {
-  const orch = readFileSync(join(DIST, "orchestrator.js"), "utf8");
+  const orch = orchestratorSource("dist");
   for (const [fn, counter] of [
     ["tryBatchImplementation", "failureCount.set(repoName, newCount)"],
     ["tryRevision", "revisionFailureCount.set(repoName, newCount)"],

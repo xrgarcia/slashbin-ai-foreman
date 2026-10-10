@@ -5,8 +5,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { UNBLOCK_CHECKS, passingCheck, unblockedReason } from "../dist/unblock.js";
+import { orchestratorSource } from "./orchestrator-source.mjs";
 
-const src = readFileSync(new URL("../src/orchestrator.ts", import.meta.url), "utf8");
+const src = orchestratorSource();
 
 test("every block kind has at least one check", () => {
   for (const [kind, checks] of Object.entries(UNBLOCK_CHECKS)) assert.ok(checks.length > 0, kind);

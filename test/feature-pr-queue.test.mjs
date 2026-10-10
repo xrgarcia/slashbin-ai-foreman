@@ -11,9 +11,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { orchestratorSource } from "./orchestrator-source.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const src = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
+const src = orchestratorSource();
 
 const gateAt = src.indexOf("Gate: an open feature PR holds the branch");
 // The gate itself: from its comment to the end of the `if (featurePr && queued…)`

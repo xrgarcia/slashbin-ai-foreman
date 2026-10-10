@@ -10,9 +10,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { orchestratorSource } from "./orchestrator-source.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const orchestrator = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
+const orchestrator = orchestratorSource();
 
 test("exhausted revision retries escalate instead of going quiet", () => {
   assert.match(orchestrator, /const revisionEscalated = new Set<string>\(\)/,
