@@ -112,6 +112,7 @@ src/
 ├── phases/          # One file per stage: reconcile, implement, revise, verify, review, promote, custom;
 │                    #   common.ts holds what they share. Each reports every step via emit/advance
 ├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
+├── paperclip/config.ts # The plugin's config block: schema, AI_AGENT_PAPERCLIP_* overrides, checks
 ├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
 ├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
 ├── paperclip/mirror.ts # PaperclipMirror: a WorkObserver (plugin) — each event → the issue's card; best-effort
@@ -135,8 +136,9 @@ src/
 - **One state machine, one call.** Every state change is a named move in `src/lifecycle.ts`;
   the orchestrator calls `advance(item, "<move>")` and reports everything else with `emit()`.
   The work source (GitHub labels) records the event; observers (Paperclip, when enabled) get
-  the same event. Only `cli.ts` (the wiring) imports `paperclip/`; the connector and the
-  plugin never read each other. A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
+  the same event. Only `cli.ts` (the wiring) imports `paperclip/`, plus `config.ts` composing
+  the plugin's own block from `paperclip/config.ts`; the connector and the plugin never read
+  each other (a test walks every core file and enforces it). A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
 - **One Claude session at a time** — resource + git-state safety.
 - **Phase order is the priority order** — reconcile and review settle prior-cycle state
   before new implementation starts. The default `stages` keeps it; a config that

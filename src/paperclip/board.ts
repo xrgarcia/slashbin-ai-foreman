@@ -13,7 +13,7 @@ import {
   paperclipBoardDefaults,
   type PaperclipConfig,
   type PaperclipStage,
-} from "../config.js";
+} from "./config.js";
 import type { SESSION_STAGE } from "../lifecycle.js";
 import type { PaperclipClient } from "./client.js";
 

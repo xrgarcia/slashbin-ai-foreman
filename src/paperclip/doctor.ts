@@ -7,7 +7,8 @@
 // It needs no GitHub token and makes no GitHub call. Each request is bounded by
 // a timeout, so an unreachable or hung server fails a check instead of hanging.
 
-import type { AgentConfig, PaperclipConfig } from "../config.js";
+import type { AgentConfig } from "../config.js";
+import type { PaperclipConfig } from "./config.js";
 import { PaperclipClient, PaperclipClientError, type PaperclipAgent } from "./client.js";
 
 /** The checks, in the order they run and print. */
