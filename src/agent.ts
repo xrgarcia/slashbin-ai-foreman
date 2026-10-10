@@ -512,13 +512,13 @@ export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfi
 const MIN_SECRET_LENGTH = 8;
 
 /**
- * The values redacted from everything a child prints: both GitHub tokens and
+ * The values redacted from everything a child prints: every agent's GitHub token and
  * each `sessionEnv` name, read from the daemon env at spawn, 8+ characters,
  * longest first (so a value containing another is replaced whole).
  */
 export function secretValues(sessionEnv: readonly string[]): Array<{ name: string; value: string }> {
   const out: Array<{ name: string; value: string }> = [];
-  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", ...sessionEnv]) {
+  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY", ...sessionEnv]) {
     const value = process.env[name];
     if (value !== undefined && value.length >= MIN_SECRET_LENGTH && !out.some((s) => s.value === value)) {
       out.push({ name, value });
@@ -1477,11 +1477,16 @@ export async function reviewViaTechLead(
 }
 
 /**
- * The SRE's environment: the Tech Lead's (EM token, essentials, label names) plus
- * its own SRE_* settings and the EM checkout it verifies from.
+ * The SRE's environment: essentials, `sessionEnv`, the label names, its own SRE_*
+ * settings (SRE_GITHUB_KEY among them, account `slashbin-sre`) and the EM checkout it
+ * verifies from. No other agent's token. Until 2026-10-10 this was the Tech Lead's env,
+ * which carried the Tech Lead's key and no token the SRE reads, so the SRE posted as
+ * whatever `gh` login was active on the host.
  */
 export function buildSreEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
-  const env = buildTechLeadEnv(agentConfig, repoConfig);
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  if (repoConfig.triggerLabel) env.FOREMAN_TRIGGER_LABEL = repoConfig.triggerLabel;
+  if (repoConfig.lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(repoConfig.lifecycleLabels);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("SRE_")), env);
   if (agentConfig.emRepoPath && !env.SRE_EM_REPO) env.SRE_EM_REPO = agentConfig.emRepoPath;
   return env;
@@ -1531,8 +1536,8 @@ export async function verifyViaSre(
 ): Promise<VerifyResult> {
   const sre = agentConfig.srePath;
   if (!sre) return { kind: "error", error: "srePath not configured" };
-  if (!process.env.EM_GITHUB_TOKEN) {
-    return { kind: "error", error: "EM_GITHUB_TOKEN not set — refusing to verify without EM-account attribution" };
+  if (!process.env.SRE_GITHUB_KEY) {
+    return { kind: "error", error: "SRE_GITHUB_KEY not set — refusing to verify without SRE-account (slashbin-sre) attribution" };
   }
   const args = [join(sre, "bin/sre.mjs"), "verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
   logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification`);
