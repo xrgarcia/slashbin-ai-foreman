@@ -121,15 +121,17 @@ export function gh(args: string[], cwd: string): string {
 }
 
 /**
- * Run gh CLI as the Tech Lead (slasbhin-techlead), for exactly one write: the
- * approval branch protection needs on a sync PR the Foreman authored, which it
- * cannot approve itself. Every approval is the Tech Lead's; the EM coordinates
+ * Run gh CLI as the Tech Lead (slasbhin-techlead), for exactly two writes on a
+ * sync PR the Foreman authored: the approval branch protection needs (the
+ * Foreman cannot approve its own PR), and the merge, which must come from an
+ * account Railway links to a workspace member or the dev deploy waits for a
+ * manual approval. Every approval is the Tech Lead's; the EM coordinates
  * and does not review (Ray, 2026-10-10). A sync PR's head is `main`, so the
  * approval vouches for no new code.
  */
 function ghAsTechLead(args: string[], cwd: string): string {
   const token = process.env.TECHLEAD_GITHUB_KEY;
-  if (!token) throw new Error("TECHLEAD_GITHUB_KEY not set — cannot approve a sync PR");
+  if (!token) throw new Error("TECHLEAD_GITHUB_KEY not set — cannot approve or merge a sync PR");
   invalidateSnapshotIfMutating(args);
   return runGh(args, cwd, token);
 }
@@ -2646,7 +2648,11 @@ export function createSyncPR(
 
     const prNumber = prNumberMatch[1];
 
-    // Immediately approve (Tech Lead) + merge (Foreman)
+    // Immediately approve + merge, both as the Tech Lead. The merge is what
+    // triggers the dev deploy, and Railway holds any deploy merged by a GitHub
+    // account with no linked workspace member for manual approval. The Foreman
+    // coordinates and has no Railway account (Ray, 2026-10-10); merging as the
+    // Foreman stalled every post-promotion dev deploy (jerky_skuvault_service#410).
     try {
       ghAsTechLead([
         "pr", "review", prNumber,
@@ -2655,7 +2661,7 @@ export function createSyncPR(
         "--body", "Branch sync: head is `main`, so there is no new code to review.",
       ], cwd);
 
-      gh([
+      ghAsTechLead([
         "pr", "merge", prNumber,
         "--repo", repo,
         "--merge",
@@ -2719,7 +2725,8 @@ export function tryMergeSyncPR(
       // Already approved, or approval not required. Not a reason to skip the merge.
     }
 
-    gh([
+    // As the Tech Lead, never the Foreman — see createSyncPR.
+    ghAsTechLead([
       "pr", "merge", String(prNumber),
       "--repo", repo,
       "--merge",
