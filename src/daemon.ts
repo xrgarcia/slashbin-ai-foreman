@@ -10,6 +10,7 @@ import {
 } from "./github-state.js";
 import { addObserver } from "./work-source.js";
 import { stateDir } from "./state.js";
+import { configureBackoff } from "./backoff.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
 
@@ -52,6 +53,10 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
   // One open-issue snapshot per repo per cycle, instead of one GraphQL request
   // per discovery lookup. See the block comment above `getOpenIssues`.
+  // Every back-off and retry limit, for the module-level code that takes no
+  // config (gh retries, CI gate, stuck-merge scan, upstream windows).
+  configureBackoff(config.backoff);
+
   configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
     snapshotLimit: config.issueSnapshotLimit,
@@ -87,8 +92,6 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   // One daemon-wide back-off per upstream (GitHub rate limit, Claude session
   // limit). Every transition is logged AND sent once to Discord — never per repo.
   configureUpstreamBackoff({
-    baseMs: activeConfig.upstreamBackoffBaseMs,
-    capMs: activeConfig.upstreamBackoffCapMs,
     notify: (text, level) => {
       logger.warn(text);
       bridge?.sendStatus(`**FOREMAN:** ${text}`, level);
@@ -166,6 +169,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       }
 
       setGitHubStateRepos(fresh.repos.map((r) => r.githubRepo));
+      configureBackoff(fresh.backoff);
       return fresh;
     } catch (err) {
       logger.warn("Config reload failed, using previous config", {

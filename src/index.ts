@@ -8,6 +8,7 @@ export { createLogger, type Logger, type LogLevel } from "./logger.js";
 export { hasPendingRevisions, verifyPRExists } from "./github.js";
 export { GitHubIssueConnector } from "./github-work-source.js";
 export type { WorkItem, WorkSourceAdapter, WorkObserver, WorkEvent, SnapshotItem } from "./adapters.js";
+export { DEFAULT_BACKOFF, backoffDelay, type BackoffConfig, type BackoffWindow } from "./backoff.js";
 export { STAGES, MOVES, transition, type Stage, type Move, type Transition } from "./lifecycle.js";
 export { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";
 export { reconcileRepo, type ReconciliationResult } from "./reconciler.js";

@@ -1,4 +1,5 @@
 import type { AgentConfig, RepoConfig } from "./config.js";
+import { configureBackoff } from "./backoff.js";
 import type { Logger } from "./logger.js";
 import { publishSnapshot, hasObservers } from "./work-source.js";
 import { type ImplementationResult } from "./agent.js";
@@ -16,7 +17,7 @@ import { tryVerify } from "./phases/verify.js";
 // CLI and the tests reach through the orchestrator.
 export { stoppedReason, divergenceNotice, labelFromTrailer, workStateOf, type CycleEvent } from "./phases/common.js";
 export { prBlockingSkip } from "./phases/implement.js";
-export { VERIFY_RETRY_MS, VERIFY_MAX_ATTEMPTS, verifyHoldPlan, pickVerifyTarget } from "./phases/verify.js";
+export { verifyHoldPlan, pickVerifyTarget } from "./phases/verify.js";
 
 export interface OrchestratorState {
   implementing: string | null;
@@ -238,7 +239,7 @@ async function runRepoCycle(
 
       // --- Revise PRs with pending review feedback ---
       case "revise": {
-        const revisionInfo = await tryRevision(repoConfig, base, cycleNumber, events);
+        const revisionInfo = await tryRevision(repoConfig, config, base, cycleNumber, events);
         if (revisionInfo) {
           events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
           processed++;
@@ -345,6 +346,8 @@ export async function runCycle(
   cycleNumber: number
 ): Promise<CycleResult> {
   const cycleLogger = logger.child({ cycle: cycleNumber, phase: "poll" });
+  // `--once` and programmatic callers start here, not in the daemon.
+  configureBackoff(config.backoff);
 
   let totalProcessed = 0;
   let lastResult: ImplementationResult | null = null;

@@ -15,6 +15,7 @@ import { readReviewOutcomes, type ReviewOutcome } from "../github.js";
 import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "../unblock.js";
+import { BackoffTracker } from "../backoff.js";
 
 /**
  * Why a run stopped, worded for the card. Every stop — the first failure, a
@@ -64,8 +65,6 @@ export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boo
   if (r.status !== 0 || Number.isNaN(at) || Number.isNaN(since)) return undefined;
   return at > since;
 }
-
-export const MAX_RETRIES = 2;
 
 /** The work item a repo-scoped issue number names. */
 /** One line: why a diverged feature branch holds an item back. */
@@ -227,12 +226,13 @@ export async function notifyOnce(
 // because they share one git working clone.
 export const activeRuns = new Map<string, AbortController>();
 
-// Per-repo consecutive batch failure count with cooldown
+// Per-repo consecutive implement failures. At `backoff.repoFailure.maxFailures`
+// the repo's implement stage pauses (failurePause), longer each time it trips.
 export const failureCount = new Map<string, number>();
-export const failureHitMaxAt = new Map<string, number>(); // cycle when max was hit
+export const failurePause = new BackoffTracker();
 export const revisionFailureCount = new Map<string, number>();
 // Repos whose revision retries are exhausted AND already escalated. Without this
-// the cap was reached silently: the count hit MAX_RETRIES, every later cycle took
+// the cap was reached silently: the count hit maxFailures, every later cycle took
 // the `debug` skip branch, and the stuck PR sat there with nobody told. The set is
 // cleared the moment a revision succeeds or the pending feedback clears, so a repo
 // that recovers escalates again if it breaks again.
@@ -260,7 +260,7 @@ export const MAX_CONSECUTIVE_NO_COMMIT = 1;
 export const REVIEW_ROUNDS_ALERT = 4;
 export const reviewRoundsAlerted = new Set<string>();
 export const reviewFailureCount = new Map<string, number>();
-export const reviewFailureHitMaxAt = new Map<string, number>();
+export const reviewFailurePause = new BackoffTracker();
 
 // Last cycle on which each repo checked whether an empty ready-for-prod set is
 // actually a stall. Rate-limits one compare API call per repo; see tryPromotion.
@@ -281,7 +281,6 @@ export const deadZoneRecoveryAttempted = new Map<string, Set<number>>();
  *  deployment, so minutes are normal and hanging forever is not. */
 export const RECOVERY_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 
-export const FAILURE_COOLDOWN_CYCLES = 3; // retry after this many idle cycles
 export const lastFailureReason = new Map<string, string>(); // per-repo last failure for retry context
 
 /**

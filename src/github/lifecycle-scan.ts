@@ -7,6 +7,7 @@ import { closedPrVersion, dropIssueSnapshot, findOpenPrs, formatGhError, getOpen
 import { extractImplementedIssues } from "./discovery.js";
 import { gh } from "./gh.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
+import { backoffSettings } from "../backoff.js";
 
 
 export interface MergedIssueRef {
@@ -102,7 +103,6 @@ export type StuckMergedIssue = MergedIssueRef;
 /** Grace window before a merged-but-unadvanced issue is treated as dead-zoned,
  *  giving an in-flight post-merge verify time to advance it. Prevents flapping
  *  on freshly-merged PRs the review agent is still finishing. */
-export const STUCK_MERGE_GRACE_MS = 15 * 60 * 1000;
 
 /**
  * Detect issues DEAD-ZONED by a failed post-merge verify: labeled `pr under
@@ -126,7 +126,7 @@ export const STUCK_MERGE_GRACE_MS = 15 * 60 * 1000;
  *  - ignores `pr approved` / `ready for prod release` (already advanced)
  *  - ignores issues REFERENCED BY an open feature PR (normal review-pending;
  *    tryReview owns those specific issues)
- *  - only flags PRs merged more than STUCK_MERGE_GRACE_MS ago (no flap on fresh merges)
+ *  - only flags PRs merged more than backoff.stuckMergeGraceMs ago (no flap on fresh merges)
  *
  * An issue with ONLY the trigger label is the same dead zone by a third door
  * (slashbin-ai-foreman#73): implement treats it as covered once its PR merged,
@@ -212,7 +212,7 @@ export function findStuckMergedIssues(
 
     const nowMs = Date.now();
     return merged.filter(
-      (m) => nowMs - new Date(m.mergedAt).getTime() > STUCK_MERGE_GRACE_MS,
+      (m) => nowMs - new Date(m.mergedAt).getTime() > backoffSettings().stuckMergeGraceMs,
     );
   } catch (err) {
     logger.debug(
