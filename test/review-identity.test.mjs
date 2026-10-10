@@ -1,8 +1,8 @@
 // Review skill + reviewer identity per repo, with no built-in defaults (EM#425).
 // Run with `npm test` after `npm run build`.
 //
-// The contract: a review-enabled repo needs a reviewSkillPath (from its entry or
-// the global), not an EM repo; and a relative reviewSkillPath resolves against
+// The contract: a review-enabled repo needs a reviewer (techLeadPath), not an EM
+// repo or a review skill; and a relative reviewSkillPath resolves against
 // the directory the review session runs in — emRepoPath when set (unchanged
 // behaviour), else the repo's review checkout.
 import test from "node:test";
@@ -22,10 +22,10 @@ function load(cfg) {
   return loadConfig(p);
 }
 
-test("only the review-enabled repo needs a skill; the error names the repo", () => {
+test("only the review-enabled repo needs a reviewer; the error names the repo", () => {
   assert.doesNotThrow(() => load({ repos: [repo({ reviewEnabled: false }), repo({ name: "b" })] }));
   assert.throws(
     () => load({ repos: [repo(), repo({ name: "b", reviewEnabled: true })] }),
-    (e) => /reviewSkillPath/.test(e.message) && /"b"/.test(e.message) && !/emRepoPath/.test(e.message),
+    (e) => /techLeadPath/.test(e.message) && /"b"/.test(e.message) && !/emRepoPath/.test(e.message),
   );
 });

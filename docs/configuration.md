@@ -176,13 +176,13 @@ Daemon log level.
 
 Additive + OSS-safe: reviewEnabled defaults to false, so a vanilla .ai-agent.json keeps the original reconcile/revise/implement/sync/promote behavior with no review step. We opt in via our own .ai-agent.json.
 
-The review phase invokes a review skill in a headless Claude session under the EM GitHub token (reviewer attribution). emRepoPath is optional: when set, the session's cwd is that repo (NOT the service repo) so it has the reviewer's MCP servers, npm scripts, and context/docs; when unset, the cwd is the repo's managed review checkout (see reviewSessionCwd in agent.ts).
+The review phase hands each PR to the Tech Lead (techLeadPath), which runs under TECHLEAD_GITHUB_KEY (reviewer attribution).
 
 ### `emRepoPath`
 
 Type: string · Default: none · Env: `AI_AGENT_EM_REPO_PATH`
 
-The review session's working directory (the reviewer's own repo). Unset, it is the repo's managed review checkout.
+No longer read: review runs through the Tech Lead, never a Claude session in this directory. Accepted so an older config still loads.
 
 ### `techLeadPath`
 
@@ -206,7 +206,7 @@ Run the review stage. Off by default; per repo too, where it wins.
 
 Type: string · Default: none · Per repo: yes, falls back to this value
 
-The review skill. No default: a review-enabled repo must get one from here or its own entry, or loadConfig refuses to start. A relative path resolves against the review session's cwd — emRepoPath when set, else the repo's review checkout — exactly as the session itself would read it (resolveReviewSkillPath in agent.ts). Per-repo override supported.
+No longer read: review runs through the Tech Lead (techLeadPath), which carries its own review procedure. Accepted so an older config still loads.
 
 ### `reviewModel`
 
