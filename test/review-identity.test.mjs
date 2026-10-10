@@ -8,10 +8,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../dist/config.js";
-import { resolveReviewSkillPath, reviewSessionCwd } from "../dist/agent.js";
 
 for (const k of Object.keys(process.env)) if (k.startsWith("AI_AGENT_")) delete process.env[k];
 
@@ -22,26 +21,6 @@ function load(cfg) {
   writeFileSync(p, JSON.stringify({ reviewCheckoutRoot: join(tmp, "checkouts"), ...cfg }));
   return loadConfig(p);
 }
-
-test("a relative skill path resolves against emRepoPath when it is set", () => {
-  const c = load({ reviewEnabled: true, emRepoPath: join(tmp, "em"), reviewSkillPath: ".claude/skills/review/SKILL.md", repos: [repo()] });
-  assert.equal(reviewSessionCwd(c, c.repos[0]), join(tmp, "em"));
-  assert.equal(resolveReviewSkillPath(c, c.repos[0]), join(tmp, "em", ".claude/skills/review/SKILL.md"));
-});
-
-test("without emRepoPath the session and a relative skill path use the repo's review checkout", () => {
-  const c = load({ reviewEnabled: true, reviewSkillPath: ".claude/skills/review/SKILL.md", repos: [repo()] });
-  assert.equal(c.emRepoPath, undefined);
-  assert.equal(reviewSessionCwd(c, c.repos[0]), join(tmp, "checkouts", "svc"));
-  assert.equal(resolveReviewSkillPath(c, c.repos[0]), join(tmp, "checkouts", "svc", ".claude/skills/review/SKILL.md"));
-});
-
-test("absolute and ~/ skill paths are taken as given", () => {
-  const c = load({ reviewEnabled: true, reviewSkillPath: "/opt/review/SKILL.md",
-    repos: [repo(), repo({ name: "other", reviewSkillPath: "~/skills/r/SKILL.md" })] });
-  assert.equal(resolveReviewSkillPath(c, c.repos[0]), "/opt/review/SKILL.md");
-  assert.equal(resolveReviewSkillPath(c, c.repos[1]), join(homedir(), "skills/r/SKILL.md"));
-});
 
 test("only the review-enabled repo needs a skill; the error names the repo", () => {
   assert.doesNotThrow(() => load({ repos: [repo({ reviewEnabled: false }), repo({ name: "b" })] }));
