@@ -486,7 +486,7 @@ src/
 ├── lifecycle.ts       # The state machine: stages and named moves (docs/lifecycle.md)
 ├── adapters.ts        # Data contract: WorkEvent, WorkSourceAdapter, WorkObserver
 ├── work-source.ts     # emit()/advance(): one event → work source + observers
-├── github.ts          # GitHub API (polling, PRs, labels, dual-token ops)
+├── github.ts          # GitHub API surface (polling, PRs, labels, dual-token ops); code in github/
 ├── github-work-source.ts # GitHub issues as the work source: a move → its labels
 ├── agent.ts           # Claude Code CLI spawner
 ├── reviewer.ts        # PR review feedback handler
