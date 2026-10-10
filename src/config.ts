@@ -511,11 +511,11 @@ export interface AgentConfig {
 
 /**
  * Names `sessionEnv` may not carry: the four `gh` reads a token from, and the
- * Foreman's and EM's own. A session's token is assigned, never inherited.
+ * Foreman's, EM's and Tech Lead's own. A session's token is assigned, never inherited.
  */
 const SESSION_ENV_FORBIDDEN: readonly string[] = [
   "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-  "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN",
+  "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY",
 ];
 
 function inferGithubRepo(repoPath: string): string | undefined {

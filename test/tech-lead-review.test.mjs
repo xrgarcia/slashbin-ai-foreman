@@ -20,7 +20,7 @@ function fakeTechLead(script) {
   return { techLeadPath: dir, emRepoPath: "/em", reviewMaxDurationMs: 30_000 };
 }
 
-process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
+process.env.TECHLEAD_GITHUB_KEY ||= "test-token-not-real";
 
 test("exit 3 (wrote nothing) falls back to the Claude review", async () => {
   const cfg = fakeTechLead('console.log("Codex first read failed (signed-out) — nothing written"); process.exit(3);');
