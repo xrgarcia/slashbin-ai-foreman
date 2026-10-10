@@ -7,6 +7,7 @@ import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 import {
   paperclipConfigSchema, mergePaperclip, resolvePaperclipConfig, type PaperclipConfig,
 } from "./paperclip/config.js";
+import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
 
 // --- Schemas ---
 
@@ -42,6 +43,7 @@ const lifecycleLabelsSchema = z.object({
 
 
 const repoEntrySchema = z.object({
+  // The repo's short name: in logs, state, notifications and `--repo <name>`.
   name: z.string(),
   repoPath: z.string(),
   githubRepo: z.string().optional(),
@@ -76,23 +78,45 @@ const repoEntrySchema = z.object({
 });
 
 export const configSchema = z.object({
-  // Single-repo fields (backward compat — ignored when repos[] is provided)
+  // --- The repo ---
+  // Single-repo mode sets these at the top level. With repos[], each entry sets
+  // its own; the ones marked "falls back" use the top-level value when an entry
+  // leaves them out, the rest apply only to the entry that sets them.
+
+  // Path to the repo's local clone. Single-repo mode only; ignored when repos[] is set.
   repoPath: z.string().default("."),
+  // GitHub `owner/repo`. Omitted, it is read from the clone's git remote.
   githubRepo: z.string().optional(),
+  // The label that authorizes an issue to be built. Applying it starts the build.
   triggerLabel: z.string().default("approved"),
+  // The branch feature PRs target, where review merges.
   baseBranch: z.string().default("develop"),
+  // The branch promotion PRs target; branch sync merges it back into baseBranch.
   productionBranch: z.string().default("main"),
+  // The branch implement and revise sessions commit to.
   featureBranch: z.string().default("features"),
+  // The implement skill: a repo-relative SKILL.md, or "builtin:" for skills/implement/.
   skillPath: z.string().optional(),
+  // The revise skill: a repo-relative SKILL.md, or "builtin:" for skills/revise/.
   revisionSkillPath: z.string().optional(),
+  // A repo-relative file appended to the implement prompt after the skill.
+  // Configured but unreadable, the session is not started.
   skillOverlayPath: z.string().optional(),
+  // The same, for the revise prompt.
   revisionSkillOverlayPath: z.string().optional(),
+  // A full custom prompt template in place of the built-in one (README "Prompt
+  // template variables"). The Foreman adds nothing to it.
   prompt: z.string().optional(),
 
-  // Multi-repo
+  // --- Multi-repo ---
+
+  // One entry per repo: `{ name, repoPath, ... }` plus any key marked per repo.
+  // When set, the top-level repoPath is ignored.
   repos: z.array(repoEntrySchema).optional(),
 
-  // Global settings
+  // --- Global settings ---
+
+  // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
   // How many repos may run their pipeline at the same time. Repos are safe to
   // run concurrently on their own — each has its own git working clone, so two
@@ -101,17 +125,12 @@ export const configSchema = z.object({
   // another stream of GitHub API calls. Default 3; raise it deliberately after
   // watching what it costs. Set to 1 for the original strictly-serial behaviour.
   maxConcurrentRepos: z.coerce.number().int().positive().default(3),
-  // Base window for the escalating per-issue skip back-off. The Nth consecutive
-  // skip of an issue waits skipBackoffMs * 2^(N-1), capped at SKIP_BACKOFF_MAX_MS.
-  // Additive + OSS-safe: defaults to the historical fixed 30 min, so an existing
-  // .ai-agent.json keeps working with no new key (the first window is unchanged;
-  // only repeat skips of the SAME issue back off further). slashbin-ai-foreman#32.
-  skipBackoffMs: z.coerce.number().int().positive().default(1_800_000),
-  // Daemon-wide back-off when an upstream (GitHub rate limit, Claude session
-  // limit) refuses work: the Nth consecutive window is base * 2^(N-1), capped.
-  // See src/upstream-backoff.ts. Additive: defaults 2 min base, 60 min cap.
-  upstreamBackoffBaseMs: z.coerce.number().int().positive().default(120_000),
-  upstreamBackoffCapMs: z.coerce.number().int().positive().default(3_600_000),
+  // Every wait before the Foreman tries something again — declined issues,
+  // failed verifications, an unavailable reviewer, failing repos, upstream
+  // limits, gh retries — each exponential and tunable. See src/backoff.ts and
+  // docs/configuration.md. The old top-level `skipBackoffMs`,
+  // `upstreamBackoffBaseMs` and `upstreamBackoffCapMs` are still read into it.
+  backoff: backoffConfigSchema,
   // How long a repo's open-issue snapshot stays warm. The discovery phases each
   // used to run their own `gh issue list` against the same repo — six GraphQL
   // requests per repo per cycle, which at 20 repos on a 60s poll blew GitHub's
@@ -125,13 +144,16 @@ export const configSchema = z.object({
   // is larger than any single label slice the old per-label queries fetched —
   // hence 500 rather than the previous 100. Truncation is logged, never silent.
   issueSnapshotLimit: z.coerce.number().int().positive().default(500),
+  // Most turns an implement or revise session may take. Per repo too.
   maxTurns: z.coerce.number().int().positive().default(30),
+  // Longest an implement or revise session may run before it is stopped. Per repo too.
   maxDurationMs: z.coerce.number().int().positive().default(1_800_000),
   // Model for the implement/revise phases, cascading to every repo that does not
   // set its own. Omit to let the Claude CLI pick its default. Global because the
   // model is a spend/quality dial for the whole fleet, not a per-repo trait —
   // without the cascade the only way to move the fleet is to edit all 20 entries.
   model: z.string().optional(),
+  // The tools an implement or revise session may use.
   allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "Bash", "Glob", "Grep"]),
   // MCP client config handed to implement/revise sessions (`--mcp-config`), so a
   // builder can check its assumptions against real data before it builds instead
@@ -147,10 +169,12 @@ export const configSchema = z.object({
   // denylist misses names like SYSTEM_SUDO_PW and WORKER_POSTGRES_URL. One list
   // for the fleet, never per repo. May not name a GitHub token (see loadConfig).
   sessionEnv: z.array(z.string()).default([]),
+  // Daemon log format.
   logFormat: z.enum(["json", "text"]).default("text"),
+  // Daemon log level.
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
-  // --- Review phase (Phase 1 in the cycle) ---
+  // --- Review phase ---
   // Additive + OSS-safe: reviewEnabled defaults to false, so a vanilla
   // .ai-agent.json keeps the original reconcile/revise/implement/sync/promote
   // behavior with no review step. We opt in via our own .ai-agent.json.
@@ -160,6 +184,9 @@ export const configSchema = z.object({
   // the session's cwd is that repo (NOT the service repo) so it has the
   // reviewer's MCP servers, npm scripts, and context/docs; when unset, the cwd is
   // the repo's managed review checkout (see reviewSessionCwd in agent.ts).
+
+  // The review session's working directory (the reviewer's own repo). Unset, it
+  // is the repo's managed review checkout.
   emRepoPath: z.string().optional(),
   // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
   // review is offered to it FIRST — Codex judges, its code posts and merges.
@@ -172,6 +199,7 @@ export const configSchema = z.object({
   // `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved.
   // Unset = no verify stage: the review run verifies and labels as before.
   srePath: z.string().optional(),
+  // Run the review stage. Off by default; per repo too, where it wins.
   reviewEnabled: z.boolean().default(false),
   // The review skill. No default: a review-enabled repo must get one from here
   // or its own entry, or loadConfig refuses to start. A relative path resolves
@@ -179,6 +207,7 @@ export const configSchema = z.object({
   // review checkout — exactly as the session itself would read it
   // (resolveReviewSkillPath in agent.ts). Per-repo override supported.
   reviewSkillPath: z.string().optional(),
+  // Model for review sessions, independent of `model`. Omit for the CLI default.
   reviewModel: z.string().optional(),
   // Where the review session finds the service repo's code.
   //
@@ -201,6 +230,7 @@ export const configSchema = z.object({
   // The review skill is long-running (it polls Railway deploys during dev verify),
   // so it gets a much larger turn/duration budget than implement/revise.
   reviewMaxTurns: z.coerce.number().int().positive().default(200),
+  // Longest a review session may run before it is stopped.
   reviewMaxDurationMs: z.coerce.number().int().positive().default(3_600_000),
   // After a review run, set the issue's outcome label from the run's own
   // FOREMAN_REVIEW trailer when the skill merged the PR but left the issue at
@@ -239,8 +269,12 @@ export const configSchema = z.object({
   // override supported.
   reviewerLogin: z.string().optional(),
 
-  // prefault, not default: zod 4 returns a `default` value without parsing it, so
-  // an omitted block would arrive as {} with none of the five names filled in.
+  // --- Pipeline ---
+
+  // The names of the labels that carry a PR through its lifecycle (the block
+  // below). Set any subset; the rest keep their defaults. (prefault, not
+  // default: zod 4 returns a `default` value without parsing it, so an omitted
+  // block would arrive as {} with none of the names filled in.)
   lifecycleLabels: lifecycleLabelsSchema.prefault({}),
 
   // The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the
@@ -250,8 +284,9 @@ export const configSchema = z.object({
   // work to each other by label, one pipeline for the fleet.
   stages: stagesSchema,
 
-  // Paperclip mirror (see paperclipConfigSchema). Global, never per repo: one
-  // Foreman is one Paperclip agent. prefault for the same reason as above.
+  // The optional Paperclip board mirror, off unless `enabled` (docs/paperclip.md).
+  // Global, never per repo: one Foreman is one Paperclip agent. prefault for
+  // the same reason as above.
   paperclip: paperclipConfigSchema.prefault({}),
 });
 
@@ -322,12 +357,8 @@ export interface AgentConfig {
   pollIntervalMs: number;
   /** Max repos running their pipeline at once (default 3). Caps spend, not risk. */
   maxConcurrentRepos: number;
-  /** Base window for the escalating per-issue skip back-off (default 30 min). */
-  skipBackoffMs: number;
-  /** First window of the daemon-wide upstream-limit back-off (default 2 min). */
-  upstreamBackoffBaseMs: number;
-  /** Ceiling for the upstream-limit back-off window (default 60 min). */
-  upstreamBackoffCapMs: number;
+  /** Every back-off and retry limit (see src/backoff.ts). */
+  backoff: BackoffConfig;
   /** How long a repo's open-issue snapshot stays warm (default 30s; 0 disables). */
   issueCacheTtlMs: number;
   /** Page cap for the open-issue snapshot (default 500). */
@@ -411,9 +442,15 @@ export function loadConfig(configPath?: string): AgentConfig {
     triggerLabel: process.env.AI_AGENT_TRIGGER_LABEL ?? fileConfig.triggerLabel,
     pollIntervalMs: process.env.AI_AGENT_POLL_INTERVAL_MS ?? fileConfig.pollIntervalMs,
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
-    skipBackoffMs: process.env.AI_AGENT_SKIP_BACKOFF_MS ?? fileConfig.skipBackoffMs,
-    upstreamBackoffBaseMs: process.env.AI_AGENT_UPSTREAM_BACKOFF_BASE_MS ?? fileConfig.upstreamBackoffBaseMs,
-    upstreamBackoffCapMs: process.env.AI_AGENT_UPSTREAM_BACKOFF_CAP_MS ?? fileConfig.upstreamBackoffCapMs,
+    backoff: mergeBackoff(fileConfig.backoff, {
+      skipBackoffMs: fileConfig.skipBackoffMs,
+      upstreamBackoffBaseMs: fileConfig.upstreamBackoffBaseMs,
+      upstreamBackoffCapMs: fileConfig.upstreamBackoffCapMs,
+    }, {
+      skipBackoffMs: process.env.AI_AGENT_SKIP_BACKOFF_MS,
+      upstreamBackoffBaseMs: process.env.AI_AGENT_UPSTREAM_BACKOFF_BASE_MS,
+      upstreamBackoffCapMs: process.env.AI_AGENT_UPSTREAM_BACKOFF_CAP_MS,
+    }),
     issueCacheTtlMs: process.env.AI_AGENT_ISSUE_CACHE_TTL_MS ?? fileConfig.issueCacheTtlMs,
     issueSnapshotLimit: process.env.AI_AGENT_ISSUE_SNAPSHOT_LIMIT ?? fileConfig.issueSnapshotLimit,
     skillPath: process.env.AI_AGENT_SKILL_PATH ?? fileConfig.skillPath,
@@ -588,9 +625,8 @@ export function loadConfig(configPath?: string): AgentConfig {
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
     maxConcurrentRepos: parsed.maxConcurrentRepos,
-    skipBackoffMs: parsed.skipBackoffMs,
-    upstreamBackoffBaseMs: parsed.upstreamBackoffBaseMs,
-    upstreamBackoffCapMs: parsed.upstreamBackoffCapMs,
+    backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
+      [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,
     issueCacheTtlMs: parsed.issueCacheTtlMs,
     issueSnapshotLimit: parsed.issueSnapshotLimit,
     logFormat: parsed.logFormat,

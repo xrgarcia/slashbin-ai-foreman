@@ -75,7 +75,7 @@ test("the fuzzy heuristic still exists, downstream", () => {
 // reviewing a skills:publish commit. The trailer had no issue scope, so
 // `skippedIssues: issueNumbers ?? []` marked every issue in the batch skipped
 // whenever the agent declared one. orchestrator.ts then writes a skip record per
-// issue and filters each out for backoffWindowFor(skipCount) — 30m rising to 24h.
+// issue and filters each out for backoffDelay(skipCount, backoff.skip) — 5 min rising to 4 h by default.
 //
 // `implement-approved-issues` selects exactly ONE issue per invocation while the
 // orchestrator hands it the whole actionable set, so a single unusable spec took
@@ -130,7 +130,7 @@ test("the agent is told to include the issue scope", () => {
 // `skipped issue=123 reason="..."` therefore dropped every reason to the literal
 // "no reason given" — and the reason is the sole input to
 // isResolvedTransientSkip, so a self-clearing divergence skip would have become
-// a back-off rising to 24h.
+// a back-off rising to its cap (backoff.skip).
 //
 // These call the real function rather than grepping the source, because the
 // defect was in what the regex MATCHED, which source text cannot show.

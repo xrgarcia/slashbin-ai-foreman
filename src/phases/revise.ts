@@ -1,6 +1,6 @@
 // The revise phase: address review feedback on an open PR.
 
-import type { RepoConfig } from "../config.js";
+import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, hasObservers } from "../work-source.js";
@@ -11,7 +11,6 @@ import { type BlockKind } from "../unblock.js";
 import {
   CycleEvent,
   MAX_CONSECUTIVE_NO_COMMIT,
-  MAX_RETRIES,
   REVIEW_ROUNDS_ALERT,
   activeRuns,
   consecutiveNoCommit,
@@ -28,6 +27,7 @@ import { reportLaunchThrew } from "./implement.js";
 
 export async function tryRevision(
   repoConfig: RepoConfig,
+  config: AgentConfig,
   logger: Logger,
   cycleNumber: number,
   events: CycleEvent[],
@@ -38,6 +38,8 @@ export async function tryRevision(
   if (isUpstreamBlocked("claude")) return null;
 
   let failures = revisionFailureCount.get(repoName) ?? 0;
+  // Failed revisions before the PR is escalated to a person (backoff.repoFailure).
+  const { maxFailures } = config.backoff.repoFailure;
 
   // Gate: are there issues with pending review feedback + an open feature PR?
   //
@@ -62,7 +64,7 @@ export async function tryRevision(
   const stoppedAt = revisionStoppedHead.get(repoName);
   if (stoppedAt !== undefined) {
     const head = pending.pr.headRefOid;
-    const kind: BlockKind = failures >= MAX_RETRIES ? "revision-exhausted" : "revision-stalemate";
+    const kind: BlockKind = failures >= maxFailures ? "revision-exhausted" : "revision-stalemate";
     if (await releaseIfResolved(kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
       revisionStoppedHead.delete(repoName);
       revisionFailureCount.set(repoName, 0);
@@ -73,7 +75,7 @@ export async function tryRevision(
   }
 
   // Check if this repo has exceeded revision failure retries
-  if (failures >= MAX_RETRIES) {
+  if (failures >= maxFailures) {
     revLogger.debug(`Skipping ${repoName} revision — ${failures} consecutive failures`);
     return null;
   }
@@ -188,9 +190,9 @@ export async function tryRevision(
       }
       const newCount = failures + 1;
       revisionFailureCount.set(repoName, newCount);
-      revLogger.warn(`PR revision failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
-      if (newCount < MAX_RETRIES) {
-        const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, false, `${newCount}/${MAX_RETRIES}`);
+      revLogger.warn(`PR revision failed (${newCount}/${maxFailures}): ${result.error}`);
+      if (newCount < maxFailures) {
+        const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, false, `${newCount}/${maxFailures}`);
         for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
       }
 
@@ -198,7 +200,7 @@ export async function tryRevision(
       // later cycle takes the skip branch above and does nothing. Say so out loud,
       // once, with the PR and the reason — a stuck PR that nobody is told about is
       // only discovered by someone thinking to look.
-      if (newCount >= MAX_RETRIES && !revisionEscalated.has(repoName)) {
+      if (newCount >= maxFailures && !revisionEscalated.has(repoName)) {
         revisionEscalated.add(repoName);
         const issues = pending.issueNumbers.map((n) => `#${n}`).join(", ");
         revLogger.error(

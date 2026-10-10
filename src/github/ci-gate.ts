@@ -4,6 +4,7 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { gh } from "./gh.js";
 import { byReviewer } from "./review-freshness.js";
+import { backoffSettings } from "../backoff.js";
 
 
 // --- CI gate in front of review ---------------------------------------------
@@ -95,7 +96,6 @@ export const CI_GATE_MARKER = "<!-- foreman-ci-gate -->";
 /** Consecutive bounces allowed before the PR goes to review anyway. A check the
  *  builder cannot turn green (a broken workflow, a red base branch) must still
  *  reach a reviewer instead of cycling builder sessions forever. */
-export const MAX_CI_BOUNCES = 2;
 
 /**
  * How many CI-gate bounces this PR has had since the reviewer last reviewed it.
@@ -127,7 +127,7 @@ export function countCiBouncesSinceReview(
   } catch (err) {
     logger.debug(`countCiBouncesSinceReview failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
     // Unknown count → treat as capped, so a lookup failure can never start a loop.
-    return MAX_CI_BOUNCES;
+    return backoffSettings().maxCiBounces;
   }
 }
 

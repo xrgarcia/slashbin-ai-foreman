@@ -67,7 +67,9 @@ function runCase(body, { baseMs = 200, capMs = 1600 } = {}) {
     const G = await import(${JSON.stringify(url("github.js"))});
     const call = () => { try { G.gh(["issue", "list", "--repo", "example/test"], ${JSON.stringify(dir)}); return "ok"; }
       catch (e) { return e instanceof B.UpstreamBackoffError ? "backoff" : "error"; } };
-    B.configureUpstreamBackoff({ baseMs: ${baseMs}, capMs: ${capMs}, notify: (t, l) => notes.push({ t, l }) });
+    const BO = await import(${JSON.stringify(url("backoff.js"))});
+    BO.configureBackoff({ ...BO.DEFAULT_BACKOFF, upstream: { baseMs: ${baseMs}, capMs: ${capMs}, factor: 2 } });
+    B.configureUpstreamBackoff({ notify: (t, l) => notes.push({ t, l }) });
   `;
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", `${prelude}\n${body}`], {
     env: {

@@ -9,6 +9,7 @@ import { verifyViaSre } from "../agent.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify } from "../github.js";
 import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
+import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, itemOf, releaseIfResolved } from "./common.js";
 
 /**
@@ -22,12 +23,6 @@ import { CycleEvent, activeRuns, baseAdvancedSince, itemOf, releaseIfResolved } 
  *
  * Returns true when a review run was triggered (regardless of verdict).
  */
-/** Hours between verify attempts on a held issue, and how many it gets. */
-export const VERIFY_RETRY_MS = 60 * 60_000;
-export const VERIFY_MAX_ATTEMPTS = 3;
-/** How long a repo's verify waits after the SRE could not run at all. */
-export const VERIFY_DEFER_MS = 15 * 60_000;
-
 /**
  * What a non-passing verify costs. Pure, exported for tests.
  *
@@ -47,19 +42,22 @@ export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wai
   }
   return { kind: "charge" };
 }
-export const verifyDeferredUntil = new Map<string, number>();
+/** Per repo: the verify stage waiting after the SRE could not run at all (backoff.agentUnavailable). */
+export const verifyDefer = new BackoffTracker();
 
 /**
  * The merged PR to verify this pass, or null. Pure, exported for tests.
  *
  * One PR per pass, oldest issue first. A PR is skipped while ANY of its issues
  * is held within its retry window or has spent its attempts: the SRE verifies
- * the PR, not the issue, so one held issue holds its PR.
+ * the PR, not the issue, so one held issue holds its PR. The Nth failed attempt
+ * waits backoffDelay(N, retry) from when it was held.
  */
 export function pickVerifyTarget(
   refs: ReadonlyArray<{ issueNumber: number; prNumber: number }>,
   held: Readonly<Record<number, VerifyHold>>,
   now: number,
+  retry: BackoffConfig["verifyRetry"] = DEFAULT_BACKOFF.verifyRetry,
 ): { prNumber: number; issueNumbers: number[] } | null {
   const byPr = new Map<number, number[]>();
   for (const r of [...refs].sort((a, b) => a.issueNumber - b.issueNumber)) {
@@ -69,9 +67,9 @@ export function pickVerifyTarget(
     const waiting = issueNumbers.some((n) => {
       const h = held[n];
       if (!h) return false;
-      if (h.attempts >= VERIFY_MAX_ATTEMPTS) return true;
+      if (h.attempts >= retry.maxAttempts) return true;
       if (h.retryAt) return now < Date.parse(h.retryAt);
-      return now - Date.parse(h.heldAt) < VERIFY_RETRY_MS;
+      return now - Date.parse(h.heldAt) < backoffDelay(h.attempts, retry);
     });
     if (!waiting) return { prNumber, issueNumbers };
   }
@@ -82,8 +80,8 @@ export function pickVerifyTarget(
  * The verify stage (EM#440): hand one merged PR to the SRE and move its issues
  * `pr merged` → `pr approved` on a pass. A hold or an error never relabels: the
  * issue stays `pr merged`, its card goes to Blocked with the reason, and the
- * stage retries it every VERIFY_RETRY_MS up to VERIFY_MAX_ATTEMPTS, after which
- * it waits for a person. Nothing here writes `pr pending actions` — a merged PR
+ * stage retries it after a growing wait (backoff.verifyRetry) up to its
+ * maxAttempts, after which it waits for a person. Nothing here writes `pr pending actions` — a merged PR
  * has no feature PR left to revise.
  *
  * The SRE runs on Codex only (Ray, 2026-10-10). A run that could not happen, or
@@ -99,7 +97,8 @@ export async function tryVerify(
   if (!config.srePath) return false;
   if (isUpstreamBlocked("github")) return false;
   const repoName = repoConfig.name;
-  if ((verifyDeferredUntil.get(repoName) ?? 0) > Date.now()) return false;
+  if (verifyDefer.waiting(repoName)) return false;
+  const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
   const waiting = findIssuesAwaitingVerify(repoConfig, vlog);
@@ -121,7 +120,7 @@ export async function tryVerify(
   for (const [key, h] of Object.entries(held)) {
     const n = Number(key);
     const noPr = h.reason === "no-merged-pr";
-    if (!noPr && h.attempts < VERIFY_MAX_ATTEMPTS) continue;
+    if (!noPr && h.attempts < verifyRetry.maxAttempts) continue;
     const ok = noPr
       ? await releaseIfResolved("verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
       : await releaseIfResolved("verify-exhausted", { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) }, [n], repoConfig, vlog);
@@ -132,13 +131,13 @@ export async function tryVerify(
   for (const n of unmatched) {
     // Labelled merged, but no merged PR closes it — nothing to verify against.
     const reason = `"${repoConfig.lifecycleLabels.prMerged}" but no merged PR into ${repoConfig.baseBranch} closes it`;
-    held[n] = { heldAt: new Date().toISOString(), prNumber: 0, reason: "no-merged-pr", attempts: VERIFY_MAX_ATTEMPTS };
+    held[n] = { heldAt: new Date().toISOString(), prNumber: 0, reason: "no-merged-pr", attempts: verifyRetry.maxAttempts };
     vlog.warn(`#${n}: ${reason} — needs a person`);
     await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, vlog);
   }
   if (unmatched.length > 0) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });
 
-  const target = pickVerifyTarget(refs, held, Date.now());
+  const target = pickVerifyTarget(refs, held, Date.now(), verifyRetry);
   if (!target) return false;
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -158,6 +157,7 @@ export async function tryVerify(
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
 
     if (r.kind === "verdict" && r.pass) {
+      verifyDefer.clear(repoName);
       const after = loadRepoState(repoName);
       const kept = { ...(after.verifyHeld ?? {}) };
       for (const n of target.issueNumbers) {
@@ -173,11 +173,12 @@ export async function tryVerify(
     const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
     const plan = r.kind === "verdict" ? verifyHoldPlan(reason) : { kind: "charge" as const };
     if (plan.kind === "defer") {
-      verifyDeferredUntil.set(repoName, Date.now() + VERIFY_DEFER_MS);
-      ended = { status: "failed", detail: `deferred — the SRE could not run (${reason})` };
-      vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason}`);
+      const wait = formatWait(verifyDefer.start(repoName, agentUnavailable));
+      ended = { status: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
+      vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
       return false;
     }
+    verifyDefer.clear(repoName);
     const after = loadRepoState(repoName);
     const kept = { ...(after.verifyHeld ?? {}) };
     if (plan.kind === "wait") {
@@ -198,9 +199,9 @@ export async function tryVerify(
       kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts };
     }
     saveRepoState(repoName, { ...after, verifyHeld: kept });
-    const final = attempts >= VERIFY_MAX_ATTEMPTS;
-    const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${VERIFY_MAX_ATTEMPTS}` +
-      (final ? "; no more retries, a person must look" : `; retrying in ${Math.round(VERIFY_RETRY_MS / 60_000)} min`);
+    const final = attempts >= verifyRetry.maxAttempts;
+    const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${verifyRetry.maxAttempts}` +
+      (final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
     for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
     ended = { status: "failed", detail: why };
     vlog.warn(`${repoName}: ${why}`);

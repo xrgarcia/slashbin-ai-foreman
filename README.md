@@ -10,6 +10,8 @@
 
 The Foreman is an AI engineering agent that polls your repos for approved work, invokes a Claude Code skill (e.g. `/implement-approved-issues`) on each service repo, opens PRs, and revises based on reviewer feedback. Reviewers — human or AI — stay in the loop via PR reviews.
 
+**Docs:** [docs/README.md](docs/README.md) maps every question (configure it, tune its retries, read its state machine, extend its pipeline) to the page that answers it.
+
 ## Who this is for
 
 The Foreman shines when you have **more approved work than time to implement**. Three patterns:
@@ -106,7 +108,9 @@ file left by a killed daemon is taken over automatically.
 
 ## Configuration
 
-Copy `.ai-agent.example.json` to `.ai-agent.json` and customize. Env vars override file values.
+Copy `.ai-agent.example.json` to `.ai-agent.json` and customize. Env vars override file values. The daemon re-reads the file every cycle, so most edits apply without a restart.
+
+**[docs/configuration.md](docs/configuration.md) is the complete reference**: every key, its default, its env override and what it does, generated from the code (`npm run docs:generate`) so it cannot fall behind. The tables below cover the common keys.
 
 ```bash
 cp .ai-agent.example.json .ai-agent.json
@@ -126,8 +130,7 @@ For a single repo, set fields at the root level:
 | `triggerLabel` | `AI_AGENT_TRIGGER_LABEL` | `approved` | Label that triggers implementation |
 | `pollIntervalMs` | `AI_AGENT_POLL_INTERVAL_MS` | `300000` (5 min) | Poll interval in milliseconds |
 | `issueCacheTtlMs` | `AI_AGENT_ISSUE_CACHE_TTL_MS` | `30000` (30 s) | How long a repo's open-issue snapshot stays warm. Keep it **below** `pollIntervalMs`. `0` disables caching. See [GitHub API budget](#github-api-budget) |
-| `upstreamBackoffBaseMs` | `AI_AGENT_UPSTREAM_BACKOFF_BASE_MS` | `120000` (2 min) | First window of the daemon-wide back-off when GitHub (rate limit) or Claude (session limit) refuses work. Doubles per consecutive window. Each transition is logged and sent once to Discord |
-| `upstreamBackoffCapMs` | `AI_AGENT_UPSTREAM_BACKOFF_CAP_MS` | `3600000` (60 min) | Ceiling for that back-off window |
+| `backoff` | `AI_AGENT_BACKOFF_<GROUP>_<FIELD>` | see [Back-offs](#back-offs) | Every wait before the Foreman retries something, each exponential and tunable |
 | `issueSnapshotLimit` | `AI_AGENT_ISSUE_SNAPSHOT_LIMIT` | `500` | Max open issues fetched per snapshot. Must exceed a repo's open-issue count; truncation is logged |
 | `skillPath` | `AI_AGENT_SKILL_PATH` | — | Claude Code skill for implementation: a repo-relative path, or `builtin:` for the skill shipped in `skills/implement/` |
 | `revisionSkillPath` | — | — | Claude Code skill for PR revision: a repo-relative path, or `builtin:` for `skills/revise/` |
@@ -169,6 +172,38 @@ Every Claude session the daemon spawns (implement, revise, review) gets the name
 - `FOREMAN_LIFECYCLE_LABELS`: the five names as a JSON object with the keys above
 
 To create the labels on your repos, run `npm run build && npm run labels:install` (or ask Claude Code in this repo to "install the labels" — the `install-labels` skill runs the same thing). Per repo it creates whichever of the `triggerLabel` and five lifecycle names are missing, prints `<repo>: created N, present M`, and never changes or deletes an existing label. A failed repo is listed at the end and the exit code is 1.
+
+### Back-offs
+
+Every wait before the Foreman tries something again lives in one `backoff` block. Each
+condition has its own group, and every wait grows the same way: the Nth wait in a row is
+`min(baseMs × factor^(N−1), capMs)`. A success resets it, so a blip costs one short wait
+and only trouble that lasts gets the long ones.
+
+| Group | When it waits | Default waits |
+|---|---|---|
+| `skip` | The implement session declined an issue on purpose | 5 min, doubling to 4 h |
+| `verifyRetry` | A dev verification failed (`maxAttempts` 3, then a person) | 10 min, then 20 min |
+| `agentUnavailable` | The Tech Lead or the SRE could not run at all | 2 min, doubling to 30 min |
+| `repoFailure` | A repo's sessions failed `maxFailures` (2) times in a row | 5 min, doubling to 1 h |
+| `upstream` | GitHub's rate limit or Claude's session limit refused work | 2 min, doubling to 1 h |
+| `gh` | One `gh` call failed on a network error or 5xx (`maxAttempts` 3) | 1 s, then 3 s |
+
+Override only what you need; the rest keep their defaults. Every field also has an env
+override, e.g. `AI_AGENT_BACKOFF_SKIP_BASE_MS`.
+
+```json
+{
+  "backoff": {
+    "skip": { "baseMs": 120000, "capMs": 3600000 },
+    "verifyRetry": { "maxAttempts": 5 },
+    "upstream": { "factor": 3 }
+  }
+}
+```
+
+The older top-level `skipBackoffMs`, `upstreamBackoffBaseMs` and `upstreamBackoffCapMs`
+still work. Every group, field and env name: [docs/configuration.md](docs/configuration.md#back-offs).
 
 ### GitHub API budget
 
@@ -491,6 +526,7 @@ src/
 ├── agent.ts           # Claude Code CLI spawner
 ├── reviewer.ts        # PR review feedback handler
 ├── stages.ts          # Stage schema, default order, dispatch loop
+├── backoff.ts         # Every retry wait: the `backoff` config block and the one formula
 ├── orchestrator.ts    # Stage pass per repo, failure cooldowns, session slot
 ├── phases/            # One file per stage (reconcile, implement, revise, verify, review, promote, custom)
 ├── paperclip/         # Optional Paperclip board plugin (a WorkObserver)

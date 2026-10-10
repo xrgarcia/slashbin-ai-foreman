@@ -7,12 +7,14 @@ merged work — across many repos from a single process.
 ## Cycle
 
 Each poll cycle runs the configured `stages` across every configured repo
-(`src/stages.ts`; README "Pipeline stages"). Omitted, they are the seven built-ins
+(`src/stages.ts`; README "Pipeline stages"). Omitted, they are the eight built-ins
 in this order, so labels set in one phase are consumed by the right phase next cycle:
 
 ```
-Reconcile → Review → Revise → Implement → Branch Sync → Dependabot → Promote
+Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote
 ```
+
+Verify runs only when `srePath` is set: the SRE checks each merged PR in dev.
 
 A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
 one Claude session on that skill against the open feature PR. A custom stage that
@@ -81,13 +83,24 @@ repo), written after every change and loaded on startup so the daemon survives r
   entry has no delivering PR — see `docs/implemented-cache-self-heal.md`).
 - `skipped` — per-issue back-off records for issues the agent deliberately declined
   (investigation-only, blocked-on-external-verification); cleared on success or after
-  the back-off window. Some transient skip reasons are re-checked and admitted early.
-- `failed` / failure counters — per-repo consecutive-failure counts with cooldown
-  (after `MAX_RETRIES` failures, skip the repo for `FAILURE_COOLDOWN_CYCLES`). A run refused by
-  an upstream limit (GitHub rate limit, Claude session limit) is never charged.
+  the `backoff.skip` window. Some transient skip reasons are re-checked and admitted early.
+- `verifyHeld` — merged PRs whose dev verification failed, with their attempt count;
+  re-verified per `backoff.verifyRetry`.
+- `failed` / failure counters — per-repo consecutive-failure counts. After
+  `backoff.repoFailure.maxFailures` in a row the stage pauses for an exponential window.
+  A run refused by an upstream limit (GitHub rate limit, Claude session limit) is never charged.
 
-In-memory only: `implementing` mutex and the upstream back-off state (both reset on
-restart — safe).
+In-memory only: the `implementing` mutex, the repo-failure and agent-unavailable waits, and
+the upstream back-off state (all reset on restart — safe, it only retries sooner).
+
+## Back-offs
+
+Every wait before a retry is a group in the `backoff` config block (`src/backoff.ts`),
+and every one is `min(baseMs × factor^(N−1), capMs)` for the Nth wait in a row, reset by
+a success. Phases read `config.backoff`; module-level code (gh runner, CI gate, lifecycle
+scans, upstream back-off) reads `backoffSettings()`, which the daemon refreshes on start
+and on every config reload. **A new wait is a new group there, never a constant in a
+phase.** Groups, defaults and env names: `docs/configuration.md` (generated).
 
 ## Architecture
 
@@ -104,6 +117,7 @@ src/
 ├── github-work-source.ts # GitHubIssueConnector: a move → its `gh issue edit`; labels → stages for snapshot
 ├── redact.ts / review-report.ts # Core helpers shared by the agent runner and plugins
 ├── agent.ts         # Spawns claude CLI (implement / revise / review)
+├── backoff.ts       # Every retry wait: the `backoff` config block, the one formula, BackoffTracker
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
 ├── state.ts         # Disk persistence (.agent-state.json)
@@ -144,6 +158,8 @@ src/
   before new implementation starts. The default `stages` keeps it; a config that
   reorders the built-ins gives that up.
 - **Additive, opt-in config** — new capabilities (e.g. Review) default off so existing
-  `.ai-agent.json` files keep working unchanged.
+  `.ai-agent.json` files keep working unchanged. Every key is commented where it is
+  declared; `docs/configuration.md` is generated from those comments and the generator
+  fails on an uncommented key. `docs/README.md` is the docs index.
 - **Disk persistence** — `.agent-state.json` survives restarts; the daemon resumes where
   it left off.

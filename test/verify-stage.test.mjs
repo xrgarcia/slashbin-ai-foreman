@@ -4,7 +4,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, VERIFY_RETRY_MS, VERIFY_MAX_ATTEMPTS } from "../dist/orchestrator.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan } from "../dist/orchestrator.js";
+import { DEFAULT_BACKOFF } from "../dist/backoff.js";
+
+const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
 import { issueStage } from "../dist/github-work-source.js";
 import { BUILTIN_STAGES } from "../dist/stages.js";
 
@@ -46,6 +49,13 @@ test("pickVerifyTarget: oldest PR first, one PR's issues together, held PRs skip
 
   const due = { ...fresh, heldAt: new Date(now - VERIFY_RETRY_MS).toISOString() };
   assert.deepEqual(pickVerifyTarget(refs, { 4: due }, now), { prNumber: 40, issueNumbers: [3, 4] }, "retry once the window passes");
+
+  const second = { ...fresh, attempts: 2, heldAt: new Date(now - VERIFY_RETRY_MS).toISOString() };
+  assert.deepEqual(pickVerifyTarget(refs, { 4: second }, now), { prNumber: 50, issueNumbers: [9] }, "the second wait is twice the first");
+  const secondDue = { ...second, heldAt: new Date(now - 2 * VERIFY_RETRY_MS).toISOString() };
+  assert.deepEqual(pickVerifyTarget(refs, { 4: secondDue }, now), { prNumber: 40, issueNumbers: [3, 4] });
+  const tuned = { baseMs: 1_000, capMs: 1_000, factor: 2, maxAttempts: 9 };
+  assert.deepEqual(pickVerifyTarget(refs, { 4: { ...second, heldAt: new Date(now - 2_000).toISOString() } }, now, tuned), { prNumber: 40, issueNumbers: [3, 4] }, "the configured window is the one used");
 
   const capped = { ...due, attempts: VERIFY_MAX_ATTEMPTS };
   assert.equal(pickVerifyTarget([refs[1]], { 3: capped }, now), null, "capped waits for a person");

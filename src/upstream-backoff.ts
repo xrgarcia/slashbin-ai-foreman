@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import type { GhResource } from "./gh-usage.js";
 import type { Logger } from "./logger.js";
 import { emit } from "./work-source.js";
+import { backoffDelay, backoffSettings } from "./backoff.js";
 
 /**
  * Daemon-wide back-off for upstreams that refuse work: the GitHub API rate limit
@@ -68,8 +69,6 @@ interface UpstreamState {
 
 const NAMES: Record<Upstream, string> = { github: "GitHub", claude: "Claude" };
 
-let baseMs = 120_000;
-let capMs = 3_600_000;
 let notifyFn: ((text: string, level: Level) => void) | undefined;
 
 /** Fallback until the daemon supplies its own; observer errors land here at info. */
@@ -95,18 +94,15 @@ function freshState(): UpstreamState {
 }
 
 /**
- * Apply daemon-level settings. Called once at startup; the defaults (2 min base,
- * 60 min cap, log-only) stand if it is never called.
+ * Apply daemon-level settings. Called once at startup; log-only stands if it is
+ * never called. The windows are `backoff.upstream` (src/backoff.ts), read live
+ * so a config reload applies to the next window.
  */
 export function configureUpstreamBackoff(opts: {
-  baseMs: number;
-  capMs: number;
   notify?: (text: string, level: Level) => void;
   /** Passed to work observers on pause / resume. */
   logger?: Logger;
 }): void {
-  if (Number.isFinite(opts.baseMs) && opts.baseMs > 0) baseMs = opts.baseMs;
-  if (Number.isFinite(opts.capMs) && opts.capMs > 0) capMs = opts.capMs;
   notifyFn = opts.notify;
   observerLogger = opts.logger ?? consoleLogger;
 }
@@ -125,9 +121,9 @@ function notify(text: string, level: Level): void {
   }
 }
 
-/** `min(base * 2^(n-1), cap)` — same shape as the per-issue skip back-off. */
+/** `min(base * factor^(n-1), cap)` — the one back-off formula (src/backoff.ts). */
 function windowFor(consecutive: number): number {
-  return Math.min(baseMs * 2 ** Math.max(0, consecutive - 1), capMs);
+  return backoffDelay(consecutive, backoffSettings().upstream);
 }
 
 function formatDuration(ms: number): string {

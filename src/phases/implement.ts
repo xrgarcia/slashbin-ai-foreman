@@ -22,16 +22,15 @@ import {
   type BranchDivergence,
 } from "../reconciler.js";
 import { findIssuesMergedToBase } from "../github.js";
+import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import {
   CycleEvent,
-  FAILURE_COOLDOWN_CYCLES,
-  MAX_RETRIES,
   activeRuns,
   announceDivergence,
   divergenceReason,
   failureCount,
-  failureHitMaxAt,
+  failurePause,
   itemOf,
   lastFailureReason,
   notifyOnce,
@@ -102,29 +101,6 @@ export function prBlockingSkip(reason: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-/** Hard ceiling on the escalating skip back-off — 24h. Beyond this the retry rate
- *  is already negligible, and we still want an eventual re-check in case the
- *  world changed (issue body edited, dependency landed). */
-export const SKIP_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Escalating back-off window for the Nth consecutive skip of one issue:
- * base * 2^(N-1), capped (30m → 1h → 2h → 4h → … → 24h at the default base).
- *
- * A FIXED snooze is not a back-off: it never gives up, so an issue that can never
- * become actionable costs one full Claude session every window, forever
- * (slashbin-ai-foreman#32). Escalating bounds the cost of ANY repeating skip —
- * investigation-only issues, blocked-on-external, and merged-work alike.
- *
- * skipCount is optional in persisted state (pre-#32 files) — absent reads as the
- * first skip, i.e. exactly the original single-window behavior.
- */
-export function backoffWindowFor(skipCount: number | undefined, baseMs: number): number {
-  const n = Math.max(1, skipCount ?? 1);
-  const exp = Math.min(n - 1, 10); // 2^10 * 30m ≫ cap; guards against overflow
-  return Math.min(baseMs * 2 ** exp, SKIP_BACKOFF_MAX_MS);
-}
-
 /**
  * A Claude launch that threw is reported as a non-limit result, so a half-open
  * probe is never left out forever. Every launch that returns is reported by its
@@ -143,26 +119,24 @@ export async function tryBatchImplementation(
   events?: CycleEvent[]
 ): Promise<ImplementationResult | null> {
   const repoName = repoConfig.name;
-  const skipBackoffMs = config.skipBackoffMs;
+  const { skip, repoFailure } = config.backoff;
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
   if (isUpstreamBlocked("claude")) return null;
 
-  // Check if this repo has exceeded batch failure retries
+  // A repo whose sessions keep failing pauses (backoff.repoFailure). When the
+  // pause ends the count restarts, but the pause count is kept: tripping again
+  // pauses for longer, until a success clears it.
   const failures = failureCount.get(repoName) ?? 0;
-  if (failures >= MAX_RETRIES) {
-    const hitAt = failureHitMaxAt.get(repoName) ?? cycleNumber;
-    const cyclesSinceMax = cycleNumber - hitAt;
-    if (cyclesSinceMax < FAILURE_COOLDOWN_CYCLES) {
-      repoLogger.debug(`Skipping ${repoName} — ${failures} consecutive failures, cooldown ${cyclesSinceMax}/${FAILURE_COOLDOWN_CYCLES} cycles`);
+  if (failures >= repoFailure.maxFailures) {
+    if (failurePause.waiting(repoName)) {
+      repoLogger.debug(`Skipping ${repoName} — ${failures} consecutive failures, paused (pause ${failurePause.count(repoName)})`);
       return null;
     }
-    // Cooldown expired — reset and retry
-    repoLogger.info(`Failure cooldown expired for ${repoName} — resetting and retrying`);
+    repoLogger.info(`Failure pause over for ${repoName} — retrying`);
     failureCount.set(repoName, 0);
-    failureHitMaxAt.delete(repoName);
   }
 
   // Gate: are there approved issues to implement? The work source offers
@@ -232,7 +206,7 @@ export async function tryBatchImplementation(
   }
 
   // Filter out issues the agent recently chose to skip (investigation-only,
-  // blocked-on-external-verification, etc.). Back off for SKIP_BACKOFF_MS so
+  // blocked-on-external-verification, etc.). Back off (backoff.skip) so
   // we don't burn an agent run every cycle correctly doing nothing.
   // Skipped entries are cleared automatically when the issue is re-implemented
   // (success path) or when the back-off expires.
@@ -242,7 +216,7 @@ export async function tryBatchImplementation(
   // session can manually resolve mid-back-off. Before honoring the back-off,
   // re-run the precondition check; if it now passes, admit the issue and clear
   // the stale skip entry. This prevents the cache from pinning a dead-zone
-  // 30 minutes past an already-applied manual reconcile.
+  // a whole window past an already-applied manual reconcile.
   // The open feature PR, if any. Unknown (lookup threw) reads as none: the
   // session still refuses to bundle, so the old path is the fallback.
   let featurePr: ReturnType<typeof findOpenFeaturePR> = null;
@@ -260,7 +234,7 @@ export async function tryBatchImplementation(
     const entry = skippedMap[n];
     if (!entry) return true;
     const age = now - new Date(entry.lastSkippedAt).getTime();
-    if (Number.isNaN(age) || age >= backoffWindowFor(entry.skipCount, skipBackoffMs)) return true;
+    if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) return true;
     // A skip on the open feature PR is the queue gate's to hold, not a skip's.
     const onFeaturePr = featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number;
     if (onFeaturePr || isResolvedTransientSkip(entry.reason, repoConfig, repoLogger)) {
@@ -411,7 +385,7 @@ export async function tryBatchImplementation(
     if (result.success) {
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
-      failureHitMaxAt.delete(repoName);
+      failurePause.clear(repoName);
 
       // Filter to only issues the implementation skill actually addressed in
       // the resulting PR. The canonical implement-approved-issues skill picks
@@ -509,7 +483,7 @@ export async function tryBatchImplementation(
     } else if (result.skipped) {
       // Deliberate no-op by the agent (e.g., issue body says "investigate first").
       // Record per-issue skip timestamps so the back-off filter at the top of
-      // this function suppresses retries for SKIP_BACKOFF_MS.
+      // this function suppresses retries for backoffDelay(skipCount, backoff.skip).
       // Do NOT increment failureCount — this isn't an error.
       const updatedState = loadRepoState(repoName);
       if (!updatedState.skipped) updatedState.skipped = {};
@@ -577,7 +551,7 @@ export async function tryBatchImplementation(
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
-      failureHitMaxAt.delete(repoName);
+      failurePause.clear(repoName);
       repoLogger.info(`Batch implementation skipped by agent: ${reason} (issues: ${skippedSet.map(n => `#${n}`).join(", ")})`);
       events?.push({ message: `Implementation skipped on ${repoConfig.githubRepo}: ${reason}`, level: "info" });
     } else {
@@ -598,16 +572,16 @@ export async function tryBatchImplementation(
       )?.filter((n) => actionableIssues.includes(n));
       if (onPr && onPr.length > 0) worked = onPr;
       const failedOn = worked ?? actionableIssues;
-      if (newCount < MAX_RETRIES) {
-        const why = stoppedReason("Implementation", result, false, `${newCount}/${MAX_RETRIES}`);
+      if (newCount < repoFailure.maxFailures) {
+        const why = stoppedReason("Implementation", result, false, `${newCount}/${repoFailure.maxFailures}`);
         for (const n of failedOn) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       } else {
-        failureHitMaxAt.set(repoName, cycleNumber);
-        const why = `implementation failed ${newCount}× — paused until cooldown: ${result.error || "unknown"}`;
+        const pause = failurePause.start(repoName, repoFailure);
+        const why = `implementation failed ${newCount}× — paused ${formatWait(pause)}: ${result.error || "unknown"}`;
         for (const n of failedOn) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       }
       lastFailureReason.set(repoName, result.error || "unknown");
-      repoLogger.warn(`Batch implementation failed (${newCount}/${MAX_RETRIES}): ${result.error}`);
+      repoLogger.warn(`Batch implementation failed (${newCount}/${repoFailure.maxFailures}): ${result.error}`);
       events?.push({ message: `Implementation failed on ${repoConfig.githubRepo}: ${result.error}`, level: "error" });
     }
 

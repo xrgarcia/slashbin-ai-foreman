@@ -49,7 +49,6 @@ export {
   summarizeCheckRollup,
   getPRCheckVerdict,
   CI_GATE_MARKER,
-  MAX_CI_BOUNCES,
   countCiBouncesSinceReview,
   ciBounceComment,
   bounceForRedCI,

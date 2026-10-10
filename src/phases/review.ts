@@ -11,11 +11,11 @@ import {
   getPRCheckVerdict,
   countCiBouncesSinceReview,
   bounceForRedCI,
-  MAX_CI_BOUNCES,
   findOpenPromotionPR,
 } from "../github.js";
 import { reviewViaTechLead } from "../agent.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
+import { BackoffTracker, formatWait } from "../backoff.js";
 import {
   findIssuesMergedToBase,
   planFailedReviewOutcome,
@@ -26,22 +26,19 @@ import {
 import { prepareReviewCheckout, releaseReviewCheckout } from "../review-checkout.js";
 import {
   CycleEvent,
-  FAILURE_COOLDOWN_CYCLES,
-  MAX_RETRIES,
   activeRuns,
   itemOf,
   notifyOnce,
   reportReviewOutcomes,
   reviewFailureCount,
-  reviewFailureHitMaxAt,
+  reviewFailurePause,
   reviewReport,
   stoppedReason,
 } from "./common.js";
 import { reconcileReviewOutcomeLabels } from "./reconcile.js";
 
-/** How long a repo's review waits after the Tech Lead could not take a PR. */
-export const REVIEW_DEFER_MS = 15 * 60_000;
-export const reviewDeferredUntil = new Map<string, number>();
+/** Per repo: the review waiting after the Tech Lead could not take a PR (backoff.agentUnavailable). */
+export const reviewDefer = new BackoffTracker();
 
 export async function tryReview(
   repoConfig: RepoConfig,
@@ -57,25 +54,23 @@ export async function tryReview(
 
   // The Tech Lead is the only reviewer, on Codex (Ray, 2026-10-10). There is no
   // Claude review and no EM-account review: without a Tech Lead nothing reviews,
-  // and when it could not take a PR the repo waits REVIEW_DEFER_MS.
+  // and when it could not take a PR the repo waits (backoff.agentUnavailable).
   if (!config.techLeadPath) {
     reviewLogger.warn("review skipped: techLeadPath is not configured, and the Tech Lead is the only reviewer");
     return false;
   }
-  if ((reviewDeferredUntil.get(repoName) ?? 0) > Date.now()) return false;
+  if (reviewDefer.waiting(repoName)) return false;
+  const { repoFailure, agentUnavailable, maxCiBounces } = config.backoff;
 
-  // Failure back-off with cooldown (mirrors the implement phase).
+  // Failure pause (mirrors the implement phase): longer each time it trips.
   const failures = reviewFailureCount.get(repoName) ?? 0;
-  if (failures >= MAX_RETRIES) {
-    const hitAt = reviewFailureHitMaxAt.get(repoName) ?? cycleNumber;
-    const cyclesSinceMax = cycleNumber - hitAt;
-    if (cyclesSinceMax < FAILURE_COOLDOWN_CYCLES) {
-      reviewLogger.debug(`Skipping ${repoName} review — ${failures} consecutive failures, cooldown ${cyclesSinceMax}/${FAILURE_COOLDOWN_CYCLES}`);
+  if (failures >= repoFailure.maxFailures) {
+    if (reviewFailurePause.waiting(repoName)) {
+      reviewLogger.debug(`Skipping ${repoName} review — ${failures} consecutive failures, paused (pause ${reviewFailurePause.count(repoName)})`);
       return false;
     }
-    reviewLogger.info(`Review failure cooldown expired for ${repoName} — resetting and retrying`);
+    reviewLogger.info(`Review failure pause over for ${repoName} — retrying`);
     reviewFailureCount.set(repoName, 0);
-    reviewFailureHitMaxAt.delete(repoName);
   }
 
   // Gate: is there an open feature PR awaiting EM review?
@@ -107,13 +102,13 @@ export async function tryReview(
   }
   if (checks.state === "failing") {
     const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
-    if (bounces < MAX_CI_BOUNCES) {
+    if (bounces < maxCiBounces) {
       const names = checks.failing.map((f) => f.name).join(", ");
       bounceForRedCI(repoConfig, candidate.prNumber, checks);
       for (const n of candidate.issueNumbers) {
         await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
       }
-      reviewLogger.info(`PR #${candidate.prNumber} CI red (${names}) — sent back to revise without a review (bounce ${bounces + 1}/${MAX_CI_BOUNCES})`);
+      reviewLogger.info(`PR #${candidate.prNumber} CI red (${names}) — sent back to revise without a review (bounce ${bounces + 1}/${maxCiBounces})`);
       events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: CI red (${names}) — sent back to the builder before review`, level: "info" });
       return true;
     }
@@ -152,22 +147,23 @@ export async function tryReview(
     await emit({ kind: "session", session: { ...session, status: "started", reviewer } }, null, reviewLogger);
     // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
     // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
-    // failure is charged and the repo asks again after REVIEW_DEFER_MS.
+    // failure is charged and the repo asks again after a backoff.agentUnavailable wait.
     const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
-      reviewDeferredUntil.set(repoName, Date.now() + REVIEW_DEFER_MS);
-      ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${REVIEW_DEFER_MS / 60_000} min` };
-      reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${REVIEW_DEFER_MS / 60_000} min`);
+      const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
+      ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${wait}` };
+      reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
       return false;
     }
+    reviewDefer.clear(repoName);
     if (hasObservers()) {
       report = reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
     }
 
     if (result.success) {
       reviewFailureCount.set(repoName, 0);
-      reviewFailureHitMaxAt.delete(repoName);
+      reviewFailurePause.clear(repoName);
       reviewLogger.info(`Review run completed for ${repoName}`);
 
       // --- Post-condition check ------------------------------------------
@@ -273,7 +269,7 @@ export async function tryReview(
       // nothing to review, so charging a failure only walks the repo toward its
       // backoff for work that succeeded.
       reviewFailureCount.set(repoName, 0);
-      reviewFailureHitMaxAt.delete(repoName);
+      reviewFailurePause.clear(repoName);
       events?.push({
         message: `⚠️ ${repoConfig.githubRepo} — review of PR #${plan.mergedPrs.join(", #")} merged, then ran past its budget (${result.error}). Labels reconciled; not counted as a failed review.`,
         level: "warn",
@@ -291,15 +287,15 @@ export async function tryReview(
     }
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
-    if (newCount < MAX_RETRIES) {
-      const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, false, `${newCount}/${MAX_RETRIES}`);
+    if (newCount < repoFailure.maxFailures) {
+      const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, false, `${newCount}/${repoFailure.maxFailures}`);
       for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
     } else {
-      reviewFailureHitMaxAt.set(repoName, cycleNumber);
-      const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused until cooldown: ${result.error}`;
+      const pause = reviewFailurePause.start(repoName, repoFailure);
+      const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused ${formatWait(pause)}: ${result.error}`;
       for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
     }
-    reviewLogger.warn(`Review failed (${newCount}/${MAX_RETRIES}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
+    reviewLogger.warn(`Review failed (${newCount}/${repoFailure.maxFailures}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
     return false;
   } finally {

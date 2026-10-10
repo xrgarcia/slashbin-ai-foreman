@@ -5,10 +5,9 @@ import { execFileSync } from "node:child_process";
 import { ghResource, recordGhCall } from "../gh-usage.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "../upstream-backoff.js";
 import { formatGhError, invalidateSnapshotIfMutating } from "./cache.js";
+import { backoffDelay, backoffSettings } from "../backoff.js";
 
 
-export const GH_MAX_ATTEMPTS = 3;
-export const GH_BACKOFF_MS = [1000, 3000, 9000];
 
 /** Block the thread for `ms` without busy-waiting. Only hit on the rare retry
  *  path; keeps the gh() wrapper synchronous so no caller signature changes. */
@@ -75,7 +74,8 @@ export function runGh(args: string[], cwd: string, token: string): string {
   // spends more of a spent quota. The module's own probe decides when to resume.
   if (isUpstreamBlocked("github")) throw new UpstreamBackoffError("GitHub back-off active");
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= GH_MAX_ATTEMPTS; attempt++) {
+  const retry = backoffSettings().gh;
+  for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
     try {
       recordGhCall(args);
       return execFileSync("gh", args, {
@@ -98,10 +98,10 @@ export function runGh(args: string[], cwd: string, token: string): string {
         });
         throw err;
       }
-      if (attempt < GH_MAX_ATTEMPTS && isTransientGhError(err)) {
-        const wait = GH_BACKOFF_MS[attempt - 1];
+      if (attempt < retry.maxAttempts && isTransientGhError(err)) {
+        const wait = backoffDelay(attempt, retry);
         const { message, stderr } = formatGhError(err);
-        console.warn(`[gh] transient failure (attempt ${attempt}/${GH_MAX_ATTEMPTS}), retrying in ${wait}ms: ${stderr.split("\n")[0] || message}`);
+        console.warn(`[gh] transient failure (attempt ${attempt}/${retry.maxAttempts}), retrying in ${wait}ms: ${stderr.split("\n")[0] || message}`);
         sleepSync(wait);
         continue;
       }

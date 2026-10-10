@@ -23,11 +23,11 @@ test("reviewer/reviser stalemate reports blocked before stopping", () => {
 });
 
 test("review retries exhausted reports blocked", () => {
-  assert.match(after("reviewFailureHitMaxAt.set(repoName, cycleNumber);", 400), /kind: "blocked"/);
+  assert.match(after("const pause = reviewFailurePause.start(repoName, repoFailure);", 400), /kind: "blocked"/);
 });
 
 test("implementation retries exhausted reports blocked", () => {
-  assert.match(after("failureHitMaxAt.set(repoName, cycleNumber);\n        const why", 400), /emit\(\{ kind: "blocked", item: itemOf\(repoConfig, n\)/);
+  assert.match(after("const pause = failurePause.start(repoName, repoFailure);\n        const why", 400), /emit\(\{ kind: "blocked", item: itemOf\(repoConfig, n\)/);
 });
 
 test("a configured stage that blocks or fails reports blocked", () => {

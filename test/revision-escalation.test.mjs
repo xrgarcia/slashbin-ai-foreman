@@ -18,7 +18,7 @@ const orchestrator = orchestratorSource();
 test("exhausted revision retries escalate instead of going quiet", () => {
   assert.match(orchestrator, /const revisionEscalated = new Set<string>\(\)/,
     "no escalation bookkeeping");
-  const block = orchestrator.slice(orchestrator.indexOf("newCount >= MAX_RETRIES && !revisionEscalated"));
+  const block = orchestrator.slice(orchestrator.indexOf("newCount >= maxFailures && !revisionEscalated"));
   assert.match(block.slice(0, 1500), /events\.push/,
     "hitting the cap must emit a notifier event, not just a log line");
   assert.match(block.slice(0, 1500), /level: "error"/, "a stuck PR is an error-level condition");
