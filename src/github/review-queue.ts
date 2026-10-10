@@ -216,6 +216,13 @@ export function findPRsNeedingReview(
  *  - carries `config.triggerLabel` (default `approved`)
  *  - NOT `pr pending actions` (revise phase owns those)
  *  - NOT `ready for prod release` (already advanced)
+ *
+ * A PR with no issue to adopt is still reviewed, with no issues: the implement
+ * stage queues every approved issue behind any open feature PR, so one the
+ * review stage ignores holds the repo forever. jerky_service #99 (a person's
+ * PR on `features`, linked to nothing) held #102 for days, logged once a
+ * minute as "queued" (2026-10-10). The Tech Lead merges it or asks for changes;
+ * the freshness guard keeps either verdict from being reviewed again.
  */
 export function adoptOrphanedReviewCandidate(
   config: RepoConfig,
@@ -239,10 +246,11 @@ export function adoptOrphanedReviewCandidate(
     const n = Number(m[1]);
     if (Number.isFinite(n) && n !== pr.number) refs.add(n);
   }
-  if (refs.size === 0) {
-    logger.debug(`${config.name}: PR #${pr.number} has no "${prUnderReview}" label and no linked issues found in title/body`);
-    return null;
-  }
+  const unlinked = (why: string): ReviewCandidate => {
+    logger.info(`${config.name}: PR #${pr.number} ${why} — reviewing it with no issue, so it cannot hold the queue`);
+    return { prNumber: pr.number, prUrl: pr.url, issueNumbers: [], adopted: [] };
+  };
+  if (refs.size === 0) return unlinked("names no issue");
 
   // This probe runs on every idle cycle while a feature PR waits for review.
   // With the fleet state on, the open-issue list already answers "open, and
@@ -251,6 +259,9 @@ export function adoptOrphanedReviewCandidate(
     ? new Map(stateOpenIssues(config.githubRepo).map((i) => [i.number, i]))
     : null;
   const adopted: number[] = [];
+  // An open approved issue the PR names, adoptable or not: one in revise or
+  // past review is that stage's to move, so the PR is not reviewed without it.
+  let tracked = false;
   for (const num of refs) {
     try {
       const info: { state: string; labels: { name: string }[] } = known
@@ -263,16 +274,20 @@ export function adoptOrphanedReviewCandidate(
       if (info.state !== "OPEN") continue;
       const names = new Set(info.labels.map((l) => l.name));
       if (!names.has(config.triggerLabel)) continue;
+      tracked = true;
       if (names.has(prPendingActions)) continue;
       if (names.has(readyForProd)) continue;
       logger.warn(`${config.name}: adopted orphaned issue #${num} → PR #${pr.number} (implement phase never applied "${prUnderReview}")`);
       adopted.push(num);
     } catch (err) {
+      // Unread is not "not ours": the PR waits for a pass that can read it.
+      tracked = true;
       logger.debug(`${config.name}: could not inspect referenced #${num}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   if (adopted.length === 0) {
-    logger.debug(`${config.name}: PR #${pr.number} is orphaned but no referenced issue is a review candidate (missing ${config.triggerLabel}, or owned by revise/prod)`);
+    if (!tracked) return unlinked(`names no open "${config.triggerLabel}" issue`);
+    logger.debug(`${config.name}: PR #${pr.number} is orphaned but its issues are owned by revise or prod`);
     return null;
   }
 

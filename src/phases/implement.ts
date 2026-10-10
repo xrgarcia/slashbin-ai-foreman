@@ -340,6 +340,12 @@ export async function tryBatchImplementation(
       await advance(itemOf(repoConfig, n), "queue", repoConfig, repoLogger);
     }
     repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind open feature PR #${featurePr.number} — builds once it merges or closes`);
+    // A PR that names no issue is outside the lifecycle: nothing here moves it,
+    // so say once that it holds the queue (jerky_service #99 held #102 for days).
+    // The review stage hands it to the Tech Lead (adoptOrphanedReviewCandidate).
+    if (fresh.length > 0 && featurePr.issueNumbers.length === 0) {
+      repoLogger.warn(`PR #${featurePr.number} names no issue and holds ${fresh.map((n) => `#${n}`).join(", ")} — the Tech Lead reviews it; they build once it merges or closes`);
+    }
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
   }
