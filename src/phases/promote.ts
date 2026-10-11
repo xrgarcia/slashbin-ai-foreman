@@ -1,8 +1,13 @@
 // Promotion: branch-drift sync PRs, dependency batches, and the release PR.
+//
+// Nothing here sends a Discord message (owner direction, 2026-10-10: a notice
+// that needs a person goes on the issue, where it cannot get lost). A stall
+// that needs the EM is a comment on the issues waiting on it; the rest is the
+// log. `notifyOnce` and `emit` reach observers only (the daemon's activity
+// file, the Paperclip mirror), never Discord.
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { emit } from "../work-source.js";
 import { trackRelease } from "../release-tracker.js";
 import {
   findReadyForProdIssues,
@@ -22,8 +27,15 @@ import {
   tryMergeSyncPR,
   countBranchDiffFiles,
   stripReadyForProdLabel,
+  getOpenIssues,
+  hasLabel,
+  commentOnIssue,
+  productionHead,
+  type PromotionIssue,
 } from "../github.js";
+import { emit, advance } from "../work-source.js";
 import { loadRepoState, saveRepoState } from "../state.js";
+import { releaseIssues } from "../release-tracker.js";
 import { STALL_CHECK_CYCLE_INTERVAL, itemOf, lastStallCheckCycle, notifyOnce } from "./common.js";
 
 export function trySyncDrift(
@@ -122,10 +134,120 @@ export function tryFileDependencyBatchIssue(
   return number;
 }
 
+/**
+ * Follow the release PR from open to merged, so the items it carries show as
+ * waiting on it and then as done (Slashbin-console#1185 sat "in progress"
+ * behind release PR #1206). Exported for the release stage, which calls it the
+ * moment the SRE merges, so the board does not wait a pass.
+ */
+export async function followRelease(repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  const repoName = repoConfig.name;
+  await trackRelease({
+    repo: repoConfig.githubRepo,
+    productionBranch: repoConfig.productionBranch,
+    saved: loadRepoState(repoName).release,
+    findOpenRelease: () =>
+      findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger),
+    releaseState: (pr) => getPrState(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
+    save: (v) => {
+      const st = loadRepoState(repoName);
+      if (v) st.release = v;
+      else delete st.release;
+      saveRepoState(repoName, st);
+    },
+    emit: async (release) => { await emit({ kind: "release", release }, null, logger); },
+  });
+}
+
+/** Marks the promote stage's one stall comment on an issue. */
+const STALL_MARK = "<!-- foreman:promotion-stall -->";
+
+/**
+ * `develop` carries work no issue is authorized to release. Every issue
+ * waiting at `pr approved` (dev-verified, awaiting EM verification) gets one
+ * comment saying so, once per stall: the EM's action is on the issue, not in
+ * a channel. Issues that have left `pr approved` drop out of the dedupe list,
+ * so a later stall comments again. With nobody to comment on, the log line is
+ * the record.
+ */
+function noteStall(repoConfig: RepoConfig, files: number, logger: Logger): void {
+  const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
+  const waiting = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => hasLabel(i, prApproved) && !hasLabel(i, repoConfig.github.blockedLabel))
+    .map((i) => i.number);
+  const st = loadRepoState(repoConfig.name);
+  const noted = new Set((st.promotionStallNoted ?? []).filter((n) => waiting.includes(n)));
+  const fresh = waiting.filter((n) => !noted.has(n));
+  if (waiting.length === 0) {
+    logger.warn(
+      `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch} and no issue carries ` +
+      `"${readyForProd}" or "${prApproved}": promotion is STALLED and no issue names the work. Nothing was commented.`,
+    );
+  }
+  for (const n of fresh) {
+    try {
+      commentOnIssue(repoConfig, n, [
+        STALL_MARK,
+        `**Waiting on EM verification.** This issue passed dev verification (\`${prApproved}\`), and \`${repoConfig.baseBranch}\` ` +
+        `carries ${files} changed file(s) that are not on \`${repoConfig.productionBranch}\`, but no issue carries \`${readyForProd}\`, ` +
+        "so nothing is being released.",
+        "",
+        `To release it: verify the outcome, then apply \`${readyForProd}\`. The Foreman opens the release PR, the Tech Lead ` +
+        "approves it, the SRE deploys and verifies it in production, and the Foreman closes this issue on a pass.",
+      ].join("\n"));
+      noted.add(n);
+      logger.info(`Promotion stall: commented on #${n} (waiting on EM verification)`);
+    } catch (err) {
+      logger.warn(`Promotion stall: could not comment on #${n}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const next = [...noted].sort((a, b) => a - b);
+  if (next.join() !== (st.promotionStallNoted ?? []).join()) {
+    if (next.length > 0) st.promotionStallNoted = next;
+    else delete st.promotionStallNoted;
+    saveRepoState(repoConfig.name, st);
+  }
+}
+
+/**
+ * Issues already in the release the Foreman owns (`release pending`), open,
+ * not blocked, and not yet merged by the release stage: they must stay listed
+ * on the release PR when promote rewrites it, and are re-queued onto a new
+ * one if the old one was closed unmerged.
+ */
+function carriedIssues(repoConfig: RepoConfig, logger: Logger): PromotionIssue[] {
+  const { releasePending } = repoConfig.lifecycleLabels;
+  const merged = new Set<number>();
+  for (const r of Object.values(loadRepoState(repoConfig.name).prodReleases ?? {})) {
+    if (r.phase !== "deploying") for (const n of r.issues) merged.add(n);
+  }
+  return getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => hasLabel(i, releasePending) && !hasLabel(i, repoConfig.github.blockedLabel) && !merged.has(i.number))
+    .map((i) => ({ number: i.number, title: i.title }));
+}
+
+/** `a` then whatever of `b` is not in it, by issue number. */
+function union(a: PromotionIssue[], b: PromotionIssue[]): PromotionIssue[] {
+  const seen = new Set(a.map((i) => i.number));
+  return [...a, ...b.filter((i) => !seen.has(i.number))];
+}
+
+/**
+ * Open the release PR (base → production) for the issues the EM authorized,
+ * and keep it listing every issue in it.
+ *
+ * With the release stage active (`releaseActive`, EM#578) the Foreman owns
+ * the release from here: each authorized issue moves `ready for prod release`
+ * → `release pending` once a release PR lists it, and the release stage has
+ * the Tech Lead approve it, the SRE deploy it, and closes the issues on a
+ * passed prod verification. Without it the legacy path runs: the label is
+ * stripped and a person merges and closes.
+ */
 export async function tryPromotion(
   repoConfig: RepoConfig,
   logger: Logger,
-  cycleNumber: number
+  cycleNumber: number,
+  releaseActive = false,
 ): Promise<"promoted" | "synced" | null> {
   const repoName = repoConfig.name;
   const promoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "promote" });
@@ -135,34 +257,23 @@ export async function tryPromotion(
     return null;
   }
 
-  // Follow the release PR from open to merged, so the items it carries show as
-  // waiting on it and then as done (Slashbin-console#1185 sat "in progress"
-  // behind release PR #1206). Before the ready-for-prod read: a release PR
-  // stays open, and merges, after its issues have lost that label.
-  await trackRelease({
-    repo: repoConfig.githubRepo,
-    productionBranch: repoConfig.productionBranch,
-    saved: loadRepoState(repoName).release,
-    findOpenRelease: () =>
-      findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger),
-    releaseState: (pr) => getPrState(repoConfig.githubRepo, pr, repoConfig.repoPath, promoLogger),
-    save: (v) => {
-      const st = loadRepoState(repoName);
-      if (v) st.release = v;
-      else delete st.release;
-      saveRepoState(repoName, st);
-    },
-    emit: async (release) => { await emit({ kind: "release", release }, null, promoLogger); },
-  });
+  // Before the ready-for-prod read: a release PR stays open, and merges, after
+  // its issues have lost that label.
+  await followRelease(repoConfig, promoLogger);
 
   const issues = findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
   );
-  if (issues.length === 0) {
+  const carried = releaseActive ? carriedIssues(repoConfig, promoLogger) : [];
+  const queue = async (nums: number[]): Promise<void> => {
+    for (const n of nums) await advance(itemOf(repoConfig, n), "releaseQueued", repoConfig, promoLogger);
+  };
+
+  if (issues.length === 0 && carried.length === 0) {
     // "Nothing ready to promote" and "the gate was revoked and promotion is
     // stalled" produce the identical empty set and the identical silence. They
     // are distinguishable by one fact: whether `develop` is carrying merged work
-    // that never reached `main`. Say so when it is.
+    // that never reached `main`. Say so when it is, on the issues waiting.
     //
     // Rate-limited because it costs a compare API call and the discovery budget
     // is repos x cycles/hour (see docs on the GitHub API budget) — a stall lasts
@@ -176,12 +287,13 @@ export async function tryPromotion(
       // which carries no file change. Warning on `ahead > 0` fires on every repo
       // on every check, forever, and a warning that is always on is not a signal.
       if (drift && drift.developAheadFiles > 0) {
-        promoLogger.warn(
+        promoLogger.info(
           `${repoName}: ${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch} ` +
           `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${repoConfig.lifecycleLabels.readyForProd}" — ` +
-          `promotion is STALLED, not idle. Either the EM gate has not been signed yet, or it was signed and revoked.`,
+          "promotion is waiting on EM verification.",
           { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles },
         );
+        noteStall(repoConfig, drift.developAheadFiles, promoLogger);
         await emit({
           kind: "promotionStall",
           repo: repoConfig.githubRepo,
@@ -197,35 +309,48 @@ export async function tryPromotion(
 
   // Issues are ready, so promotion is moving, not stalled.
   await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
-  promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
+  if (issues.length > 0) promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
   // Check if a promotion PR already exists
   const existingPR = findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
   if (existingPR) {
-    // Check if the PR body is missing any current ready-for-prod issues
-    const listedIssues = new Set(
-      (existingPR.body.match(/#(\d+)/g) || []).map((m) => parseInt(m.slice(1), 10))
-    );
-    const missingIssues = issues.filter((i) => !listedIssues.has(i.number));
+    const listed = releaseIssues(existingPR.body);
+    const listedSet = new Set(listed);
+    // Everything the PR must list: the newly authorized, the carried, and,
+    // with the release stage on, whatever it already lists that is still
+    // open, so a rewrite never drops an issue out of its own release.
+    const open = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, promoLogger);
+    const stillListed = releaseActive
+      ? open.filter((i) => listedSet.has(i.number)).map((i) => ({ number: i.number, title: i.title }))
+      : [];
+    const wanted = releaseActive ? union(union(stillListed, carried), issues) : issues;
+    const missing = wanted.filter((i) => !listedSet.has(i.number));
 
-    if (missingIssues.length > 0) {
+    if (missing.length > 0) {
       const updated = updatePromotionPR(
-        repoConfig.githubRepo, existingPR.number, issues, repoConfig.repoPath, repoConfig.github,
+        repoConfig.githubRepo, existingPR.number, wanted, repoConfig.repoPath, repoConfig.github,
       );
       if (updated) {
         promoLogger.info(
-          `Updated promotion PR #${existingPR.number} — added ${missingIssues.length} issue(s): ${missingIssues.map((i) => `#${i.number}`).join(", ")}`
+          `Updated promotion PR #${existingPR.number} — added ${missing.length} issue(s): ${missing.map((i) => `#${i.number}`).join(", ")}`
         );
+        if (releaseActive) await queue(issues.map((i) => i.number));
       } else {
         promoLogger.error(
-          `Failed to update promotion PR #${existingPR.number} — ${missingIssues.length} dev-verified issue(s) are BLOCKED from production and no promotion PR reflects them. This is not cosmetic: the promote phase found the work and could not act on it.`
+          `Failed to update promotion PR #${existingPR.number} — ${missing.length} dev-verified issue(s) are BLOCKED from production and no promotion PR reflects them. This is not cosmetic: the promote phase found the work and could not act on it.`
         );
       }
     } else {
-      promoLogger.info(`Promotion PR #${existingPR.number} already includes all ${issues.length} issue(s)`);
+      promoLogger.info(`Promotion PR #${existingPR.number} already includes all ${wanted.length} issue(s)`);
+      if (releaseActive) await queue(issues.map((i) => i.number));
     }
     return null;
   }
+
+  // No open release PR. With the release stage on and nothing newly
+  // authorized, only carried issues remain: their release PR was closed
+  // unmerged, or merged (the release stage's adoption owns that).
+  const toList = releaseActive ? union(carried, issues) : issues;
 
   // Guard: confirm develop actually has file changes main is missing before
   // creating the promotion PR. develop can be "ahead" of main by 1+ commits
@@ -240,39 +365,55 @@ export async function tryPromotion(
     // develop has ZERO file changes vs main, so every ready-for-prod issue's work
     // is ALREADY in main — it was promoted, and there is nothing left to promote.
     // Retrying is futile by construction; no future cycle can produce a diff.
-    //
-    // This used to just log "labels will clear on next verify cycle" and return.
-    // They never cleared: stripReadyForProdLabel() is only reachable on the
-    // promotion-PR-created path below, so an already-promoted issue kept the label
-    // forever and this phase re-checked it EVERY cycle, indefinitely. Observed on
-    // jerky_security_testing #110/#115/#117/#118/#122 — stuck from 2026-07-01 for
-    // two weeks, burning a promote check every poll, while their fixes had shipped
-    // to main (and deployed) on day one. The "likely a race" comment was a wrong
-    // assumption that made a permanent stuck state read as self-healing.
+    // (jerky_security_testing #110/#115/#117/#118/#122 kept the label for two
+    // weeks, re-checked every poll, while their fixes had shipped on day one.)
     //
     // Safe: `ready for prod release` is only applied after the feature PR merges to
-    // develop, so develop-content == main-content ⇒ that work IS in main. Strip the
-    // label to remove them from the promote set. We do NOT close them — the EM still
-    // owns outcome verification; an open issue with no lifecycle label is inert
-    // (the Foreman won't re-pick it) and stays visible for that close.
+    // develop, so develop-content == main-content ⇒ that work IS in main.
+    if (issues.length === 0) return null;  // carried only: the release stage owns them
+    const nums = issues.map((i) => i.number);
+    if (releaseActive) {
+      // In main, but "in main" is not "verified in production" (EM#578). An
+      // issue closes here only on evidence: a prod verification the release
+      // stage recorded for it against the commit production is at now.
+      // Everything else goes to `release pending`, where the release stage
+      // adopts the merged release that carried it and verifies it.
+      let head: string | null = null;
+      try { head = productionHead(repoConfig); } catch (err) {
+        promoLogger.warn(`Could not read ${repoConfig.productionBranch}'s head: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const verified = loadRepoState(repoName).prodVerified ?? {};
+      const close = nums.filter((n) => head !== null && verified[n]?.mergeSha === head);
+      const pending = nums.filter((n) => !close.includes(n));
+      promoLogger.info(
+        `Already promoted — ${nums.length} issue(s) labeled '${repoConfig.lifecycleLabels.readyForProd}' with ${repoConfig.baseBranch} at 0 file changes vs ${repoConfig.productionBranch}` +
+        (close.length > 0 ? `; closing ${close.map((n) => `#${n}`).join(", ")} (prod-verified at ${head?.slice(0, 10)})` : "") +
+        (pending.length > 0 ? `; ${pending.map((n) => `#${n}`).join(", ")} → release pending for prod verification` : ""),
+      );
+      await emit({ kind: "release", release: {
+        repo: repoConfig.githubRepo, state: "merged",
+        issues: nums.map((n) => itemOf(repoConfig, n)), productionBranch: repoConfig.productionBranch,
+      } }, null, promoLogger);
+      for (const n of close) await advance(itemOf(repoConfig, n), "alreadyReleased", repoConfig, promoLogger);
+      await queue(pending);
+      await notifyOnce("promoted", repoConfig, nums, promoLogger);
+      return null;
+    }
+    // Legacy (no release stage): strip the label to remove them from the promote
+    // set. We do NOT close them — the EM still owns outcome verification; an open
+    // issue with no lifecycle label is inert and stays visible for that close.
     promoLogger.warn(
       `Already promoted — ${issues.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but ${repoConfig.baseBranch} has 0 file changes vs ${repoConfig.productionBranch}, ` +
-      `so their work is already in ${repoConfig.productionBranch}: ${issues.map((i) => `#${i.number}`).join(", ")}. ` +
+      `so their work is already in ${repoConfig.productionBranch}: ${nums.map((n) => `#${n}`).join(", ")}. ` +
       `Stripping the label (nothing left to promote). They remain open for EM outcome-verification + close.`,
     );
-    stripReadyForProdLabel(
-      repoConfig.githubRepo,
-      issues.map((i) => i.number),
-      repoConfig.repoPath,
-      repoConfig.lifecycleLabels,
-      promoLogger,
-    );
+    stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
     // Confirmed in main: the promotion these issues were waiting for happened.
-    await notifyOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
+    await notifyOnce("promoted", repoConfig, nums, promoLogger);
     await emit({ kind: "release", release: {
       repo: repoConfig.githubRepo,
       state: "merged",
-      issues: issues.map((i) => itemOf(repoConfig, i.number)),
+      issues: nums.map((n) => itemOf(repoConfig, n)),
       productionBranch: repoConfig.productionBranch,
     } }, null, promoLogger);
     return null;
@@ -285,7 +426,7 @@ export async function tryPromotion(
     repoConfig.githubRepo,
     repoConfig.productionBranch,
     repoConfig.baseBranch,
-    issues,
+    toList,
     repoConfig.repoPath,
     promoLogger,
     repoConfig.github,
@@ -293,24 +434,21 @@ export async function tryPromotion(
 
   if (prUrl) {
     promoLogger.info(`Promotion PR created: ${prUrl}`, {
-      issues: issues.map((i) => i.number),
+      issues: toList.map((i) => i.number),
     });
-    // Strip the `ready for prod release` label now that the promotion PR
-    // owns these issues. Prevents the Foreman from treating the same issues
-    // as still-to-promote on its next cycle (which races with the EM
-    // verification script that normally strips labels at close time).
-    stripReadyForProdLabel(
-      repoConfig.githubRepo,
-      issues.map((i) => i.number),
-      repoConfig.repoPath,
-      repoConfig.lifecycleLabels,
-      promoLogger,
-    );
-    await notifyOnce("promoted", repoConfig, issues.map((i) => i.number), promoLogger);
+    const nums = issues.map((i) => i.number);
+    if (releaseActive) {
+      // The release PR owns them now: `ready for prod release` → `release pending`.
+      await queue(nums);
+    } else {
+      // Strip the `ready for prod release` label now that the promotion PR
+      // owns these issues, so the next cycle does not promote them again.
+      stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
+    }
+    await notifyOnce("promoted", repoConfig, nums, promoLogger);
     return "promoted";
   } else {
     promoLogger.warn("Failed to create promotion PR");
     return null;
   }
 }
-
