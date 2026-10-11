@@ -16,7 +16,7 @@ export {
   ghKeyed,
   closedPrVersion,
 } from "./github/cache.js";
-export { extractImplementedIssues, discoveryBatch } from "./github/discovery.js";
+export { extractImplementedIssues, issuesImplementedByCommits, discoveryBatch, type PrCommit } from "./github/discovery.js";
 export {
   type PendingRevisionPR,
   type PendingRevisionInfo,
