@@ -50,7 +50,7 @@ Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dep
 - **Persists state across restarts** — picks up where it left off
 - **Failure cooldown** — after 2 consecutive failures on a repo, skips it for 3 cycles before retrying
 - **Graceful shutdown** — waits for in-progress work before stopping (60-second timeout)
-- **Discord notifications** — optional; posts status updates to a Discord channel via WebSocket bridge. The Foreman runs without Discord — set `DISCORD_BOT_ID` and `DISCORD_STATUS_CHANNEL` to enable
+- **No Discord** — what needs a person is a label and a comment on the GitHub issue, which also moves its Paperclip card; everything else is the daemon log. `bridge-client.ts` is still exported for other agents; the daemon does not use it
 
 ## How it fits together
 
@@ -288,7 +288,6 @@ Set these environment variables to enable status updates in Discord. The Foreman
 |---|---|
 | `DISCORD_BOT_ID` | Your Discord bot's application ID |
 | `DISCORD_STATUS_CHANNEL` | Channel ID for status messages |
-| `DISCORD_BRIDGE_URL` | WebSocket bridge URL (default: `ws://127.0.0.1:9800`) |
 
 ### GitHub tokens
 
@@ -543,8 +542,8 @@ src/
 ├── phases/            # One file per stage (reconcile, implement, revise, verify, review, promote, custom)
 ├── paperclip/         # Optional Paperclip board plugin (a WorkObserver)
 ├── state.ts           # Persistent state management
-├── daemon.ts          # Poll loop, graceful shutdown, Discord bridge
-├── bridge-client.ts   # WebSocket client for Discord notifications
+├── daemon.ts          # Poll loop, graceful shutdown
+├── bridge-client.ts   # WebSocket Discord client (exported; unused by the daemon)
 └── index.ts           # Public API exports
 ```
 
