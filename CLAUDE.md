@@ -7,14 +7,16 @@ merged work — across many repos from a single process.
 ## Cycle
 
 Each poll cycle runs the configured `stages` across every configured repo
-(`src/stages.ts`; README "Pipeline stages"). Omitted, they are the eight built-ins
+(`src/stages.ts`; README "Pipeline stages"). Omitted, they are the nine built-ins
 in this order, so labels set in one phase are consumed by the right phase next cycle:
 
 ```
-Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote
+Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release
 ```
 
-Verify runs only when `srePath` is set: the SRE checks each merged PR in dev.
+Verify runs only when `srePath` is set: the SRE checks each merged PR in dev. Release runs
+only when both `srePath` and `techLeadPath` are set (skipped with a startup warning
+otherwise; an explicit `release` without both is refused).
 
 A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
 one Claude session on that skill against the open feature PR. A custom stage that
@@ -36,7 +38,14 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
 5. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
 6. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
    with `dependencyPreApproved`).
-7. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues.
+7. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues
+   and move them to `release pending`.
+8. **Release** (`src/phases/release.ts`, no Claude session) — Tech Lead `approve-promotion`
+   at the PR head → SRE `deploy` (merge, deploy, verify) → annotated tag on the merge commit
+   (never a GitHub Release, never a `v` prefix) → close each issue on a passed prod
+   verification, or `prod verification held` and re-verify on a back-off; then a 30-minute
+   soak. Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
+   Discord. See docs/lifecycle.md.
 
 Priority within a cycle is encoded by stage order. Only one Claude session runs at a
 time (`implementing` mutex) for git-state safety.
@@ -54,7 +63,7 @@ decision-layer workflow rather than an in-repo edit:
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
 - **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
   transitions issue labels itself; the orchestrator does **not** relabel afterward. Its
-  label side effects feed the other phases (approve → `ready for prod release` → Promote;
+  label side effects feed the other phases (approve → `pr merged` → Verify → `pr approved`;
   request-changes → `pr pending actions` → Revise).
 
 CI gate (before any review session): the PR's checks are read first. Red →

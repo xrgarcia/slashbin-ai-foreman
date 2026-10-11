@@ -34,8 +34,8 @@ that one field. The block is read once at startup — restart the daemon after c
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
-| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
-| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"pendingVerification":{"name":"Pending verification","color":"#7c3aed"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
+| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"releaseAuthorized":{"owner":"foreman","status":"in_review","label":"releaseAuthorized"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"releasing":{"owner":"foreman","status":"in_progress","label":"releasing"},"prodVerifyHeld":{"owner":"foreman","status":"in_review","label":"prodVerifyHeld"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
+| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"pendingVerification":{"name":"Awaiting EM verification","color":"#7c3aed"},"releaseAuthorized":{"name":"Release authorized","color":"#4f46e5"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"releasing":{"name":"Releasing","color":"#16a34a"},"prodVerifyHeld":{"name":"Prod verification held","color":"#b45309"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
 | `liveLeaseMinutes` | integer | none | `15` | Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way. |
 | `comments` | object | none | `{"enabled":true,"events":{"implementStart":true,"implementEnd":true,"reviewStart":true,"reviewEnd":true,"reviseStart":true,"reviseEnd":true,"progress":true,"release":true,"blocked":true},"maxLength":3000,"includeDiffStat":true}` | What a card's thread says: { enabled, events, maxLength, includeDiffStat }. enabled false = the one-line note per step. events turns each comment off by kind (implementStart, implementEnd, reviewStart, reviewEnd, reviseStart, reviseEnd, progress, release, blocked). maxLength caps every comment, includeDiffStat adds the PR's files and +/- lines to the implement summary. Every comment is redacted (known secrets and token-shaped strings) and never repeats the task's latest comment. |
 
@@ -80,11 +80,11 @@ six status buckets. Each is sent to Paperclip under its
 | Bucket | Set by default at | Name sent to Paperclip |
 |---|---|---|
 | `todo` | task creation, `queued`, `changesRequested` | `statusMap.todo`, else `todo` |
-| `in_progress` | `claim`, `reviseStarted`, `reviewStarted`, `verifyStarted` | `statusMap.in_progress`, else `in_progress` |
-| `in_review` | `inReview`, `approved`, `awaitingVerify`, `releaseWaiting` | `statusMap.in_review`, else `in_review` |
+| `in_progress` | `claim`, `releaseQueued`, `reviseStarted`, `reviewStarted`, `verifyStarted` | `statusMap.in_progress`, else `in_progress` |
+| `in_review` | `inReview`, `approved`, `awaitingVerify`, `releaseWaiting`, `prodHeld` | `statusMap.in_review`, else `in_review` |
 | `blocked` | `blocked`, `waiting` | `statusMap.blocked`, else `blocked` |
-| `done` | `released`, `inProduction` | `statusMap.done`, else `done` |
-| `cancelled` | never by default — the Foreman does not close issues | `statusMap.cancelled`, else `cancelled` |
+| `done` | `released`, `inProduction`, `prodVerified` | `statusMap.done`, else `done` |
+| `cancelled` | never by default | `statusMap.cancelled`, else `cancelled` |
 
 Merging to the base branch is a note, not a status: the work is not in production yet. Once
 the issue is in a release pull request (base branch → production branch) the task goes to
@@ -94,6 +94,12 @@ leaves the open set, one GitHub read says whether it merged or was closed. The p
 being waited on is saved per repo, so a merge that lands while the Foreman is down is seen at
 the next start. `cancelled` is left to whatever else syncs GitHub issues into the same
 company.
+
+With the release stage on (both `srePath` and `techLeadPath` set) a merged release is not
+`done` yet: the issue goes `releaseAuthorized` → `releasing` (in the release pull request
+the Foreman owns) and reaches `done` only when the SRE verifies it in production and the
+Foreman closes it. A held verification moves it to `prodVerifyHeld` (`in_review`: the Foreman
+is still acting on it), and a STOP that needs a person to `blocked`. See docs/lifecycle.md.
 
 An issue that needs a person goes to the `blocked` stage: the source labels it `blocked`,
 or the Foreman declines it or runs out of revision retries (`blocked` step). It is held by
@@ -132,6 +138,9 @@ knows of are redacted from every note before it is sent.
 | `releaseWaiting` | The issue is in an open release pull request (base branch → production branch). Written once per release pull request. | `awaitingRelease` | `waiting on release PR #{pr} to merge to {branch}` |
 | `released` | That release pull request merges to the production branch. | `done` | `release PR #{pr} merged to {branch}` |
 | `inProduction` | Promotion finds the issue's work already on the production branch, with no release pull request left to merge. | `done` | `in production ({branch})` |
+| `releaseQueued` | With the release stage on: promote lists the issue in the release pull request it owns (`ready for prod release` → `release pending`). The Tech Lead approves it, the SRE deploys it, and the SRE verifies production next. | `releasing` | `in the release PR: Tech Lead approval, SRE deploy and prod verification next` |
+| `prodHeld` | The release merged to the production branch but its prod verification (or its 30-minute soak) held or failed: the issue is reopened if it was closed and re-verified on a back-off. | `prodVerifyHeld` | `in production, prod verification held; re-verifying on a back-off` |
+| `prodVerified` | The SRE verified the release in production: the Foreman tags the merge commit and closes the issue with one comment. | `done` | `verified in production; closed` |
 | `releaseClosed` | That release pull request is closed without merging; the task stays in review until the next one. | unchanged | `release PR #{pr} closed without merging; waiting for the next release` |
 | `backoffPause` | A GitHub or Claude limit pauses the build in progress. | unchanged | `paused: {upstream} back-off: {reason}` |
 | `backoffResume` | The build in progress resumes after that limit clears. | unchanged | `resumed after back-off` |
@@ -204,8 +213,11 @@ field in it, falls back to its default on its own, so a config names only what i
 | `revising` | A revision session is running on it. | `foreman` | `in_progress` | `changesRequested` |
 | `merged` | Merged to the base branch; waiting for dev verification. | `foreman` | `in_review` | `merged` |
 | `verifying` | A dev-verification session is running on it. | `foreman` | `in_progress` | `merged` |
-| `pendingVerification` | Approved and merged to the base branch; waiting for verification before release. | `foreman` | `in_review` | `pendingVerification` |
-| `awaitingRelease` | Verified (or in an open release pull request); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
+| `pendingVerification` | Dev-verified (`pr approved`); waiting for the EM's verification and `ready for prod release`. | `foreman` | `in_review` | `pendingVerification` |
+| `releaseAuthorized` | The EM authorized the release (`ready for prod release`); promote puts it in the release pull request next. | `foreman` | `in_review` | `releaseAuthorized` |
+| `awaitingRelease` | In an open release pull request a person merges (the release stage is off); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
+| `releasing` | In the release pull request the Foreman owns (`release pending`): Tech Lead approval, SRE deploy and prod verification. | `foreman` | `in_progress` | `releasing` |
+| `prodVerifyHeld` | Merged to production, but prod verification held (`prod verification held`); the SRE re-verifies it on a back-off. | `foreman` | `in_review` | `prodVerifyHeld` |
 | `blocked` | Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries. | `foreman` | `blocked` | `blocked` |
 
 The defaults suit a Foreman that is the only agent: it holds every task. A task carries at most
@@ -217,8 +229,11 @@ label is created in the company on first use (by name, so one created by hand is
 | `inReview` | `In code review` | `#2563eb` |
 | `changesRequested` | `Changes requested` | `#d97706` |
 | `merged` | `Dev verification` | `#0891b2` |
-| `pendingVerification` | `Pending verification` | `#7c3aed` |
+| `pendingVerification` | `Awaiting EM verification` | `#7c3aed` |
+| `releaseAuthorized` | `Release authorized` | `#4f46e5` |
 | `awaitingRelease` | `Awaiting release` | `#059669` |
+| `releasing` | `Releasing` | `#16a34a` |
+| `prodVerifyHeld` | `Prod verification held` | `#b45309` |
 | `blocked` | `Blocked` | `#dc2626` |
 
 When the issue ships (`done`) its stage label is removed and it stays with whoever held it.

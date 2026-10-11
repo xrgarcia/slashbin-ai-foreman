@@ -33,7 +33,7 @@ The Foreman shines when you have **more approved work than time to implement**. 
 Each poll cycle runs these stages, in this order, across every configured repo (the order is configurable — see [Pipeline stages](#pipeline-stages)):
 
 ```
-Reconcile → Review → Revise → Implement → Branch Sync → Dependabot → Promote
+Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release
 ```
 
 1. **Reconcile** — detects orphaned commits on the features branch with no PR and creates one
@@ -42,7 +42,8 @@ Reconcile → Review → Revise → Implement → Branch Sync → Dependabot →
 4. **Implement** — picks up approved issues and invokes the repo's implementation skill via Claude Code (up to 3 issues per cycle; 1 in greenfield repos)
 5. **Branch Sync** — merges main → develop to keep branches aligned after promotions
 6. **Dependabot** — files one issue covering the open Dependabot PRs on the working branches, so they go through the implement session (filed with the trigger label when the repo sets `dependencyPreApproved`)
-7. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`
+7. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`, moving them to `release pending`
+8. **Release** *(on when both `srePath` and `techLeadPath` are set)* — no Claude session: the Tech Lead approves the promotion PR at its head, the SRE merges, deploys and verifies it in production, the Foreman tags the merge commit (an annotated tag, never a GitHub Release) and closes each issue on a passed prod verification, or labels it `prod verification held` and re-verifies. It also adopts promotion PRs merged by anyone else in the last 48 hours. Full flow: [docs/lifecycle.md](docs/lifecycle.md#the-release-stage). The SRE's promotion-verify-sweep (a systemd timer on the owner's desktop) is retired once this ships
 
 - **Poll interval is configurable** — default 5 minutes (`pollIntervalMs` in config)
 - **Multi-repo** — manages multiple repos in a single daemon, each with its own skill paths and config
@@ -59,7 +60,7 @@ The Foreman is one layer in an AI engineering pipeline:
 2. **Engineering Manager** decomposes epics into implementation tasks, approves them with the trigger label
 3. **Foreman** picks up approved issues, invokes the implementation skill on each service repo, and opens PRs
 4. **Reviewers** (human or AI) provide feedback on PRs — Foreman revises automatically
-5. **Foreman** promotes merged work from develop → main via promotion PRs
+5. **Foreman** promotes merged work from develop → main via promotion PRs, and (with the release stage) has it approved, deployed, verified in production and closed
 
 The Foreman uses a **dual-token model**: one GitHub token for its own operations (creating PRs, managing labels) and a second token for the reviewer, the Tech Lead (approving and merging PRs that require branch protection). This prevents the Foreman from self-approving its own work.
 
@@ -152,21 +153,24 @@ For a single repo, set fields at the root level:
 | `sessionEnv` | — | `[]` | Daemon env var names every Claude session inherits, on top of the essentials. Top-level only. May not name a GitHub token. See [Session security](#session-security) |
 | `logFormat` | `AI_AGENT_LOG_FORMAT` | `text` | `json` or `text` |
 | `logLevel` | `AI_AGENT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `lifecycleLabels` | — | see below | Names of the five labels that move a PR through its lifecycle. Top-level only — every repo shares one set |
+| `lifecycleLabels` | — | see below | Names of the labels that move a PR through its lifecycle. Top-level only — every repo shares one set |
 | `github` | — | today's names (see [docs/configuration.md](docs/configuration.md#github-conventions-github)) | Every other GitHub name the Foreman reads or writes: `blockedLabel`, `priorityLabels` (the tiers the implement skill picks by), `dependencyBranchPrefixes` (`["renovate/"]` for Renovate), the promotion, sync, dependency-batch and reconcile titles, and the PR-body `signature`. Set any subset; the rest keep their defaults. Sessions get `FOREMAN_BLOCKED_LABEL` and `FOREMAN_PRIORITY_LABELS`. Top-level only |
 | `paperclip` | `AI_AGENT_PAPERCLIP_ENABLED`, `_URL`, `_COMPANY_ID`, `_AGENT_NAME`, `_AGENT_ID`, `_API_KEY`, `_IDENTITY_KEY_FORMAT`, `_TASK_TITLE_FORMAT`, `_PROJECT_ID` | `enabled: false`, `url: "http://127.0.0.1:3100"`, `agentName: "Foreman"`, `identityKeyFormat: "source: {repo}#{N}"`, `taskTitleFormat: "{repo}#{N}"`, `projects: false` | Optional [Paperclip](https://github.com/paperclipai/paperclip) mirror. Off unless `enabled`; `companyId` is required once enabled. `{repo}` is the full `owner/name`. `projectId` files every new task in one project; `repos` limits the mirror to some repos; `board`, `roles`, `stageLabels` and `comments` set who holds each card, its column and label, and what its thread says — every key in [docs/paperclip.md](docs/paperclip.md). `statusMap` (no env var) renames any of the buckets `todo`, `in_progress`, `in_review`, `done`, `cancelled`. Top-level only. `npm run build && npm run paperclip:register [-- config-path]` registers the agent with every wake path off and writes `agentId` back into the file; `npm run paperclip:doctor [-- --config config-path]` then checks the integration read-only (health, company, agent-registered, wake-on-demand, heartbeat-enabled, config-complete) and exits non-zero on any FAIL |
 
 #### Lifecycle labels
 
-Set any subset; the rest keep their defaults. The five names must be distinct, and none may equal a repo's `triggerLabel` — the config fails to load otherwise.
+Set any subset; the rest keep their defaults. The names must be distinct, and none may equal a repo's `triggerLabel` — the config fails to load otherwise.
 
 ```json
 {
   "lifecycleLabels": {
     "prUnderReview": "pr under review",
+    "prMerged": "pr merged",
     "prPendingActions": "pr pending actions",
     "prApproved": "pr approved",
     "readyForProd": "ready for prod release",
+    "releasePending": "release pending",
+    "prodVerifyHeld": "prod verification held",
     "readyToClose": "ready to close"
   }
 }
@@ -175,9 +179,9 @@ Set any subset; the rest keep their defaults. The five names must be distinct, a
 Every Claude session the daemon spawns (implement, revise, review) gets the names in its environment, so a skill can use the configured names in place of its own literals:
 
 - `FOREMAN_TRIGGER_LABEL`: the repo's `triggerLabel`, e.g. for `gh issue list --label "$FOREMAN_TRIGGER_LABEL"`
-- `FOREMAN_LIFECYCLE_LABELS`: the five names as a JSON object with the keys above
+- `FOREMAN_LIFECYCLE_LABELS`: the names as a JSON object with the keys above
 
-To create the labels on your repos, run `npm run build && npm run labels:install` (or ask Claude Code in this repo to "install the labels" — the `install-labels` skill runs the same thing). Per repo it creates whichever of the `triggerLabel` and five lifecycle names are missing, prints `<repo>: created N, present M`, and never changes or deletes an existing label. A failed repo is listed at the end and the exit code is 1.
+To create the labels on your repos, run `npm run build && npm run labels:install` (or ask Claude Code in this repo to "install the labels" — the `install-labels` skill runs the same thing). Per repo it creates whichever of the `triggerLabel` and lifecycle names are missing, prints `<repo>: created N, present M`, and never changes or deletes an existing label. A failed repo is listed at the end and the exit code is 1.
 
 ### Back-offs
 
@@ -346,20 +350,24 @@ the skill is never run without it.
 ## Pipeline stages
 
 `stages` sets which stages a repo pass runs and in what order. Omitted, it is the
-seven built-ins in the order above — an existing config runs unchanged:
+built-ins in the order above (verify only with `srePath`; release only with both
+`srePath` and `techLeadPath`, otherwise skipped with a startup warning):
 
 ```json
 { "stages": [
-  { "type": "reconcile" }, { "type": "review" }, { "type": "revise" }, { "type": "implement" },
-  { "type": "branch-sync" }, { "type": "dependabot" }, { "type": "promote" }
+  { "type": "reconcile" }, { "type": "review" }, { "type": "verify" }, { "type": "revise" },
+  { "type": "implement" }, { "type": "branch-sync" }, { "type": "dependabot" }, { "type": "promote" },
+  { "type": "release" }
 ] }
 ```
 
 Leave a built-in out and it never runs; reorder them and you give up what the
 default order guarantees (review before implement, so review only sees PRs
-labeled in an earlier pass; promote last, so it sees labels this pass just set).
+labeled in an earlier pass; promote late, so it sees labels this pass just set;
+release after promote, so it acts on the PR promote just opened or updated).
 Each stage may appear once. A `reviewEnabled` repo needs `techLeadPath` only when
-`review` is in `stages`.
+`review` is in `stages`. An explicit `release` needs both `srePath` and `techLeadPath`;
+the config is refused at startup otherwise.
 
 ### Custom stages
 

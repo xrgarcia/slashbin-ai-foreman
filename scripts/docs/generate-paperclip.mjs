@@ -96,6 +96,9 @@ const WHEN = {
   releaseWaiting: "The issue is in an open release pull request (base branch → production branch). Written once per release pull request.",
   released: "That release pull request merges to the production branch.",
   inProduction: "Promotion finds the issue's work already on the production branch, with no release pull request left to merge.",
+  releaseQueued: "With the release stage on: promote lists the issue in the release pull request it owns (`ready for prod release` → `release pending`). The Tech Lead approves it, the SRE deploys it, and the SRE verifies production next.",
+  prodHeld: "The release merged to the production branch but its prod verification (or its 30-minute soak) held or failed: the issue is reopened if it was closed and re-verified on a back-off.",
+  prodVerified: "The SRE verified the release in production: the Foreman tags the merge commit and closes the issue with one comment.",
   releaseClosed: "That release pull request is closed without merging; the task stays in review until the next one.",
   backoffPause: "A GitHub or Claude limit pauses the build in progress.",
   backoffResume: "The build in progress resumes after that limit clears.",
@@ -137,8 +140,11 @@ const STAGE_WHEN = {
   revising: "A revision session is running on it.",
   merged: "Merged to the base branch; waiting for dev verification.",
   verifying: "A dev-verification session is running on it.",
-  pendingVerification: "Approved and merged to the base branch; waiting for verification before release.",
-  awaitingRelease: "Verified (or in an open release pull request); waiting for the release to merge.",
+  pendingVerification: "Dev-verified (`pr approved`); waiting for the EM's verification and `ready for prod release`.",
+  releaseAuthorized: "The EM authorized the release (`ready for prod release`); promote puts it in the release pull request next.",
+  awaitingRelease: "In an open release pull request a person merges (the release stage is off); waiting for the release to merge.",
+  releasing: "In the release pull request the Foreman owns (`release pending`): Tech Lead approval, SRE deploy and prod verification.",
+  prodVerifyHeld: "Merged to production, but prod verification held (`prod verification held`); the SRE re-verifies it on a back-off.",
   blocked: "Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries.",
 };
 const stageKeys = [...PAPERCLIP_STAGES];
@@ -165,7 +171,7 @@ const bucketOf = (move) => (move === null ? null : move === "done" ? move : move
 const setters = (b) => {
   const by = stepIds.filter((s) => bucketOf(PAPERCLIP_STEPS[s].stage) === b).map(code);
   if (b === PAPERCLIP_CREATE_STATUS) by.unshift("task creation");
-  return by.length ? by.join(", ") : "never by default — the Foreman does not close issues";
+  return by.length ? by.join(", ") : "never by default";
 };
 const statusRows = buckets.map((b) => `| ${code(b)} | ${setters(b)} | ${code(`statusMap.${b}`)}, else ${code(b)} |`);
 
@@ -265,6 +271,12 @@ leaves the open set, one GitHub read says whether it merged or was closed. The p
 being waited on is saved per repo, so a merge that lands while the Foreman is down is seen at
 the next start. \`cancelled\` is left to whatever else syncs GitHub issues into the same
 company.
+
+With the release stage on (both \`srePath\` and \`techLeadPath\` set) a merged release is not
+\`done\` yet: the issue goes \`releaseAuthorized\` → \`releasing\` (in the release pull request
+the Foreman owns) and reaches \`done\` only when the SRE verifies it in production and the
+Foreman closes it. A held verification moves it to \`prodVerifyHeld\` (\`in_review\`: the Foreman
+is still acting on it), and a STOP that needs a person to \`blocked\`. See docs/lifecycle.md.
 
 An issue that needs a person goes to the \`blocked\` stage: the source labels it \`blocked\`,
 or the Foreman declines it or runs out of revision retries (\`blocked\` step). It is held by

@@ -17,7 +17,7 @@ Never type a label name from memory. The Foreman hands you the configured names:
 - `FOREMAN_TRIGGER_LABEL` — the label that marks an issue as ready to build.
 - `FOREMAN_LIFECYCLE_LABELS` — a JSON object of the lifecycle labels
   (`prUnderReview`, `prMerged`, `prPendingActions`, `prApproved`, `readyForProd`,
-  `readyToClose`). Read one with, for example:
+  `releasePending`, `prodVerifyHeld`, `readyToClose`). Read one with, for example:
   `node -e 'console.log(JSON.parse(process.env.FOREMAN_LIFECYCLE_LABELS).prUnderReview)'`
 - `FOREMAN_BLOCKED_LABEL` — the label that holds an issue back (default `blocked`).
 - `FOREMAN_PRIORITY_LABELS` — a JSON array of priority tiers, highest first. Each
