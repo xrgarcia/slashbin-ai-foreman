@@ -26,6 +26,8 @@ before(() => {
   const bin = join(tmp, "bin");
   capture = join(tmp, "prompt.txt");
   mkdirSync(bin);
+  // The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+  writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
   writeFileSync(join(bin, "claude"),
     `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(capture)}, process.argv[3]);\n` +
     `process.stdout.write("done\\n");\n`);

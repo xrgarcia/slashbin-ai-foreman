@@ -127,6 +127,8 @@ before(() => {
   const bin = join(tmp, "bin");
   argvLog = join(tmp, "argv.jsonl");
   mkdirSync(bin);
+  // The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+  writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
   mkdirSync(join(tmp, "repo"));
   writeFileSync(join(bin, "claude"),
     `#!/usr/bin/env node\nrequire("fs").appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
