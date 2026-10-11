@@ -196,6 +196,12 @@ Type: string · Default: none · Env: `AI_AGENT_SRE_PATH`
 
 The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved. Unset = no verify stage: the review run verifies and labels as before.
 
+### `sreDeployMaxDurationMs`
+
+Type: integer · Default: `7200000` (2 h) · Env: `AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS`
+
+The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex run and a prod-verification Codex run of up to 40 min each, plus the merge and the deploy wait. The Foreman kills the deploy only past this; a deploy killed after its merge is finished on the next pass from the saved state. Default 2 h.
+
 ### `reviewEnabled`
 
 Type: boolean · Default: `false` · Per repo: yes, falls back to this value
@@ -268,9 +274,9 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 ### `stages`
 
-Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `revise` → `implement` → `branch-sync` → `dependabot` → `promote`
+Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `revise` → `implement` → `branch-sync` → `dependabot` → `promote` → `release`
 
-The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the eight built-ins in today's order, so an existing .ai-agent.json runs exactly as before. A custom stage is `{ id, skillPath }`: one Claude session on that skill when the pass reaches it. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the nine built-ins in order; the last, `release`, runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill when the pass reaches it. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 
@@ -325,6 +331,8 @@ which only means it retries sooner.
 | `agentUnavailable` | 2 min, 4 min, 8 min, 16 min, 30 min | none |
 | `approvedUnmerged` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 4 h | none |
 | `repoFailure` | 5 min, 10 min, 20 min, 40 min, 1 h | `maxFailures` 2 |
+| `releaseRetry` | 5 min, 10 min, 20 min, 40 min, 1.3 h, 2 h | none |
+| `prodVerifyRetry` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 5.3 h, 6 h | none |
 | `upstream` | 2 min, 4 min, 8 min, 16 min, 32 min, 1 h | none |
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
 | `stuckMergeGraceMs` | 15 min | — |
@@ -404,6 +412,26 @@ A repo whose implement or review sessions failed `maxFailures` times in a row pa
 | `factor` | `2` | `AI_AGENT_BACKOFF_REPO_FAILURE_FACTOR` |
 | `maxFailures` | `2` | `AI_AGENT_BACKOFF_REPO_FAILURE_MAX_FAILURES` |
 
+### `backoff.releaseRetry`
+
+The release stage could not finish a release this pass for a passing reason: the Tech Lead's approval or the SRE's deploy could not run (exit 3, a timeout, an error), or the SRE did not merge for a reason that is not a STOP (the head moved, the merge was refused). The release PR is tried again after one window, longer each time; a merge clears it. Default 5 min rising to 2 h.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `300000` (5 min) | `AI_AGENT_BACKOFF_RELEASE_RETRY_BASE_MS` |
+| `capMs` | `7200000` (2 h) | `AI_AGENT_BACKOFF_RELEASE_RETRY_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_RELEASE_RETRY_FACTOR` |
+
+### `backoff.prodVerifyRetry`
+
+A release that merged but whose prod verification held or failed. The SRE re-verifies production after one window, longer each time, with no attempt cap: the issue stays open at `prod verification held` until a pass closes it or a person steps in. A `hold=wait-until-…` time the SRE reports wins when it is later. Default 10 min rising to 6 h.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `600000` (10 min) | `AI_AGENT_BACKOFF_PROD_VERIFY_RETRY_BASE_MS` |
+| `capMs` | `21600000` (6 h) | `AI_AGENT_BACKOFF_PROD_VERIFY_RETRY_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_PROD_VERIFY_RETRY_FACTOR` |
+
 ### `backoff.upstream`
 
 GitHub's rate limit or Claude's session limit refused work. The whole daemon pauses that upstream; a GitHub reset time it reports wins over the window. Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` / `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
@@ -460,8 +488,10 @@ The names must be distinct, and none may equal a repo's `triggerLabel`. Every se
 | `prUnderReview` | `pr under review` | Implement/revise opened or updated a PR; the review phase picks it up. |
 | `prMerged` | `pr merged` | Reviewed and merged to the base branch; dev verification pending. The verify stage picks it up and moves it to prApproved (EM#440). Only written when `srePath` is configured — without a verify stage nothing would read it. |
 | `prPendingActions` | `pr pending actions` | Review asked for changes (or CI is red); the revise phase picks it up. |
-| `prApproved` | `pr approved` | Merged and verified in dev; awaiting the EM outcome-gate. |
-| `readyForProd` | `ready for prod release` | The EM outcome-gate's signature — authorizes production. The daemon never applies it on its own judgement (see GitHubIssueConnector.reportState); it only puts back one a review run removed (restoreEmGate). |
+| `prApproved` | `pr approved` | Merged and verified in dev; awaiting EM verification. The name stays `pr approved` because the human lanes write it too. |
+| `readyForProd` | `ready for prod release` | The EM's release authorization, applied after EM verification — the one lifecycle label the Foreman never applies on its own judgement; it only puts back one a review run removed (restoreEmGate). The promote stage moves it to releasePending once a release PR carries the issue. |
+| `releasePending` | `release pending` | In a release PR the Foreman owns: the release stage has the Tech Lead approve it and the SRE merge, deploy and verify it in production. Replaces readyForProd when the promote stage opens or updates the release PR. |
+| `prodVerifyHeld` | `prod verification held` | Deployed, but the SRE's prod verification held or failed. The issue stays open (reopened if GitHub's keywords closed it at the merge) and the release stage re-verifies it on the prodVerifyRetry back-off; a pass closes it. |
 | `readyToClose` | `ready to close` | Promoted; awaiting the close. Read here only to keep such issues out of the actionable set. |
 
 ## GitHub conventions (`github`)
@@ -484,6 +514,7 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 | `syncTitle` | `"chore: sync {base} with {production} (merge commits backfill)"` | Title of the PR that merges production back into base after a promotion. {base} and {production} are the two branch names. |
 | `reconcileTitle` | `"feat: implement #{N}"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number. |
 | `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the feature branch. |
+| `releaseTagFormat` | `"release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"` | Name of the annotated git tag the release stage puts on a release PR's merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date, {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must appear so two releases never share a name. A plain annotated tag only, never a GitHub Release: jerky_shipping's desktop pipeline (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases and tags at HEAD to decide whether a commit is already released, so a Release on main's merge commit would suppress its desktop build. Never starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a `release-` name stays out of its version history. |
 | `signature` | `"Automated by slashbin-ai-agent"` | The last line of every PR body the Foreman writes. Empty writes none. No "#<number>": every #N in a promotion PR's body is read as an issue it carries. |
 
 ## Elsewhere

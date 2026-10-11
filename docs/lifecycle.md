@@ -31,10 +31,13 @@ Where an item can be. The `…ing` stages exist only while a session runs.
 | `revising` | A revise session is addressing the review. |
 | `merged` | Merged to the base branch; waiting for dev verification. |
 | `verifying` | A verify session is checking it in dev. |
-| `pendingVerification` | Approved (verified, or merged with no verify stage); waiting for the release gate. |
-| `awaitingRelease` | In an open release PR, or marked ready for production. |
+| `pendingVerification` | Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization. |
+| `releaseAuthorized` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
+| `awaitingRelease` | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
+| `releasing` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
+| `prodVerifyHeld` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
 | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
-| `done` | In production. Closing it is the EM's act after prod verification. |
+| `done` | Closed by the Foreman after the SRE's prod verification passed. |
 
 ## Moves
 
@@ -51,11 +54,17 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `reviewMerged` | inReview | merged | `merged` | The review approved and merged; dev verification is next. |
 | `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, or a stranded changes-requested verdict is caught up. |
 | `revised` | changesRequested | inReview | `inReview` | A revise session pushed changes; back to review. |
-| `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed. |
+| `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`. |
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |
 | `recoverFailed` | unknown | changesRequested | `changesRequested` | Dead-zone recovery: a fresh verification failed. |
 | `recoverMerged` | unknown | merged | `merged` | Dead-zone recovery with a verify stage: the merge is recorded and verification follows. |
 | `release` | unknown | queued | `approved` | An orphan: in review with no open PR; released back to the queue. |
+| `releaseQueued` | releaseAuthorized | releasing | `releasing` | The promote stage put an EM-authorized item in the release PR (opened, updated, or already listing it), or found its work already in production with no prod verification on record. |
+| `alreadyReleased` | releaseAuthorized | released | `done` | Authorized, its work already in production, and a passed prod verification on record for it: closed. |
+| `prodVerified` | releasing | released | `done` | The release PR merged (tagged) and the SRE's prod verification passed: commented and closed. |
+| `prodHeld` | releasing | prodVerifyHeld | `prodVerifyHeld` | The release PR merged (tagged) but prod verification held, failed or did not run: labelled, reopened if GitHub's keywords closed it, re-verified on a back-off. |
+| `prodReverified` | prodVerifyHeld | released | `done` | A later prod re-verification passed: commented and closed. |
+| `soakHeld` | released | prodVerifyHeld | `prodVerifyHeld` | Closed after prod verification, but the SRE's 30-minute soak held or failed: reopened, labelled, re-verified on a back-off. |
 
 ```mermaid
 stateDiagram-v2
@@ -72,6 +81,12 @@ stateDiagram-v2
   unknown --> changesRequested: recoverFailed
   unknown --> merged: recoverMerged
   unknown --> queued: release
+  releaseAuthorized --> releasing: releaseQueued
+  releaseAuthorized --> released: alreadyReleased
+  releasing --> released: prodVerified
+  releasing --> prodVerifyHeld: prodHeld
+  prodVerifyHeld --> released: prodReverified
+  released --> prodVerifyHeld: soakHeld
 ```
 
 ## Sessions
@@ -92,6 +107,44 @@ While a session runs it holds its items in a stage; when it ends with nothing ne
 | open | `awaitingRelease` |
 | merged | `done` |
 | closed | where they were |
+
+With the release stage on, a merge is not the end: the moves after it (`prodVerified`, `prodHeld`) place each item again in the same pass.
+
+### The release stage
+
+`release` is a built-in stage after `promote`, with no Claude session. It is on by default only when both
+`srePath` and `techLeadPath` are set; otherwise it is skipped with a startup warning, and an explicit
+`release` in `stages` without both is refused at startup. From merge to close the Foreman writes every
+lifecycle label; the one label a person writes is the EM's `ready for prod release`.
+
+1. **Promote** moves each `ready for prod release` issue into the release PR and to `release pending`
+   (also when it updates an existing PR). When the base branch has nothing to promote (a 0-file diff),
+   the issue's work is already in production: it is closed only on evidence (a passed prod verification
+   the release stage recorded for it, in `.agent-state.json`, at the commit production is at now);
+   otherwise it gets `release pending` and the release stage verifies it.
+2. **Tech Lead** approves the release PR at its exact head (`tech-lead.mjs approve-promotion`). A refusal
+   blocks the PR's issues with a comment; anything other than approve or refuse backs off (`backoff.releaseRetry`).
+3. **SRE** merges, deploys and verifies (`sre.mjs deploy`, up to `sreDeployMaxDurationMs`). Its
+   `SRE_DEPLOY` trailer decides the outcome: only `hold=predeploy-stop` blocks; every other hold, and
+   any run without a trailer, is retried.
+4. **Tag.** Once merged, the merge commit gets an annotated tag named by `github.releaseTagFormat`
+   (reused if one is already there). Never a GitHub Release object, never a `v` prefix.
+5. **Close or hold.** A pass comments on each issue (tag, merge commit, evidence), strips its lifecycle
+   labels and closes it. A hold or fail labels it `prod verification held`, reopens it if GitHub's
+   keywords closed it, comments the reason, and re-verifies (`sre.mjs verify --mode prod`) on
+   `backoff.prodVerifyRetry`. No issue is ever left closed-but-unverified or open-but-unlabelled.
+6. **Soak.** At least 30 minutes after the merge, the stage runs `sre.mjs verify --mode soak` once;
+   a hold or fail reopens the issues to `prod verification held`.
+
+**Adoption.** A base → production PR merged in the last 48 hours by anyone else, whose lifecycle issues
+this stage has not closed, is adopted: no Tech Lead or deploy, but a prod verification (or the result of
+an existing `## Production Verification` comment), the tag, the soak, and the same close/hold paths.
+Issues the SRE's promotion-verify sweep marked `blocked` ("**Production release check needs a person.**")
+are moved to `prod verification held`. The SRE's promotion-verify-sweep (a systemd timer on the owner's
+desktop) is retired once this ships.
+
+The promote and release path sends nothing to Discord: what needs a person is a comment and a label
+on the issue, which also moves its Paperclip card.
 
 ## Events
 

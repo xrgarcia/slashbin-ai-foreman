@@ -78,9 +78,10 @@ repo's entry instead of the top level):
 6. **The trigger label** — "Which label means 'build this'? Default `approved`."
 7. **Progress labels** — "The Foreman moves an issue through these labels: `pr under
    review`, `pr pending actions`, `pr merged`, `pr approved`, `ready for prod release`,
-   `ready to close`. Keep those names, or rename any?" Renamed ones go in
-   `lifecycleLabels` under their keys (`prUnderReview`, `prPendingActions`, `prMerged`,
-   `prApproved`, `readyForProd`, `readyToClose`).
+   `release pending`, `prod verification held`, `ready to close`. Keep those names, or
+   rename any?" Renamed ones go in `lifecycleLabels` under their keys (`prUnderReview`,
+   `prPendingActions`, `prMerged`, `prApproved`, `readyForProd`, `releasePending`,
+   `prodVerifyHeld`, `readyToClose`).
 8. **Hold and priority** — "An issue labelled `blocked` is never built. And when several
    issues are approved, the Foreman builds by priority labels: `S1`, then `security`,
    then `S2`+`bug`… down to `chore`. Do you use different labels for either?" Changes go
