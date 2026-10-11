@@ -6,7 +6,8 @@ import { stageTarget, liveRows, withStage, ensureStageLabels } from "../dist/pap
 import { issueStage } from "../dist/github-work-source.js";
 
 const L = { prUnderReview: "pr under review", prPendingActions: "pr pending actions", prApproved: "pr approved",
-  readyForProd: "ready for prod release", readyToClose: "ready to close" };
+  readyForProd: "ready for prod release", releasePending: "release pending", prodVerifyHeld: "prod verification held",
+  readyToClose: "ready to close" };
 
 test("issueStage: the latest lifecycle label wins; an open release PR is awaiting release", () => {
   assert.equal(issueStage(["approved"], false, L, "approved"), "approved");
@@ -14,7 +15,13 @@ test("issueStage: the latest lifecycle label wins; an open release PR is awaitin
   assert.equal(issueStage(["pr pending actions"], false, L, "approved"), "changesRequested");
   assert.equal(issueStage(["pr approved", "pr under review"], false, L, "approved"), "pendingVerification");
   assert.equal(issueStage(["pr approved"], true, L, "approved"), "awaitingRelease");
-  assert.equal(issueStage(["ready for prod release"], false, L, "approved"), "awaitingRelease");
+  // The release lifecycle (EM#578): the EM's authorization, the Foreman's release PR, a held prod verification.
+  assert.equal(issueStage(["ready for prod release"], false, L, "approved"), "releaseAuthorized");
+  assert.equal(issueStage(["ready for prod release"], true, L, "approved"), "releaseAuthorized");
+  assert.equal(issueStage(["release pending"], true, L, "approved"), "releasing");
+  assert.equal(issueStage(["release pending", "ready for prod release"], true, L, "approved"), "releasing");
+  assert.equal(issueStage(["prod verification held", "release pending"], false, L, "approved"), "prodVerifyHeld");
+  assert.equal(issueStage(["prod verification held", "blocked"], false, L, "approved"), "blocked");
   assert.equal(issueStage(["ready to close"], true, L, "approved"), "done");
   assert.equal(issueStage(["bug"], false, L, "approved"), null);
 });
@@ -59,6 +66,6 @@ test("ensureStageLabels: creates only the missing labels; a lost race (409) re-l
   const m = await ensureStageLabels(client, { agentId: "fm" });
   assert.equal(m.get("inReview"), "e1");
   assert.equal(m.get("changesRequested"), "race");
-  assert.equal(created.length, 4);
-  assert.equal(m.size, 6);
+  assert.equal(created.length, 7);
+  assert.equal(m.size, 9);
 });

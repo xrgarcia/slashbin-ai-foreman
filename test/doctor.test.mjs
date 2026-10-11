@@ -17,12 +17,15 @@ import { findConfigFile } from "../dist/config.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOCTOR = join(root, "scripts", "doctor.mjs");
-const LABELS = ["approved", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release", "ready to close", "blocked"];
+const LABELS = ["approved", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release",
+  "release pending", "prod verification held", "ready to close", "blocked"];
 const TOKEN = "ghp_doctor_test_value_never_printed";
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-doctor-test-"));
 const bin = join(tmp, "bin");
 mkdirSync(bin);
+// The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
 writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
 const fs = require("fs");
 const a = process.argv.slice(2);
@@ -68,10 +71,12 @@ const ready = () => ({ push: true, branches: ["features", "develop", "main"], la
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
 
 test("a ready install passes every check, exits 0, and never prints the token", () => {
-  const run = arrange({ repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] }, { "acme/a": ready() });
-  const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN, TECHLEAD_GITHUB_KEY: TOKEN });
+  // Ready includes the release stage (EM#578): it needs the Tech Lead and the SRE.
+  const run = arrange({ techLeadPath: tmp, srePath: tmp, repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] }, { "acme/a": ready() });
+  const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN, TECHLEAD_GITHUB_KEY: TOKEN, SRE_GITHUB_KEY: TOKEN });
   assert.equal(r.status, 0, r.out);
   assert.doesNotMatch(r.out, /^(FAIL|WARN)/m, r.out);
+  assert.match(r.out, /^PASS  release stage — /m, r.out);
   for (const check of ["node", "claude", "gh", "config", "FOREMAN_GITHUB_TOKEN", "a: checkout", "a: github", "a: branches", "a: skillPath", "a: labels"]) {
     assert.match(r.out, new RegExp(`^PASS  ${check} — `, "m"), `${check}\n${r.out}`);
   }
@@ -106,7 +111,8 @@ test("each missing piece is a FAIL that names its fix; the run exits 1", () => {
 });
 
 test("renamed labels are the ones checked", () => {
-  const labels = ["go", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release", "ready to close", "on hold"];
+  const labels = ["go", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release",
+    "release pending", "prod verification held", "ready to close", "on hold"];
   const cfg = { triggerLabel: "go", github: { blockedLabel: "on hold" }, repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] };
   assert.equal(arrange(cfg, { "acme/a": { ...ready(), labels } })().status, 0);
   assert.match(arrange(cfg, { "acme/a": ready() })().out, /^FAIL  a: labels — missing "go", "on hold"/m);
@@ -121,6 +127,8 @@ test("tokens: review without the reviewer's token fails; an SRE path needs its t
   const w = arrange({ repos: [{ name: "a", githubRepo: "acme/a" }] }, { "acme/a": ready() })();
   assert.match(w.out, /^WARN  FOREMAN_GITHUB_TOKEN — unset/m);
   assert.match(w.out, /^WARN  TECHLEAD_GITHUB_KEY — unset — branch-sync PRs/m);
+  // No Tech Lead or SRE: the default stages carry release, so it is skipped, and said so.
+  assert.match(w.out, /^WARN  release stage — release stage skipped: techLeadPath and srePath not set/m);
 });
 
 test("no config: one FAIL that says how to create it, and nothing else is tried", () => {
