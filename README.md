@@ -286,8 +286,6 @@ Set these environment variables to enable status updates in Discord. The Foreman
 
 | Env Var | Description |
 |---|---|
-| `DISCORD_BOT_ID` | Your Discord bot's application ID |
-| `DISCORD_STATUS_CHANNEL` | Channel ID for status messages |
 
 ### GitHub tokens
 
