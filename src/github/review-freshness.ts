@@ -118,6 +118,31 @@ export function currentVerdictRequestsChanges(
 }
 
 /**
+ * When the reviewer's latest verdict on the PR is APPROVED, the time it was
+ * submitted (ms); otherwise null. Lookup failure → null: the pre-existing skip.
+ */
+export function currentApprovalMs(
+  config: RepoConfig,
+  prNumber: number,
+  reviewerLogin: string | undefined,
+  logger: Logger,
+): number | null {
+  try {
+    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+    };
+    const verdicts = (data.reviews ?? [])
+      .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+      .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
+    const last = verdicts[verdicts.length - 1];
+    return last?.state === "APPROVED" ? new Date(last.submittedAt!).getTime() : null;
+  } catch (err) {
+    logger.debug(`currentApprovalMs lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
  * True when a linked issue was labelled `prUnderReview` AFTER the reviewer's
  * latest CHANGES_REQUESTED verdict — the reviser answered without a commit.
  *

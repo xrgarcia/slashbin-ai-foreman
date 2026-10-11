@@ -5,7 +5,8 @@ import type { Logger } from "../logger.js";
 import { isGitHubStateEnabled, stateOpenIssues } from "../github-state.js";
 import { findOpenPrs, getOpenIssues, hasLabel, issueCacheTtlMs } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
-import { currentVerdictRequestsChanges, hasFreshReview, returnedToReviewSinceVerdict } from "./review-freshness.js";
+import { BackoffTracker, backoffSettings } from "../backoff.js";
+import { currentApprovalMs, currentVerdictRequestsChanges, hasFreshReview, returnedToReviewSinceVerdict } from "./review-freshness.js";
 
 
 // --- Revision Gate ---
@@ -116,6 +117,35 @@ export interface ReviewCandidate {
 }
 
 /**
+ * An APPROVED feature PR that is still open: the merge after the approval never
+ * happened, and a current APPROVE is never reviewed again, so nothing would
+ * offer it. On 2026-10-10 GitHub refused five merges while required checks ran
+ * (HTTP 405) — Slashbin-console #1271 among them — and each PR sat approved and
+ * unmerged for five hours, holding its repo's implement queue. It is offered
+ * again once the approval is one `backoff.approvedUnmerged` window old, then
+ * after each longer window while it stays open (an author hold keeps it open on
+ * purpose). Keyed by the approval: a new verdict starts the count again.
+ */
+export const approvedUnmergedWaits = new BackoffTracker();
+
+export function approvedUnmergedDue(
+  config: RepoConfig,
+  prNumber: number,
+  reviewerLogin: string | undefined,
+  logger: Logger,
+  now = Date.now(),
+): boolean {
+  const at = currentApprovalMs(config, prNumber, reviewerLogin, logger);
+  if (at === null) return false;
+  const w = backoffSettings().approvedUnmerged;
+  const key = `${config.githubRepo}#${prNumber}@${at}`;
+  if (now - at < w.baseMs || approvedUnmergedWaits.waiting(key, now)) return false;
+  approvedUnmergedWaits.start(key, w, now);
+  logger.warn(`${config.name}: PR #${prNumber} was approved but is still open — the merge never happened; offering it to the reviewer again`);
+  return true;
+}
+
+/**
  * Gate check for the review phase: is there an open feature PR whose linked
  * issue(s) are labeled `pr under review` (set by implement/revise) and that has
  * NOT already been reviewed by the EM at its current head?
@@ -180,6 +210,9 @@ export function findPRsNeedingReview(
           logger.warn(`${config.name}: PR #${pr.number} has a current CHANGES_REQUESTED verdict but its issues are still "${prUnderReview}" — stranded; the review phase sends them to revise`);
           return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [], stranded: true };
         }
+        if (approvedUnmergedDue(config, pr.number, reviewerLogin, logger)) {
+          return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [] };
+        }
         logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin ?? "reviewer"} review — skipping re-review`);
         return null;
       }
@@ -237,7 +270,8 @@ export function adoptOrphanedReviewCandidate(
   if (prs.length === 0) return null;
   const pr = prs[0];
 
-  if (hasFreshReview(config, pr.number, reviewerLogin, logger)) return null;
+  if (hasFreshReview(config, pr.number, reviewerLogin, logger)
+    && !approvedUnmergedDue(config, pr.number, reviewerLogin, logger)) return null;
 
   const { prUnderReview, prPendingActions, readyForProd } = config.lifecycleLabels;
   const refs = new Set<number>();
