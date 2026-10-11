@@ -378,12 +378,14 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * @internal
    */
   releaseQueued(config: RepoConfig, num: number, logger: Logger): boolean {
-    const { readyForProd, releasePending } = config.lifecycleLabels;
+    const { readyForProd, prApproved, releasePending } = config.lifecycleLabels;
     try {
       const issue = viewIssue(config, num);
       if (!issue) return false;
       const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
-      if (issue.labels.includes(readyForProd)) args.push("--remove-label", readyForProd);
+      // `pr approved` goes too: on its own it means "waiting on the EM", and the EM
+      // finds its queue by that label. An issue in a release is no longer waiting on it.
+      for (const l of [readyForProd, prApproved]) if (issue.labels.includes(l)) args.push("--remove-label", l);
       if (!issue.labels.includes(releasePending)) args.push("--add-label", releasePending);
       if (args.length === 5) return false;
       gh(args, config.repoPath);
