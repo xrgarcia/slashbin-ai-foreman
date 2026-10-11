@@ -2,7 +2,6 @@ import type { AgentConfig } from "./config.js";
 import { loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
-import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
 import { join } from "node:path";
 import { configureIssueCache, gh } from "./github.js";
 import {
@@ -29,27 +28,9 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   let sleepResolve: (() => void) | null = null;
   let activeConfig = config;
 
-  // --- Discord Bridge ---
-  let bridge: BridgeClient | null = null;
-  const bridgeUrl = process.env.DISCORD_BRIDGE_URL || "ws://127.0.0.1:9800";
-  const discordBotId = process.env.DISCORD_BOT_ID;
-  const statusChannel = process.env.DISCORD_STATUS_CHANNEL;
-  if (discordBotId && statusChannel) {
-    const bridgeConfig: BridgeConfig = {
-      url: bridgeUrl,
-      agentId: "foreman",
-      discordBotId,
-      channels: {
-        status: statusChannel,
-        listen: [],  // Foreman is status-only — does not respond to commands
-      },
-    };
-    bridge = new BridgeClient(bridgeConfig, logger);
-    bridge.connect();
-    logger.info("Discord bridge client initialized", { url: bridgeUrl, statusChannel });
-  } else {
-    logger.debug("Discord bridge disabled — DISCORD_BOT_ID and DISCORD_STATUS_CHANNEL not set");
-  }
+  // No Discord (owner, 2026-10-11: "GitHub and Paperclip are where Foreman should be
+  // posting important messages"). What needs a person is a label and comment on the
+  // issue, which also moves its Paperclip card; everything else is this log.
 
   // One open-issue snapshot per repo per cycle, instead of one GraphQL request
   // per discovery lookup. See the block comment above `getOpenIssues`.
@@ -90,12 +71,10 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   });
 
   // One daemon-wide back-off per upstream (GitHub rate limit, Claude session
-  // limit). Every transition is logged AND sent once to Discord — never per repo.
+  // limit). Every transition is logged once — never per repo — and the Paperclip
+  // mirror shows the pause from its `backoff` event.
   configureUpstreamBackoff({
-    notify: (text, level) => {
-      logger.warn(text);
-      bridge?.sendStatus(`**FOREMAN:** ${text}`, level);
-    },
+    notify: (text) => logger.warn(text),
     logger,
   });
 
@@ -232,11 +211,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         try {
           const result = await runRepoPass(repoConfig, activeConfig, logger);
           didWork = result.processed > 0;
-          if (bridge) {
-            for (const event of result.events) {
-              bridge.sendStatus(`**FOREMAN:** ${event.message}`, event.level);
-            }
-          }
+          for (const event of result.events) logger[event.level](event.message);
         } catch (err) {
           // A pass cut short by the GitHub back-off is expected, and the back-off
           // module has already announced it once — no per-repo message.
@@ -249,10 +224,6 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
           repoLogger.error("Repo pass failed", {
             error: err instanceof Error ? err.message : String(err),
           });
-          bridge?.sendStatus(
-            `**FOREMAN:** ${repoName} pass error — ${err instanceof Error ? err.message : String(err)}`,
-            "error",
-          );
         }
 
         // Stop BEFORE the fast re-loop: a pass that did work used to go straight
@@ -361,7 +332,6 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       }
     }
 
-    bridge?.shutdown();
     logger.info("Shutdown complete");
   };
 
