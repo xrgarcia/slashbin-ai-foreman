@@ -29,6 +29,20 @@ if (!existsSync(ADAPTERS_SRC)) fail(`${ADAPTERS_SRC} not found.`);
 if (!existsSync(built)) fail(`${built} not found — run \`npm run build\` first.`);
 
 const { STAGES, STAGE_MEANING, STATE_STAGE, MOVES, SESSION_STAGE, SESSION_FALLBACK_STAGE, RELEASE_STAGE } = await import(built);
+const { issueStage, SOURCE_BLOCKED_LABEL } = await import(join(root, "dist", "github-work-source.js"));
+const { defaultLifecycleLabels } = await import(join(root, "dist", "config.js"));
+
+// --- What marks each stage on a GitHub issue, read back through issueStage itself ---
+// (the function the board and the EM's queue use), so this column cannot drift from it.
+
+const TRIGGER = "approved";
+const STAGE_MARK = {};
+for (const l of [TRIGGER, SOURCE_BLOCKED_LABEL, ...Object.values(defaultLifecycleLabels())]) {
+  const st = issueStage([l], false, defaultLifecycleLabels(), TRIGGER);
+  if (st) STAGE_MARK[st] = [...(STAGE_MARK[st] ?? []), `\`${l}\``];
+}
+STAGE_MARK[issueStage([], true, defaultLifecycleLabels(), TRIGGER)] = ["an open release PR names it"];
+STAGE_MARK.done = ["closed", ...(STAGE_MARK.done ?? [])];
 
 // --- Event kinds: the union in adapters.ts, described here ---
 
@@ -87,9 +101,15 @@ out(
   "",
   "Where an item can be. The `…ing` stages exist only while a session runs.",
   "",
-  "| Stage | Meaning |",
-  "|---|---|",
-  ...[...STAGES, "done"].map((s) => `| ${code(s)} | ${STAGE_MEANING[s]} |`),
+  "On a GitHub issue each stage is one label. Where an issue carries more than one, the stage is",
+  "the first that applies in `issueStage` (`src/github-work-source.ts`): `blocked`, `done`,",
+  "`prodVerifyHeld`, `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on",
+  "back to `approved`. The Foreman writes every label except the EM's `ready for prod release`;",
+  "`pendingVerification` is the one stage waiting on the EM.",
+  "",
+  "| Stage | Label | Meaning |",
+  "|---|---|---|",
+  ...[...STAGES, "done"].map((s) => `| ${code(s)} | ${(STAGE_MARK[s] ?? ["— (a session holds it)"]).join(" or ")} | ${STAGE_MEANING[s]} |`),
   "",
   "## Moves",
   "",
