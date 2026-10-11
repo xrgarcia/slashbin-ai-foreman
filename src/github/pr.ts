@@ -4,7 +4,7 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { isGitHubStateEnabled } from "../github-state.js";
 import { findOpenPrs, formatGhError, ghKeyed, issueCacheTtlMs, knownOpenPr, openPrVersion } from "./cache.js";
-import { extractImplementedIssues } from "./discovery.js";
+import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 
 
 // --- PR Verification ---
@@ -67,12 +67,11 @@ export function getReferencedIssuesFromOpenPR(
     // bare `(#N)` mention in the free-text body. A schema PR whose body said
     // "the forthcoming handler (#2) will..." otherwise falsely marked #2
     // implemented, orphaning it. (slashbin-ai-foreman#28)
-    const commits = (pr.commits || []) as { messageHeadline?: string; messageBody?: string }[];
+    const commits = (pr.commits || []) as PrCommit[];
     return extractImplementedIssues({
       title: pr.title || "",
       body: pr.body || "",
-      commitHeadlines: commits.map((c) => c.messageHeadline || ""),
-      commitBodies: commits.map((c) => c.messageBody || ""),
+      commits,
     });
   } catch (err) {
     logger?.warn("getReferencedIssuesFromOpenPR: gh pr list failed", { ...formatGhError(err), repo, headBranch, baseBranch });
@@ -109,7 +108,7 @@ export function findOpenFeaturePR(
   ], config.repoPath);
   const prs = JSON.parse(json || "[]") as Array<{
     number: number; title?: string; body?: string; headRefOid?: string;
-    commits?: { messageHeadline?: string; messageBody?: string }[];
+    commits?: PrCommit[];
   }>;
   if (prs.length === 0) return null;
   const pr = prs[0];
@@ -120,8 +119,7 @@ export function findOpenFeaturePR(
     issueNumbers: extractImplementedIssues({
       title: pr.title || "",
       body: pr.body || "",
-      commitHeadlines: commits.map((c) => c.messageHeadline || ""),
-      commitBodies: commits.map((c) => c.messageBody || ""),
+      commits,
     }),
   };
 }

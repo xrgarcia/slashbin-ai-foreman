@@ -4,7 +4,7 @@
 import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { closedPrVersion, dropIssueSnapshot, findOpenPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel } from "./cache.js";
-import { extractImplementedIssues } from "./discovery.js";
+import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { gh } from "./gh.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
 import { backoffSettings } from "../backoff.js";
@@ -55,7 +55,7 @@ export function findIssuesMergedToBase(
       url: string;
       title?: string;
       body?: string;
-      commits?: { messageHeadline?: string; messageBody?: string }[];
+      commits?: PrCommit[];
       mergedAt?: string;
     }[];
 
@@ -66,8 +66,7 @@ export function findIssuesMergedToBase(
       const closed = extractImplementedIssues({
         title: pr.title || "",
         body: pr.body || "",
-        commitHeadlines: commits.map((c) => c.messageHeadline || ""),
-        commitBodies: commits.map((c) => c.messageBody || ""),
+        commits,
         strict: true,
       });
       for (const n of closed) {
