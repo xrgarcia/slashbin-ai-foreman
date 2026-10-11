@@ -14,19 +14,26 @@ export interface WorkItem {
 
 /**
  * The states the Foreman itself may move a work item into. There is no
- * ready-for-release and no done member, on purpose: the release gate is the
- * EM outcome-gate's signature (separation of duties, 2026-07-27) and closing
- * an item is the EM's act after prod verification. A connector refuses any
- * target outside this set.
+ * ready-for-release member, on purpose: the release gate is the EM's
+ * verification and signature (separation of duties, 2026-07-27), and a
+ * connector refuses any target outside this set. `released` is the close: the
+ * Foreman makes it only after the SRE's prod verification passed (EM#578;
+ * before that, closing was the EM's act).
  */
-export type WorkState = "queued" | "inReview" | "changesRequested" | "merged" | "approved";
+export type WorkState =
+  | "queued" | "inReview" | "changesRequested" | "merged" | "approved"
+  | "releasing" | "prodVerifyHeld" | "released";
 
 /**
  * What the caller believes the item's state is before the report. `unknown`
  * tells the connector to read the current state first and move only what is
- * actually there (dead-zone recovery, orphan release).
+ * actually there (dead-zone recovery, orphan release). `releaseAuthorized` is
+ * the EM's release authorization: a state the Foreman reads, never writes.
+ * `released` is a closed item whose 30-minute soak then held (EM#578).
  */
-export type PriorState = "new" | "inReview" | "changesRequested" | "merged" | "unknown";
+export type PriorState =
+  | "new" | "inReview" | "changesRequested" | "merged" | "unknown"
+  | "releaseAuthorized" | "releasing" | "prodVerifyHeld" | "released";
 
 /**
  * Where the Foreman's work comes from, and where its lifecycle is recorded.

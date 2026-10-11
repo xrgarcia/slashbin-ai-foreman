@@ -30,8 +30,11 @@ const stageLabelsSchema = z.object({
   inReview: stageLabel("In code review", "#2563eb"),
   changesRequested: stageLabel("Changes requested", "#d97706"),
   merged: stageLabel("Dev verification", "#0891b2"),
-  pendingVerification: stageLabel("Pending verification", "#7c3aed"),
+  pendingVerification: stageLabel("Awaiting EM verification", "#7c3aed"),
+  releaseAuthorized: stageLabel("Release authorized", "#4f46e5"),
   awaitingRelease: stageLabel("Awaiting release", "#059669"),
+  releasing: stageLabel("Releasing", "#16a34a"),
+  prodVerifyHeld: stageLabel("Prod verification held", "#b45309"),
   blocked: stageLabel("Blocked", "#dc2626"),
 }).catchall(z.object({ name: z.string().trim().min(1).max(48), color: hexColor })).prefault({});
 
@@ -52,8 +55,16 @@ const boardStagesSchema = z.object({
   // Merged, waiting for the verify stage; then its live session.
   merged: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "merged"),
   verifying: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "merged"),
+  // Dev-verified (`pr approved`): waiting on the EM's verification and `ready for prod release`.
   pendingVerification: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "pendingVerification"),
+  // The EM authorized the release (`ready for prod release`); promote puts it in the release PR next.
+  releaseAuthorized: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "releaseAuthorized"),
   awaitingRelease: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingRelease"),
+  // In the release PR the Foreman owns (`release pending`): Tech Lead approval, SRE deploy, prod verification.
+  releasing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "releasing"),
+  // Merged to production, but prod verification held (`prod verification held`): re-verified on a back-off.
+  // in_review, not blocked: the Foreman is still acting on it, and blocked is a person's queue.
+  prodVerifyHeld: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "prodVerifyHeld"),
   // Needs a person: labelled `blocked` on the source, or the Foreman declined it / ran out of retries.
   blocked: stage(PAPERCLIP_FOREMAN_ROLE, "blocked", "blocked"),
 }).prefault({});

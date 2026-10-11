@@ -52,6 +52,19 @@ export const backoffConfigSchema = z.object({
   // revisions escalate a PR to a person. Default 2 failures, then 5 min rising to
   // 1 h (was a fixed 3 poll cycles).
   repoFailure: z.object({ ...win(300_000, 3_600_000, 2), maxFailures: count(2) }).prefault({}),
+  // The release stage could not finish a release this pass for a passing
+  // reason: the Tech Lead's approval or the SRE's deploy could not run (exit 3,
+  // a timeout, an error), or the SRE did not merge for a reason that is not a
+  // STOP (the head moved, the merge was refused). The release PR is tried again
+  // after one window, longer each time; a merge clears it. Default 5 min rising
+  // to 2 h.
+  releaseRetry: z.object(win(300_000, 7_200_000, 2)).prefault({}),
+  // A release that merged but whose prod verification held or failed. The SRE
+  // re-verifies production after one window, longer each time, with no attempt
+  // cap: the issue stays open at `prod verification held` until a pass closes
+  // it or a person steps in. A `hold=wait-until-…` time the SRE reports wins
+  // when it is later. Default 10 min rising to 6 h.
+  prodVerifyRetry: z.object(win(600_000, 21_600_000, 2)).prefault({}),
   // GitHub's rate limit or Claude's session limit refused work. The whole daemon
   // pauses that upstream; a GitHub reset time it reports wins over the window.
   // Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` /

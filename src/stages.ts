@@ -12,8 +12,12 @@ import { z } from "zod";
  * order is load-bearing (see runRepoCycle): review runs before implement so it
  * only acts on PRs labeled in a PRIOR pass, verify right after review so a PR
  * merged this pass is verified in the same pass (the verifier waits on the
- * deploy itself), and promote runs last so it sees the labels this pass just set. A config that reorders them accepts the
- * consequence; nothing here forbids it.
+ * deploy itself), promote after the working stages so it sees the labels this
+ * pass just set, and release last so it acts on the release PR promote just
+ * opened or updated (EM#578). A config that reorders them accepts the
+ * consequence; nothing here forbids it. `release` runs only when both
+ * `srePath` and `techLeadPath` are set (config.ts refuses an explicit one
+ * without them; the default skips it with a startup warning).
  */
 export const BUILTIN_STAGES = [
   "reconcile",
@@ -24,6 +28,7 @@ export const BUILTIN_STAGES = [
   "branch-sync",
   "dependabot",
   "promote",
+  "release",
 ] as const;
 
 export const stageTypeSchema = z.enum(BUILTIN_STAGES);
@@ -44,7 +49,7 @@ export const stageEntrySchema = z.union([builtinStageSchema, customStageSchema])
 export type StageEntry = z.infer<typeof stageEntrySchema>;
 export type CustomStage = z.infer<typeof customStageSchema>;
 
-/** A fresh copy of the default sequence — the eight built-ins, in order. */
+/** A fresh copy of the default sequence — the nine built-ins, in order. */
 export function defaultStages(): StageEntry[] {
   return BUILTIN_STAGES.map((type) => ({ type }));
 }

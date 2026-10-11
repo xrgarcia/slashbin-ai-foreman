@@ -11,6 +11,7 @@ import {
 import type { Move, StageOrDone } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
+import { viewIssue } from "./github/release.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
 export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
@@ -18,8 +19,11 @@ export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
 /**
  * The lifecycle stage GitHub labels put an open issue in, latest stage first;
  * "blocked" while the source labels it so, whatever else it carries; "done"
- * once promoted (the close is all that is left); null when the issue is not in
- * the Foreman's lifecycle at all. `inRelease` = an open release PR names it.
+ * for a legacy `ready to close` (the close is all that is left); null when the
+ * issue is not in the Foreman's lifecycle at all. `inRelease` = an open release
+ * PR names it: it places an issue only when no release label does, because the
+ * release labels say more (the EM authorized it; the Foreman owns its release;
+ * its prod verification held).
  */
 export function issueStage(
   labels: readonly string[],
@@ -31,7 +35,10 @@ export function issueStage(
   const has = (l: string) => labels.includes(l);
   if (has(blockedLabel)) return "blocked";
   if (has(lifecycle.readyToClose)) return "done";
-  if (inRelease || has(lifecycle.readyForProd)) return "awaitingRelease";
+  if (has(lifecycle.prodVerifyHeld)) return "prodVerifyHeld";
+  if (has(lifecycle.releasePending)) return "releasing";
+  if (has(lifecycle.readyForProd)) return "releaseAuthorized";
+  if (inRelease) return "awaitingRelease";
   if (has(lifecycle.prApproved)) return "pendingVerification";
   if (has(lifecycle.prMerged)) return "merged";
   if (has(lifecycle.prPendingActions)) return "changesRequested";
@@ -62,6 +69,12 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
   recoverFailed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "fail", log),
   recoverMerged: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "merged", log),
   release: (c, cfg, n, log) => c.orphanRelease(cfg, n, log),
+  releaseQueued: (c, cfg, n, log) => c.releaseQueued(cfg, n, log),
+  alreadyReleased: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
+  prodVerified: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
+  prodHeld: (c, cfg, n, log) => c.prodHeld(cfg, n, log),
+  prodReverified: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
+  soakHeld: (c, cfg, n, log) => c.prodHeld(cfg, n, log),
 });
 
 /** repo → the covered issue set last announced by implement's "all have linked PRs" skip. */
@@ -88,10 +101,13 @@ const coveredSkipAnnounced = new Map<string, string>();
  * writes the skip comment itself — a write here would change what GitHub sees.
  * `snapshot` reads the labels back as stages (`issueStage`).
  *
- * Never sets `ready for prod release`: that label is the EM outcome-gate's
- * signature (separation of duties, 2026-07-27), and no lifecycle move maps
+ * Never sets `ready for prod release`: that label is the EM's release
+ * authorization (separation of duties, 2026-07-27), and no lifecycle move maps
  * to it. Putting a gate back that a review removed (`restoreEmGate`)
- * is code-host logic and stays outside the connector.
+ * is code-host logic and stays outside the connector. It does read it: the
+ * promote stage moves an authorized issue on to `release pending`, and from
+ * there the release stage's moves are the only writers until the close
+ * (EM#578), so no issue is left closed-but-unverified or open-but-unlabelled.
  *
  * Stateless: construct one where it is used.
  */
@@ -349,6 +365,98 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       logger.warn(
         `Failed to release orphaned issue #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
+    }
+  }
+
+  /**
+   * The promote stage put an EM-authorized issue in a release PR the Foreman
+   * owns: `ready for prod release` → `release pending`. Reads the issue first
+   * and writes only what is missing, so a re-run (the release PR updated, or
+   * already listing it) is a no-op rather than a `gh` error.
+   *
+   * @internal
+   */
+  releaseQueued(config: RepoConfig, num: number, logger: Logger): boolean {
+    const { readyForProd, releasePending } = config.lifecycleLabels;
+    try {
+      const issue = viewIssue(config, num);
+      if (!issue) return false;
+      const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
+      if (issue.labels.includes(readyForProd)) args.push("--remove-label", readyForProd);
+      if (!issue.labels.includes(releasePending)) args.push("--add-label", releasePending);
+      if (args.length === 5) return false;
+      gh(args, config.repoPath);
+      logger.info(`Transitioned issue #${num} labels: "${readyForProd}" → "${releasePending}" (in the release PR)`);
+      return true;
+    } catch (err) {
+      logger.warn(`Failed to queue #${num} for release: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
+   * The close (EM#578): prod verification passed, so strip every lifecycle
+   * label the issue carries in one edit and close it as completed. The
+   * trigger label stays: it records that the work was authorized. Closed
+   * already (GitHub's keywords at the merge) is fine; the labels still go.
+   *
+   * @internal
+   */
+  closeReleased(config: RepoConfig, num: number, logger: Logger): boolean {
+    try {
+      const issue = viewIssue(config, num);
+      if (!issue) return false;
+      const strip = Object.values(config.lifecycleLabels).filter((l) => issue.labels.includes(l));
+      if (strip.length > 0) {
+        const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
+        for (const l of strip) args.push("--remove-label", l);
+        gh(args, config.repoPath);
+      }
+      if (issue.state === "OPEN") {
+        gh(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
+      }
+      logger.info(`Closed issue #${num} after prod verification (removed ${strip.map((l) => `"${l}"`).join(", ") || "no labels"})`);
+      return strip.length > 0 || issue.state === "OPEN";
+    } catch (err) {
+      logger.warn(`Failed to close #${num} after prod verification: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Prod verification held or failed: `release pending` → `prod verification
+   * held`, and the issue open again if GitHub's closing keywords closed it at
+   * the release merge, or the Foreman closed it before its 30-minute soak
+   * held. The release stage re-verifies it on a back-off.
+   *
+   * @internal
+   */
+  prodHeld(config: RepoConfig, num: number, logger: Logger): boolean {
+    const { prodVerifyHeld } = config.lifecycleLabels;
+    try {
+      const issue = viewIssue(config, num);
+      if (!issue) return false;
+      let wrote = false;
+      if (issue.state !== "OPEN") {
+        gh(["issue", "reopen", String(num), "--repo", config.githubRepo], config.repoPath);
+        wrote = true;
+      }
+      const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
+      // One stage label: an adopted release's issue may still carry an earlier
+      // one (`pr approved` when a person merged the release before authorizing).
+      for (const l of Object.values(config.lifecycleLabels)) {
+        if (l !== prodVerifyHeld && issue.labels.includes(l)) args.push("--remove-label", l);
+      }
+      if (!issue.labels.includes(prodVerifyHeld)) args.push("--add-label", prodVerifyHeld);
+      if (args.length > 5) {
+        gh(args, config.repoPath);
+        wrote = true;
+      }
+      if (wrote) logger.info(`Transitioned issue #${num} → "${prodVerifyHeld}" (prod verification held)`);
+      return wrote;
+    } catch (err) {
+      logger.warn(`Failed to hold #${num} for prod verification: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
   }
