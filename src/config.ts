@@ -31,12 +31,22 @@ const lifecycleLabelsSchema = z.object({
   prMerged: z.string().min(1).default("pr merged"),
   // Review asked for changes (or CI is red); the revise phase picks it up.
   prPendingActions: z.string().min(1).default("pr pending actions"),
-  // Merged and verified in dev; awaiting the EM outcome-gate.
+  // Merged and verified in dev; awaiting EM verification. The name stays
+  // `pr approved` because the human lanes write it too.
   prApproved: z.string().min(1).default("pr approved"),
-  // The EM outcome-gate's signature — authorizes production. The daemon never
-  // applies it on its own judgement (see GitHubIssueConnector.reportState);
-  // it only puts back one a review run removed (restoreEmGate).
+  // The EM's release authorization, applied after EM verification — the one
+  // lifecycle label the Foreman never applies on its own judgement; it only
+  // puts back one a review run removed (restoreEmGate). The promote stage
+  // moves it to releasePending once a release PR carries the issue.
   readyForProd: z.string().min(1).default("ready for prod release"),
+  // In a release PR the Foreman owns: the release stage has the Tech Lead
+  // approve it and the SRE merge, deploy and verify it in production. Replaces
+  // readyForProd when the promote stage opens or updates the release PR.
+  releasePending: z.string().min(1).default("release pending"),
+  // Deployed, but the SRE's prod verification held or failed. The issue stays
+  // open (reopened if GitHub's keywords closed it at the merge) and the release
+  // stage re-verifies it on the prodVerifyRetry back-off; a pass closes it.
+  prodVerifyHeld: z.string().min(1).default("prod verification held"),
   // Promoted; awaiting the close. Read here only to keep such issues out of the
   // actionable set.
   readyToClose: z.string().min(1).default("ready to close"),
@@ -197,6 +207,12 @@ export const configSchema = z.object({
   // `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved.
   // Unset = no verify stage: the review run verifies and labels as before.
   srePath: z.string().optional(),
+  // The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex
+  // run and a prod-verification Codex run of up to 40 min each, plus the merge
+  // and the deploy wait. The Foreman kills the deploy only past this; a deploy
+  // killed after its merge is finished on the next pass from the saved state.
+  // Default 2 h.
+  sreDeployMaxDurationMs: z.coerce.number().int().positive().default(7_200_000),
   // Run the review stage. Off by default; per repo too, where it wins.
   reviewEnabled: z.boolean().default(false),
   // No longer read: review runs through the Tech Lead (techLeadPath), which
@@ -273,8 +289,9 @@ export const configSchema = z.object({
   lifecycleLabels: lifecycleLabelsSchema.prefault({}),
 
   // The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the
-  // eight built-ins in today's order, so an existing .ai-agent.json runs exactly
-  // as before. A custom stage is `{ id, skillPath }`: one Claude session on that
+  // nine built-ins in order; the last, `release`, runs only when both srePath
+  // and techLeadPath are set and is skipped with a startup warning otherwise.
+  // Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that
   // skill when the pass reaches it. Global, never per repo — the stages hand
   // work to each other by label, one pipeline for the fleet.
   stages: stagesSchema,
@@ -295,7 +312,7 @@ export const configSchema = z.object({
 // --- Types ---
 
 
-/** Configured names of the five lifecycle labels. See `lifecycleLabelsSchema`. */
+/** Configured names of the lifecycle labels. See `lifecycleLabelsSchema`. */
 export type LifecycleLabels = Readonly<z.infer<typeof lifecycleLabelsSchema>>;
 
 
@@ -379,6 +396,8 @@ export interface AgentConfig {
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
+  /** Ceiling on one SRE deploy run (the release stage). */
+  sreDeployMaxDurationMs: number;
   /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
   reviewSkillPath?: string;
   reviewModel?: string;
@@ -391,7 +410,7 @@ export interface AgentConfig {
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
   github: GithubConventions;
-  /** The stages each repo pass runs, in order. Defaults to the eight built-ins. */
+  /** The stages each repo pass runs, in order. Defaults to the nine built-ins. */
   stages: readonly StageEntry[];
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
@@ -421,6 +440,25 @@ function inferGithubRepo(repoPath: string): string | undefined {
     return undefined;
   }
 }
+
+/** True when the release stage can run: it needs both the Tech Lead and the SRE. */
+export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLeadPath">): boolean {
+  return Boolean(config.srePath && config.techLeadPath);
+}
+
+/**
+ * The startup warning when the release stage is in the pipeline (the default
+ * list carries it) but cannot run, so it is skipped every pass; null when it
+ * runs or is not configured. An explicit `release` in `stages` without both
+ * paths never gets here: loadConfig refuses it.
+ */
+export function releaseStageWarning(config: Pick<AgentConfig, "srePath" | "techLeadPath" | "stages">): string | null {
+  if (!hasStage(config.stages, "release") || releaseStageReady(config)) return null;
+  const missing = [!config.techLeadPath && "techLeadPath", !config.srePath && "srePath"].filter(Boolean).join(" and ");
+  return `release stage skipped: ${missing} not set. Promote keeps its pre-release behaviour: it strips the ` +
+    `authorization label when it lists an issue, and the release PR waits for a person to merge it and close its issues.`;
+}
+
 
 /**
  * The config file `loadConfig` reads: `configPath` when given, else
@@ -483,6 +521,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
+    sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
@@ -616,6 +655,18 @@ export function loadConfig(configPath?: string): AgentConfig {
     );
   }
 
+  // The same for the release stage (EM#578): it is one Tech Lead approval and
+  // one SRE deploy, so it needs both. Listed explicitly in `stages` without
+  // them is a refusal; the default list just skips it (releaseStageWarning).
+  const listsRelease = Array.isArray(fileConfig.stages)
+    && (fileConfig.stages as unknown[]).some((s) => (s as { type?: unknown } | null)?.type === "release");
+  if (listsRelease && (!parsed.srePath || !parsed.techLeadPath)) {
+    throw new Error(
+      `stages lists "release" but ${[!parsed.techLeadPath && "techLeadPath", !parsed.srePath && "srePath"].filter(Boolean).join(" and ")} ` +
+      "is not set. The release stage has the Tech Lead approve the release PR and the SRE deploy it: set both, or drop \"release\" from stages.",
+    );
+  }
+
   // Fail fast on a label that means two things. The phases tell work apart by
   // label alone, so two lifecycle states sharing a name are one state, and a
   // trigger label that is also a lifecycle label excludes every issue it selects.
@@ -654,6 +705,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
+    sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
     reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),

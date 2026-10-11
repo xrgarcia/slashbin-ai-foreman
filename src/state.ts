@@ -40,6 +40,62 @@ export interface VerifyHold {
   retryAt?: string;
 }
 
+/**
+ * A release the release stage is carrying (EM#578), keyed by release PR. Kept
+ * so a deploy that merged while the Foreman died is finished after the
+ * restart (tagged and verified, never deployed twice), and so a held prod
+ * verification is retried on its back-off across restarts.
+ */
+export interface ProdRelease {
+  pr: number;
+  url?: string;
+  /** The head the Tech Lead approved and the SRE was asked to merge. */
+  headSha: string;
+  /** The issues the release carries (its `release pending` issues when it started). */
+  issues: number[];
+  /**
+   * `deploying`: handed to the SRE, outcome not yet read. `merged`: merged,
+   * tag and verdict not yet recorded. `held`: merged and tagged, prod
+   * verification held; re-verified on the prodVerifyRetry back-off.
+   * `soaking`: verified and its issues closed; the SRE's 30-minute soak runs
+   * once `soakAt` has passed, and the entry goes when it settles.
+   */
+  phase: "deploying" | "merged" | "held" | "soaking";
+  mergeSha?: string;
+  /** ISO time the Foreman saw the merge (no earlier than the merge itself). */
+  mergedAt?: string;
+  /** ISO time from which the soak may run: 30 minutes after `mergedAt`. */
+  soakAt?: string;
+  /** The soak ran (whatever it found): a release is soaked once, never again. */
+  soaked?: boolean;
+  tag?: string;
+  /** The last hold slug, so a re-verify that holds for the same reason comments once. */
+  hold?: string;
+  evidence?: string;
+  /** Prod verifications that did not pass. */
+  attempts: number;
+  /** ISO time before which a held release is not re-verified. */
+  retryAt?: string;
+  /** ISO time the release stage started it. */
+  since: string;
+  /**
+   * Merged by someone else (a person, or before this stage existed): the
+   * release stage adopted it for prod verification, soak and close, and never
+   * asked the Tech Lead or the SRE to deploy it.
+   */
+  adopted?: boolean;
+}
+
+/** A passed prod verification, per issue: the evidence the promote stage's 0-diff path may close on. */
+export interface ProdVerified {
+  pr: number;
+  mergeSha: string;
+  tag?: string;
+  evidence?: string;
+  /** ISO time it passed. */
+  at: string;
+}
+
 export interface RepoState {
   implemented: number[];
   failed: Record<number, FailedIssue>;
@@ -75,6 +131,15 @@ export interface RepoState {
   // its merge is seen even when it lands while the daemon is down. Optional for
   // backward compat with state files written before this field existed.
   release?: SavedRelease;
+  // Releases the release stage is carrying, by release PR number (EM#578).
+  // Optional for backward compat with state files written before it existed.
+  prodReleases?: Record<number, ProdRelease>;
+  // Issues whose prod verification passed, by issue number: the evidence the
+  // promote stage needs before it closes an already-promoted issue.
+  prodVerified?: Record<number, ProdVerified>;
+  // Issues the promote stage already commented on for a promotion stall, so a
+  // stall that lasts days comments once, not every hour (EM#578).
+  promotionStallNoted?: number[];
 }
 
 /**
@@ -167,6 +232,10 @@ export function loadRepoState(repoName: string): RepoState {
       // Dropping this re-announced an open release PR on every promotion pass:
       // trackRelease saw no saved release each time (foreman issue 74).
       ...(repo.release ? { release: { ...repo.release, issues: [...repo.release.issues] } } : {}),
+      // Dropped here, a merged release would be deployed again after a restart.
+      prodReleases: Object.fromEntries(Object.entries(repo.prodReleases ?? {}).map(([k, v]) => [k, { ...v, issues: [...v.issues] }])),
+      prodVerified: { ...(repo.prodVerified ?? {}) },
+      ...(repo.promotionStallNoted ? { promotionStallNoted: [...repo.promotionStallNoted] } : {}),
     };
   }
 

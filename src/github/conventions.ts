@@ -49,6 +49,21 @@ export const githubConventionsSchema = z.object({
   // The same, for commits naming no issue or several. {n} is the commit count,
   // {branch} the feature branch.
   reconcileBatchTitle: name.default("feat: implement {n} change(s) from {branch}"),
+  // Name of the annotated git tag the release stage puts on a release PR's
+  // merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date,
+  // {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must
+  // appear so two releases never share a name. A plain annotated tag only,
+  // never a GitHub Release: jerky_shipping's desktop pipeline
+  // (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases
+  // and tags at HEAD to decide whether a commit is already released, so a
+  // Release on main's merge commit would suppress its desktop build. Never
+  // starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a
+  // `release-` name stays out of its version history.
+  releaseTagFormat: name
+    .refine((f) => f.includes("{N}"), "releaseTagFormat must contain {N}, the release PR number")
+    .refine((f) => !/^v/i.test(f), "releaseTagFormat must not start with \"v\" (semantic-release reads v* tags)")
+    .refine((f) => isTagName(fillReleaseTag(f, 1, new Date(0))), "releaseTagFormat must fill to a valid git tag name")
+    .default("release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"),
   // The last line of every PR body the Foreman writes. Empty writes none. No
   // "#<number>": every #N in a promotion PR's body is read as an issue it carries.
   signature: z.string().trim()
@@ -74,6 +89,32 @@ export function fillTitle(template: string, vars: Record<string, string | number
 /** `body` with the signature appended under a rule, or `body` alone when the signature is empty. */
 export function signed(body: string, c: GithubConventions, suffix = ""): string {
   return c.signature ? `${body}\n\n---\n${c.signature}${suffix}` : body;
+}
+
+/** `format` filled for release PR `pr` merged at `at` (UTC): {yyyy} {mm} {dd} {HH} {MM} {HHMM} {N}. */
+export function fillReleaseTag(format: string, pr: number, at: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const HH = p(at.getUTCHours()), MM = p(at.getUTCMinutes());
+  return fillTitle(format, {
+    yyyy: at.getUTCFullYear(), mm: p(at.getUTCMonth() + 1), dd: p(at.getUTCDate()), HH, MM, HHMM: `${HH}${MM}`, N: pr,
+  });
+}
+
+/**
+ * The release tag for `pr` merged at `at`. Throws on a name starting with "v"
+ * or one git refuses: the format is checked at config load, so this is the
+ * guard against a format that passed there and fills badly here.
+ */
+export function releaseTagName(format: string, pr: number, at: Date): string {
+  const tag = fillReleaseTag(format, pr, at);
+  if (/^v/i.test(tag)) throw new Error(`release tag "${tag}" starts with "v"; semantic-release would read it as a version`);
+  if (!isTagName(tag)) throw new Error(`release tag "${tag}" is not a valid git tag name`);
+  return tag;
+}
+
+/** A conservative git ref-name check: what `git check-ref-format` accepts, and no `{`. */
+function isTagName(t: string): boolean {
+  return t.length > 0 && t.length <= 200 && /^[A-Za-z0-9._\/-]+$/.test(t) && !/^[./-]|[./]$|\.\.|\/\/|\.lock$|@\{/.test(t);
 }
 
 function deepFreeze<T>(v: T): T {

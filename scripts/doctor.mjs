@@ -24,7 +24,7 @@ if (!existsSync(built)) {
   console.log(`FAIL  build — ${built} not found. Run \`npm install && npm run build\`.`);
   process.exit(1);
 }
-const { loadConfig, findConfigFile } = await import(built);
+const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning } = await import(built);
 
 const args = process.argv.slice(2);
 const configArg = args.includes("--config") ? args[args.indexOf("--config") + 1] : args.find((a) => !a.startsWith("-"));
@@ -100,6 +100,13 @@ else if (syncs) line("WARN", "TECHLEAD_GITHUB_KEY", "unset — branch-sync PRs (
 if (config.srePath) {
   if (process.env.SRE_GITHUB_KEY) line("PASS", "SRE_GITHUB_KEY", "set");
   else line("FAIL", "SRE_GITHUB_KEY", "unset, and srePath is set — the verify stage refuses to run without it.");
+}
+// The release stage (EM#578): the Tech Lead approves the release PR, the SRE deploys it.
+const releaseWarning = releaseStageWarning(config);
+if (releaseWarning) line("WARN", "release stage", releaseWarning);
+else if (config.stages.some((s) => s.type === "release") && releaseStageReady(config)) {
+  if (!process.env.TECHLEAD_GITHUB_KEY) line("FAIL", "release stage", "TECHLEAD_GITHUB_KEY unset — the Tech Lead cannot approve release PRs, so none is deployed.");
+  else line("PASS", "release stage", `on — labels "${config.lifecycleLabels.releasePending}" and "${config.lifecycleLabels.prodVerifyHeld}" are checked per repo below`);
 }
 
 // --- Per repo ---

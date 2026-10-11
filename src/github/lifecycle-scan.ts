@@ -527,7 +527,8 @@ export interface EmGateRestoreStep {
  * `gh` call around them is not.
  *
  * Restores only issues that (a) carried the gate before the run, (b) are still
- * open, and (c) no longer carry it. A closed issue needs no gate — the promotion
+ * open, (c) no longer carry it, and (d) did not move on into a release
+ * (`release pending` / `prod verification held`: promote consumed the gate). A closed issue needs no gate — the promotion
  * either happened or the work was abandoned, and re-labeling a closed issue would
  * put it back in the Foreman's pickup list for no reason.
  */
@@ -542,6 +543,8 @@ export function planEmGateRestore(
     if (!issue) continue;                                   // closed — nothing to restore
     const names = new Set(issue.labels.map((l) => l.name));
     if (names.has(labels.readyForProd)) continue;           // still signed — healthy path
+    // Promote moved it on (EM#578): the gate was consumed into the release, not revoked.
+    if (names.has(labels.releasePending) || names.has(labels.prodVerifyHeld)) continue;
     steps.push({ number: num, dropPrApproved: names.has(labels.prApproved) });
   }
   return steps;

@@ -101,6 +101,9 @@ export const PAPERCLIP_STEPS = Object.freeze({
   releaseWaiting: { stage: "awaitingRelease", note: "waiting on release PR #{pr} to merge to {branch}" },
   released: { stage: "done", note: "release PR #{pr} merged to {branch}" },
   inProduction: { stage: "done", note: "in production ({branch})" },
+  releaseQueued: { stage: "releasing", note: "in the release PR: Tech Lead approval, SRE deploy and prod verification next" },
+  prodHeld: { stage: "prodVerifyHeld", note: "in production, prod verification held; re-verifying on a back-off" },
+  prodVerified: { stage: "done", note: "verified in production; closed" },
   releaseClosed: { stage: null, note: "release PR #{pr} closed without merging; waiting for the next release" },
   backoffPause: { stage: null, note: "paused: {upstream} back-off: {reason}" },
   backoffResume: { stage: null, note: "resumed after back-off" },
@@ -162,6 +165,9 @@ const STATE_STEP: { readonly [S in WorkState]: PaperclipStep & { readonly stage:
   changesRequested: PAPERCLIP_STEPS.changesRequested,
   merged: PAPERCLIP_STEPS.awaitingVerify,
   approved: PAPERCLIP_STEPS.approved,
+  releasing: PAPERCLIP_STEPS.releaseQueued,
+  prodVerifyHeld: PAPERCLIP_STEPS.prodHeld,
+  released: PAPERCLIP_STEPS.prodVerified,
 };
 
 /** `template` with each `{name}` replaced from `vars`, in one pass. */

@@ -1,5 +1,5 @@
 import type { AgentConfig } from "./config.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
 import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
@@ -112,6 +112,11 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       { issueCacheTtlMs: config.issueCacheTtlMs, pollIntervalMs: config.pollIntervalMs },
     );
   }
+
+  // The default pipeline carries the release stage; without the Tech Lead and
+  // the SRE it cannot run, and a silent skip would read as releases stalling.
+  const releaseWarning = releaseStageWarning(config);
+  if (releaseWarning) logger.warn(releaseWarning);
 
   const repoNames = config.repos.map((r) => r.name).join(", ");
   logger.info("Daemon starting", {

@@ -94,3 +94,21 @@ export {
   type FailedReviewPlan,
   planFailedReviewOutcome,
 } from "./github/pr.js";
+export {
+  type IssueView,
+  viewIssue,
+  type ReleasePrView,
+  viewReleasePr,
+  latestMergedReleasePr,
+  recentMergedReleasePrs,
+  PV_HEADING,
+  findPvComment,
+  readPvResult,
+  SRE_SWEEP_HOLD,
+  findSreSweepHold,
+  productionHead,
+  tagPrefix,
+  ensureReleaseTag,
+  addBlockedLabel,
+  removeBlockedLabel,
+} from "./github/release.js";
