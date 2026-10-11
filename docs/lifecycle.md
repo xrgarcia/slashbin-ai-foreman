@@ -21,23 +21,29 @@ So the core calls one interface; GitHub is updated, and Paperclip too when it is
 
 Where an item can be. The `…ing` stages exist only while a session runs.
 
-| Stage | Meaning |
-|---|---|
-| `approved` | Authorized and waiting to be built (or queued behind an open feature PR). |
-| `implementing` | An implement session is building it. |
-| `inReview` | Its PR is open and waiting for review. |
-| `reviewing` | A review session is reviewing its PR. |
-| `changesRequested` | The review asked for changes, or CI bounced the PR; waiting to be revised. |
-| `revising` | A revise session is addressing the review. |
-| `merged` | Merged to the base branch; waiting for dev verification. |
-| `verifying` | A verify session is checking it in dev. |
-| `pendingVerification` | Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization. |
-| `releaseAuthorized` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
-| `awaitingRelease` | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
-| `releasing` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
-| `prodVerifyHeld` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
-| `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
-| `done` | Closed by the Foreman after the SRE's prod verification passed. |
+On a GitHub issue each stage is one label. Where an issue carries more than one, the stage is
+the first that applies in `issueStage` (`src/github-work-source.ts`): `blocked`, `done`,
+`prodVerifyHeld`, `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on
+back to `approved`. The Foreman writes every label except the EM's `ready for prod release`;
+`pendingVerification` is the one stage waiting on the EM.
+
+| Stage | Label | Meaning |
+|---|---|---|
+| `approved` | `approved` | Authorized and waiting to be built (or queued behind an open feature PR). |
+| `implementing` | — (a session holds it) | An implement session is building it. |
+| `inReview` | `pr under review` | Its PR is open and waiting for review. |
+| `reviewing` | — (a session holds it) | A review session is reviewing its PR. |
+| `changesRequested` | `pr pending actions` | The review asked for changes, or CI bounced the PR; waiting to be revised. |
+| `revising` | — (a session holds it) | A revise session is addressing the review. |
+| `merged` | `pr merged` | Merged to the base branch; waiting for dev verification. |
+| `verifying` | — (a session holds it) | A verify session is checking it in dev. |
+| `pendingVerification` | `pr approved` | Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization. |
+| `releaseAuthorized` | `ready for prod release` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
+| `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
+| `releasing` | `release pending` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
+| `prodVerifyHeld` | `prod verification held` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
+| `blocked` | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
+| `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed. |
 
 ## Moves
 
