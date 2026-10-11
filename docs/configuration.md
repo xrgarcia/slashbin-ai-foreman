@@ -323,6 +323,7 @@ which only means it retries sooner.
 | `skip` | 5 min, 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 4 h | none |
 | `verifyRetry` | 10 min, 20 min | `maxAttempts` 3 |
 | `agentUnavailable` | 2 min, 4 min, 8 min, 16 min, 30 min | none |
+| `approvedUnmerged` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 4 h | none |
 | `repoFailure` | 5 min, 10 min, 20 min, 40 min, 1 h | `maxFailures` 2 |
 | `upstream` | 2 min, 4 min, 8 min, 16 min, 32 min, 1 h | none |
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
@@ -381,6 +382,16 @@ The Tech Lead (review) or the SRE (verify) could not run at all, e.g. Codex is u
 | `baseMs` | `120000` (2 min) | `AI_AGENT_BACKOFF_AGENT_UNAVAILABLE_BASE_MS` |
 | `capMs` | `1800000` (30 min) | `AI_AGENT_BACKOFF_AGENT_UNAVAILABLE_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_AGENT_UNAVAILABLE_FACTOR` |
+
+### `backoff.approvedUnmerged`
+
+A feature PR the reviewer APPROVED that is still open: the merge after the approval never happened (GitHub refused it while required checks ran, or the run died). It is offered for review again once the approval is one window old, then after each longer window while it stays open. Default 10 min rising to 4 h.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `600000` (10 min) | `AI_AGENT_BACKOFF_APPROVED_UNMERGED_BASE_MS` |
+| `capMs` | `14400000` (4 h) | `AI_AGENT_BACKOFF_APPROVED_UNMERGED_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_APPROVED_UNMERGED_FACTOR` |
 
 ### `backoff.repoFailure`
 

@@ -40,6 +40,12 @@ export const backoffConfigSchema = z.object({
   // is unavailable. Costs no attempt; the repo just asks again after one window,
   // per repo and per stage. Default 2 min rising to 30 min (was a fixed 15 min).
   agentUnavailable: z.object(win(120_000, 1_800_000, 2)).prefault({}),
+  // A feature PR the reviewer APPROVED that is still open: the merge after the
+  // approval never happened (GitHub refused it while required checks ran, or the
+  // run died). It is offered for review again once the approval is one window
+  // old, then after each longer window while it stays open. Default 10 min
+  // rising to 4 h.
+  approvedUnmerged: z.object(win(600_000, 14_400_000, 2)).prefault({}),
   // A repo whose implement or review sessions failed `maxFailures` times in a row
   // pauses that stage for one window, longer each time it trips again; a
   // successful session clears it. `maxFailures` is also how many failed

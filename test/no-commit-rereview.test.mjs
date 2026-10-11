@@ -21,7 +21,7 @@ const body = fn.slice(0, fn.indexOf("\n}\n"));
 
 test("a fresh verdict is overridden only when the issue was returned to review after it", () => {
   const find = github.slice(github.indexOf("export function findPRsNeedingReview"));
-  const guard = find.slice(find.indexOf("if (hasFreshReview("), find.indexOf("if (hasFreshReview(") + 1600);
+  const guard = find.slice(find.indexOf("if (hasFreshReview("), find.indexOf("needs review (issues"));
   assert.match(guard, /returnedToReviewSinceVerdict\(/,
     "without it a no-commit revision deadlocks: relabelled, never re-reviewed");
   assert.ok(guard.indexOf("returnedToReviewSinceVerdict") < guard.indexOf("return null"),

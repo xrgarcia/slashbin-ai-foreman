@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { findPRsNeedingReview } from "../dist/github.js";
 import { loadConfig } from "../dist/config.js";
 
-let tmp, ghState, savedPath;
+let tmp, ghState, savedPath, savedToken;
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return logger; } };
 
 before(() => {
@@ -24,7 +24,7 @@ before(() => {
   mkdirSync(bin);
   ghState = join(tmp, "gh-state.json");
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
-const fs = require("node:fs");
+import fs from "node:fs";
 const a = process.argv.slice(2);
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(ghState)}, "utf8"));
 const out = (v) => process.stdout.write(JSON.stringify(v));
@@ -40,9 +40,12 @@ else if (a[0] === "issue" && a[1] === "view") {
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
+  savedToken = process.env.FOREMAN_GITHUB_TOKEN;
+  process.env.FOREMAN_GITHUB_TOKEN = "test-placeholder"; // the gh runner refuses without one
 });
 after(() => {
   process.env.PATH = savedPath;
+  if (savedToken === undefined) delete process.env.FOREMAN_GITHUB_TOKEN; else process.env.FOREMAN_GITHUB_TOKEN = savedToken;
   rmSync(tmp, { recursive: true, force: true });
 });
 
