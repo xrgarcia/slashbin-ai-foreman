@@ -24,6 +24,8 @@ const url = (f) => pathToFileURL(join(DIST, f)).href;
 const tmp = mkdtempSync(join(tmpdir(), "foreman-upstream-test-"));
 const binDir = join(tmp, "bin");
 mkdirSync(binDir);
+// The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+writeFileSync(join(binDir, "package.json"), '{"type":"commonjs"}');
 writeFileSync(join(binDir, "gh"), `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
