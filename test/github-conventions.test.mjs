@@ -104,7 +104,7 @@ test("session env: every builder hands over the blocked and priority labels", ()
 
 // --- What reaches gh ---
 
-let tmp, ghLog, ghState, savedPath;
+let tmp, ghLog, ghState, savedPath, savedToken;
 before(() => {
   tmp = mkdtempSync(join(tmpdir(), "foreman-github-gh-"));
   const bin = join(tmp, "bin");
@@ -126,9 +126,13 @@ else process.stdout.write("[]");
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
+  // runGh refuses without a Foreman token; the fake gh never reads it.
+  savedToken = process.env.FOREMAN_GITHUB_TOKEN;
+  process.env.FOREMAN_GITHUB_TOKEN = "test-token";
 });
 after(() => {
   process.env.PATH = savedPath;
+  if (savedToken === undefined) delete process.env.FOREMAN_GITHUB_TOKEN; else process.env.FOREMAN_GITHUB_TOKEN = savedToken;
   rmSync(tmp, { recursive: true, force: true });
 });
 

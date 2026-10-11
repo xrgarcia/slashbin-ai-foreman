@@ -59,7 +59,7 @@ test("ordinary commits are unchanged", () => {
   assert.deepEqual(extractImplementedIssues({ title: "t", body: "", commits: [c("e2", "chore: b", "Related to #9")], strict: true }), []);
 });
 
-let tmp, savedPath;
+let tmp, savedPath, savedToken;
 before(() => {
   tmp = mkdtempSync(join(tmpdir(), "foreman-revert-"));
   const bin = join(tmp, "bin");
@@ -73,9 +73,13 @@ process.stdout.write(a[0] === "pr" && a[1] === "list" ? ${JSON.stringify(JSON.st
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
+  // runGh refuses without a Foreman token; the fake gh never reads it.
+  savedToken = process.env.FOREMAN_GITHUB_TOKEN;
+  process.env.FOREMAN_GITHUB_TOKEN = "test-token";
 });
 after(() => {
   process.env.PATH = savedPath;
+  if (savedToken === undefined) delete process.env.FOREMAN_GITHUB_TOKEN; else process.env.FOREMAN_GITHUB_TOKEN = savedToken;
   rmSync(tmp, { recursive: true, force: true });
 });
 
