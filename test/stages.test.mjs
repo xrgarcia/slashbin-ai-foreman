@@ -18,7 +18,7 @@ import { configureIssueCache } from "../dist/github.js";
 import { setStatePath } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
 
-const DEFAULT = ["reconcile", "review", "verify", "revise", "implement", "branch-sync", "dependabot", "promote"];
+const DEFAULT = ["reconcile", "review", "verify", "revise", "implement", "branch-sync", "dependabot", "promote", "release"];
 const logger = createLogger({ format: "text", level: "error" });
 const names = (stages) => stages.map((s) => s.type ?? s.id);
 
@@ -28,6 +28,8 @@ before(() => {
   tmp = mkdtempSync(join(tmpdir(), "foreman-stages-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);
+  // The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+  writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
   F = {
     ghLog: join(tmp, "gh.log"),
     ghState: join(tmp, "gh-state.json"),
@@ -101,7 +103,7 @@ const OPEN_PR = { number: 7, title: "feat: scan target (#3)", body: "Related to 
 
 // --- Config resolution -------------------------------------------------------
 
-test("default stages: a config with no `stages` resolves to the eight built-ins, in order", () => {
+test("default stages: a config with no `stages` resolves to the nine built-ins, in order", () => {
   assert.deepEqual([...BUILTIN_STAGES], DEFAULT);
   assert.deepEqual(names(load({}).stages), DEFAULT);
   assert.deepEqual(names(configSchema.parse({}).stages), DEFAULT);

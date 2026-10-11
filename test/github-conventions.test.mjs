@@ -109,6 +109,8 @@ before(() => {
   tmp = mkdtempSync(join(tmpdir(), "foreman-github-gh-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);
+  // The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+  writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
   ghLog = join(tmp, "gh.log");
   ghState = join(tmp, "gh-state.json");
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env node

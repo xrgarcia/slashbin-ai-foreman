@@ -34,6 +34,8 @@ const CUSTOM = {
 const tmp = mkdtempSync(join(tmpdir(), "foreman-lifecycle-labels-test-"));
 const binDir = join(tmp, "bin");
 mkdirSync(binDir);
+// The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+writeFileSync(join(binDir, "package.json"), '{"type":"commonjs"}');
 const GH_LOG = join(tmp, "gh.log");
 const GH_ISSUES = join(tmp, "issues.json");
 const CLAUDE_ENV = join(tmp, "claude-env.json");
@@ -101,6 +103,8 @@ test("omitted: every label resolves to the name Slashbin runs on today", () => {
     prMerged: "pr merged",
     prApproved: "pr approved",
     readyForProd: "ready for prod release",
+    releasePending: "release pending",
+    prodVerifyHeld: "prod verification held",
     readyToClose: "ready to close",
   });
   assert.deepEqual({ ...c.lifecycleLabels }, { ...defaultLifecycleLabels() });
@@ -120,7 +124,9 @@ test("global: every repo carries the one configured set — there is no per-repo
       { name: "b", repoPath: tmp, githubRepo: "example/b", lifecycleLabels: { prUnderReview: "ignored" } },
     ],
   });
-  for (const r of c.repos) assert.deepEqual({ ...r.lifecycleLabels }, CUSTOM, r.name);
+  // CUSTOM names the six pre-release keys; the release keys (EM#578) keep their defaults.
+  const want = { ...CUSTOM, releasePending: "release pending", prodVerifyHeld: "prod verification held" };
+  for (const r of c.repos) assert.deepEqual({ ...r.lifecycleLabels }, want, r.name);
 });
 
 test("two lifecycle states sharing a name is refused at load", () => {

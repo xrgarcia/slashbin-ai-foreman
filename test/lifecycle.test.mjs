@@ -29,7 +29,7 @@ test("every move resolves to a transition that lands on a known stage", () => {
     const t = transition(move);
     assert.equal(t.move, move);
     assert.equal(t.to, MOVES[move].to);
-    assert.ok(STAGES.includes(t.stage), `${move} lands on ${t.stage}`);
+    assert.ok([...STAGES, "done"].includes(t.stage), `${move} lands on ${t.stage}`);
     assert.equal(t.stage, STATE_STAGE[t.to]);
     assert.ok(MOVES[move].why.length > 0, `${move} says why`);
   }
@@ -51,7 +51,7 @@ test("every session phase holds a stage and falls back to one", () => {
 });
 
 test("the GitHub connector records every move (and only transitions)", async () => {
-  // The 26 rows below cover all of MOVES; a move added to the table without a
+  // The rows below cover all of MOVES; a move added to the table without a
   // row here (and a label write in github-work-source.ts) fails this.
   assert.deepEqual([...new Set(LABELS.map(([m]) => m))].sort(), Object.keys(MOVES).sort());
   const c = new GitHubIssueConnector();
@@ -89,11 +89,22 @@ const LABELS = [
   ["recoverMerged", "pr merged", false, null],
   ["release", "pr under review", true, ["--remove-label", "pr under review"]],
   ["release", "pr merged", false, null],
+  // The release lifecycle (EM#578). Each reads the issue first and writes only what is missing.
+  ["releaseQueued", "ready for prod release", true, ["--remove-label", "ready for prod release", "--add-label", "release pending"]],
+  ["releaseQueued", "release pending", false, null],
+  ["alreadyReleased", "ready for prod release", true, ["--remove-label", "ready for prod release"]],
+  ["prodVerified", "release pending", true, ["--remove-label", "release pending"]],
+  ["prodReverified", "prod verification held", true, ["--remove-label", "prod verification held"]],
+  ["prodHeld", "release pending", true, ["--remove-label", "release pending", "--add-label", "prod verification held"]],
+  ["soakHeld", "pr approved", true, ["--remove-label", "pr approved", "--add-label", "prod verification held"]],
+  ["soakHeld", "prod verification held", false, null],
 ];
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-lifecycle-test-"));
 const bin = join(tmp, "bin");
 mkdirSync(bin);
+// The fakes are CommonJS: pin it, so a stray "type": "module" package.json above the temp dir cannot make them ESM.
+writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
 const GH_LOG = join(tmp, "gh.log");
 const GH_ISSUES = join(tmp, "issues.json");
 writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
@@ -101,6 +112,10 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(GH_LOG)}, JSON.stringify(args) + "\\n");
 if (args[0] === "issue" && args[1] === "list") { process.stdout.write(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")); process.exit(0); }
+if (args[0] === "issue" && args[1] === "view") {
+  const issue = JSON.parse(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")).find((i) => String(i.number) === args[2]);
+  process.stdout.write(JSON.stringify(issue ? { state: "OPEN", labels: issue.labels } : null)); process.exit(0);
+}
 process.stdout.write("[]");
 `);
 chmodSync(join(bin, "gh"), 0o755);

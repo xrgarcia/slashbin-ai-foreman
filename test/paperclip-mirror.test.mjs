@@ -475,12 +475,12 @@ test("each step hands the card to its configured agent with exactly one stage la
   await mirror.onState(item, "inReview", "changesRequested", repoConfig, logger());
   assert.deepEqual(at(), ["todo", AGENT, ["bug", "Changes requested"]]);
   await mirror.onState(item, "changesRequested", "approved", repoConfig, logger());
-  assert.deepEqual(at(), ["todo", "agent-lead", ["bug", "Pending verification"]]);
+  assert.deepEqual(at(), ["todo", "agent-lead", ["bug", "Awaiting EM verification"]]);
   await mirror.onRelease(release("open", 12, [7]), logger());
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
-  assert.equal(fake.labels.length, 7, "the six stage labels created once");
+  assert.equal(fake.labels.length, 10, "the nine stage labels created once");
 });
 
 test("a review session holds the card in progress under the reviewer, noted by name, and returns it when it ends", async () => {
@@ -497,7 +497,7 @@ test("a review session holds the card in progress under the reviewer, noted by n
   await mirror.onSession({ phase: "review", status: "finished", repo: "example/r", items: [item], pr: 9 }, logger());
   assert.equal(r.status, "todo");
   assert.equal(r.assigneeAgentId, "agent-lead");
-  assert.deepEqual(labelName(fake, r), ["Pending verification"]);
+  assert.deepEqual(labelName(fake, r), ["Awaiting EM verification"]);
   assert.deepEqual(fake.agent.metadata.foremanLive.rows, []);
   assert.ok(fake.comments.r7.includes("Tech Lead reviewing PR #9"));
 });
