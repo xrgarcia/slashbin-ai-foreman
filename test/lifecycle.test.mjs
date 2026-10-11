@@ -92,6 +92,8 @@ const LABELS = [
   // The release lifecycle (EM#578). Each reads the issue first and writes only what is missing.
   ["releaseQueued", "ready for prod release", true, ["--remove-label", "ready for prod release", "--add-label", "release pending"]],
   ["releaseQueued", "release pending", false, null],
+  // An EM-authorized issue still carries `pr approved`; leaving it put the issue in the EM's queue.
+  ["releaseQueued", "pr approved", true, ["--remove-label", "pr approved", "--add-label", "release pending"]],
   ["alreadyReleased", "ready for prod release", true, ["--remove-label", "ready for prod release"]],
   ["prodVerified", "release pending", true, ["--remove-label", "release pending"]],
   ["prodReverified", "prod verification held", true, ["--remove-label", "prod verification held"]],
