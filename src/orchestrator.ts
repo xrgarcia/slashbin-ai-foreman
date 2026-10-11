@@ -1,14 +1,15 @@
-import type { AgentConfig, RepoConfig } from "./config.js";
+import { releaseStageReady, type AgentConfig, type RepoConfig } from "./config.js";
 import { configureBackoff } from "./backoff.js";
 import type { Logger } from "./logger.js";
 import { publishSnapshot, hasObservers } from "./work-source.js";
 import { type ImplementationResult } from "./agent.js";
-import { dispatchStages, isCustomStage, type StageResult } from "./stages.js";
+import { dispatchStages, hasStage, isCustomStage, type StageResult } from "./stages.js";
 import { CycleEvent, activeRuns, failureCount, revisionFailureCount } from "./phases/common.js";
 import { tryCustomStage } from "./phases/custom.js";
 import { tryBatchImplementation } from "./phases/implement.js";
 import { tryFileDependencyBatchIssue, tryPromotion, trySyncDrift } from "./phases/promote.js";
 import { runReconcileStage } from "./phases/reconcile.js";
+import { tryRelease } from "./phases/release.js";
 import { tryReview } from "./phases/review.js";
 import { tryRevision } from "./phases/revise.js";
 import { tryVerify } from "./phases/verify.js";
@@ -203,14 +204,15 @@ async function runRepoCycle(
   cycleNumber = repoCycle;
   const base = logger.child({ cycle: cycleNumber, repoCycle, repo: repoConfig.name });
 
-  // The stages run in the configured order (default: reconcile, review, revise,
-  // implement, branch-sync, dependabot, promote — see BUILTIN_STAGES). Each
+  // The stages run in the configured order (default: reconcile, review, verify,
+  // revise, implement, branch-sync, dependabot, promote, release — see BUILTIN_STAGES). Each
   // built-in below is the phase that used to be called here by name, unchanged.
   const dispatched = await dispatchStages(config.stages, async (stage): Promise<StageResult> => {
-    // Review, revise, implement and custom stages each spawn a Claude session.
-    // None may START once a shutdown is under way — see `shutdownRequested`.
-    // The pass ends there, as it did when the phases were inline.
-    const spawnsClaude = isCustomStage(stage) || stage.type === "review" || stage.type === "verify" || stage.type === "revise" || stage.type === "implement";
+    // Review, revise, implement and custom stages each spawn a Claude session;
+    // release runs the Tech Lead and the SRE, whose deploy must never be cut
+    // off half-way. None may START once a shutdown is under way — see
+    // `shutdownRequested`. The pass ends there, as it did when the phases were inline.
+    const spawnsClaude = isCustomStage(stage) || stage.type === "review" || stage.type === "verify" || stage.type === "revise" || stage.type === "implement" || stage.type === "release";
     if (spawnsClaude && shutdownRequested) return { outcome: "stop", reason: "shutdown requested" };
 
     if (isCustomStage(stage)) {
@@ -292,18 +294,22 @@ async function runRepoCycle(
         break;
 
       // --- Create promotion PRs for repos with ready-for-prod issues. Never
-      //    applies the ready-for-prod label itself (separation of duties). ---
+      //    applies the ready-for-prod label itself (separation of duties). No
+      //    Discord message (owner direction, 2026-10-10): the release PR and
+      //    the issue labels are the record. ---
       case "promote": {
-        const promotionResult = await tryPromotion(repoConfig, base, cycleNumber);
-        if (promotionResult === "promoted") {
-          events.push({ message: `Promotion PR created on ${repoConfig.githubRepo} (${repoConfig.baseBranch} → ${repoConfig.productionBranch})`, level: "info" });
-          processed++;
-        } else if (promotionResult === "synced") {
-          events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged, promotion will follow`, level: "info" });
-          processed++;
-        }
+        const releaseActive = hasStage(config.stages, "release") && releaseStageReady(config);
+        const promotionResult = await tryPromotion(repoConfig, base, cycleNumber, releaseActive);
+        if (promotionResult === "promoted" || promotionResult === "synced") processed++;
         break;
       }
+
+      // --- Release the release PR (EM#578): Tech Lead approval, SRE deploy,
+      //    tag, prod verification, close or hold, soak. No Discord message on
+      //    any outcome; a no-op without srePath and techLeadPath. ---
+      case "release":
+        if (await tryRelease(repoConfig, config, base, cycleNumber)) processed++;
+        break;
     }
     return { outcome: "ok" };
   });
