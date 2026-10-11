@@ -363,10 +363,15 @@ export async function runReconcileStage(
         `Dead-zoned issue #${s.issueNumber}: PR #${s.prNumber} merged to ${repoConfig.baseBranch} but the issue never advanced to "${labels.prApproved}", and re-verification produced no verdict`,
         { prUrl: s.prUrl, mergedAt: s.mergedAt },
       );
-      events.push({
-        message: `⚠️ ${repoConfig.githubRepo} #${s.issueNumber} dead-zoned: PR #${s.prNumber} merged but the issue never advanced to "${labels.prApproved}", and auto re-verification could not produce a verdict. EM: verify by hand (npm run verify -- --repo ${repoConfig.name} --pr ${s.prNumber} --env development), then advance to "${labels.readyForProd}" or flag "${labels.prPendingActions}".`,
-        level: "warn",
-      });
+      // A person acts on it, so it goes on the card, never to Discord (owner, 2026-10-10).
+      // Never a hand-written label: the EM writes only `ready for prod release`. With a
+      // verify stage, recovery hands the issue to it (`recoverMerged`), so landing here
+      // means that label write failed; recovery is tried once per daemon run.
+      await emit({
+        kind: "blocked",
+        item: itemOf(repoConfig, s.issueNumber),
+        reason: `PR #${s.prNumber} merged but the issue never advanced and recovery could not move it; restarting the Foreman retries recovery, which hands it to the SRE's dev verification`,
+      }, repoConfig, reconLogger);
     }
     // Drop cleared issues so a real re-entry alerts again — and so a repaired
     // issue that genuinely re-enters the dead zone later can be retried.
