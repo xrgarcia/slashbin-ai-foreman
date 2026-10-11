@@ -50,6 +50,8 @@ import {
   ensureReleaseTag,
   addBlockedLabel,
   removeBlockedLabel,
+  addReleasePrIssues,
+  productionHead,
   type ReleasePrView,
 } from "../github.js";
 import { releaseTagName } from "../github/conventions.js";
@@ -393,10 +395,55 @@ async function blockOrphans(repoConfig: RepoConfig, st: RepoState, logger: Logge
   if (findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger)) return;
   const diff = countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   if (diff !== 0) return;  // promote opens a release PR for them next pass
+  if (await joinCarryingRelease(repoConfig, st, orphans, logger)) return;
   await stopRelease(repoConfig, null, orphans,
     `no release carries this issue: its work is already on \`${repoConfig.productionBranch}\`, but no release PR merged in the last ` +
     "48 hours lists it, so there is no release to verify it by. Check production by hand and close it, or move it back to " +
     `\`${repoConfig.lifecycleLabels.readyForProd}\` once a release can carry it`, undefined, logger);
+}
+
+/**
+ * An orphan's work is on production with nothing left on base, so the release
+ * whose merge IS production's head shipped it. That happens when an issue
+ * reaches `ready for prod release` after promote read the list for the open
+ * release PR (jerky_skuvault_service #417 and #419, 2026-10-11: labelled 1-4 s
+ * after PR #426 was opened naming only #397, then blocked here as carried by
+ * nothing). Join it to that release while it is still unverified (`merged` or
+ * `held`): its PR body names it, so the SRE's next prod verification grades its
+ * acceptance, and the release closes it on a pass. A `soaking` release already
+ * passed without it, so that one cannot carry it. True when joined.
+ */
+async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphans: number[], logger: Logger): Promise<boolean> {
+  let head: string;
+  try {
+    head = productionHead(repoConfig);
+  } catch (err) {
+    logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
+    return false;
+  }
+  const rel = Object.values(st.prodReleases ?? {})
+    .find((r) => r.mergeSha === head && (r.phase === "merged" || r.phase === "held"));
+  if (!rel) return false;
+  const titles = new Map(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i.title]));
+  try {
+    const pr = viewReleasePr(repoConfig, rel.pr);
+    const named = new Set(releaseIssues(pr.body));
+    const missing = orphans.filter((n) => !named.has(n));
+    if (missing.length) addReleasePrIssues(repoConfig, pr, missing.map((n) => ({ number: n, title: titles.get(n) ?? `#${n}` })));
+  } catch (err) {
+    logger.warn(`Could not add ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr}: ${errText(err)}`);
+    return false;
+  }
+  putRelease(repoConfig, { ...rel, issues: [...rel.issues, ...orphans.filter((n) => !rel.issues.includes(n))] });
+  for (const n of orphans) {
+    if (rel.phase === "held") await advance(itemOf(repoConfig, n), "prodHeld", repoConfig, logger);
+    comment(repoConfig, n,
+      `**Joined release PR #${rel.pr}.** This issue's work shipped in that release (\`${repoConfig.productionBranch}\` is at its merge, \`${short(head)}\`), ` +
+      "which was opened before this issue was ready for production. The release now names it, so its production verification grades this issue " +
+      "and closes it on a pass.", logger);
+  }
+  logger.info(`Joined ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr} (production head ${short(head)})`);
+  return true;
 }
 
 /** The verdict for a merged release: the SRE's posted Production Verification if there is one, else a fresh run. */

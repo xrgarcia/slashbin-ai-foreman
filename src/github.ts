@@ -111,4 +111,5 @@ export {
   ensureReleaseTag,
   addBlockedLabel,
   removeBlockedLabel,
+  addReleasePrIssues,
 } from "./github/release.js";
