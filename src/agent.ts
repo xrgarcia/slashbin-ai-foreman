@@ -1596,6 +1596,210 @@ export async function verifyViaSre(
   return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
 }
 
+// --- The release stage's hand-offs (EM#578) ---
+
+/** The Tech Lead's promotion approval: one read of the diff and one review. */
+export const TECH_LEAD_APPROVE_MAX_DURATION_MS = 20 * 60_000;
+
+interface CliRun { code: number | null; stdout: string; stderr: string; timedOut: boolean }
+
+/**
+ * Run `node <dir>/<script> ...args` the way reviewViaTechLead and verifyViaSre
+ * do: cwd the agent's checkout, its own env, a kill at `maxMs` or on abort,
+ * and the session secrets redacted at every sink (the transcript as it
+ * streams, and the stdout/stderr returned).
+ */
+async function runAgentCli(
+  dir: string,
+  script: string,
+  args: string[],
+  env: Record<string, string>,
+  agentConfig: AgentConfig,
+  maxMs: number,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<CliRun> {
+  const secrets = secretValues(agentConfig.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  return new Promise<CliRun>((resolveRun) => {
+    const child = spawn("node", [join(dir, script), ...args], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", timedOut = false;
+    const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath, { flags: "a" })) : null;
+    child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, maxMs);
+    const onAbort = () => child.kill("SIGTERM");
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (e) => { stderr += String(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      if (log) {
+        log.write(outRedactor.flush());
+        log.write(errRedactor.flush());
+        log.end();
+      }
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(stderr, secrets), timedOut });
+    });
+  });
+}
+
+const tail = (r: CliRun) => (r.stderr || r.stdout).trim().slice(-400);
+
+/** How the Tech Lead answered a promotion approval. */
+export type PromotionApproval =
+  | { kind: "approved" }
+  /** Exit 4: the Tech Lead looked and refused. A person must decide. */
+  | { kind: "refused"; reason: string }
+  /** Anything else (exit 3 "could not run, wrote nothing", an error, a timeout): ask again later. */
+  | { kind: "retry"; reason: string };
+
+/**
+ * Ask the Tech Lead to approve release PR `prNumber` at exactly `sha`
+ * (`tech-lead.mjs approve-promotion`). The SRE's deploy refuses a PR without
+ * that approval at that head. Exit 0 approved, 4 refused, anything else retry.
+ */
+export async function approvePromotionViaTechLead(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  sha: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<PromotionApproval> {
+  const techLead = agentConfig.techLeadPath;
+  if (!techLead) return { kind: "retry", reason: "techLeadPath not configured" };
+  if (!process.env.TECHLEAD_GITHUB_KEY) return { kind: "retry", reason: "TECHLEAD_GITHUB_KEY not set — refusing to approve without Tech Lead attribution" };
+  logger.info(`Asking the Tech Lead to approve release PR #${prNumber} on ${repoConfig.githubRepo} at ${sha.slice(0, 10)}`);
+  const r = await runAgentCli(techLead, "bin/tech-lead.mjs",
+    ["approve-promotion", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--sha", sha],
+    buildTechLeadEnv(agentConfig, repoConfig), agentConfig, TECH_LEAD_APPROVE_MAX_DURATION_MS, abortSignal, transcriptPath);
+  if (r.timedOut) return { kind: "retry", reason: "Tech Lead approval timed out" };
+  if (r.code === 0) return { kind: "approved" };
+  const last = r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
+  if (r.code === 4) return { kind: "refused", reason: last || "refused" };
+  return { kind: "retry", reason: `exit ${r.code}: ${tail(r)}` };
+}
+
+/** The SRE deploy trailer: the last line of `sre.mjs deploy` (exit 0, and exit 3 too). */
+export interface DeployTrailer {
+  pr: number;
+  merged: boolean;
+  mergeSha: string | null;
+  verify: "pass" | "hold" | "fail" | "none";
+  hold?: string;
+  evidence?: string;
+}
+
+/**
+ * Parse `SRE_DEPLOY pr=#N merged=<yes|no> merge_sha=<sha|none>
+ * verify=<pass|hold|fail|none> [hold=<slug>] [evidence=<url>]`; the last one
+ * for `prNumber` wins. Same grammar as the SRE's own parser (lib/deploy.mjs);
+ * a merge_sha that is not 40 hex reads as none. Null when there is none. Pure,
+ * exported for tests.
+ */
+export function parseDeployTrailer(stdout: string, prNumber: number): DeployTrailer | null {
+  const re = /SRE_DEPLOY\s+pr=#?(\d+)\s+merged=(yes|no)\s+merge_sha=(\S+)\s+verify=(pass|hold|fail|none)(?:\s+hold=([\w/-]+))?(?:\s+evidence=(\S+))?/g;
+  let found: DeployTrailer | null = null;
+  for (const m of stdout.matchAll(re)) {
+    if (Number(m[1]) !== prNumber) continue;
+    found = {
+      pr: prNumber,
+      merged: m[2] === "yes",
+      mergeSha: /^[0-9a-f]{40}$/.test(m[3]) ? m[3] : null,
+      verify: m[4] as DeployTrailer["verify"],
+      ...(m[5] ? { hold: m[5] } : {}),
+      ...(m[6] ? { evidence: m[6] } : {}),
+    };
+  }
+  return found;
+}
+
+/** What a deploy hand-off came back with. */
+export type DeployResult =
+  | { kind: "trailer"; trailer: DeployTrailer }
+  /**
+   * Exit 1: the SRE refused a precondition (PR not open, head moved, no Tech
+   * Lead approval at that head); nothing ran. The release stage re-reads the
+   * head and asks again on its backoff.
+   */
+  | { kind: "refused"; reason: string }
+  /** Exit 3 (whatever its trailer says), a timeout or any other failure: nothing merged that the Foreman knows of; ask again later. */
+  | { kind: "retry"; reason: string };
+
+/**
+ * Hand release PR `prNumber` at `sha` to the SRE (`sre.mjs deploy`): it
+ * validates, merges (as itself, sha-pinned, never squash), waits for the
+ * deploy and verifies production. It never tags, relabels or closes: the
+ * Foreman does that from the trailer.
+ */
+export async function deployViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  sha: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<DeployResult> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "retry", reason: "srePath not configured" };
+  if (!process.env.SRE_GITHUB_KEY) return { kind: "retry", reason: "SRE_GITHUB_KEY not set — refusing to deploy without SRE-account attribution" };
+  logger.info(`Handing release PR #${prNumber} on ${repoConfig.githubRepo} at ${sha.slice(0, 10)} to the SRE to deploy`);
+  const r = await runAgentCli(sre, "bin/sre.mjs",
+    ["deploy", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--sha", sha],
+    buildSreEnv(agentConfig, repoConfig), agentConfig, agentConfig.sreDeployMaxDurationMs, abortSignal, transcriptPath);
+  const trailer = parseDeployTrailer(r.stdout, prNumber);
+  // A merge the trailer reports is the truth whatever the exit: it must never
+  // be read as "nothing happened".
+  if (trailer?.merged) return { kind: "trailer", trailer };
+  // Exit 3 prints a trailer too (hold=codex-unavailable / em-mirror-unavailable),
+  // but it means "could not run, nothing merged": retry, whatever it says.
+  if (r.code === 3) return { kind: "retry", reason: `the SRE could not run (${trailer?.hold ?? tail(r)})` };
+  if (trailer && r.code === 0) return { kind: "trailer", trailer };
+  if (r.timedOut) return { kind: "retry", reason: "SRE deploy timed out" };
+  if (r.code === 1) return { kind: "refused", reason: tail(r) || "refused" };
+  if (r.code === 0) return { kind: "retry", reason: "SRE exited 0 without an SRE_DEPLOY trailer for this PR" };
+  return { kind: "retry", reason: `exit ${r.code}: ${tail(r)}` };
+}
+
+/**
+ * Verify a merged release PR in production (`sre.mjs verify --mode prod`), for
+ * an issue whose prod verification held, or run its 30-minute soak (`--mode
+ * soak`; the SRE's ledger records it, so its promotion-verify sweep skips a
+ * release the Foreman soaked). Same trailer and verdict as the dev verify
+ * (verifyVerdict); the hold slug is the reason. A soak with nothing left to
+ * soak exits 1: `{ kind: "nothing" }`.
+ */
+export async function verifyProdViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+  mode: "prod" | "soak" = "prod",
+): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "error", error: "srePath not configured" };
+  if (!process.env.SRE_GITHUB_KEY) return { kind: "error", error: "SRE_GITHUB_KEY not set — refusing to verify without SRE-account attribution" };
+  const what = mode === "soak" ? "30-minute soak" : "prod verification";
+  logger.info(`Handing release PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for its ${what}`);
+  const r = await runAgentCli(sre, "bin/sre.mjs",
+    ["verify", "--mode", mode, "--repo", repoConfig.githubRepo, "--pr", String(prNumber)],
+    buildSreEnv(agentConfig, repoConfig), agentConfig, SRE_VERIFY_MAX_DURATION_MS, abortSignal, transcriptPath);
+  if (r.timedOut) return { kind: "error", error: `SRE ${what} timed out` };
+  if (mode === "soak" && r.code === 1) return { kind: "nothing", reason: tail(r) || "nothing to soak" };
+  if (r.code !== 0) return { kind: "error", error: `SRE ${what} failed (exit ${r.code}): ${tail(r)}` };
+  const trailer = parseReviewTrailerRecords(r.stdout).filter((t) => t.pr === prNumber).pop();
+  if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
+  const v = verifyVerdict(trailer);
+  logger.info(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
+}
+
 /**
  * Render a review run's wall-clock budget as the two facts the run needs: how
  * long it has, and the instant it dies.
