@@ -224,3 +224,21 @@ export function addBlockedLabel(config: RepoConfig, num: number): void {
 export function removeBlockedLabel(config: RepoConfig, num: number): void {
   gh(["issue", "edit", String(num), "--repo", config.githubRepo, "--remove-label", config.github.blockedLabel], config.repoPath);
 }
+
+/**
+ * Add issues to a release PR's "Issues included" list, after its last `- #N`
+ * line. The SRE's prod verification reads the PR body for the issues whose
+ * acceptance it grades, so an issue the release carries but its body omits is
+ * never verified. REST, not `gh pr edit` (see updatePromotionPR). Throws on a
+ * failed write.
+ */
+export function addReleasePrIssues(config: RepoConfig, pr: ReleasePrView, issues: { number: number; title: string }[]): void {
+  const lines = pr.body.split("\n");
+  let at = -1;
+  lines.forEach((l, i) => { if (/^- #\d+/.test(l)) at = i; });
+  const added = issues.map((i) => `- #${i.number}: ${i.title}`);
+  if (at < 0) lines.push("", "### Issues included", ...added);
+  else lines.splice(at + 1, 0, ...added);
+  const [owner, name] = config.githubRepo.split("/");
+  gh(["api", "--method", "PATCH", `repos/${owner}/${name}/pulls/${pr.number}`, "-f", `body=${lines.join("\n")}`, "--silent"], config.repoPath);
+}

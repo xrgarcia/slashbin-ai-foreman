@@ -530,6 +530,29 @@ test("a `release pending` issue nothing can carry is blocked, never closed unver
   assert.deepEqual(gh().issues[9].labels, ["approved", "release pending"], "promote opens a release PR for it next");
 });
 
+test("a `release pending` issue the production release shipped joins that release instead of being blocked", async () => {
+  const seed = (phase) => {
+    world({ issues: [issue(5, "prod verification held"), issue(9, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE });
+    editState((st) => {
+      st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5], phase, mergeSha: MERGE, mergedAt: new Date().toISOString(),
+        attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() } };
+    });
+  };
+  seed("held");
+  await run();
+  const i = gh().issues[9];
+  assert.ok(!i.labels.includes("blocked"), "not blocked");
+  assert.ok(i.labels.includes("prod verification held"), "held with the release it joined");
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/, "the release PR now names it, so the SRE grades it");
+  assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5, 9]);
+  assert.match(commentsOn(9)[0], /^\*\*Joined release PR #100\.\*\*/);
+
+  seed("soaking");  // already verified without it: it cannot carry it
+  await run();
+  assert.ok(gh().issues[9].labels.includes("blocked"));
+  assert.match(commentsOn(9)[0], /no release carries this issue/);
+});
+
 test("without srePath and techLeadPath the stage does nothing at all", async () => {
   const off = loadConfig(writeCfg("cfg-off.json", {}));
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
