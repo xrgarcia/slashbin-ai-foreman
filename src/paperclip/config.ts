@@ -157,6 +157,8 @@ export const paperclipConfigSchema = z.object({
   agentStatus: z.boolean().default(true),
   // Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card.
   roles: z.record(z.string().regex(/^\w+$/), roleSchema).default({}),
+  // The Paperclip user id of the person who holds `approved-for-human` cards (assigneeFor in board.ts), written by whatever syncs those issues; the Foreman's own moves never assign a user. Set it in the installed `.ai-agent.json`: a person's id never goes in the repo. Unset = those cards are written unassigned.
+  humanUserId: z.string().min(1).optional(),
   // The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is.
   agentReportsTo: z.string().min(1).optional(),
   // Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none).

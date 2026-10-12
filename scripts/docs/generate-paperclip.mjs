@@ -40,7 +40,7 @@ for (const f of [builtConfig, builtMirror, builtPaperclipConfig]) if (!existsSyn
 const { configSchema } = await import(builtConfig);
 const { PAPERCLIP_STAGES, PAPERCLIP_FOREMAN_ROLE } = await import(builtPaperclipConfig);
 const { PAPERCLIP_STEPS, PAPERCLIP_CREATE_STATUS } = await import(builtMirror);
-const { FOREMAN_BLOCKED_PREFIX } = await import(builtMirror.replace(/mirror\.js$/, "board.js"));
+const { FOREMAN_BLOCKED_PREFIX, HUMAN_HOLD_LABEL, EM_ROLE, EM_REPO } = await import(builtMirror.replace(/mirror\.js$/, "board.js"));
 const { toJSONSchema } = await import("zod");
 
 // --- The schema ---
@@ -396,6 +396,39 @@ Every move to a lifecycle stage assigns the task to that stage's owner (see abov
 steps leave the assignee alone; a task reassigned by hand in Paperclip goes back at its next
 move. The Foreman's agent is registered with every wake path off (no heartbeat, no
 wake-on-demand), so assigning a task to it never makes Paperclip start a run.
+
+### Cards held by labels and repo
+
+Two kinds of card are not held by a stage's owner: they wait on a person, or on an agent the
+Foreman never runs. The plugin never reads GitHub labels, so it decides these from facts a
+sync supplies: \`assigneeFor(cfg, { labels, repo })\` in \`board.ts\`, a pure function. The
+Foreman's own moves never call it, and are unchanged.
+
+| The item | Assignee |
+|---|---|
+| labelled ${code(HUMAN_HOLD_LABEL)} | the Paperclip user \`humanUserId\` |
+| an issue in ${code(EM_REPO)} | the agent of role ${code(EM_ROLE)} (\`roles.${EM_ROLE}.id\`) |
+| anything else | no assignment: the stage's owner holds it |
+
+${code(HUMAN_HOLD_LABEL)} is checked first, so an item that is both goes to the user. Paperclip
+allows one assignee, so the answer sets exactly one of \`assigneeUserId\` and
+\`assigneeAgentId\` and the other is \`null\`. A rule whose id is unset (no \`humanUserId\`, or
+\`roles.${EM_ROLE}\` with no \`id\` yet) gives both \`null\`: the card is written unassigned, never
+handed to the Foreman's agent, and nothing throws. \`stageTarget\` carries an optional \`userId\`
+beside \`agentId\` for a reader of either kind; a lifecycle stage never sets it.
+
+\`.ai-agent.json\` is set at runtime and is not in this repo, so \`humanUserId\` and
+\`roles.${EM_ROLE}\` are set in the installed file. \`roles.${EM_ROLE}\` gets its \`id\` from
+\`npm run paperclip:register\`, which must run before a sync can use it. A sync imports
+\`dist/paperclip/board.js\` from the Foreman's checkout, so the rollout is, in order:
+
+1. Merge the change.
+2. Rebuild \`dist/\` (\`npm run build\`).
+3. Set \`humanUserId\` and add \`roles.${EM_ROLE}\` in the installed \`.ai-agent.json\`, then
+   \`npm run paperclip:register\` to write its \`id\`.
+4. Only then switch the sync's assignee writes to \`assigneeFor\`.
+
+Until step 4 the sync writes those cards unassigned, as before, so nothing breaks in between.
 
 ## Projects
 
