@@ -68,11 +68,6 @@ export function stageTarget(cfg: BoardConfig, stage: PaperclipStage): { bucket: 
 
 /** The GitHub label that puts an item in a person's hands: its card is held by `humanUserId`. */
 export const HUMAN_HOLD_LABEL = "approved-for-human";
-/** The role key of the Engineering Manager's agent in `roles`. */
-export const EM_ROLE = "em";
-/** The repo whose issues the Engineering Manager's agent holds. */
-export const EM_REPO = "xrgarcia/slashbin-engineering-manager";
-
 /**
  * A card's one assignee, as Paperclip takes it: exactly one of the two is an id
  * and the other null ("Issue can only have one assignee", 422), or both null
@@ -81,27 +76,22 @@ export const EM_REPO = "xrgarcia/slashbin-engineering-manager";
 export type CardAssignee = { assigneeAgentId: string | null; assigneeUserId: string | null };
 
 /**
- * Who holds an item's card by its labels and repo, for a caller (a sync) that
- * reads them; this plugin never reads GitHub. Pure: the same item and config
- * always give the same answer.
+ * Who holds an item's card by its labels, for a caller (a sync) that reads
+ * them; this plugin never reads GitHub. Pure: the same item and config always
+ * give the same answer.
  *
- * - labelled `approved-for-human` → the `humanUserId` user. Checked first, so
- *   it wins over the repo rule.
- * - an issue in the Engineering Manager's repo → the `roles.em` agent.
+ * - labelled `approved-for-human` → the `humanUserId` user (unset → both null,
+ *   so the card is still written, unassigned).
  * - anything else → undefined: no assignment here, the stage's holder stands.
  *
- * A rule that matches with its id unset (no `humanUserId`, or `roles.em` with
- * no `id` yet) gives both null, so the card is still written, unassigned. It
- * never falls back to the Foreman's own agent and never throws.
+ * It never assigns an agent. Paperclip wakes an agent whose wake-on-demand is on
+ * for every assignment of an open, non-backlog card, and an agent bridged to a
+ * bot (the Engineering Manager's) has it on, so a sync assigning it each EM-repo
+ * row would start one run per row. A user assignment wakes nothing.
  */
 export function assigneeFor(cfg: BoardConfig, item: { labels: readonly string[]; repo: string }): CardAssignee | undefined {
   if (item.labels.includes(HUMAN_HOLD_LABEL)) {
     return { assigneeAgentId: null, assigneeUserId: cfg.humanUserId ?? null };
-  }
-  if (item.repo.toLowerCase() === EM_REPO) {
-    // agentFor falls back to the Foreman's agent for a role with no id; this card is never the Foreman's.
-    const em = filled(cfg).roles[EM_ROLE]?.id ? agentFor(cfg, EM_ROLE) : undefined;
-    return { assigneeAgentId: em ?? null, assigneeUserId: null };
   }
   return undefined;
 }

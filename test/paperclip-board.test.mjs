@@ -41,31 +41,23 @@ test("stageTarget: no lifecycle stage is held by a user, so no result carries a 
   for (const st of PAPERCLIP_STAGES) assert.equal("userId" in stageTarget(cfg, st), false, st);
 });
 
-test("assigneeFor: approved-for-human goes to the user, the EM repo to the EM agent, exactly one assignee", () => {
+test("assigneeFor: approved-for-human goes to the user; nothing else is assigned, an EM-repo item included", () => {
   const EM = "xrgarcia/slashbin-engineering-manager";
   const cfg = { agentId: "fm", humanUserId: "ray-user", roles: { em: { name: "Engineering Manager", id: "em-agent" } } };
-  // approved-for-human: only the user id.
   assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
-  // An EM-repo item with roles.em.id set: only that agent id.
-  assert.deepEqual(assigneeFor(cfg, { labels: ["approved"], repo: EM }), { assigneeAgentId: "em-agent", assigneeUserId: null });
-  // Both: approved-for-human wins.
   assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: EM }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
-  // Neither: no assignment, the stage's owner stands.
+  // An agent is never assigned: the EM agent is bridged and would wake on every row.
+  assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: EM }), undefined);
   assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: "acme/svc" }), undefined);
   assert.equal(assigneeFor(cfg, { labels: [], repo: "acme/svc" }), undefined);
 });
 
-test("assigneeFor: a missing id leaves both null, never the Foreman's agent, and never throws", () => {
-  const EM = "xrgarcia/slashbin-engineering-manager";
-  // Unset humanUserId.
+test("assigneeFor: an unset humanUserId leaves both null, never the Foreman's agent, and never throws", () => {
   assert.deepEqual(assigneeFor({ agentId: "fm" }, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: null });
-  // Unresolved roles.em: absent, or present with no id yet.
-  assert.deepEqual(assigneeFor({ agentId: "fm" }, { labels: [], repo: EM }), { assigneeAgentId: null, assigneeUserId: null });
-  assert.deepEqual(assigneeFor({ agentId: "fm", roles: { em: { name: "EM" } } }, { labels: [], repo: EM }), { assigneeAgentId: null, assigneeUserId: null });
 });
 
 test("assigneeFor: two identical calls return equal results", () => {
-  const cfg = { agentId: "fm", humanUserId: "ray-user", roles: { em: { name: "EM", id: "em-agent" } } };
+  const cfg = { agentId: "fm", humanUserId: "ray-user" };
   for (const item of [{ labels: ["approved-for-human"], repo: "a/b" }, { labels: [], repo: "xrgarcia/slashbin-engineering-manager" }, { labels: [], repo: "a/b" }]) {
     assert.deepEqual(assigneeFor(cfg, item), assigneeFor(cfg, item));
   }
