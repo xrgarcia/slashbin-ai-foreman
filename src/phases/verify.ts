@@ -4,13 +4,14 @@ import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent } from "../adapters.js";
+import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { verifyViaSre } from "../agent.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify } from "../github.js";
 import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
-import { CycleEvent, activeRuns, baseAdvancedSince, itemOf, releaseIfResolved } from "./common.js";
+import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
 
 /**
  * Review phase: invoke the EM /review-all-prs skill, scoped to one repo, when it
@@ -115,15 +116,21 @@ export async function tryVerify(
 
   const refs = findIssuesMergedToBase(repoConfig, waiting, vlog);
   // The blocked verify holds, re-checked: a merged PR now closes a
-  // "no merged PR" hold; new commits on base reopen an exhausted one.
+  // "no merged PR" hold; an edited spec reopens any failed one at once, with a
+  // fresh attempt count, because retrying an unchanged spec cannot pass; new
+  // commits on base reopen an exhausted one.
   let released = false;
   for (const [key, h] of Object.entries(held)) {
     const n = Number(key);
     const noPr = h.reason === "no-merged-pr";
-    if (!noPr && h.attempts < verifyRetry.maxAttempts) continue;
+    const exhausted = h.attempts >= verifyRetry.maxAttempts;
+    const kind: BlockKind = exhausted ? "verify-exhausted" : "verify-held";
     const ok = noPr
       ? await releaseIfResolved("verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
-      : await releaseIfResolved("verify-exhausted", { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) }, [n], repoConfig, vlog);
+      : await releaseIfResolved(kind, {
+        specEdited: issueEditedSince(repoConfig, n, h.heldAt),
+        ...(exhausted ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
+      }, [n], repoConfig, vlog);
     if (ok) { delete held[n]; released = true; }
   }
   if (released) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });

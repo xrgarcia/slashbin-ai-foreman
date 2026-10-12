@@ -20,6 +20,7 @@ export type BlockKind =
   | "skip"                 // the implementer declined: a transient precondition
   | "divergence"           // the feature branch diverged from its base
   | "verify-no-pr"         // labelled merged, but no merged PR closes the issue
+  | "verify-held"          // dev verification failed and is waiting out its backoff
   | "verify-exhausted"     // dev verification failed its last attempt
   | "revision-exhausted"   // revision failed its retries
   | "revision-stalemate";  // reviser and reviewer disagree with no commit
@@ -34,6 +35,8 @@ export interface BlockFacts {
   mergedPrFound?: boolean;
   /** The base branch gained commits after the block: a fix may have landed. */
   baseAdvanced?: boolean;
+  /** The issue's body, which is the spec the SRE verifies against, was edited after the hold. */
+  specEdited?: boolean;
   /** Someone pushed to the PR after the Foreman stopped on it. */
   prHeadMoved?: boolean;
 }
@@ -45,7 +48,8 @@ export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>
   "skip": ["transientCauseGone"],
   "divergence": ["divergenceCleared"],
   "verify-no-pr": ["mergedPrFound"],
-  "verify-exhausted": ["baseAdvanced"],
+  "verify-held": ["specEdited"],
+  "verify-exhausted": ["specEdited", "baseAdvanced"],
   "revision-exhausted": ["prHeadMoved"],
   "revision-stalemate": ["prHeadMoved"],
 };
@@ -56,6 +60,7 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   divergenceCleared: "the feature branch no longer diverges from its base",
   mergedPrFound: "a merged PR now closes the issue",
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",
+  specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",
   prHeadMoved: "the PR received new commits since the Foreman stopped — resuming",
 };
 

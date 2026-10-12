@@ -9,7 +9,7 @@ import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
 import { emit, advance, hasObservers } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
-import { commentOnIssue, issueTitles, readPrDigest, readLatestReviewBody } from "../github.js";
+import { commentOnIssue, gh, issueTitles, readPrDigest, readLatestReviewBody } from "../github.js";
 import { type BranchDivergence } from "../reconciler.js";
 import { readReviewOutcomes, type ReviewOutcome } from "../github.js";
 import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
@@ -52,6 +52,26 @@ export async function releaseIfResolved(
   logger.info(`${kind} block on ${items.map((n) => `#${n}`).join(", ") || repoConfig.name} resolved — ${why}`);
   for (const n of items) await emit({ kind: "unblocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, logger);
   return true;
+}
+
+/**
+ * Whether issue `n`'s body was edited after `sinceIso`. The body is the spec the
+ * SRE verifies against, so a failure the spec caused is fixed by editing it, not
+ * by new code. Undefined when GitHub cannot say: unknown never unblocks.
+ */
+export function issueEditedSince(repoConfig: RepoConfig, n: number, sinceIso: string): boolean | undefined {
+  const [owner, name] = repoConfig.githubRepo.split("/");
+  try {
+    const out = gh(["api", "graphql", "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `n=${n}`, "-f",
+      "query=query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){lastEditedAt}}}"], repoConfig.repoPath);
+    const at = JSON.parse(out || "{}")?.data?.repository?.issue?.lastEditedAt;
+    if (at === undefined) return undefined;
+    if (at === null) return false;
+    const since = Date.parse(sinceIso);
+    return Number.isNaN(since) ? undefined : Date.parse(at) > since;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
