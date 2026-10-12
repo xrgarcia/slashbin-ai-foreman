@@ -33,6 +33,7 @@ that one field. The block is read once at startup — restart the daemon after c
 | `repos` | array | none | — | Only issues in these repos (owner/name, as in githubRepo) get a card. Unset = every configured repo. A repo left out is never touched in Paperclip; its existing cards stay as they are. |
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
+| `humanUserId` | string | none | — | The Paperclip user id of the person who holds `approved-for-human` cards (assigneeFor in board.ts), written by whatever syncs those issues; the Foreman's own moves never assign a user. Set it in the installed `.ai-agent.json`: a person's id never goes in the repo. Unset = those cards are written unassigned. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
 | `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"releaseAuthorized":{"owner":"foreman","status":"in_review","label":"releaseAuthorized"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"releasing":{"owner":"foreman","status":"in_progress","label":"releasing"},"prodVerifyHeld":{"owner":"foreman","status":"in_review","label":"prodVerifyHeld"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
 | `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"pendingVerification":{"name":"Awaiting EM verification","color":"#7c3aed"},"releaseAuthorized":{"name":"Release authorized","color":"#4f46e5"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"releasing":{"name":"Releasing","color":"#16a34a"},"prodVerifyHeld":{"name":"Prod verification held","color":"#b45309"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
@@ -303,6 +304,39 @@ Every move to a lifecycle stage assigns the task to that stage's owner (see abov
 steps leave the assignee alone; a task reassigned by hand in Paperclip goes back at its next
 move. The Foreman's agent is registered with every wake path off (no heartbeat, no
 wake-on-demand), so assigning a task to it never makes Paperclip start a run.
+
+### Cards held by labels and repo
+
+Two kinds of card are not held by a stage's owner: they wait on a person, or on an agent the
+Foreman never runs. The plugin never reads GitHub labels, so it decides these from facts a
+sync supplies: `assigneeFor(cfg, { labels, repo })` in `board.ts`, a pure function. The
+Foreman's own moves never call it, and are unchanged.
+
+| The item | Assignee |
+|---|---|
+| labelled `approved-for-human` | the Paperclip user `humanUserId` |
+| an issue in `xrgarcia/slashbin-engineering-manager` | the agent of role `em` (`roles.em.id`) |
+| anything else | no assignment: the stage's owner holds it |
+
+`approved-for-human` is checked first, so an item that is both goes to the user. Paperclip
+allows one assignee, so the answer sets exactly one of `assigneeUserId` and
+`assigneeAgentId` and the other is `null`. A rule whose id is unset (no `humanUserId`, or
+`roles.em` with no `id` yet) gives both `null`: the card is written unassigned, never
+handed to the Foreman's agent, and nothing throws. `stageTarget` carries an optional `userId`
+beside `agentId` for a reader of either kind; a lifecycle stage never sets it.
+
+`.ai-agent.json` is set at runtime and is not in this repo, so `humanUserId` and
+`roles.em` are set in the installed file. `roles.em` gets its `id` from
+`npm run paperclip:register`, which must run before a sync can use it. A sync imports
+`dist/paperclip/board.js` from the Foreman's checkout, so the rollout is, in order:
+
+1. Merge the change.
+2. Rebuild `dist/` (`npm run build`).
+3. Set `humanUserId` and add `roles.em` in the installed `.ai-agent.json`, then
+   `npm run paperclip:register` to write its `id`.
+4. Only then switch the sync's assignee writes to `assigneeFor`.
+
+Until step 4 the sync writes those cards unassigned, as before, so nothing breaks in between.
 
 ## Projects
 

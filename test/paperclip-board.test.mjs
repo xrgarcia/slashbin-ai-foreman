@@ -2,7 +2,8 @@
 // stage → holder/status/label, the live-session lease, one stage label per card.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stageTarget, liveRows, withStage, ensureStageLabels } from "../dist/paperclip/board.js";
+import { stageTarget, assigneeFor, liveRows, withStage, ensureStageLabels } from "../dist/paperclip/board.js";
+import { PAPERCLIP_STAGES } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
 
 const L = { prUnderReview: "pr under review", prPendingActions: "pr pending actions", prApproved: "pr approved",
@@ -33,6 +34,41 @@ test("stageTarget: defaults hand every card to the Foreman; a role takes its sta
       .map((s) => [s, stageTarget({ agentId: "fm" }, s)]).map(([s, t]) => [s, { owner: "foreman", status: t.bucket, label: t.label }])),
       pendingVerification: { owner: "lead", status: "todo", label: "pendingVerification" } } };
   assert.deepEqual(stageTarget(cfg, "pendingVerification"), { bucket: "todo", agentId: "lead-1", label: "pendingVerification" });
+});
+
+test("stageTarget: no lifecycle stage is held by a user, so no result carries a userId key", () => {
+  const cfg = { agentId: "fm", humanUserId: "ray", roles: { em: { name: "EM", id: "em-1" } } };
+  for (const st of PAPERCLIP_STAGES) assert.equal("userId" in stageTarget(cfg, st), false, st);
+});
+
+test("assigneeFor: approved-for-human goes to the user, the EM repo to the EM agent, exactly one assignee", () => {
+  const EM = "xrgarcia/slashbin-engineering-manager";
+  const cfg = { agentId: "fm", humanUserId: "ray-user", roles: { em: { name: "Engineering Manager", id: "em-agent" } } };
+  // approved-for-human: only the user id.
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
+  // An EM-repo item with roles.em.id set: only that agent id.
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved"], repo: EM }), { assigneeAgentId: "em-agent", assigneeUserId: null });
+  // Both: approved-for-human wins.
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: EM }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
+  // Neither: no assignment, the stage's owner stands.
+  assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: "acme/svc" }), undefined);
+  assert.equal(assigneeFor(cfg, { labels: [], repo: "acme/svc" }), undefined);
+});
+
+test("assigneeFor: a missing id leaves both null, never the Foreman's agent, and never throws", () => {
+  const EM = "xrgarcia/slashbin-engineering-manager";
+  // Unset humanUserId.
+  assert.deepEqual(assigneeFor({ agentId: "fm" }, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: null });
+  // Unresolved roles.em: absent, or present with no id yet.
+  assert.deepEqual(assigneeFor({ agentId: "fm" }, { labels: [], repo: EM }), { assigneeAgentId: null, assigneeUserId: null });
+  assert.deepEqual(assigneeFor({ agentId: "fm", roles: { em: { name: "EM" } } }, { labels: [], repo: EM }), { assigneeAgentId: null, assigneeUserId: null });
+});
+
+test("assigneeFor: two identical calls return equal results", () => {
+  const cfg = { agentId: "fm", humanUserId: "ray-user", roles: { em: { name: "EM", id: "em-agent" } } };
+  for (const item of [{ labels: ["approved-for-human"], repo: "a/b" }, { labels: [], repo: "xrgarcia/slashbin-engineering-manager" }, { labels: [], repo: "a/b" }]) {
+    assert.deepEqual(assigneeFor(cfg, item), assigneeFor(cfg, item));
+  }
 });
 
 test("liveRows: a fresh lease holds its rows; a lapsed or missing one holds none", () => {

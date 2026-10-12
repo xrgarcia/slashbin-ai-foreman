@@ -37,7 +37,7 @@ export const FOREMAN_BLOCKED_PREFIX = "blocked: ";
 export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE }> };
 
 /** The board settings a mapping needs; missing ones take the defaults. */
-type BoardConfig = Pick<PaperclipConfig, "agentId"> & Partial<Pick<PaperclipConfig, "board" | "roles" | "stageLabels" | "statusMap">>;
+type BoardConfig = Pick<PaperclipConfig, "agentId"> & Partial<Pick<PaperclipConfig, "board" | "roles" | "stageLabels" | "statusMap" | "humanUserId">>;
 
 function filled(cfg: BoardConfig) {
   const d = paperclipBoardDefaults();
@@ -55,10 +55,55 @@ export function statusName(cfg: BoardConfig, bucket: PaperclipBucket): string {
   return cfg.statusMap?.[bucket] ?? bucket;
 }
 
-/** Where a stage puts a card: its status bucket, the agent holding it, and its stage label key (null = none). */
-export function stageTarget(cfg: BoardConfig, stage: PaperclipStage): { bucket: PaperclipBucket; agentId: string | undefined; label: string | null } {
+/**
+ * Where a stage puts a card: its status bucket, its holder, and its stage label
+ * key (null = none). The holder is an agent (`agentId`) or a Paperclip user
+ * (`userId`), never both. A lifecycle stage is always held by a role's agent,
+ * so `userId` is absent here; it is in the type for readers of either kind.
+ */
+export function stageTarget(cfg: BoardConfig, stage: PaperclipStage): { bucket: PaperclipBucket; agentId: string | undefined; label: string | null; userId?: string | undefined } {
   const s = filled(cfg).board[stage];
   return { bucket: s.status, agentId: agentFor(cfg, s.owner), label: s.label };
+}
+
+/** The GitHub label that puts an item in a person's hands: its card is held by `humanUserId`. */
+export const HUMAN_HOLD_LABEL = "approved-for-human";
+/** The role key of the Engineering Manager's agent in `roles`. */
+export const EM_ROLE = "em";
+/** The repo whose issues the Engineering Manager's agent holds. */
+export const EM_REPO = "xrgarcia/slashbin-engineering-manager";
+
+/**
+ * A card's one assignee, as Paperclip takes it: exactly one of the two is an id
+ * and the other null ("Issue can only have one assignee", 422), or both null
+ * for a card written unassigned.
+ */
+export type CardAssignee = { assigneeAgentId: string | null; assigneeUserId: string | null };
+
+/**
+ * Who holds an item's card by its labels and repo, for a caller (a sync) that
+ * reads them; this plugin never reads GitHub. Pure: the same item and config
+ * always give the same answer.
+ *
+ * - labelled `approved-for-human` → the `humanUserId` user. Checked first, so
+ *   it wins over the repo rule.
+ * - an issue in the Engineering Manager's repo → the `roles.em` agent.
+ * - anything else → undefined: no assignment here, the stage's holder stands.
+ *
+ * A rule that matches with its id unset (no `humanUserId`, or `roles.em` with
+ * no `id` yet) gives both null, so the card is still written, unassigned. It
+ * never falls back to the Foreman's own agent and never throws.
+ */
+export function assigneeFor(cfg: BoardConfig, item: { labels: readonly string[]; repo: string }): CardAssignee | undefined {
+  if (item.labels.includes(HUMAN_HOLD_LABEL)) {
+    return { assigneeAgentId: null, assigneeUserId: cfg.humanUserId ?? null };
+  }
+  if (item.repo.toLowerCase() === EM_REPO) {
+    // agentFor falls back to the Foreman's agent for a role with no id; this card is never the Foreman's.
+    const em = filled(cfg).roles[EM_ROLE]?.id ? agentFor(cfg, EM_ROLE) : undefined;
+    return { assigneeAgentId: em ?? null, assigneeUserId: null };
+  }
+  return undefined;
 }
 
 /** The card ids a live lease still holds at `now`; empty once it has lapsed. */
