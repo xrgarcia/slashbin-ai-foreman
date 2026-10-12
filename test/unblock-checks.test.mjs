@@ -25,6 +25,14 @@ test("a check only releases the kinds it is listed for", () => {
   assert.equal(passingCheck("verify-no-pr", { mergedPrFound: true }), "mergedPrFound");
 });
 
+test("an edited spec releases a failed verify, held or exhausted; unknown keeps it", () => {
+  assert.equal(passingCheck("verify-held", { specEdited: true }), "specEdited");
+  assert.equal(passingCheck("verify-exhausted", { specEdited: true, baseAdvanced: false }), "specEdited");
+  assert.equal(passingCheck("verify-exhausted", { specEdited: undefined, baseAdvanced: true }), "baseAdvanced");
+  assert.equal(passingCheck("verify-held", { specEdited: undefined }), null);
+  assert.equal(passingCheck("verify-held", { baseAdvanced: true }), null);
+});
+
 test("the card note names the check", () => {
   assert.match(unblockedReason("divergenceCleared"), /^unblocked: .*diverge/);
 });
