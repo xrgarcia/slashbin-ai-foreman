@@ -547,10 +547,25 @@ test("a `release pending` issue the production release shipped joins that releas
   assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5, 9]);
   assert.match(commentsOn(9)[0], /^\*\*Joined release PR #100\.\*\*/);
 
-  seed("soaking");  // already verified without it: it cannot carry it
+});
+
+test("an issue orphaned after its release passed rejoins it, and the release is verified again with it named", async () => {
+  world({
+    issues: [{ number: 5, title: "Issue 5", state: "CLOSED", labels: ["approved"] }, issue(9, "release pending")],
+    prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE,
+  }, { prod: VERIFY(100) });
+  editState((st) => {
+    st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5], phase: "soaking", mergeSha: MERGE, mergedAt: new Date().toISOString(),
+      attempts: 0, soakAt: new Date(Date.now() + 1_800_000).toISOString(), since: new Date().toISOString() } };
+  });
   await run();
-  assert.ok(gh().issues[9].labels.includes("blocked"));
-  assert.match(commentsOn(9)[0], /no release carries this issue/);
+  assert.ok(!gh().issues[9].labels.includes("blocked"), "not blocked");
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/);
+  assert.match(commentsOn(9)[0], /re-run production verification/);
+  assert.deepEqual(agentCalls(), [["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]], "verified again, with #9 named");
+  assertClosedVerified(9);
+  assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5, 9]);
+  assert.deepEqual(commentsOn(5), [], "the issue the first pass closed is left alone");
 });
 
 test("without srePath and techLeadPath the stage does nothing at all", async () => {

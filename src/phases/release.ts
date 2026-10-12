@@ -196,7 +196,9 @@ async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move,
   const line =
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
     `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.`;
-  for (const n of writable(repoConfig, rel, logger)) {
+  // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
+  const open = new Set(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => i.number));
+  for (const n of writable(repoConfig, rel, logger).filter((i) => open.has(i))) {
     comment(repoConfig, n, line, logger);
     await advance(itemOf(repoConfig, n), move, repoConfig, logger);
   }
@@ -408,10 +410,11 @@ async function blockOrphans(repoConfig: RepoConfig, st: RepoState, logger: Logge
  * reaches `ready for prod release` after promote read the list for the open
  * release PR (jerky_skuvault_service #417 and #419, 2026-10-11: labelled 1-4 s
  * after PR #426 was opened naming only #397, then blocked here as carried by
- * nothing). Join it to that release while it is still unverified (`merged` or
- * `held`): its PR body names it, so the SRE's next prod verification grades its
- * acceptance, and the release closes it on a pass. A `soaking` release already
- * passed without it, so that one cannot carry it. True when joined.
+ * nothing). Join it to that release: its PR body names it, so the SRE's next
+ * prod verification grades its acceptance, and the release closes it on a pass.
+ * A `soaking` release already passed without it, so it goes back to `merged` to
+ * be verified again (jerky_skuvault_service #433, 2026-10-12: labelled 2 s
+ * before PR #439 was cut, orphaned only after #439 passed). True when joined.
  */
 async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphans: number[], logger: Logger): Promise<boolean> {
   let head: string;
@@ -422,7 +425,7 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
     return false;
   }
   const rel = Object.values(st.prodReleases ?? {})
-    .find((r) => r.mergeSha === head && (r.phase === "merged" || r.phase === "held"));
+    .find((r) => r.mergeSha === head && r.phase !== "deploying");
   if (!rel) return false;
   const titles = new Map(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i.title]));
   try {
@@ -434,13 +437,17 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
     logger.warn(`Could not add ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr}: ${errText(err)}`);
     return false;
   }
-  putRelease(repoConfig, { ...rel, issues: [...rel.issues, ...orphans.filter((n) => !rel.issues.includes(n))] });
+  const issues = [...rel.issues, ...orphans.filter((n) => !rel.issues.includes(n))];
+  const reverify = rel.phase === "soaking";
+  putRelease(repoConfig, reverify
+    ? { ...rel, issues, phase: "merged", attempts: 0, adopted: false, retryAt: undefined, soakAt: undefined, hold: undefined }
+    : { ...rel, issues });
   for (const n of orphans) {
     if (rel.phase === "held") await advance(itemOf(repoConfig, n), "prodHeld", repoConfig, logger);
     comment(repoConfig, n,
       `**Joined release PR #${rel.pr}.** This issue's work shipped in that release (\`${repoConfig.productionBranch}\` is at its merge, \`${short(head)}\`), ` +
-      "which was opened before this issue was ready for production. The release now names it, so its production verification grades this issue " +
-      "and closes it on a pass.", logger);
+      "which was opened before this issue was ready for production. The release now names it, so its " +
+      `${reverify ? "re-run " : ""}production verification grades this issue and closes it on a pass.`, logger);
   }
   logger.info(`Joined ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr} (production head ${short(head)})`);
   return true;
