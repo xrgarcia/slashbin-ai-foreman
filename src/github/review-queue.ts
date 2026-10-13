@@ -5,6 +5,7 @@ import type { Logger } from "../logger.js";
 import { isGitHubStateEnabled, stateOpenIssues } from "../github-state.js";
 import { findOpenPrs, getOpenIssues, hasLabel, issueCacheTtlMs } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
+import { extractImplementedIssues } from "./discovery.js";
 import { BackoffTracker, backoffSettings } from "../backoff.js";
 import { currentApprovalMs, currentVerdictRequestsChanges, hasFreshReview, returnedToReviewSinceVerdict } from "./review-freshness.js";
 
@@ -274,12 +275,12 @@ export function adoptOrphanedReviewCandidate(
     && !approvedUnmergedDue(config, pr.number, reviewerLogin, logger)) return null;
 
   const { prUnderReview, prPendingActions, readyForProd } = config.lifecycleLabels;
-  const refs = new Set<number>();
-  const combined = `${pr.title}\n${pr.body ?? ""}`;
-  for (const m of combined.matchAll(/#(\d+)/g)) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n !== pr.number) refs.add(n);
-  }
+  // A keyword reference or a `(#N)` title suffix, never a bare `#N`: prose in the
+  // body names siblings ("#109 depends on this and is next"), and adopting one
+  // ties unbuilt work to this PR's review and verification.
+  const refs = new Set<number>(
+    extractImplementedIssues({ title: pr.title, body: pr.body ?? "" }).filter((n) => n !== pr.number),
+  );
   const unlinked = (why: string): ReviewCandidate => {
     logger.info(`${config.name}: PR #${pr.number} ${why} — reviewing it with no issue, so it cannot hold the queue`);
     return { prNumber: pr.number, prUrl: pr.url, issueNumbers: [], adopted: [] };

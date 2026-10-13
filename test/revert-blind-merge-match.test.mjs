@@ -89,3 +89,8 @@ test("findIssuesMergedToBase does not read the reverted #1164 as merged", () => 
   const cfg = loadConfig(p).repos[0];
   assert.deepEqual(findIssuesMergedToBase(cfg, [1163, 1164], logger).map((m) => m.issueNumber), [1163]);
 });
+
+test("jerky_service PR #112: a prose mention of the next issue is not a reference", () => {
+  const body = "Related to #108\n\n## Notes\n- Boot: this check runs before #108's code.\n- #109 depends on this and is next.";
+  assert.deepEqual(extractImplementedIssues({ title: "feat: escalation rules + CS Manager confirm/reject (#108)", body }), [108]);
+});

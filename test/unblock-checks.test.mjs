@@ -57,3 +57,10 @@ test("the mirror moves only a Foreman-blocked card on unblock", () => {
   assert.match(body, /statusName\("blocked"\)/);
   assert.match(body, /this\.blockedAt\.delete\(id\)/);
 });
+
+test("an exhausted hold dev could not observe is not reopened by new commits on base", async () => {
+  const { reopensOnBaseAdvance } = await import("../dist/phases/verify.js");
+  // jerky_service #110: dev has no classifier key and drafting off, so every reopen re-ran the same hold.
+  assert.equal(reopensOnBaseAdvance("acceptance-not-verified"), false);
+  assert.equal(reopensOnBaseAdvance("acceptance-failed"), true);
+});
