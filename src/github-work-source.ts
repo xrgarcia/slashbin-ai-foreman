@@ -12,6 +12,7 @@ import type { Move, StageOrDone } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
+import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
 export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
@@ -80,11 +81,15 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
 /** repo → the covered issue set last announced by implement's "all have linked PRs" skip. */
 const coveredSkipAnnounced = new Map<string, string>();
 
+/** `repo#issue` → the hold last logged for it, so a held issue is announced once, not every cycle. */
+const blockerHoldAnnounced = new Map<string, string>();
+
 /**
  * GitHub issues as a work source — the first `WorkSourceAdapter` connector.
  *
  * `selectWork` is everything this source offers the implement stage: open
  * issues carrying the trigger label, not `blocked`, in no lifecycle state,
+ * with every GitHub "blocked by" issue merged,
  * implemented by no open or merged PR — uncapped, in `gh issue list` order.
  * The orchestrator cuts its own capped `discoveryBatch` from it, and hands the
  * whole offer (less backed-off issues) to a skill.
@@ -507,9 +512,35 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       const labels = issue.labels.map((l) => l.name);
       if (labels.includes(config.github.blockedLabel)) continue;
       if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
+      if (this.waitsOnBlocker(config, issue.number, logger)) continue;
       actionable.push(issue.number);
     }
     return actionable;
+  }
+
+  /**
+   * True while a GitHub "blocked by" issue of `num` has not merged to the base
+   * branch (dependencies.ts). An unreadable dependency list holds the issue too:
+   * a stall is logged and visible, a build out of order is neither.
+   */
+  private waitsOnBlocker(config: RepoConfig, num: number, logger: Logger): boolean {
+    const key = `${config.githubRepo}#${num}`;
+    let hold: string | null;
+    try {
+      const unmet = unmetBlockers(blockersOf(config.githubRepo, num, config.repoPath), config.lifecycleLabels);
+      hold = unmet.length ? `blocked by ${unmet.map((b) => blockerRef(b, config.githubRepo)).join(", ")} until it merges` : null;
+    } catch (err) {
+      hold = `its blockers could not be read (${err instanceof Error ? err.message : String(err)})`;
+    }
+    if (hold === null) {
+      blockerHoldAnnounced.delete(key);
+      return false;
+    }
+    if (blockerHoldAnnounced.get(key) !== hold) {
+      blockerHoldAnnounced.set(key, hold);
+      logger.info(`Holding #${num}: ${hold}`);
+    }
+    return true;
   }
 
   /**
