@@ -25,6 +25,16 @@ import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, re
  * Returns true when a review run was triggered (regardless of verdict).
  */
 /**
+ * Whether new commits on base may reopen an exhausted hold. Not one the SRE
+ * could not observe (`acceptance-not-verified`): commits do not give dev the
+ * instrument it lacks, so each reopen buys three more runs of the same hold.
+ * Only an edited spec (an acceptance script, an offline-instrument exception) can.
+ */
+export function reopensOnBaseAdvance(reason: string): boolean {
+  return reason !== "acceptance-not-verified";
+}
+
+/**
  * What a non-passing verify costs. Pure, exported for tests.
  *
  * - `defer`: the SRE could not run (Codex or its EM spec mirror unavailable) —
@@ -118,7 +128,7 @@ export async function tryVerify(
   // The blocked verify holds, re-checked: a merged PR now closes a
   // "no merged PR" hold; an edited spec reopens any failed one at once, with a
   // fresh attempt count, because retrying an unchanged spec cannot pass; new
-  // commits on base reopen an exhausted one.
+  // commits on base reopen an exhausted one, unless dev could not observe it.
   let released = false;
   for (const [key, h] of Object.entries(held)) {
     const n = Number(key);
@@ -129,7 +139,7 @@ export async function tryVerify(
       ? await releaseIfResolved("verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
       : await releaseIfResolved(kind, {
         specEdited: issueEditedSince(repoConfig, n, h.heldAt),
-        ...(exhausted ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
+        ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
       }, [n], repoConfig, vlog);
     if (ok) { delete held[n]; released = true; }
   }
