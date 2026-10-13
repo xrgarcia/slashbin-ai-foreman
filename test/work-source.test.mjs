@@ -42,6 +42,7 @@ before(() => {
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(${JSON.stringify(JSON.stringify(BOARD))});
+else if (args[0] === "api" && args[1] === "repos/example/ordered/issues/3/dependencies/blocked_by") process.stdout.write(JSON.stringify([{ number: 2, state: "open", labels: [{ name: "approved" }] }]));
 else if (args[0] === "ls-files") process.stdout.write(Array.from({ length: 40 }, (_, i) => "f" + i).join("\\n"));
 else process.stdout.write("[]");
 `);
@@ -91,6 +92,12 @@ test("the GitHub connector offers every eligible issue, uncapped, in gh order", 
   assert.deepEqual(items.map((w) => w.issueNumber), [5, 4, 3, 2, 1]);
   assert.deepEqual(discoveryBatch(config.repos[0], [5, 4, 3, 2, 1], logger), [1, 2, 3],
     "the Foreman's own batch stays ascending and capped at 3");
+});
+
+test("an issue whose GitHub blocker has not merged is not offered (jerky_service #108 → #109)", async () => {
+  const config = load({ githubRepo: "example/ordered" });
+  const items = await new GitHubIssueConnector().selectWork(config.repos[0], config, logger);
+  assert.deepEqual(items.map((w) => w.issueNumber), [5, 4, 2, 1], "#3 is blocked by #2, still only approved");
 });
 
 for (const skillPath of [".claude/skills/implement-approved-issues/SKILL.md", "builtin:"]) {
