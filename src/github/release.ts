@@ -113,8 +113,10 @@ export function findPvComment(config: RepoConfig, pr: number): { url: string; bo
  * not read: the soak is its own step. Any FAIL or Grafana REGRESSIONS is
  * `prod-verify-failed`; NOT YET ELIGIBLE with a readable UTC time is
  * `wait-until-<UTC>` (the SRE's own window slug), without one, and any NOT
- * VERIFIED, `acceptance-not-verified`. Null when no row reads: the caller then
- * runs the verification rather than guess. Pure, exported for tests.
+ * VERIFIED, `acceptance-not-verified`. WATCH passes: the deploy is healthy and
+ * the dev proof stands, and the live outcome is left to a post-launch watch
+ * rather than holding the release (owner, 2026-10-12). Null when no row reads:
+ * the caller then runs the verification rather than guess. Pure, exported for tests.
  */
 export function readPvResult(body: string): { pass: true } | { pass: false; hold: string } | null {
   const rows: Array<{ check: string; result: string }> = [];
@@ -134,7 +136,7 @@ export function readPvResult(body: string): { pass: true } | { pass: false; hold
     return { pass: false, hold: m ? `wait-until-${m[1]}${m[2]}${m[3]}T${m[4]}${m[5]}Z` : "acceptance-not-verified" };
   }
   if (rows.some((r) => /NOT[ -]VERIFIED|PENDING/i.test(r.result))) return { pass: false, hold: "acceptance-not-verified" };
-  if (rows.every((r) => /^(PASS|CLEAN|N\/?A)\b/i.test(r.result))) return { pass: true };
+  if (rows.every((r) => /^(PASS|CLEAN|N\/?A|WATCH)\b/i.test(r.result))) return { pass: true };
   return { pass: false, hold: "acceptance-not-verified" };
 }
 
