@@ -646,6 +646,7 @@ test("readPvResult reads a Production Verification table; the soak row is its ow
   assert.deepEqual(readPvResult(table("| **Grafana** | REGRESSIONS | p95 |")), { pass: false, hold: "prod-verify-failed" });
   assert.deepEqual(readPvResult(table("| **Acceptance** | NOT YET ELIGIBLE until 2026-10-10 12:15 UTC | |")), { pass: false, hold: "wait-until-20261010T1215Z" });
   assert.deepEqual(readPvResult(table("| **Acceptance** | NOT VERIFIED | |")), { pass: false, hold: "acceptance-not-verified" });
+  assert.deepEqual(readPvResult(table("| **Outcome vs baseline** | WATCH — no post-deploy chat yet | |", "| **Grafana** | N/A | |")), { pass: true });
   assert.equal(readPvResult("## Production Verification\n\nprose only"), null);
 });
 
