@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan } from "../dist/orchestrator.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding } from "../dist/orchestrator.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
 const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
@@ -86,4 +86,18 @@ test("board: `pr merged` is the merged stage; `pr approved` still wins over it",
 test("verify runs right after review in the default stages", () => {
   const ids = BUILTIN_STAGES.map((s) => s.type ?? s.id ?? s);
   assert.equal(ids[ids.indexOf("review") + 1], "verify");
+});
+
+test("devVerifyHolding: an unverified merge holds the next build until it passes or needs a person", () => {
+  const at = "2026-10-14T21:00:00.000Z";
+  assert.equal(devVerifyHolding([], {}, 3), null, "nothing merged, nothing holds");
+  assert.equal(devVerifyHolding([131], {}, 3), 131, "merged, not yet verified — holds");
+  assert.equal(devVerifyHolding([131], { 131: { heldAt: at, prNumber: 148, reason: "held", attempts: 1 } }, 3), 131,
+    "held and still retrying — holds: the fix it asks for comes first");
+  assert.equal(devVerifyHolding([131], { 131: { heldAt: at, prNumber: 148, reason: "held", attempts: 3 } }, 3), null,
+    "attempts spent — it waits on a person, so it frees the repo");
+  assert.equal(devVerifyHolding([131], { 131: { heldAt: at, prNumber: 148, reason: "wait-until-20261016T1400Z", attempts: 0, retryAt: "2026-10-16T14:00:00.000Z" } }, 3), null,
+    "waiting on a named time frees the repo");
+  assert.equal(devVerifyHolding([140, 131], { 131: { heldAt: at, prNumber: 148, reason: "no-merged-pr", attempts: 3 } }, 3), 140,
+    "the first merge still with the SRE is the one named");
 });

@@ -124,6 +124,12 @@ Type: integer · Default: `1` · Env: `AI_AGENT_BUILD_BATCH_SIZE`
 
 How many approved issues one build claims. The Foreman picks them before the session — priority tier (github.priorityLabels), then oldest — hands the session only those, and claims only those; the rest stay queued (todo, on the Foreman). Default 1: per repo, one issue is built at a time, as one is reviewed and one deployed at a time. Raise it to let one session choose among several and build one of them.
 
+### `buildWaitsForDevVerify`
+
+Type: boolean · Default: `true` · Env: `AI_AGENT_BUILD_WAITS_FOR_DEV_VERIFY`
+
+Hold a repo's next build until its last merge has passed dev verification, not just merged. One issue is in flight per repo, from build to verified on dev, so a fix the verification calls for lands before the next issue is built on top. A merge whose verification waits on a person (attempts spent) or on a named time frees the repo. No effect without an SRE (srePath). Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+
 ### `backoff`
 
 Every wait before the Foreman tries something again — declined issues, failed verifications, an unavailable reviewer, failing repos, upstream limits, gh retries — each exponential and tunable. See src/backoff.ts and docs/configuration.md. The old top-level `skipBackoffMs`, `upstreamBackoffBaseMs` and `upstreamBackoffCapMs` are still read into it.
