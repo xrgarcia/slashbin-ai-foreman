@@ -502,6 +502,30 @@ test("a review session holds the card in progress under the reviewer, noted by n
   assert.ok(fake.comments.r7.includes("Tech Lead reviewing PR #9"));
 });
 
+test("a session that starts while Paperclip is down puts its card in progress on the next snapshot", async () => {
+  // jerky_service #131, 2026-10-14: the verify session's move failed in a
+  // 30-second outage, the hold kept every later writer off the card, and it
+  // sat in To Do on the SRE's seat for the whole verification.
+  let down = true;
+  const fake = fakePaperclip([row("r7", 7, { status: "todo", assigneeAgentId: "agent-rev" })]);
+  const flaky = { ...fake, fetch: async (...a) => { if (down) throw new Error("ECONNREFUSED"); return fake.fetch(...a); } };
+  const { mirror } = mirrorOn(flaky, { ...TEAM, board: { ...TEAM.board,
+    merged: { owner: "reviewer", status: "todo", label: null }, verifying: { owner: "reviewer", status: "in_progress", label: null } } });
+  down = false;
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  down = true;
+  await mirror.onSession({ phase: "verify", status: "started", repo: "example/r", items: [item], pr: 9, reviewer: "SRE" }, logger());
+  assert.equal(fake.rows[0].status, "todo");
+  down = false;
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the held card takes its session's column once Paperclip answers");
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-rev");
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  assert.equal(fake.rows[0].status, "in_progress", "and the snapshot still leaves a held card alone");
+  await mirror.onSession({ phase: "verify", status: "finished", repo: "example/r", items: [item], pr: 9 }, logger());
+  assert.equal(fake.rows[0].status, "todo", "the session's end still returns it");
+});
+
 test("a session that ends with no verdict returns the card to the stage it came from", async () => {
   const fake = fakePaperclip([row("r7", 7, { status: "todo" })]);
   const { mirror } = mirrorOn(fake, TEAM);

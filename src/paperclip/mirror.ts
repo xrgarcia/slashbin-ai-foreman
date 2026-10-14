@@ -239,7 +239,7 @@ export class PaperclipMirror implements WorkObserver {
    * in To-do while the Tech Lead reviewed PR #90 (2026-10-05).
    */
   private recovery: Promise<void> = Promise.resolve();
-  private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove }>();
+  private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove; placed: boolean }>();
   /** Task id → the last lifecycle stage the mirror placed it in, so a resumed card goes back there. */
   private readonly rowStage = new Map<string, PaperclipStage>();
   /** Task id → why the Foreman blocked it, the unblock descriptor's action when it moves to `blocked`. */
@@ -419,7 +419,11 @@ export class PaperclipMirror implements WorkObserver {
       if (!id) continue;
       this.ghStage.set(id, stage);
       const state = this.rowState.get(id);
-      if (!state || state.startsWith("waiting\n") || this.holds.has(id)) continue;
+      if (this.holds.has(id)) {
+        await this.placeHeld(id);
+        continue;
+      }
+      if (!state || state.startsWith("waiting\n")) continue;
       if (state === `status:${this.statusName("cancelled")}`) continue;
       const want = `status:${this.statusName(stage === "done" ? "done" : stageTarget(this.cfg, stage).bucket)}`;
       if (state === want) continue;
@@ -755,10 +759,9 @@ export class PaperclipMirror implements WorkObserver {
           // The card takes the session's stage first (the claim may already
           // have put it there), then is held there.
           const stage = SESSION_STAGE[phase];
-          if (this.rowStage.get(id) !== stage || this.rowState.get(id) !== `status:${this.statusName(stageTarget(this.cfg, stage).bucket)}`) {
-            await this.move(id, stage);
-          }
-          this.holds.set(id, { count: 1, phase, restore: null });
+          const placed = (this.rowStage.get(id) === stage && this.rowState.get(id) === `status:${this.statusName(stageTarget(this.cfg, stage).bucket)}`)
+            || await this.move(id, stage);
+          this.holds.set(id, { count: 1, phase, restore: null, placed });
         }
         leaseChanged = true;
       } else if (event.status === "finished" || event.status === "failed") {
@@ -911,10 +914,23 @@ export class PaperclipMirror implements WorkObserver {
    * board user, so taking the row means releasing that user. The stage label
    * is best-effort: when the labels cannot be read the status still moves.
    */
-  private async move(id: string, to: PaperclipStepMove): Promise<boolean> {
+  /**
+   * A held card its session's start could not move (Paperclip was down) takes
+   * the session's column now. Otherwise the hold keeps every later writer off
+   * it, and it shows its old column for the whole session: jerky_service #131
+   * sat in To Do while the SRE verified it, after a 30-second outage
+   * (2026-10-14).
+   */
+  private async placeHeld(id: string): Promise<void> {
+    const h = this.holds.get(id);
+    if (!h || h.placed) return;
+    h.placed = await this.move(id, SESSION_STAGE[h.phase], true);
+  }
+
+  private async move(id: string, to: PaperclipStepMove, held = false): Promise<boolean> {
     if (to === null || to === "waiting") return true;
     const h = this.holds.get(id);
-    if (h) {
+    if (h && !held) {
       if (to !== SESSION_STAGE[h.phase]) h.restore = to;
       return true;
     }
