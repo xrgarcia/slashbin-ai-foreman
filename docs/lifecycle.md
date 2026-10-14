@@ -42,6 +42,7 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
 | `releasing` | `release pending` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
 | `prodVerifyHeld` | `prod verification held` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
+| `needsRuling` | — (a session holds it) | Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. |
 | `blocked` | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
 | `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed. |
 
@@ -162,6 +163,7 @@ The full `WorkEvent` contract (`src/adapters.ts`). Only `transition` writes to t
 | `transition` | A lifecycle move (the table below). `observed: true` when an AI session already wrote the labels itself and the Foreman is only reporting what it saw: the work source does not write again. |
 | `prLink` | The item's PR was opened. |
 | `blocked` | The Foreman stopped and needs a person (the reason says why). |
+| `escalated` | Revision stopped: the PR is not converging under review, and the EM must post a scope ruling. |
 | `unblocked` | A check resolved an earlier block. |
 | `merged` | The item's PR merged to the base branch. |
 | `promoted` | A promotion PR to the production branch now carries the item. |

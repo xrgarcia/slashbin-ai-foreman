@@ -65,7 +65,7 @@ export {
   stripReadyForProdLabel,
   createPromotionPR,
 } from "./github/promotion.js";
-export { issueTitles, readPrDigest, readLatestReviewBody, countChangesRequested } from "./github/reports.js";
+export { issueTitles, readPrDigest, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
 export {
   checkPRHasChanges,
   getRemoteBranchSha,

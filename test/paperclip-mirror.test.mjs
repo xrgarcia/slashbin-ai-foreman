@@ -480,7 +480,7 @@ test("each step hands the card to its configured agent with exactly one stage la
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
-  assert.equal(fake.labels.length, 10, "the nine stage labels created once");
+  assert.equal(fake.labels.length, 11, "the ten stage labels created once");
 });
 
 test("a review session holds the card in progress under the reviewer, noted by name, and returns it when it ends", async () => {
@@ -792,4 +792,30 @@ test("step notes: an untouched item gets no implement-end note", async () => {
   await mirror.onSession(ev("started"), logger());
   await mirror.onSession(ev("failed", { detail: "exit 1", worked: [7] }), logger());
   assert.equal((fake.comments.r7 ?? []).length - (fake.comments.r8 ?? []).length, 1, "only the worked item carries the failure note");
+});
+
+test("escalated: the card parks Blocked in the EM's hands until revision resumes", async () => {
+  const fake = fakePaperclip([row7("todo")]);
+  const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
+  const r = fake.rows[0];
+  assert.equal(r.status, "blocked", "blocked, so a board sync leaves it alone and the EM's inbox lists it");
+  assert.equal(r.assigneeAgentId, "em-agent");
+  assert.equal(r.unblockDescriptor.owner.agentId, "em-agent");
+  assert.match(r.unblockDescriptor.action, /^blocked: needs an EM scope ruling: PR #3/);
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  assert.equal(r.status, "blocked", "the snapshot undid the escalation");
+  await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", pr: 3, items: [item] }, logger());
+  assert.equal(r.status, "in_progress", "the revision after the ruling takes the card back");
+  assert.equal(r.assigneeAgentId, AGENT);
+});
+
+test("escalated with no roles configured stays with the Foreman", async () => {
+  const fake = fakePaperclip([row7("todo")]);
+  const { mirror } = mirrorOn(fake, { agentStatus: false });
+  await mirror.onEvent({ kind: "escalated", item, reason: "x" }, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, AGENT);
 });

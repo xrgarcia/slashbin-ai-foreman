@@ -97,6 +97,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   approved: { stage: "pendingVerification", note: "approved" },
   awaitingVerify: { stage: "merged", note: "merged; awaiting dev verification" },
   blocked: { stage: "blocked", note: "blocked: {reason}" },
+  escalated: { stage: "needsRuling", note: "blocked: needs an EM scope ruling: {reason}" },
   merged: { stage: null, note: "merged" },
   releaseWaiting: { stage: "awaitingRelease", note: "waiting on release PR #{pr} to merge to {branch}" },
   released: { stage: "done", note: "release PR #{pr} merged to {branch}" },
@@ -282,6 +283,7 @@ export class PaperclipMirror implements WorkObserver {
       case "transition": return this.onState(event.item, event.from, event.to);
       case "prLink": return this.onPrLink(event.item, event.prUrl);
       case "blocked": return this.onBlocked(event.item, event.reason);
+      case "escalated": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.escalated);
       case "unblocked": return this.onUnblocked(event.item, event.reason);
       case "merged": return this.onMerged(event.item);
       case "session": return this.onSession(event.session, logger);
@@ -344,15 +346,17 @@ export class PaperclipMirror implements WorkObserver {
     if (id) await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }), { event: "progress", tag: "prLink" });
   }
 
-  async onBlocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
+  /** Blocked, or (`step` escalated) parked for the EM's ruling in the stage that holder owns. */
+  async onBlocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger,
+    step: typeof PAPERCLIP_STEPS.blocked | typeof PAPERCLIP_STEPS.escalated = PAPERCLIP_STEPS.blocked): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
-    const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: this.clean(reason) });
+    const text = fill(step.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
     this.blockedAt.set(id, this.ghStage.get(id));
-    await this.move(id, PAPERCLIP_STEPS.blocked.stage);
+    await this.move(id, step.stage);
     await this.note(id, text, { event: "blocked" });
   }
 

@@ -35,6 +35,7 @@ const stageLabelsSchema = z.object({
   awaitingRelease: stageLabel("Awaiting release", "#059669"),
   releasing: stageLabel("Releasing", "#16a34a"),
   prodVerifyHeld: stageLabel("Prod verification held", "#b45309"),
+  needsRuling: stageLabel("Needs EM ruling", "#be185d"),
   blocked: stageLabel("Blocked", "#dc2626"),
 }).catchall(z.object({ name: z.string().trim().min(1).max(48), color: hexColor })).prefault({});
 
@@ -65,6 +66,9 @@ const boardStagesSchema = z.object({
   // Merged to production, but prod verification held (`prod verification held`): re-verified on a back-off.
   // in_review, not blocked: the Foreman is still acting on it, and blocked is a person's queue.
   prodVerifyHeld: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "prodVerifyHeld"),
+  // Revision stopped for a scope ruling: the review rounds are not converging. Blocked, so a sync leaves
+  // it be; point `owner` at the EM's role so the ruling lands in its inbox.
+  needsRuling: stage(PAPERCLIP_FOREMAN_ROLE, "blocked", "needsRuling"),
   // Needs a person: labelled `blocked` on the source, or the Foreman declined it / ran out of retries.
   blocked: stage(PAPERCLIP_FOREMAN_ROLE, "blocked", "blocked"),
 }).prefault({});
