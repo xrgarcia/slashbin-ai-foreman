@@ -603,7 +603,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   const merged: ProdRelease = { ...rel, phase: "merged", mergedAt: iso(now()), ...(mergeSha ? { mergeSha } : {}) };
   putRelease(repoConfig, merged);
   logger.info(`Release PR #${pr.number} merged by the SRE as ${short(mergeSha ?? undefined)} (verify=${tr.verify}${tr.hold ? `, hold=${tr.hold}` : ""})`);
-  await followRelease(repoConfig, logger);
+  await followRelease(repoConfig, logger, true);
   tagRelease(repoConfig, merged, logger);
   putRelease(repoConfig, merged);
   if (tr.verify === "pass") {

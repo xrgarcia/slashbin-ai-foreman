@@ -883,3 +883,15 @@ test("escalated at approved (a skip out of attempts): the issue still at approve
   assert.equal(r.status, "blocked", "anchored at changesRequested, the approved issue read as moved on");
   assert.equal(r.assigneeAgentId, "em-agent");
 });
+
+test("an owned release PR's open keeps its items releasing on the deployer's seat (jerky_service PR #146)", async () => {
+  const team = { roles: { ...TEAM.roles, sre: { name: "SRE", id: "agent-sre" } },
+    board: { ...TEAM.board, releasing: { owner: "sre", status: "in_progress", label: "releasing" } } };
+  const fake = fakePaperclip([row("r7", 7, { status: "in_progress", assigneeAgentId: "agent-sre" })]);
+  const { mirror } = mirrorOn(fake, team);
+  const r = fake.rows[0];
+  await mirror.onRelease({ ...release("open", 12, [7]), owned: true }, logger());
+  assert.deepEqual([r.status, r.assigneeAgentId, labelName(fake, r)], ["in_progress", "agent-sre", ["Releasing"]]);
+  await mirror.onRelease(release("open", 12, [7]), logger());
+  assert.deepEqual([r.status, r.assigneeAgentId], ["in_review", "agent-lead"], "a release PR the stage does not own still waits");
+});

@@ -149,6 +149,10 @@ export interface ReleaseEvent {
   readonly url?: string;
   readonly issues: ReadonlyArray<WorkItem>;
   readonly productionBranch: string;
+  /** The release stage owns this PR (`release pending`): its items are `releasing`, never
+   *  `awaitingRelease`, so an `open` must not move them back off the SRE (jerky_service
+   *  PR #146, 2026-10-14). */
+  readonly owned?: boolean;
 }
 
 /** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */

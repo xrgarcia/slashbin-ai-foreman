@@ -140,7 +140,7 @@ export function tryFileDependencyBatchIssue(
  * behind release PR #1206). Exported for the release stage, which calls it the
  * moment the SRE merges, so the board does not wait a pass.
  */
-export async function followRelease(repoConfig: RepoConfig, logger: Logger): Promise<void> {
+export async function followRelease(repoConfig: RepoConfig, logger: Logger, owned = false): Promise<void> {
   const repoName = repoConfig.name;
   await trackRelease({
     repo: repoConfig.githubRepo,
@@ -156,6 +156,7 @@ export async function followRelease(repoConfig: RepoConfig, logger: Logger): Pro
       saveRepoState(repoName, st);
     },
     emit: async (release) => { await emit({ kind: "release", release }, null, logger); },
+    owned,
   });
 }
 
@@ -259,7 +260,7 @@ export async function tryPromotion(
 
   // Before the ready-for-prod read: a release PR stays open, and merges, after
   // its issues have lost that label.
-  await followRelease(repoConfig, promoLogger);
+  await followRelease(repoConfig, promoLogger, releaseActive);
 
   const issues = findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
