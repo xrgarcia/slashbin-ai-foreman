@@ -136,6 +136,13 @@ export const configSchema = z.object({
   // another stream of GitHub API calls. Default 3; raise it deliberately after
   // watching what it costs. Set to 1 for the original strictly-serial behaviour.
   maxConcurrentRepos: z.coerce.number().int().positive().default(3),
+  // How many approved issues one build claims. The Foreman picks them before
+  // the session — priority tier (github.priorityLabels), then oldest — hands the
+  // session only those, and claims only those; the rest stay queued (todo, on
+  // the Foreman). Default 1: per repo, one issue is built at a time, as one is
+  // reviewed and one deployed at a time. Raise it to let one session choose
+  // among several and build one of them.
+  buildBatchSize: z.coerce.number().int().positive().default(1),
   // Every wait before the Foreman tries something again — declined issues,
   // failed verifications, an unavailable reviewer, failing repos, upstream
   // limits, gh retries — each exponential and tunable. See src/backoff.ts and
@@ -378,6 +385,8 @@ export interface AgentConfig {
   pollIntervalMs: number;
   /** Max repos running their pipeline at once (default 3). Caps spend, not risk. */
   maxConcurrentRepos: number;
+  /** Most approved issues one build claims and hands its session (default 1). */
+  buildBatchSize: number;
   /** Every back-off and retry limit (see src/backoff.ts). */
   backoff: BackoffConfig;
   /** How long a repo's open-issue snapshot stays warm (default 30s; 0 disables). */
@@ -489,6 +498,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     triggerLabel: process.env.AI_AGENT_TRIGGER_LABEL ?? fileConfig.triggerLabel,
     pollIntervalMs: process.env.AI_AGENT_POLL_INTERVAL_MS ?? fileConfig.pollIntervalMs,
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
+    buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
     backoff: mergeBackoff(fileConfig.backoff, {
       skipBackoffMs: fileConfig.skipBackoffMs,
       upstreamBackoffBaseMs: fileConfig.upstreamBackoffBaseMs,
@@ -695,6 +705,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
     maxConcurrentRepos: parsed.maxConcurrentRepos,
+    buildBatchSize: parsed.buildBatchSize,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,
     issueCacheTtlMs: parsed.issueCacheTtlMs,
