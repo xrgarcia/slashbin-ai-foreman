@@ -205,6 +205,15 @@ stage: `owner` is `foreman` (the Foreman's own agent) or a key of `roles`,
 `status` a status bucket, and `label` a key of `stageLabels` or `null`. Each entry, and each
 field in it, falls back to its default on its own, so a config names only what it changes.
 
+**Never give a stage to an agent that wakes on assignment.** A stage owner is a label on
+the card, not a worker. Assigning a card to an agent with `wakeOnAssignment` (the
+slashbin-ai-team bridge agents, the EM's among them) wakes that agent on a card it
+cannot act on. On 2026-10-14 the live config gave `needsRuling`, `pendingVerification`
+and `prodVerifyHeld` to the EM's agent. The bridge refuses a `blocked` card set by
+someone else, Paperclip retried the wake twice and then escalated, and the bridge's
+status change let the mirror release the ruling hold. The EM gets these stages from the
+Foreman's own alerts, so they stay with `foreman`.
+
 | Stage | Meaning | Default owner | Default status | Default stage label |
 |---|---|---|---|---|
 | `approved` | Authorized and waiting to be built. | `foreman` | `todo` | none |
