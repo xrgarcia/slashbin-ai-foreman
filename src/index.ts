@@ -12,6 +12,7 @@ export { DEFAULT_BACKOFF, backoffDelay, type BackoffConfig, type BackoffWindow }
 export { STAGES, MOVES, transition, type Stage, type Move, type Transition } from "./lifecycle.js";
 export { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";
 export { reconcileRepo, type ReconciliationResult } from "./reconciler.js";
-export { runCycle, getState, type OrchestratorState, type CycleResult } from "./orchestrator.js";
+export { runCycle, runRepoPass, runLanePass, getState, type OrchestratorState, type CycleResult } from "./orchestrator.js";
+export { lanesFor, type Lane } from "./lanes.js";
 export { startDaemon, type DaemonHandle } from "./daemon.js";
 export { BridgeClient, type BridgeConfig, type IncomingCommand } from "./bridge-client.js";

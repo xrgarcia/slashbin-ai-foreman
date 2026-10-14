@@ -57,7 +57,7 @@ export async function tryCustomStage(
 
   if (!tryAcquire("claude")) return { outcome: "blocked", reason: "upstream back-off", ran: false };
   const runAbort = new AbortController();
-  activeRuns.set(repoConfig.name, runAbort);
+  activeRuns.set(runAbort, repoConfig.name);
   try {
     const result = await runCustomStage(
       repoConfig, stage,
@@ -84,7 +84,7 @@ export async function tryCustomStage(
     }
     return { outcome, reason: result.reason, ran: true };
   } finally {
-    activeRuns.delete(repoConfig.name);
+    activeRuns.delete(runAbort);
   }
 }
 

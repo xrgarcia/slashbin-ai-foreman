@@ -433,7 +433,7 @@ export async function tryBatchImplementation(
   // Invoke the skill — one Claude session implements all approved issues
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
-  activeRuns.set(repoName, runAbort);
+  activeRuns.set(runAbort, repoName);
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
   const session: Omit<SessionEvent, "status"> = {
     phase: "implement", repo: repoConfig.githubRepo, items: actionableIssues.map((n) => itemOf(repoConfig, n)),
@@ -692,7 +692,7 @@ export async function tryBatchImplementation(
 
     return result;
   } finally {
-    activeRuns.delete(repoName);
+    activeRuns.delete(runAbort);
     await emit({ kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }
 }

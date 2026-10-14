@@ -160,7 +160,7 @@ export async function tryVerify(
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const transcriptPath = resolve(process.cwd(), "logs", "verify", `${repoName}-cycle${cycleNumber}-${ts}.log`);
   const runAbort = new AbortController();
-  activeRuns.set(repoName, runAbort);
+  activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
   const session: Omit<SessionEvent, "status"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE" };
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the verification ended without a result" };
@@ -229,7 +229,7 @@ export async function tryVerify(
     events?.push({ message: `⏸️ ${repoConfig.githubRepo} ${issues}: ${why}`, level: final ? "error" : "warn" });
     return false;
   } finally {
-    activeRuns.delete(repoName);
+    activeRuns.delete(runAbort);
     await emit({ kind: "session", session: { ...session, ...ended } }, null, vlog);
   }
 }

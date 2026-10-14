@@ -119,7 +119,7 @@ export async function tryRevision(
   // Invoke the revision skill with specific PR and issue context
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
-  activeRuns.set(repoName, runAbort);
+  activeRuns.set(runAbort, repoName);
   revLogger.info(`Triggering PR revision for ${repoName} — PR #${pending.pr.number}, issues: ${pending.issueNumbers.map(n => `#${n}`).join(", ")}`);
   const session: Omit<SessionEvent, "status"> = {
     phase: "revise", repo: repoConfig.githubRepo, pr: pending.pr.number,
@@ -236,7 +236,7 @@ export async function tryRevision(
 
     return null;
   } finally {
-    activeRuns.delete(repoName);
+    activeRuns.delete(runAbort);
     await emit({ kind: "session", session: { ...session, ...ended, ...(report ? { report } : {}) } }, null, revLogger);
   }
 }

@@ -152,11 +152,11 @@ function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): 
 /** Run one Tech Lead / SRE subprocess as this repo's in-flight run, so a shutdown aborts it. */
 async function asRun<T>(repoConfig: RepoConfig, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const ac = new AbortController();
-  activeRuns.set(repoConfig.name, ac);
+  activeRuns.set(ac, repoConfig.name);
   try {
     return await fn(ac.signal);
   } finally {
-    activeRuns.delete(repoConfig.name);
+    activeRuns.delete(ac);
   }
 }
 
