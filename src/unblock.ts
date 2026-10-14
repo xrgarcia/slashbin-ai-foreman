@@ -17,7 +17,7 @@
 
 /** Why the Foreman stopped on an item. */
 export type BlockKind =
-  | "skip"                 // the implementer declined: a transient precondition
+  | "skip"                 // the implementer declined: held until something it names moves
   | "divergence"           // the feature branch diverged from its base
   | "verify-no-pr"         // labelled merged, but no merged PR closes the issue
   | "verify-held"          // dev verification failed and is waiting out its backoff
@@ -29,6 +29,10 @@ export type BlockKind =
 export interface BlockFacts {
   /** The precondition a skip named is gone (branch reconciled, blocking PR closed). */
   transientCauseGone?: boolean;
+  /** The issue or PR a held skip named in `waiting_on` has closed or merged. */
+  waitedOnDone?: boolean;
+  /** Someone other than the Foreman edited, commented on or labelled the issue after the skip. */
+  issueChanged?: boolean;
   /** The feature branch no longer diverges from its base. */
   divergenceCleared?: boolean;
   /** A merged PR into the base branch now closes the issue. */
@@ -45,7 +49,7 @@ export type UnblockCheck = keyof BlockFacts;
 
 /** The checks each kind of block is released by, in order. */
 export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>> = {
-  "skip": ["transientCauseGone"],
+  "skip": ["transientCauseGone", "waitedOnDone", "issueChanged"],
   "divergence": ["divergenceCleared"],
   "verify-no-pr": ["mergedPrFound"],
   "verify-held": ["specEdited"],
@@ -57,6 +61,8 @@ export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>
 /** The note each check leaves on the card when it releases one. */
 export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   transientCauseGone: "the condition the skip named has cleared",
+  waitedOnDone: "the issue or PR the skip was waiting on has closed or merged — building again",
+  issueChanged: "the issue changed since the skip — building again",
   divergenceCleared: "the feature branch no longer diverges from its base",
   mergedPrFound: "a merged PR now closes the issue",
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",

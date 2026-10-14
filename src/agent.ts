@@ -238,6 +238,9 @@ export interface ImplementationResult {
   skipped?: boolean;
   // Reason the agent gave for skipping, surfaced from its output.
   skipReason?: string;
+  // What the skip waits on (`owner/repo#N` or `#N`), from the trailer's
+  // `waiting_on=` field. Undefined when the skip named none.
+  waitingOn?: string;
   // Issues the agent decided to skip. Empty/undefined when no skip was detected.
   skippedIssues?: number[];
   /** The session's own final message, for observers (unredacted, uncapped). */
@@ -265,7 +268,7 @@ export interface ImplementationResult {
  * guess does not get to pre-empt the evidence.
  */
 // Exported for tests: the field parse is what broke, so it is tested by calling.
-export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number } {
+export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number; waitingOn?: string } {
   // Find the trailer LINE first, then read its fields off it, so the fields may
   // appear in any order. The previous shape — `skipped(?:\s+reason="...")?` —
   // only bound `reason` when it immediately followed `skipped`, so the moment the
@@ -291,10 +294,17 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
   // invocation, so unscoped there means every other approved issue in the repo
   // gets backed off 30m..24h for a defect in a spec it never read.
   const scoped = trailer.match(/\bissue="?#?(\d+)"?/i);
+  // An OPTIONAL `waiting_on="owner/repo#N"` (or `#N` in this repo) names the
+  // issue or PR the skip waits on. The held issue runs again once it closes or
+  // merges (backoff.skip.hold). Read only from this field — never parsed out of
+  // the prose reason — and read with the reason removed, so a reason that
+  // quotes the field cannot set it.
+  const waiting = trailer.replace(/\breason="[^"]*"/i, "").match(/\bwaiting_?on="?((?:[\w.-]+\/[\w.-]+)?#\d+)"?/i);
   return {
     skipped: true,
     reason: reason ? reason[1] : "no reason given",
     issue: scoped ? Number(scoped[1]) : undefined,
+    waitingOn: waiting ? waiting[1] : undefined,
   };
 }
 
@@ -1032,7 +1042,7 @@ Work autonomously. Do not ask questions.`;
   // end its output with a single line `FOREMAN_RESULT: skipped reason="<text>"`
   // so the orchestrator can distinguish a deliberate no-op from a failed
   // implementation attempt and back off accordingly.
-  prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nThis tells the Foreman to back off on THAT issue rather than re-queue it every cycle. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
+  prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nIf the issue is waiting on another issue or PR (a dependency not merged yet, a precondition another issue delivers), add \` waiting_on="<owner/repo#N>"\` (or \`#N\` in this repo) to that line, e.g. \`FOREMAN_RESULT: skipped issue=127 waiting_on="acme/site#166" reason="refund_policy.md is on unmerged PR #166"\`.\n\nThis tells the Foreman to hold THAT issue in Blocked rather than re-queue it every cycle: it runs again only when the issue changes (a comment, an edit, a label) or the \`waiting_on\` issue closes or PR merges. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
 
   // Third Way: if a prior attempt failed, include context so Claude can adapt
   if (priorFailureReason) {
@@ -1112,6 +1122,7 @@ Work autonomously. Do not ask questions.`;
         summary: extractStreamResult(result.stdout),
         skipReason: declaredSkip.reason,
         skippedIssues: named !== undefined ? [named] : (issueNumbers ?? []),
+        waitingOn: declaredSkip.waitingOn,
         error: `skipped: ${declaredSkip.reason}`,
       };
     }
