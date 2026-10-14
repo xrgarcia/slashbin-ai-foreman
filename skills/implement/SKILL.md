@@ -105,7 +105,20 @@ Whenever you stop **on an issue you have selected**:
    ```
 
 `issue=` is required from Phase 1 onward: without it the skip applies to every issue
-the Foreman was tracking for this repo. Never resolve a stop by building something
+the Foreman was tracking for this repo.
+
+When the stop is waiting on another issue or PR — a dependency not merged yet, a file
+another PR delivers — add `waiting_on="<owner/repo#N>"` (or `#N` in this repo):
+
+```
+FOREMAN_RESULT: skipped issue=127 waiting_on="acme/site#166" reason="refund_policy.md is on unmerged PR #166"
+```
+
+The Foreman holds the issue in Blocked and runs no session on it until the issue
+changes (a comment, an edit, a label) or the `waiting_on` issue closes or PR merges.
+Name only a reference you have read; leave the field out when nothing specific blocks it.
+
+Never resolve a stop by building something
 anyway — if the next cycle hands you the same issue with a prior-failure note, the
 right answer is the same stop and the same trailer.
 

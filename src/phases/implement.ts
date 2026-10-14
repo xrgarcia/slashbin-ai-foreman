@@ -25,6 +25,16 @@ import { findIssuesMergedToBase } from "../github.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import {
+  foremanLogin,
+  heldReason,
+  holdStatus,
+  issueActivitySince,
+  parseWaitingOn,
+  refState,
+  waitingOnLabel,
+  type HoldStatus,
+} from "../github/skip-hold.js";
+import {
   CycleEvent,
   activeRuns,
   announceDivergence,
@@ -205,11 +215,17 @@ export async function tryBatchImplementation(
     return null;
   }
 
-  // Filter out issues the agent recently chose to skip (investigation-only,
-  // blocked-on-external-verification, etc.). Back off (backoff.skip) so
-  // we don't burn an agent run every cycle correctly doing nothing.
-  // Skipped entries are cleared automatically when the issue is re-implemented
-  // (success path) or when the back-off expires.
+  // Filter out issues the agent chose to skip (investigation-only, blocked on
+  // something outside the repo, etc.), so we don't burn an agent run every
+  // cycle correctly doing nothing. With `backoff.skip.hold` (the default) a
+  // skipped issue is HELD: no session runs on it until a cheap GitHub read says
+  // something moved — the issue changed after the skip, or the issue or PR its
+  // trailer named in `waiting_on` closed or merged. Without it, the older timed
+  // back-off: hidden for backoffDelay(skipCount, backoff.skip), then retried.
+  // jerky_service#127, 2026-10-14: ten full sessions in a day under the timed
+  // back-off, each rediscovering the same unmerged PR on another repo.
+  // Skipped entries are cleared when the issue is re-implemented (success path)
+  // or released here.
   //
   // Reason-aware recheck: some skip reasons describe a TRANSIENT precondition
   // (e.g., "local features branch diverged from origin/features") that an EM
@@ -230,20 +246,46 @@ export async function tryBatchImplementation(
   const now = Date.now();
   const stillBackedOff: { n: number; reason: string }[] = [];
   const resolvedTransient: { n: number; reason: string }[] = [];
+  const released: { n: number; by: Extract<HoldStatus, { held: false }>["releasedBy"] }[] = [];
   handOff = handOff.filter((n) => {
     const entry = skippedMap[n];
     if (!entry) return true;
-    const age = now - new Date(entry.lastSkippedAt).getTime();
-    if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) return true;
+    if (!skip.hold) {
+      const age = now - new Date(entry.lastSkippedAt).getTime();
+      if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) return true;
+    }
     // A skip on the open feature PR is the queue gate's to hold, not a skip's.
     const onFeaturePr = featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number;
     if (onFeaturePr || isResolvedTransientSkip(entry.reason, repoConfig, repoLogger)) {
       resolvedTransient.push({ n, reason: entry.reason });
       return true;
     }
+    if (skip.hold) {
+      const status = holdStatus(entry, repoConfig.githubRepo, {
+        refState: (ref) => refState(ref, repoConfig.repoPath),
+        activitySince: (since) => issueActivitySince(repoConfig.githubRepo, n, since, repoConfig.repoPath),
+        self: foremanLogin(repoConfig.repoPath),
+      }, (what, err) => repoLogger.debug(`Hold on #${n}: could not read ${what} — still held: ${err instanceof Error ? err.message : String(err)}`));
+      if (!status.held) {
+        released.push({ n, by: status.releasedBy });
+        return true;
+      }
+      stillBackedOff.push({ n, reason: heldReason(entry.reason, repoConfig.githubRepo, status.ref, status.refIsPr) });
+      return false;
+    }
     stillBackedOff.push({ n, reason: entry.reason });
     return false;
   });
+  if (released.length > 0) {
+    const freed = loadRepoState(repoName);
+    freed.skipped = freed.skipped ?? {};
+    for (const { n } of released) delete freed.skipped[n];
+    saveRepoState(repoName, freed);
+    repoState.skipped = freed.skipped;
+    for (const { n, by } of released) {
+      await releaseIfResolved("skip", { [by]: true }, [n], repoConfig, repoLogger);
+    }
+  }
   if (resolvedTransient.length > 0) {
     repoLogger.info(
       `Cleared ${resolvedTransient.length} resolved-transient skip entr${resolvedTransient.length === 1 ? "y" : "ies"}: ${resolvedTransient.map(({ n }) => `#${n}`).join(", ")}`,
@@ -259,7 +301,9 @@ export async function tryBatchImplementation(
     // Promoted DEBUG → INFO so silent skip-cache filtering is visible in the
     // journal (otherwise the pipeline appears stalled while the cache holds it).
     repoLogger.info(
-      `Backing off ${stillBackedOff.length} previously-skipped issue(s): ${stillBackedOff.map(({ n, reason }) => `#${n} (${reason.split("\n")[0].slice(0, 100)})`).join("; ")}`,
+      skip.hold
+        ? `Holding ${stillBackedOff.length} skipped issue(s), no session: ${stillBackedOff.map(({ n, reason }) => `#${n} (${reason.slice(0, 160)})`).join("; ")}`
+        : `Backing off ${stillBackedOff.length} previously-skipped issue(s): ${stillBackedOff.map(({ n, reason }) => `#${n} (${reason.split("\n")[0].slice(0, 100)})`).join("; ")}`,
     );
   }
   // The repo's whole waiting set, every cycle that reaches here: an issue that
@@ -538,6 +582,17 @@ export async function tryBatchImplementation(
       // ------------------------------------------------------------------------
 
       const stamp = new Date().toISOString();
+      // What the trailer said these wait on, as `owner/repo#N`, and whether it
+      // is a PR (one read, for the blocked reason's wording only).
+      const waitingOn = parseWaitingOn(result.waitingOn, repoConfig.githubRepo);
+      let waitingOnIsPr: boolean | undefined;
+      if (waitingOn && skip.hold) {
+        try {
+          waitingOnIsPr = refState(waitingOn, repoConfig.repoPath).isPr;
+        } catch (err) {
+          repoLogger.debug(`Could not read ${waitingOnLabel(waitingOn, repoConfig.githubRepo)}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       for (const issueNum of skippedSet) {
         // Escalating per-issue back-off: a fixed snooze never gives up, so a
         // permanently-unactionable issue costs an agent session every window,
@@ -548,17 +603,20 @@ export async function tryBatchImplementation(
           lastSkippedAt: stamp,
           reason,
           skipCount: priorCount + 1,
+          ...(waitingOn ? { waitingOn: `${waitingOn.repo}#${waitingOn.number}` } : {}),
         };
       }
       saveRepoState(repoName, updatedState);
       // The agent declined these; the source hears why. On GitHub this writes
       // nothing — the agent posts its own skip comment.
-      for (const n of skippedSet) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, repoLogger);
+      // Held, the reason says what releases it.
+      const blockedReason = skip.hold ? heldReason(reason, repoConfig.githubRepo, waitingOn, waitingOnIsPr) : reason;
+      for (const n of skippedSet) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blockedReason }, repoConfig, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
       failurePause.clear(repoName);
-      repoLogger.info(`Batch implementation skipped by agent: ${reason} (issues: ${skippedSet.map(n => `#${n}`).join(", ")})`);
+      repoLogger.info(`Batch implementation skipped by agent: ${blockedReason} (issues: ${skippedSet.map(n => `#${n}`).join(", ")})`);
       events?.push({ message: `Implementation skipped on ${repoConfig.githubRepo}: ${reason}`, level: "info" });
     } else {
       // An upstream limit refused the run (or a swallowed GitHub back-off made

@@ -362,13 +362,14 @@ case, which beats the file.
 
 ### `backoff.skip`
 
-An issue the implement session declined on purpose (blocked on something outside the repo, investigation only, already done). It is hidden from the next sessions for one window; each decline in a row doubles it. Default 5 min rising to 4 h (was 30 min rising to 24 h). The old top-level `skipBackoffMs` still sets `baseMs`.
+An issue the implement session declined on purpose (blocked on something outside the repo, investigation only, already done). With `hold` (the default) it is held in Blocked and no session runs on it until something moves: the issue changes after the skip (an edit, a comment or a label by anyone but the Foreman), or the issue or PR the skip names in `waiting_on` closes or merges. Each check is one cheap GitHub read. Set `hold` to false for the older timed retry: hidden for one window, each decline in a row doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still sets `baseMs`.
 
 | Field | Default | Env |
 |---|---|---|
 | `baseMs` | `300000` (5 min) | `AI_AGENT_BACKOFF_SKIP_BASE_MS` |
 | `capMs` | `14400000` (4 h) | `AI_AGENT_BACKOFF_SKIP_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_SKIP_FACTOR` |
+| `hold` | `true` | `AI_AGENT_BACKOFF_SKIP_HOLD` |
 
 ### `backoff.verifyRetry`
 

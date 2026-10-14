@@ -16,6 +16,11 @@ interface SkippedIssue {
   // Optional for backward compat with state files written before this field existed;
   // absent is read as 0, i.e. the original single-window behavior.
   skipCount?: number;
+  // What the skip said it waits on (`owner/repo#N`), when it named one. Held
+  // under `backoff.skip.hold`, the issue runs again once this closes or merges.
+  // Absent (every entry written before it existed): held until the issue changes,
+  // with `lastSkippedAt` as the "changed since" baseline.
+  waitingOn?: string;
 }
 
 interface HeldIssue {

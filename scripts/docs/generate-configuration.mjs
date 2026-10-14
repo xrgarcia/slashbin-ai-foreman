@@ -200,7 +200,8 @@ out(
 
 const groups = Object.entries(DEFAULT_BACKOFF);
 const isWindow = (v) => typeof v === "object" && v !== null && "baseMs" in v;
-const limitOf = (v) => Object.keys(v).find((k) => !["baseMs", "capMs", "factor"].includes(k));
+// A boolean field (`skip.hold`) is a mode, not a limit on the waits.
+const limitOf = (v) => Object.keys(v).find((k) => !["baseMs", "capMs", "factor"].includes(k) && typeof v[k] !== "boolean");
 // The waits a group actually makes: a `maxAttempts` group stops after its
 // last attempt, so it waits one time fewer than it tries.
 function sequence(v) {

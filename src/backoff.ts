@@ -19,6 +19,12 @@ const win = (baseMs: number, capMs: number, f: number) => ({
   factor: factor.default(f),
 });
 const count = (n: number) => z.coerce.number().int().positive().default(n);
+// NOT z.coerce.boolean(): an env override arrives as a string, and
+// Boolean("false") is true.
+const flag = (d: boolean) => z.preprocess(
+  (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
+  z.boolean(),
+).default(d);
 
 // Each group below is one condition the Foreman backs off on. Every group has
 // `baseMs` (the first wait), `capMs` (the longest), and `factor` (how much each
@@ -26,11 +32,15 @@ const count = (n: number) => z.coerce.number().int().positive().default(n);
 // without `backoff` gets these defaults.
 export const backoffConfigSchema = z.object({
   // An issue the implement session declined on purpose (blocked on something
-  // outside the repo, investigation only, already done). It is hidden from the
-  // next sessions for one window; each decline in a row doubles it. Default
-  // 5 min rising to 4 h (was 30 min rising to 24 h). The old top-level
-  // `skipBackoffMs` still sets `baseMs`.
-  skip: z.object(win(300_000, 14_400_000, 2)).prefault({}),
+  // outside the repo, investigation only, already done). With `hold` (the
+  // default) it is held in Blocked and no session runs on it until something
+  // moves: the issue changes after the skip (an edit, a comment or a label by
+  // anyone but the Foreman), or the issue or PR the skip names in `waiting_on`
+  // closes or merges. Each check is one cheap GitHub read. Set `hold` to false
+  // for the older timed retry: hidden for one window, each decline in a row
+  // doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still
+  // sets `baseMs`.
+  skip: z.object({ ...win(300_000, 14_400_000, 2), hold: flag(true) }).prefault({}),
   // A dev verification that ran and did not pass. The issue is re-verified after
   // one window, longer each time; after `maxAttempts` failed runs it waits for a
   // person (new commits on the base branch reopen it). Default 10 min, then
