@@ -5,7 +5,7 @@ import type { Logger } from "../logger.js";
 import { gh } from "./gh.js";
 
 
-/** Most issues in the Foreman's own per-pass discovery batch (see discoveryBatch). */
+/** discoveryBatch's size when the caller names none (the config's buildBatchSize decides it for a build). */
 export const MAX_BATCH_SIZE = 3;
 
 /**
@@ -122,34 +122,50 @@ export function issuesImplementedByCommits(commits: PrCommit[], strict = false):
 }
 
 /**
- * The Foreman's own discovery batch, cut from the work a source offered:
- * ascending (lowest numbers — dependencies — first), capped at MAX_BATCH_SIZE,
- * 1 on a greenfield repo. This is what the orchestrator acts on per issue
- * (run gate, inline prompt, batch-wide skip, labeling fallback). It is NOT what
- * a skill is handed: a skill chooses by priority across every offered item,
- * and capping that list would hide a high-priority issue behind three older ones.
+ * The build's batch, cut from the work a source offered and decided before the
+ * session: highest priority tier first (github.priorityLabels, the order the
+ * skill picks by), then oldest; `size` of them (the config's buildBatchSize,
+ * default 1), 1 on a greenfield repo. The session is handed exactly this and
+ * the Foreman claims exactly this; everything else stays queued. Handing the
+ * session every offered item and claiming three left the two it did not build
+ * claimed, then Blocked, on the board (jerky_service #131-#133, 2026-10-14).
  */
-export function discoveryBatch(config: RepoConfig, offered: number[], logger: Logger): number[] {
+export function discoveryBatch(
+  config: RepoConfig,
+  offered: number[],
+  logger: Logger,
+  size: number = MAX_BATCH_SIZE,
+  labelsOf: (n: number) => readonly string[] = () => [],
+): number[] {
   if (offered.length === 0) return [];
-  // Sort ascending so lowest issue numbers (dependencies) come first
-  const uncovered = [...offered].sort((a, b) => a - b);
+  // Highest priority tier first (the order the skill picks by), then oldest:
+  // lower numbers are usually the dependencies.
+  const uncovered = [...offered].sort((a, b) =>
+    priorityTier(labelsOf(a), config.github.priorityLabels) - priorityTier(labelsOf(b), config.github.priorityLabels) || a - b);
 
   // Greenfield detection: if repo has very few tracked files, limit to 1 issue
   // The skill implements one-at-a-time anyway, but a focused prompt is more reliable
-  let effectiveBatchSize = MAX_BATCH_SIZE;
-  try {
-    const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
-    if (fileCount < 10) {
-      effectiveBatchSize = 1;
-      logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);
-    }
-  } catch { /* ignore — use default batch size */ }
+  let effectiveBatchSize = size;
+  if (size > 1) {
+    try {
+      const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
+      if (fileCount < 10) {
+        effectiveBatchSize = 1;
+        logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);
+      }
+    } catch { /* ignore — use default batch size */ }
+  }
 
   const batch = uncovered.slice(0, effectiveBatchSize);
-  if (uncovered.length > MAX_BATCH_SIZE) {
-    logger.info(`Found ${uncovered.length} actionable issue(s), capping batch to ${MAX_BATCH_SIZE}: ${batch.map(n => `#${n}`).join(", ")} (${uncovered.length - MAX_BATCH_SIZE} deferred to next cycle)`);
-  } else {
-    logger.info(`Found ${uncovered.length} actionable issue(s) with no linked PR: ${batch.map(n => `#${n}`).join(", ")}`);
-  }
+  const rest = uncovered.length - batch.length;
+  logger.info(rest > 0
+    ? `Found ${uncovered.length} actionable issue(s); this build takes ${batch.map(n => `#${n}`).join(", ")}, ${rest} stay queued`
+    : `Found ${uncovered.length} actionable issue(s) with no linked PR: ${batch.map(n => `#${n}`).join(", ")}`);
   return batch;
+}
+
+/** The first priority tier whose labels `labels` all carries; past the last tier when none. */
+export function priorityTier(labels: readonly string[], tiers: ReadonlyArray<ReadonlyArray<string>>): number {
+  const i = tiers.findIndex((tier) => tier.every((l) => labels.includes(l)));
+  return i === -1 ? tiers.length : i;
 }

@@ -106,6 +106,12 @@ Type: integer · Default: `3` · Env: `AI_AGENT_MAX_CONCURRENT_REPOS`
 
 How many repos may run their pipeline at the same time. Repos are safe to run concurrently on their own — each has its own git working clone, so two can never touch the same checkout — so this cap is about SPEND, not safety: each concurrent repo means another Claude session (up to maxTurns) and another stream of GitHub API calls. Default 3; raise it deliberately after watching what it costs. Set to 1 for the original strictly-serial behaviour.
 
+### `buildBatchSize`
+
+Type: integer · Default: `1` · Env: `AI_AGENT_BUILD_BATCH_SIZE`
+
+How many approved issues one build claims. The Foreman picks them before the session — priority tier (github.priorityLabels), then oldest — hands the session only those, and claims only those; the rest stay queued (todo, on the Foreman). Default 1: per repo, one issue is built at a time, as one is reviewed and one deployed at a time. Raise it to let one session choose among several and build one of them.
+
 ### `backoff`
 
 Every wait before the Foreman tries something again — declined issues, failed verifications, an unavailable reviewer, failing repos, upstream limits, gh retries — each exponential and tunable. See src/backoff.ts and docs/configuration.md. The old top-level `skipBackoffMs`, `upstreamBackoffBaseMs` and `upstreamBackoffCapMs` are still read into it.

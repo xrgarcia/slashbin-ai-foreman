@@ -1005,9 +1005,8 @@ export async function implementApprovedIssues(
     // GitHub issues back, so it is told to pick and order within the batch as
     // it always has — the batch only takes away issues outside it.
     //
-    // `handOff` is every item the source offered (less backed-off ones), not
-    // the capped `issueNumbers` batch: the skill picks by priority across all
-    // of them, as it did when it ran its own query. Without one, the batch.
+    // `handOff` is what the implement stage chose to hand over — its build
+    // batch (buildBatchSize, default one issue). Without one, the batch.
     const items = handOff && handOff.length > 0 ? handOff : issueNumbers;
     const scope = items && items.length > 0
       ? `${workItemsLine(items)} If the skill runs its own issue query, it returns these same issues: choose and order among them as the skill directs, but take nothing outside this list.`

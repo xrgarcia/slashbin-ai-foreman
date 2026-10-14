@@ -8,6 +8,7 @@ import { selectWork, emit, advance, hasObservers } from "../work-source.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import {
   discoveryBatch,
+  openIssueLabels,
   hasPendingRevisions,
   getReferencedIssuesFromOpenPR,
   isPrOpen,
@@ -171,17 +172,16 @@ export async function tryBatchImplementation(
 
   // Gate: are there approved issues to implement? The work source offers
   // every eligible item, uncapped. Two lists are cut from that offer:
-  //   - `handOff` — the offer less the state filters below. This is what a
-  //     skill is told to build. Uncapped, because a skill chooses by priority
-  //     across all of it: capping would hide an S1 behind three older issues.
-  //   - `actionableIssues` — the Foreman's own discovery batch (ascending,
-  //     capped at MAX_BATCH_SIZE), cut from `handOff` AFTER the filters, so a
-  //     backed-off or already-implemented issue never holds a batch slot.
-  //     Cutting first and filtering after starved the queue: three backed-off
-  //     issues filled the cap every cycle and the rest of the offer was never
-  //     reached (Slashbin-console#1154, 2026-10-01). Everything the
-  //     Foreman does per issue keeps using it: the run gate, the inline
-  //     prompt, a batch-wide skip, the labeling fallback.
+  //   - `handOff` — the offer less the state filters below: everything that
+  //     could be built now.
+  //   - `actionableIssues` — the build's batch (discoveryBatch: priority tier,
+  //     then oldest, `buildBatchSize` of them, default 1), cut from `handOff`
+  //     AFTER the filters, so a backed-off or already-implemented issue never
+  //     holds a batch slot. Cutting first and filtering after starved the
+  //     queue: three backed-off issues filled the cap every cycle and the rest
+  //     of the offer was never reached (Slashbin-console#1154, 2026-10-01).
+  //     The session is handed exactly this batch and only it is claimed; the
+  //     rest of `handOff` stays queued, untouched, for a later build.
   const offered = (await selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
   let handOff = offered;
   if (offered.length === 0) {
@@ -351,13 +351,18 @@ export async function tryBatchImplementation(
     repoState.branchBlock = undefined;
   }
   await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(repoState.branchBlock) }, null, repoLogger);
-  const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger);
+  // Labels rank the batch by priority. Unreadable, every issue ranks the
+  // same and the oldest goes first.
+  let labels = new Map<number, string[]>();
+  try {
+    labels = new Map(openIssueLabels(repoConfig, repoLogger).map((i) => [i.number, i.labels]));
+  } catch (err) {
+    repoLogger.debug(`Issue labels unreadable — ranking the build by age only: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const actionableIssues = discoveryBatch(repoConfig, handOff, repoLogger, config.buildBatchSize, (n) => labels.get(n) ?? []);
   if (actionableIssues.length === 0) {
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
-  }
-  if (handOff.length > actionableIssues.length) {
-    repoLogger.info(`Handing the skill ${handOff.length} work item(s) to choose from: ${handOff.map((n) => `#${n}`).join(", ")}`);
   }
 
   // Gate: if there's a PR awaiting revision (`pr pending actions`), skip implementation.
@@ -447,7 +452,7 @@ export async function tryBatchImplementation(
     await emit({ kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
 
     const priorFailure = lastFailureReason.get(repoName) || null;
-    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, handOff)
+    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues)
       .catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success

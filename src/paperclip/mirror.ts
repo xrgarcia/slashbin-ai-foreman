@@ -246,6 +246,8 @@ export class PaperclipMirror implements WorkObserver {
    * so a snapshot never undoes a block the Foreman just made.
    */
   private readonly blockedAt = new Map<string, PaperclipStage | "done" | undefined>();
+  /** Task ids this process moved to Blocked because GitHub's blocked label said so. */
+  private readonly labelBlocked = new Set<string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
@@ -414,7 +416,10 @@ export class PaperclipMirror implements WorkObserver {
       // A Foreman block is released by GitHub moving on, not by another writer:
       // the stage owner's own wake checks the card out to in_progress, and
       // matching that to GitHub took SLA-1335 out of the EM's hands (2026-10-14).
-      if ((state === blocked || this.blockedAt.has(id)) && stage !== "blocked") {
+      // A block GitHub's label made ends when the label goes, at any stage:
+      // read as a Foreman block from before a restart, jerky_service #132/#133
+      // sat Blocked for hours after the EM lifted the label (2026-10-14).
+      if ((state === blocked || this.blockedAt.has(id)) && stage !== "blocked" && !(await this.blockedByLabel(id))) {
         if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && verifyHeld === true)) {
           this.blockedAt.set(id, stage);
           continue;
@@ -422,9 +427,23 @@ export class PaperclipMirror implements WorkObserver {
       }
       if (!(await this.move(id, stage))) continue;
       this.blockedAt.delete(id);
+      if (stage === "blocked") this.labelBlocked.add(id);
+      else this.labelBlocked.delete(id);
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
       await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress" });
     }
+  }
+
+  /**
+   * True when the card's block came from GitHub's blocked label: this process
+   * moved it there, or (after a restart) its latest note is the one that move
+   * posts. A Foreman block always ends on its own note, so it never reads so.
+   */
+  private async blockedByLabel(id: string): Promise<boolean> {
+    if (this.blockedAt.has(id)) return false;
+    if (this.labelBlocked.has(id)) return true;
+    const prefix = fill(PAPERCLIP_STEPS.synced.note, { detail: "" }).trim();
+    return (await this.latestComment(id))?.startsWith(prefix) === true;
   }
 
   async onMerged(item: WorkItem, _repoConfig?: unknown, _logger?: Logger): Promise<void> {

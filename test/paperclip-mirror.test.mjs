@@ -675,6 +675,28 @@ test("snapshot: an old Foreman block is released once GitHub moved past approved
   assert.equal(fake.rows[1].status, "blocked");
 });
 
+test("snapshot: a block GitHub's blocked label made is released when the label goes (jerky_service #132/#133)", async () => {
+  const fake = fakePaperclip([row7("todo")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "blocked"] }]), logger());
+  assert.equal(fake.rows[0].status, "blocked", "the label blocks it");
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  assert.equal(fake.rows[0].status, "todo", "the label is gone: back to the queue");
+});
+
+test("snapshot: after a restart, a label-made block (its last note the sync note) is released; a Foreman block is kept", async () => {
+  const fake = fakePaperclip([
+    row7("blocked", { unblockDescriptor: { action: "blocked: needs attention" } }),
+    { id: "r8", title: "t", status: "blocked", assigneeAgentId: AGENT, description: "source: example/r#8", unblockDescriptor: { action: "blocked: skipped: waiting on #5" } },
+  ]);
+  fake.comments.r7 = ["queued", "moved to match GitHub: feature, blocked, approved"];
+  fake.comments.r8 = ["blocked: skipped: waiting on #5"];
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }, { number: 8, labels: ["approved"] }]), logger());
+  assert.equal(fake.rows[0].status, "todo");
+  assert.equal(fake.rows[1].status, "blocked");
+});
+
 test("snapshot: a card blocked at pr merged stays Blocked while its dev verification is held", async () => {
   const fake = fakePaperclip([row7("blocked", { unblockDescriptor: { action: "blocked: dev verification did not pass" } })]);
   const { mirror } = mirrorOn(fake);
