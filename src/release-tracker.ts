@@ -30,6 +30,8 @@ export interface ReleaseTrackDeps {
   releaseState: (pr: number) => "OPEN" | "MERGED" | "CLOSED" | null;
   save: (v: SavedRelease | null) => void;
   emit: (event: ReleaseEvent) => Promise<void>;
+  /** The release stage owns the release PR; carried onto every event. */
+  owned?: boolean;
 }
 
 /** Issue numbers a release PR body lists as `#N`, in order, once each. */
@@ -55,7 +57,7 @@ export async function trackRelease(d: ReleaseTrackDeps): Promise<void> {
     if (saved?.pr === open.number && saved.issues.join() === issues.join()) return;
     if (saved && saved.pr !== open.number) await settle(saved, d, items);
     d.save({ pr: open.number, url: open.url, issues });
-    await d.emit({ repo: d.repo, state: "open", pr: open.number, url: open.url, issues: items(issues), productionBranch: d.productionBranch });
+    await d.emit({ repo: d.repo, state: "open", pr: open.number, url: open.url, issues: items(issues), productionBranch: d.productionBranch, owned: d.owned === true });
     return;
   }
   if (saved) await settle(saved, d, items);
