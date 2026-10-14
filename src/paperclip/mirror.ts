@@ -355,7 +355,14 @@ export class PaperclipMirror implements WorkObserver {
     if (!id) return;
     const text = fill(step.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
-    this.blockedAt.set(id, this.ghStage.get(id));
+    // An escalation only fires from revise, which only runs at changesRequested,
+    // so that is the stage the hold belongs to. The last snapshot can be older:
+    // the review that tipped the count moves the labels to `pr pending actions`
+    // seconds before the escalation, and anchoring on the stale `pr under review`
+    // let the next snapshot read it as "moved on" and release the hold
+    // (slashbin_data_receiver#41, 2026-10-14: the card sat In Review on the
+    // Foreman for ten hours with nobody told).
+    this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? "changesRequested" : this.ghStage.get(id));
     await this.move(id, step.stage);
     await this.note(id, text, { event: "blocked" });
   }
