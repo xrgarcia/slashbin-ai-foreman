@@ -25,6 +25,7 @@ if (!existsSync(built)) {
   process.exit(1);
 }
 const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning } = await import(built);
+const { claudeConfigPath, claudeTrustStatus } = await import(join(root, "dist", "claude-trust.js"));
 
 const args = process.argv.slice(2);
 const configArg = args.includes("--config") ? args[args.indexOf("--config") + 1] : args.find((a) => !a.startsWith("-"));
@@ -121,6 +122,13 @@ for (const repo of config.repos) {
     try {
       run("git", ["-C", repo.repoPath, "rev-parse", "--is-inside-work-tree"]);
       line("PASS", `${at}: checkout`, repo.repoPath);
+      // Claude Code workspace trust: without it a session ignores the repo's
+      // .claude/settings.json and .mcp.json. Read-only here; the daemon trusts.
+      const trust = claudeTrustStatus(repo.repoPath);
+      if (trust === "trusted") line("PASS", `${at}: claude trust`, "trusted in Claude Code");
+      else if (trust === "unreadable") line("WARN", `${at}: claude trust`, `${claudeConfigPath()} does not parse — the Foreman will not write it, so sessions here run without the repo's .claude/settings.json and .mcp.json.`);
+      else if (config.trustManagedRepos) line("PASS", `${at}: claude trust`, "not yet trusted — the Foreman trusts it on start (trustManagedRepos)");
+      else line("WARN", `${at}: claude trust`, "not trusted, and trustManagedRepos is off — sessions here ignore the repo's .claude/settings.json and .mcp.json. Trust it in Claude Code or turn trustManagedRepos on.");
     } catch {
       line("FAIL", `${at}: checkout`, `${repo.repoPath} is not a git checkout.`);
     }

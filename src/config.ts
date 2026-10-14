@@ -129,15 +129,30 @@ export const configSchema = z.object({
 
   // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
-  // RETIRED: the per-repo slot cap. Concurrency is now one loop per (repo,
-  // lane) — see src/lanes.ts — so there is no whole-repo pass left to cap.
-  // Still accepted so an existing config loads; ignored, with a startup warning.
+  // RETIRED, ignored. It capped how many repos ran their serial pass at once;
+  // concurrency is now one loop per (repo, lane) — see src/lanes.ts — so there is
+  // no whole-repo pass left to cap. A config that still sets it loads, with a
+  // startup warning naming `maxConcurrentSessions`.
   maxConcurrentRepos: z.coerce.number().int().positive().optional(),
   // Optional fleet-wide ceiling on session stages running at once (review,
   // verify, revise, implement, release, custom). 0 = no ceiling, the default:
-  // the lanes already bound the work at one item per repo per lane. Set it only
-  // if the host cannot carry every busy lane's session at once.
+  // the lanes already bound the work at one item per repo per lane (see
+  // [README → What the Foreman does](../README.md#what-the-foreman-does)). Set it
+  // only if the host cannot carry every busy lane's session at once. A stage
+  // takes its repo's checkout lock first and a slot second, so a stage queued on
+  // a checkout never sits on a slot, and a slot holder never waits on anything —
+  // a capped fleet cannot deadlock. Reloaded live.
   maxConcurrentSessions: z.coerce.number().int().nonnegative().default(0),
+  // Mark every configured repo checkout, and every directory a session runs in,
+  // as trusted in Claude Code's global config ($CLAUDE_CONFIG_DIR/.claude.json,
+  // else ~/.claude.json). Without trust a headless session silently ignores the
+  // repo's .claude/settings.json and .mcp.json. Listing a repo here is the consent;
+  // set false to manage Claude Code trust yourself.
+  // Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+  trustManagedRepos: z.preprocess(
+    (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
+    z.boolean(),
+  ).default(true),
   // How many approved issues one build claims. The Foreman picks them before
   // the session — priority tier (github.priorityLabels), then oldest — hands the
   // session only those, and claims only those; the rest stay queued (todo, on
@@ -297,12 +312,17 @@ export const configSchema = z.object({
   // block would arrive as {} with none of the names filled in.)
   lifecycleLabels: lifecycleLabelsSchema.prefault({}),
 
-  // The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the
-  // nine built-ins in order; the last, `release`, runs only when both srePath
-  // and techLeadPath are set and is skipped with a startup warning otherwise.
-  // Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that
-  // skill when the pass reaches it. Global, never per repo — the stages hand
-  // work to each other by label, one pipeline for the fleet.
+  // The stages the Foreman runs (see src/stages.ts), grouped into lanes
+  // (src/lanes.ts): revise+implement form the `build` lane, promote+release the
+  // `release` lane, every other built-in a lane of its own, and each (repo, lane)
+  // pair polls on its own loop. Order matters only inside a lane. Omitted, it is
+  // the nine built-ins in order; `release` runs only when both srePath and
+  // techLeadPath are set and is skipped with a startup warning otherwise. Listing
+  // `release` explicitly without both is refused at startup. A custom stage is
+  // `{ id, skillPath }`: one Claude session on that skill, in the lane of the
+  // built-in listed after it (its own lane when last); a blocked verdict holds the
+  // rest of that lane only. Global, never per repo — the stages hand work to each
+  // other by label, one pipeline for the fleet.
   stages: stagesSchema,
 
   // The other GitHub names the Foreman reads and writes: the blocked label, the
@@ -389,6 +409,8 @@ export interface AgentConfig {
   maxConcurrentRepos?: number;
   /** Fleet-wide ceiling on concurrent session stages; 0 = none (default). */
   maxConcurrentSessions: number;
+  /** Trust each managed checkout in Claude Code's global config (default true). */
+  trustManagedRepos: boolean;
   /** Most approved issues one build claims and hands its session (default 1). */
   buildBatchSize: number;
   /** Every back-off and retry limit (see src/backoff.ts). */
@@ -510,6 +532,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     pollIntervalMs: process.env.AI_AGENT_POLL_INTERVAL_MS ?? fileConfig.pollIntervalMs,
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
     maxConcurrentSessions: process.env.AI_AGENT_MAX_CONCURRENT_SESSIONS ?? fileConfig.maxConcurrentSessions,
+    trustManagedRepos: process.env.AI_AGENT_TRUST_MANAGED_REPOS ?? fileConfig.trustManagedRepos,
     buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
     backoff: mergeBackoff(fileConfig.backoff, {
       skipBackoffMs: fileConfig.skipBackoffMs,
@@ -718,6 +741,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     pollIntervalMs: parsed.pollIntervalMs,
     ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
     maxConcurrentSessions: parsed.maxConcurrentSessions,
+    trustManagedRepos: parsed.trustManagedRepos,
     buildBatchSize: parsed.buildBatchSize,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,

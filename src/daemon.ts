@@ -1,4 +1,5 @@
 import type { AgentConfig } from "./config.js";
+import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { concurrencyWarning, loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
@@ -39,6 +40,11 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   // Every back-off and retry limit, for the module-level code that takes no
   // config (gh retries, CI gate, stuck-merge scan, upstream windows).
   configureBackoff(config.backoff);
+
+  // Every managed checkout trusted before the first session (src/claude-trust.ts);
+  // again on each reload, and once more before every spawn.
+  configureClaudeTrust({ enabled: config.trustManagedRepos });
+  trustManagedRepos(config.repos, logger);
 
   configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
@@ -163,6 +169,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
       setGitHubStateRepos(fresh.repos.map((r) => r.githubRepo));
       configureBackoff(fresh.backoff);
+      configureClaudeTrust({ enabled: fresh.trustManagedRepos });
+      trustManagedRepos(fresh.repos, logger);
       return fresh;
     } catch (err) {
       logger.warn("Config reload failed, using previous config", {

@@ -100,17 +100,23 @@ Type: integer · Default: `300000` (5 min) · Env: `AI_AGENT_POLL_INTERVAL_MS`
 
 How often a poll cycle starts.
 
+### `maxConcurrentRepos`
+
+Type: integer · Default: none · Env: `AI_AGENT_MAX_CONCURRENT_REPOS`
+
+RETIRED, ignored. It capped how many repos ran their serial pass at once; concurrency is now one loop per (repo, lane) — see src/lanes.ts — so there is no whole-repo pass left to cap. A config that still sets it loads, with a startup warning naming `maxConcurrentSessions`.
+
 ### `maxConcurrentSessions`
 
-Type: integer · Default: `0` (no ceiling) · Env: `AI_AGENT_MAX_CONCURRENT_SESSIONS`
+Type: integer · Default: `0` · Env: `AI_AGENT_MAX_CONCURRENT_SESSIONS`
 
-An optional fleet-wide ceiling on stages that run a session at once (review, verify, revise, implement, release, custom). The lanes already bound the work — one item per repo per lane (see [README → What the Foreman does](../README.md#what-the-foreman-does)) — so the default is no ceiling. Set it only if the host cannot carry a session for every busy lane at once; a stage takes its repo's checkout lock first and a slot second, so a stage queued on a checkout never sits on a slot, and a slot holder never waits on anything — a capped fleet cannot deadlock. Reloaded live.
+Optional fleet-wide ceiling on session stages running at once (review, verify, revise, implement, release, custom). 0 = no ceiling, the default: the lanes already bound the work at one item per repo per lane (see [README → What the Foreman does](../README.md#what-the-foreman-does)). Set it only if the host cannot carry every busy lane's session at once. A stage takes its repo's checkout lock first and a slot second, so a stage queued on a checkout never sits on a slot, and a slot holder never waits on anything — a capped fleet cannot deadlock. Reloaded live.
 
-### `maxConcurrentRepos` (retired)
+### `trustManagedRepos`
 
-Type: integer · Env: `AI_AGENT_MAX_CONCURRENT_REPOS`
+Type: boolean · Default: `true` · Env: `AI_AGENT_TRUST_MANAGED_REPOS`
 
-Ignored. It capped how many repos ran their serial pass at once; repos no longer run one serial pass, so it has nothing to cap. A config that still sets it loads, with a startup warning naming `maxConcurrentSessions`.
+Mark every configured repo checkout, and every directory a session runs in, as trusted in Claude Code's global config ($CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json). Without trust a headless session silently ignores the repo's .claude/settings.json and .mcp.json. Listing a repo here is the consent; set false to manage Claude Code trust yourself. Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
 
 ### `buildBatchSize`
 

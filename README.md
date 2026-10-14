@@ -320,6 +320,12 @@ Sessions run with `--dangerously-skip-permissions`. Each receives one GitHub tok
 
 The Tech Lead hand-off gets the same essentials and `sessionEnv` names, `TECHLEAD_GITHUB_KEY`, its own `TECH_LEAD_*` settings and the two label vars — never `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
 
+### Claude Code workspace trust
+
+A headless Claude session in a directory Claude Code has never trusted ignores that repo's `.claude/settings.json` and `.mcp.json` — no error, just a stderr warning and a session without the repo's own tools and hooks. The Foreman marks every configured checkout trusted in Claude Code's global config (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`) on start, on each config reload and before every session, writing only when the flag is missing and never touching a file it cannot parse. Listing a repo is the consent; set `trustManagedRepos: false` to manage trust yourself.
+
+**Troubleshooting:** a log line `Claude Code reports <path> is not trusted` means a session ran without the repo's settings; the Foreman has trusted it for the next one. If it repeats, the config the session reads is not the one being written — check `HOME` and whether `CLAUDE_CONFIG_DIR` is in `sessionEnv`.
+
 ## Using with skills
 
 The Foreman delegates work by invoking Claude Code skills on each service repo. Two skill paths per repo:
