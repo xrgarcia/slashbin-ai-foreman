@@ -826,6 +826,22 @@ test("escalated: a snapshot taken before the review that tipped it does not rele
   assert.notEqual(r.status, "blocked", "an issue that really moves on still releases the hold");
 });
 
+test("escalated: the EM's wake checking the card out does not release the hold", async () => {
+  const fake = fakePaperclip([row7("todo")]);
+  const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
+  const r = fake.rows[0];
+  r.status = "in_progress";
+  await mirror.ensureIndex(true);
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  assert.equal(r.status, "in_progress", "the snapshot moved a card the EM is working");
+  assert.equal(r.assigneeAgentId, "em-agent", "the snapshot took the card off the EM");
+  await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", pr: 3, items: [item] }, logger());
+  assert.equal(r.assigneeAgentId, AGENT, "the revision after the ruling takes the card back");
+});
+
 test("escalated with no roles configured stays with the Foreman", async () => {
   const fake = fakePaperclip([row7("todo")]);
   const { mirror } = mirrorOn(fake, { agentStatus: false });
