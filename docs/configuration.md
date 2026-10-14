@@ -100,11 +100,17 @@ Type: integer · Default: `300000` (5 min) · Env: `AI_AGENT_POLL_INTERVAL_MS`
 
 How often a poll cycle starts.
 
-### `maxConcurrentRepos`
+### `maxConcurrentSessions`
 
-Type: integer · Default: `3` · Env: `AI_AGENT_MAX_CONCURRENT_REPOS`
+Type: integer · Default: `0` (no ceiling) · Env: `AI_AGENT_MAX_CONCURRENT_SESSIONS`
 
-How many repos may run their pipeline at the same time. Repos are safe to run concurrently on their own — each has its own git working clone, so two can never touch the same checkout — so this cap is about SPEND, not safety: each concurrent repo means another Claude session (up to maxTurns) and another stream of GitHub API calls. Default 3; raise it deliberately after watching what it costs. Set to 1 for the original strictly-serial behaviour.
+An optional fleet-wide ceiling on stages that run a session at once (review, verify, revise, implement, release, custom). The lanes already bound the work — one item per repo per lane (see [README → What the Foreman does](../README.md#what-the-foreman-does)) — so the default is no ceiling. Set it only if the host cannot carry a session for every busy lane at once; a stage takes its repo's checkout lock first and a slot second, so a stage queued on a checkout never sits on a slot, and a slot holder never waits on anything — a capped fleet cannot deadlock. Reloaded live.
+
+### `maxConcurrentRepos` (retired)
+
+Type: integer · Env: `AI_AGENT_MAX_CONCURRENT_REPOS`
+
+Ignored. It capped how many repos ran their serial pass at once; repos no longer run one serial pass, so it has nothing to cap. A config that still sets it loads, with a startup warning naming `maxConcurrentSessions`.
 
 ### `buildBatchSize`
 
@@ -282,7 +288,7 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot`
 
-The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the nine built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill when the pass reaches it. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the nine built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 

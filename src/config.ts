@@ -129,13 +129,15 @@ export const configSchema = z.object({
 
   // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
-  // How many repos may run their pipeline at the same time. Repos are safe to
-  // run concurrently on their own — each has its own git working clone, so two
-  // can never touch the same checkout — so this cap is about SPEND, not safety:
-  // each concurrent repo means another Claude session (up to maxTurns) and
-  // another stream of GitHub API calls. Default 3; raise it deliberately after
-  // watching what it costs. Set to 1 for the original strictly-serial behaviour.
-  maxConcurrentRepos: z.coerce.number().int().positive().default(3),
+  // RETIRED: the per-repo slot cap. Concurrency is now one loop per (repo,
+  // lane) — see src/lanes.ts — so there is no whole-repo pass left to cap.
+  // Still accepted so an existing config loads; ignored, with a startup warning.
+  maxConcurrentRepos: z.coerce.number().int().positive().optional(),
+  // Optional fleet-wide ceiling on session stages running at once (review,
+  // verify, revise, implement, release, custom). 0 = no ceiling, the default:
+  // the lanes already bound the work at one item per repo per lane. Set it only
+  // if the host cannot carry every busy lane's session at once.
+  maxConcurrentSessions: z.coerce.number().int().nonnegative().default(0),
   // How many approved issues one build claims. The Foreman picks them before
   // the session — priority tier (github.priorityLabels), then oldest — hands the
   // session only those, and claims only those; the rest stay queued (todo, on
@@ -383,8 +385,10 @@ export interface RepoConfig {
 export interface AgentConfig {
   repos: readonly RepoConfig[];
   pollIntervalMs: number;
-  /** Max repos running their pipeline at once (default 3). Caps spend, not risk. */
-  maxConcurrentRepos: number;
+  /** Retired (lanes replaced it); kept only so the startup warning can name it. */
+  maxConcurrentRepos?: number;
+  /** Fleet-wide ceiling on concurrent session stages; 0 = none (default). */
+  maxConcurrentSessions: number;
   /** Most approved issues one build claims and hands its session (default 1). */
   buildBatchSize: number;
   /** Every back-off and retry limit (see src/backoff.ts). */
@@ -468,6 +472,13 @@ export function releaseStageWarning(config: Pick<AgentConfig, "srePath" | "techL
     `authorization label when it lists an issue, and the release PR waits for a person to merge it and close its issues.`;
 }
 
+/** A config still setting the retired `maxConcurrentRepos` gets one startup line saying it does nothing now. */
+export function concurrencyWarning(config: Pick<AgentConfig, "maxConcurrentRepos">): string | null {
+  if (config.maxConcurrentRepos === undefined) return null;
+  return `maxConcurrentRepos (${config.maxConcurrentRepos}) is ignored: every stage lane now runs one item per repo, ` +
+    `all repos at once. Remove it; set maxConcurrentSessions to cap concurrent sessions instead.`;
+}
+
 
 /**
  * The config file `loadConfig` reads: `configPath` when given, else
@@ -498,6 +509,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     triggerLabel: process.env.AI_AGENT_TRIGGER_LABEL ?? fileConfig.triggerLabel,
     pollIntervalMs: process.env.AI_AGENT_POLL_INTERVAL_MS ?? fileConfig.pollIntervalMs,
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
+    maxConcurrentSessions: process.env.AI_AGENT_MAX_CONCURRENT_SESSIONS ?? fileConfig.maxConcurrentSessions,
     buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
     backoff: mergeBackoff(fileConfig.backoff, {
       skipBackoffMs: fileConfig.skipBackoffMs,
@@ -704,7 +716,8 @@ export function loadConfig(configPath?: string): AgentConfig {
   return Object.freeze({
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
-    maxConcurrentRepos: parsed.maxConcurrentRepos,
+    ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
+    maxConcurrentSessions: parsed.maxConcurrentSessions,
     buildBatchSize: parsed.buildBatchSize,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,

@@ -229,7 +229,36 @@ function saveRaw(state: PersistedState): void {
   }
 }
 
+/**
+ * What each top-level field held when this copy was loaded, as JSON. Several
+ * lanes of one repo now run at once (lanes.ts), and each saves the WHOLE repo
+ * record it loaded earlier — so the release lane saving after a deploy would
+ * write back the `implemented` list it read before a build finished, and erase
+ * it. With the baseline, a save writes only the fields this copy changed and
+ * keeps every other field as it now stands on disk.
+ *
+ * An enumerable symbol: `{ ...state, verifyHeld }` carries it into the copy (so
+ * that save is field-level too), and JSON.stringify never writes it.
+ */
+const BASELINE = Symbol("repoStateBaseline");
+type Baselined = RepoState & { [BASELINE]?: Record<string, string | undefined> };
+
+function baselineOf(s: RepoState): Record<string, string | undefined> {
+  const b: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(s)) b[k] = JSON.stringify(v);
+  return b;
+}
+
+function withBaseline(s: RepoState): RepoState {
+  (s as Baselined)[BASELINE] = baselineOf(s);
+  return s;
+}
+
 export function loadRepoState(repoName: string): RepoState {
+  return withBaseline(loadRepoStateCopy(repoName));
+}
+
+function loadRepoStateCopy(repoName: string): RepoState {
   const state = loadRaw();
 
   if (state.repos[repoName]) {
@@ -276,8 +305,29 @@ export function loadRepoState(repoName: string): RepoState {
   };
 }
 
+/**
+ * Save a repo's state. A copy from `loadRepoState` writes only the fields it
+ * changed since it was loaded (see BASELINE); a record built from scratch
+ * replaces the repo's whole entry, as before.
+ */
 export function saveRepoState(repoName: string, repoState: RepoState): void {
   const state = loadRaw();
-  state.repos[repoName] = repoState;
+  const baseline = (repoState as Baselined)[BASELINE];
+  const disk = state.repos[repoName];
+  if (!baseline || !disk) {
+    state.repos[repoName] = { ...repoState };
+  } else {
+    const merged: Record<string, unknown> = { ...disk };
+    const mine = repoState as unknown as Record<string, unknown>;
+    for (const k of new Set([...Object.keys(baseline), ...Object.keys(repoState)])) {
+      const now = JSON.stringify(mine[k]);
+      if (now === baseline[k]) continue; // untouched here: keep what is on disk
+      if (mine[k] === undefined) delete merged[k];
+      else merged[k] = mine[k];
+    }
+    state.repos[repoName] = merged as unknown as RepoState;
+  }
   saveRaw(state);
+  // The caller may save the same copy again; its next save diffs from this one.
+  (repoState as Baselined)[BASELINE] = baselineOf(repoState);
 }

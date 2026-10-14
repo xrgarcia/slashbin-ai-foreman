@@ -30,11 +30,22 @@ The Foreman shines when you have **more approved work than time to implement**. 
 
 ## What the Foreman does
 
-Each poll cycle runs these stages, in this order, across every configured repo (the order is configurable — see [Pipeline stages](#pipeline-stages)):
+The Foreman runs these stages on every configured repo (the list is configurable — see [Pipeline stages](#pipeline-stages)):
 
 ```
 Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot
 ```
+
+The stages do not wait on each other. They are grouped into **lanes**, and every
+(repo, lane) pair runs its own loop at `pollIntervalMs`: one item per repo per lane at
+a time, every lane of a repo side by side, every repo at once. Two lanes join stages
+that must stay in order: **build** = revise then implement, and **release** = promote
+then release. The rest are a lane each. So a 30-minute build on a repo no longer holds
+that repo's release, verify or review. Stages that change the repo's working clone
+(reconcile, revise, implement, custom stages) take turns on a per-repo checkout lock;
+review works in its own clone, and the others only call GitHub or hand off to the
+Tech Lead and SRE, so they never wait on a build. Work moves between lanes by label,
+so one lane picks up what another just finished on its next pass.
 
 1. **Reconcile** — detects orphaned commits on the features branch with no PR and creates one
 2. **Review** *(opt-in)* — when `reviewEnabled` is set, hands each open feature PR awaiting review to the **Tech Lead** (`techLeadPath`), which reviews under its own GitHub token and owns its own merge + label decisions; its label side effects (approve → `pr approved`; request-changes → `pr pending actions`) feed the Promote and Revise phases, and the Foreman reconciles the outcome label from the run's trailer if the skill merged without setting it. Disabled by default — see [Review phase](#review-phase-opt-in)
@@ -358,11 +369,12 @@ built-ins in the order above (verify only with `srePath`; release only with both
 ] }
 ```
 
-Leave a built-in out and it never runs; reorder them and you give up what the
-default order guarantees (review before implement, so review only sees PRs
-labeled in an earlier pass; promote after verify, so it sees labels this pass just set;
-release after promote, so it acts on the PR promote just opened or updated; both
-before revise and implement, so finished work never waits behind a build session).
+Leave a built-in out and it never runs. Order matters only inside a lane: revise
+runs before implement in the build lane, promote before release in the release lane
+(so release acts on the PR promote just opened or updated), and a custom stage runs
+in front of the built-in after it. Across lanes, order sets nothing — each lane polls
+on its own. Lanes are listed in the order their first stage appears; the daemon logs
+them at startup (`lanes`), and every log line from a pass carries `lane=`.
 Each stage may appear once. A `reviewEnabled` repo needs `techLeadPath` only when
 `review` is in `stages`. An explicit `release` needs both `srePath` and `techLeadPath`;
 the config is refused at startup otherwise.
@@ -384,21 +396,28 @@ deliberately small:
   `skillPath` resolves against the repo. Anything the stage should change
   (comments, labels) its skill does; the Foreman does nothing with the work items.
 - **What its outcome means.** The session ends with `FOREMAN_STAGE pass` or
-  `FOREMAN_STAGE blocked reason="…"`. `pass` lets the later stages run. `blocked`,
-  or a run with no verdict line (timed out, crashed, forgot), stops every later
-  stage for that repo. The verdict holds until the feature branch head moves, so
-  the same code is not re-checked every poll; a restart re-runs it once. A run
-  refused by an upstream limit gives no verdict and is retried next pass, with
-  later stages held meanwhile.
+  `FOREMAN_STAGE blocked reason="…"`. `pass` lets the rest of its lane run.
+  `blocked`, or a run with no verdict line (timed out, crashed, forgot), stops the
+  rest of **its lane** for that repo — other lanes carry on. The verdict holds until
+  the feature branch head moves, so the same code is not re-checked every poll; a
+  restart re-runs it once. A run refused by an upstream limit gives no verdict and
+  is retried next pass, with the rest of its lane held meanwhile.
+- **Which lane it joins.** The lane of the built-in listed right after it, so it
+  gates exactly that stage. With nothing after it, it is a lane of its own, named
+  by its `id`. It takes the repo's checkout lock: its session runs in the clone.
 
-A blocking stage belongs **after** `revise` and `implement`: a fix pushed by
-revise is what moves the head and re-runs the check.
+A blocking stage belongs **after** `revise` and `implement` and **in front of** the
+stage it gates: a fix pushed by revise is what moves the head and re-runs the check.
+In the example it sits in front of `promote`, so it joins the release lane and a
+blocked scan holds promotion and release — builds, review and branch sync go on.
+(Before lanes, a custom stage held every stage after it; a config that relied on that
+must now put the gate in front of the stage it means to hold.)
 
 ```json
 { "stages": [
   { "type": "reconcile" }, { "type": "review" }, { "type": "revise" }, { "type": "implement" },
   { "id": "security", "skillPath": ".claude/skills/security-scan/SKILL.md" },
-  { "type": "branch-sync" }, { "type": "dependabot" }, { "type": "promote" }
+  { "type": "promote" }, { "type": "branch-sync" }, { "type": "dependabot" }
 ] }
 ```
 
@@ -536,12 +555,13 @@ src/
 ├── agent.ts           # Claude Code CLI spawner
 ├── reviewer.ts        # PR review feedback handler
 ├── stages.ts          # Stage schema, default order, dispatch loop
+├── lanes.ts           # Stages grouped into lanes; checkout, lane and session locks
 ├── backoff.ts         # Every retry wait: the `backoff` config block and the one formula
-├── orchestrator.ts    # Stage pass per repo, failure cooldowns, session slot
+├── orchestrator.ts    # Lane pass per (repo, lane), failure cooldowns, shutdown drain
 ├── phases/            # One file per stage (reconcile, implement, revise, verify, review, promote, custom)
 ├── paperclip/         # Optional Paperclip board plugin (a WorkObserver)
 ├── state.ts           # Persistent state management
-├── daemon.ts          # Poll loop, graceful shutdown
+├── daemon.ts          # One poll loop per (repo, lane), graceful shutdown
 ├── bridge-client.ts   # WebSocket Discord client (exported; unused by the daemon)
 └── index.ts           # Public API exports
 ```

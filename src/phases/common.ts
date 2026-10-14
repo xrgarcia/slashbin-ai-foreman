@@ -238,13 +238,14 @@ export async function notifyOnce(
   }
 }
 
-// Agent runs in flight, keyed by repo name. Repos progress CONCURRENTLY (one
-// queue per service — see runCycle), so "the" in-flight run stopped being a
-// single thing; a lone `abortController` would have tracked whichever repo
-// started last and let a restart SIGKILL every other repo's half-built branch.
-// One entry per repo, at most — a repo's own phases stay strictly sequential
-// because they share one git working clone.
-export const activeRuns = new Map<string, AbortController>();
+// Agent runs in flight: each run's controller → its repo name. Repos progress
+// CONCURRENTLY, so "the" in-flight run stopped being a single thing; a lone
+// `abortController` would have tracked whichever repo started last and let a
+// restart SIGKILL every other repo's half-built branch. Keyed by controller,
+// not repo: a repo's lanes run side by side (see lanes.ts), so one repo can have
+// a build, a review and a release in flight at once, and a repo key would let
+// the first to finish erase the others from the shutdown drain.
+export const activeRuns = new Map<AbortController, string>();
 
 // Per-repo consecutive implement failures. At `backoff.repoFailure.maxFailures`
 // the repo's implement stage pauses (failurePause), longer each time it trips.

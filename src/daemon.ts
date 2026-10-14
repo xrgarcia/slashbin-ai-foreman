@@ -1,7 +1,9 @@
 import type { AgentConfig } from "./config.js";
-import { loadConfig, releaseStageWarning } from "./config.js";
+import { concurrencyWarning, loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
-import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
+import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
+import { lanesFor, setSessionLimit } from "./lanes.js";
+import { stageName } from "./stages.js";
 import { join } from "node:path";
 import { configureIssueCache, gh } from "./github.js";
 import {
@@ -97,13 +99,19 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   // the SRE it cannot run, and a silent skip would read as releases stalling.
   const releaseWarning = releaseStageWarning(config);
   if (releaseWarning) logger.warn(releaseWarning);
+  const retired = concurrencyWarning(config);
+  if (retired) logger.warn(retired);
 
   const repoNames = config.repos.map((r) => r.name).join(", ");
+  const startLanes = lanesFor(config.stages);
   logger.info("Daemon starting", {
     repos: repoNames,
     repoCount: config.repos.length,
     pollInterval: `${config.pollIntervalMs / 1000}s`,
-    maxConcurrentRepos: config.maxConcurrentRepos,
+    // One loop per (repo, lane): each lane runs one item per repo at a time.
+    lanes: startLanes.map((l) => `${l.name}[${l.stages.map(stageName).join(">")}]`).join(" "),
+    laneLoops: startLanes.length * config.repos.length,
+    maxConcurrentSessions: config.maxConcurrentSessions || "unbounded",
     issueCacheTtlMs: config.issueCacheTtlMs,
     // Requests/hour the discovery phases will now spend, so the budget is
     // visible in the log rather than something you have to rediscover.
@@ -164,26 +172,27 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     }
   }
 
-  // --- One independent loop per repo -------------------------------------
+  // --- One independent loop per (repo, lane) -----------------------------
   //
-  // Each repo polls, works and sleeps on its OWN schedule. There is no
-  // fleet-wide barrier, so a 40-minute review on one service no longer delays
-  // every other service's next turn — which was still true after repos were
-  // merely made concurrent WITHIN a shared cycle (2026-07-29: the fleet went
-  // quiet for 24 minutes behind a single slashbin-io-worker review).
+  // Each lane of each repo polls, works and sleeps on its OWN schedule (see
+  // src/lanes.ts). There is no barrier between repos — 2026-07-29 the fleet went
+  // quiet for 24 minutes behind one slashbin-io-worker review — and now none
+  // between the stages of one repo either: on 2026-10-14 jerky_service's
+  // release PR #146 waited behind a 30-minute revision on the same repo.
   //
-  // What still bounds the fleet is the concurrency slot limiter in the
-  // orchestrator: a repo acquires a slot for the duration of its pass. Twenty
-  // repos waking at once queue for slots instead of opening twenty Claude
-  // sessions.
-  const repoLoops = new Map<string, { stop: () => void }>();
+  // What bounds the work is the lane itself: one item per repo per lane. Stages
+  // that change the repo's working clone share the repo's checkout lock, and
+  // `maxConcurrentSessions` (off by default) can cap sessions fleet-wide.
+  const laneLoops = new Map<string, { stop: () => void }>();
+  const loopKey = (repoName: string, laneName: string): string => `${repoName}/${laneName}`;
 
-  const startRepoLoop = (repoName: string): void => {
+  const startLaneLoop = (repoName: string, laneName: string): void => {
     let loopStopping = false;
     let wake: (() => void) | null = null;
+    const key = loopKey(repoName, laneName);
 
     const run = async (): Promise<void> => {
-      const repoLogger = logger.child({ repo: repoName });
+      const repoLogger = logger.child({ repo: repoName, lane: laneName });
       while (!stopping && !loopStopping) {
         // GitHub is backing off: wait for the module's probe to clear it rather
         // than spin. Raced against `wake` so stop() still ends the loop at once.
@@ -199,30 +208,36 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         }
 
         // Re-resolve from the live config each pass so a hot-reloaded setting
-        // (branches, budgets, reviewEnabled) applies without a restart. A repo
-        // dropped from the config ends its own loop.
+        // (branches, budgets, reviewEnabled, stages) applies without a restart.
+        // A repo dropped from the config, or a lane its stages no longer have,
+        // ends its own loop.
         const repoConfig = activeConfig.repos.find((r) => r.name === repoName);
-        if (!repoConfig) {
-          repoLogger.info("Repo no longer in config — stopping its loop");
-          repoLoops.delete(repoName);
+        const lanes = lanesFor(activeConfig.stages);
+        const lane = lanes.find((l) => l.name === laneName);
+        if (!repoConfig || !lane) {
+          repoLogger.info(repoConfig ? "Lane no longer in the configured stages — stopping its loop" : "Repo no longer in config — stopping its loop");
+          laneLoops.delete(key);
           return;
         }
 
         let didWork = false;
         try {
-          const result = await runRepoPass(repoConfig, activeConfig, logger);
+          // The first lane mirrors the board every pass, as the whole-repo pass
+          // did; the others only after they changed something, so splitting a
+          // repo into lanes does not multiply the idle snapshot rate.
+          const result = await runLanePass(repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work");
           didWork = result.processed > 0;
           for (const event of result.events) logger[event.level](event.message);
         } catch (err) {
           // A pass cut short by the GitHub back-off is expected, and the back-off
           // module has already announced it once — no per-repo message.
           if (err instanceof UpstreamBackoffError) {
-            repoLogger.debug("Repo pass cut short by the GitHub back-off", { error: err.message });
+            repoLogger.debug("Lane pass cut short by the GitHub back-off", { error: err.message });
             continue;
           }
-          // Never let one repo's failure end its loop — that would take the
-          // service permanently off the fleet with no signal beyond silence.
-          repoLogger.error("Repo pass failed", {
+          // Never let one failure end the loop — that would take the lane off
+          // the fleet for this service with no signal beyond silence.
+          repoLogger.error("Lane pass failed", {
             error: err instanceof Error ? err.message : String(err),
           });
         }
@@ -242,7 +257,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       }
     };
 
-    repoLoops.set(repoName, {
+    laneLoops.set(key, {
       stop: () => {
         loopStopping = true;
         if (wake) {
@@ -260,13 +275,19 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     while (!stopping) {
       cycleNumber++;
       activeConfig = reloadConfig();
-      setConcurrencyLimit(activeConfig.maxConcurrentRepos);
+      setSessionLimit(activeConfig.maxConcurrentSessions);
 
+      const lanes = lanesFor(activeConfig.stages);
+      const wanted = new Set<string>();
       for (const repo of activeConfig.repos) {
-        if (!repoLoops.has(repo.name)) startRepoLoop(repo.name);
+        for (const lane of lanes) {
+          const key = loopKey(repo.name, lane.name);
+          wanted.add(key);
+          if (!laneLoops.has(key)) startLaneLoop(repo.name, lane.name);
+        }
       }
-      for (const [name, handle] of repoLoops) {
-        if (!activeConfig.repos.some((r) => r.name === name)) handle.stop();
+      for (const [key, handle] of laneLoops) {
+        if (!wanted.has(key)) handle.stop();
       }
 
       await new Promise<void>((resolve) => {
@@ -294,7 +315,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       sleepResolve();
       sleepResolve = null;
     }
-    for (const handle of repoLoops.values()) handle.stop();
+    for (const handle of laneLoops.values()) handle.stop();
 
     // If currently implementing, drain before aborting.
     //
@@ -314,24 +335,9 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     const drainMs =
       Number(process.env.AI_AGENT_SHUTDOWN_DRAIN_MS) ||
       Math.max(longestRun, config.reviewMaxDurationMs);
-    // Several repos can be mid-run at once now, so drain ALL of them. Waiting on
-    // a single controller would have returned as soon as the first one finished
-    // and left the rest to be SIGKILLed with half-built branches — the exact
-    // outcome TimeoutStopSec=1800 exists to prevent.
-    if (getActiveRunCount() > 0) {
-      logger.info(
-        `Waiting for ${getActiveRunCount()} in-progress run(s) to finish (${Math.round(drainMs / 1000)}s timeout)...`,
-        { repos: getActiveRunRepos(), queued: getQueuedRepoCount() },
-      );
-      const deadline = Date.now() + drainMs;
-      while (getActiveRunCount() > 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-      if (getActiveRunCount() > 0) {
-        logger.warn("Drain window elapsed — aborting in-progress run(s)", { repos: getActiveRunRepos() });
-        abortAllRuns();
-      }
-    }
+    // Every lane of every repo can be mid-run at once, so drain ALL of them —
+    // the runs and the lane passes around them (see drainInFlight).
+    await drainInFlight(drainMs, logger);
 
     logger.info("Shutdown complete");
   };

@@ -131,7 +131,7 @@ export async function tryReview(
   const checkoutPath = prepareReviewCheckout(config, repoConfig, reviewLogger);
 
   const runAbort = new AbortController();
-  activeRuns.set(repoName, runAbort);
+  activeRuns.set(runAbort, repoName);
   reviewLogger.info(`Triggering review for ${repoName} — PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")}), transcript: ${transcriptPath}`);
   events?.push({ message: `Reviewing ${repoConfig.githubRepo} PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
   const session: Omit<SessionEvent, "status"> = {
@@ -302,7 +302,7 @@ export async function tryReview(
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
     return false;
   } finally {
-    activeRuns.delete(repoName);
+    activeRuns.delete(runAbort);
     await emit({ kind: "session", session: { ...session, ...ended, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In

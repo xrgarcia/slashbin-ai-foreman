@@ -3,7 +3,8 @@ import { configureBackoff } from "./backoff.js";
 import type { Logger } from "./logger.js";
 import { publishSnapshot, hasObservers } from "./work-source.js";
 import { type ImplementationResult } from "./agent.js";
-import { dispatchStages, hasStage, isCustomStage, type StageResult } from "./stages.js";
+import { dispatchStages, hasStage, isCustomStage, type StageEntry, type StageResult } from "./stages.js";
+import { getQueuedSessionCount, lanesFor, setSessionLimit, stageNeedsCheckout, stageSpawnsSession, withCheckoutLock, withLaneLock, withSessionSlot, type Lane } from "./lanes.js";
 import { CycleEvent, activeRuns, failureCount, revisionFailureCount } from "./phases/common.js";
 import { tryCustomStage } from "./phases/custom.js";
 import { tryBatchImplementation } from "./phases/implement.js";
@@ -25,6 +26,8 @@ export interface OrchestratorState {
   /** Every repo with an agent run in flight. `implementing` is the first of
    *  these, kept for callers that predate concurrency. */
   implementingRepos: string[];
+  /** Lane passes in flight, as `repo/lane` (see lanes.ts). */
+  activeLanes: string[];
   repos: Record<string, { failures: number; revisionFailures: number }>;
 }
 
@@ -36,26 +39,41 @@ export function getState(config: AgentConfig): OrchestratorState {
       revisionFailures: revisionFailureCount.get(repo.name) ?? 0,
     };
   }
-  const implementingRepos = [...activeRuns.keys()];
-  return { implementing: implementingRepos[0] ?? null, implementingRepos, repos };
+  const implementingRepos = getActiveRunRepos();
+  return { implementing: implementingRepos[0] ?? null, implementingRepos, activeLanes: getActiveLanePasses(), repos };
 }
 
 /** Back-compat: a single controller for callers written before concurrency.
- *  Prefer `getActiveRunCount()` + `abortAllRuns()` — with several repos in
+ *  Prefer `getActiveRunCount()` + `abortAllRuns()` — with several runs in
  *  flight this returns an arbitrary one, and aborting it drains nothing else. */
 export function getAbortController(): AbortController | null {
-  for (const ac of activeRuns.values()) return ac;
+  for (const ac of activeRuns.keys()) return ac;
   return null;
 }
 
-/** How many agent runs are in flight right now, across all repos. */
+/** How many agent runs are in flight right now, across all repos and lanes. */
 export function getActiveRunCount(): number {
   return activeRuns.size;
 }
 
-/** Repos currently running an agent, for shutdown logging. */
+/** Repos currently running an agent (each once), for shutdown logging. */
 export function getActiveRunRepos(): string[] {
-  return [...activeRuns.keys()];
+  return [...new Set(activeRuns.values())];
+}
+
+/**
+ * Lane passes in flight, `repo/lane`. The shutdown drain waits on these as well
+ * as on `activeRuns`: a run covers only its subprocess, and the release lane
+ * still records the merge, tags and comments AFTER the SRE's deploy returns. A
+ * drain that ended with the subprocess would stop the daemon between a deploy
+ * and its record — and the next start would not know the deploy happened.
+ */
+const lanePassesInFlight = new Map<string, number>();
+export function getActiveLanePasses(): string[] {
+  return [...lanePassesInFlight.keys()];
+}
+export function getActiveLanePassCount(): number {
+  return lanePassesInFlight.size;
 }
 
 /**
@@ -78,7 +96,39 @@ export function isShutdownRequested(): boolean {
 /** Abort every in-flight run. Only for a shutdown whose drain window elapsed —
  *  this destroys work in progress. */
 export function abortAllRuns(): void {
-  for (const ac of activeRuns.values()) ac.abort();
+  for (const ac of activeRuns.keys()) ac.abort();
+}
+
+const inFlight = (): number => activeRuns.size + lanePassesInFlight.size;
+
+/**
+ * Wait for every run AND every lane pass in flight to finish, up to `drainMs`;
+ * then abort what is left and give the lane passes `settleMs` to record what
+ * they were doing. Call after requestShutdown(), which keeps any new session
+ * from starting. Returns true when everything finished on its own.
+ *
+ * Waiting on lane passes, not only on runs, is what keeps a release whole: the
+ * SRE's deploy is a run, but the merge, tag and verdict the release lane records
+ * after it are not.
+ */
+export async function drainInFlight(drainMs: number, logger: Logger, pollMs = 1000, settleMs = 30_000): Promise<boolean> {
+  if (inFlight() === 0) return true;
+  logger.info(
+    `Waiting for ${activeRuns.size} run(s) and ${lanePassesInFlight.size} lane pass(es) to finish (${Math.round(drainMs / 1000)}s timeout)...`,
+    { repos: getActiveRunRepos(), lanes: getActiveLanePasses(), queuedSessions: getQueuedSessionCount() },
+  );
+  const deadline = Date.now() + drainMs;
+  while (inFlight() > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  if (inFlight() === 0) return true;
+  logger.warn("Drain window elapsed — aborting in-progress run(s)", { repos: getActiveRunRepos(), lanes: getActiveLanePasses() });
+  abortAllRuns();
+  const settle = Date.now() + settleMs;
+  while (lanePassesInFlight.size > 0 && Date.now() < settle) {
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return false;
 }
 
 export interface CycleResult {
@@ -87,12 +137,10 @@ export interface CycleResult {
   events: CycleEvent[];
 }
 
-/** Per-repo cycle counter. The fleet-wide `cycle=N` alone became unreadable the
- *  moment repos ran concurrently — twenty repos interleaving under one number
- *  gives no way to follow a single service's progress, and an unreadable log is
- *  how a stalled queue hides. Every line now carries both: `cycle` (fleet) and
- *  `repoCycle` (this service's own pass count). */
-const repoCycleCounter = new Map<string, number>();
+/** Pass counter per (repo, lane). The fleet-wide `cycle=N` alone became
+ *  unreadable the moment repos ran concurrently, so every line carries
+ *  `repo`, `lane` and `repoCycle` — that lane's own pass count on that repo. */
+const laneCycleCounter = new Map<string, number>();
 
 export interface RepoCycleResult {
   processed: number;
@@ -100,251 +148,255 @@ export interface RepoCycleResult {
   events: CycleEvent[];
 }
 
+/** When a lane pass mirrors the board: every pass, only after work, or never. */
+export type SnapshotPolicy = "always" | "if-work" | "never";
+
 /**
- * Fleet-wide slot limiter. Each repo drives its OWN loop (see startDaemon), so
- * nothing else bounds how many agent sessions exist at once — twenty repos
- * waking together would be twenty concurrent Claude sessions and twenty streams
- * of GitHub calls. Slots are held for the whole of a repo's pass and released
- * even when the pass throws, so one crashing repo cannot leak the fleet's
- * capacity away one slot at a time.
+ * One pass of ONE lane on ONE repo — what each of the daemon's (repo, lane)
+ * loops calls. At most one pass per (repo, lane) runs at a time; a second
+ * caller waits for the first (withLaneLock).
  */
-let slotLimit = 3;
-let slotsInUse = 0;
-const slotWaiters: Array<() => void> = [];
-
-export function setConcurrencyLimit(limit: number): void {
-  slotLimit = Math.max(1, limit);
-  // A raised limit must wake anyone already queued, or a config reload that
-  // increases capacity would have no effect until the next natural release.
-  while (slotsInUse < slotLimit && slotWaiters.length > 0) {
-    const wake = slotWaiters.shift();
-    if (wake) {
-      slotsInUse++;
-      wake();
-    }
+export async function runLanePass(
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  lane: Lane,
+  logger: Logger,
+  snapshot: SnapshotPolicy = "always",
+): Promise<RepoCycleResult> {
+  const key = `${repoConfig.name}/${lane.name}`;
+  lanePassesInFlight.set(key, (lanePassesInFlight.get(key) ?? 0) + 1);
+  try {
+    return await withLaneLock(repoConfig.name, lane.name, () => runLaneCycle(repoConfig, config, lane, logger, snapshot));
+  } finally {
+    const n = (lanePassesInFlight.get(key) ?? 1) - 1;
+    if (n > 0) lanePassesInFlight.set(key, n);
+    else lanePassesInFlight.delete(key);
   }
-}
-
-async function acquireSlot(): Promise<void> {
-  if (slotsInUse < slotLimit) {
-    slotsInUse++;
-    return;
-  }
-  await new Promise<void>((resolve) => slotWaiters.push(resolve));
-}
-
-function releaseSlot(): void {
-  const wake = slotWaiters.shift();
-  if (wake) {
-    wake(); // hand the slot straight to the next waiter; count stays put
-    return;
-  }
-  slotsInUse = Math.max(0, slotsInUse - 1);
-}
-
-/** Repos waiting for a slot right now — surfaced so a queue that stops moving
- *  is visible rather than looking like an idle fleet. */
-export function getQueuedRepoCount(): number {
-  return slotWaiters.length;
 }
 
 /**
- * Run one pass for one repo, holding a fleet concurrency slot for its duration.
- * This is what a per-repo loop calls.
+ * One pass over every lane of ONE repo, the lanes side by side. For `--once`
+ * and the tests; the daemon drives each lane on its own loop instead.
  */
 export async function runRepoPass(
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
 ): Promise<RepoCycleResult> {
-  await acquireSlot();
+  const results = await Promise.all(
+    lanesFor(config.stages).map((lane) => runLanePass(repoConfig, config, lane, logger, "never")),
+  );
+  await publishBoard(repoConfig, logger.child({ repo: repoConfig.name }));
+  return {
+    processed: results.reduce((n, r) => n + r.processed, 0),
+    lastImplementation: results.find((r) => r.lastImplementation)?.lastImplementation ?? null,
+    events: results.flatMap((r) => r.events),
+  };
+}
+
+// Observers mirror GitHub's labels as they stand after a pass. Events move a
+// card only when the Foreman acts on that issue, so a card it never acts on
+// again (blocked by an old skip, then advanced by a label heal) stayed wrong
+// for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
+async function publishBoard(repoConfig: RepoConfig, log: Logger): Promise<void> {
+  if (!hasObservers()) return;
   try {
-    return await runRepoCycle(repoConfig, config, logger, 0);
-  } finally {
-    releaseSlot();
+    await publishSnapshot(repoConfig, log);
+  } catch (err) {
+    log.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 /**
- * One full pass over ONE repo: the configured `stages`, in order. By default
- * reconcile -> review -> revise -> implement -> branch-sync -> dependabot ->
- * promote; a config may drop, reorder, or add custom skill stages.
+ * One pass of one lane: the lane's stages, in configured order (lanes.ts). By
+ * default the lanes are reconcile, review, verify, release (promote → release),
+ * build (revise → implement), branch-sync and dependabot, and every one of them
+ * runs on its own loop — a 30-minute build no longer holds the same repo's
+ * release, verify or review behind it.
  *
- * Phase order within a repo is load-bearing, and the default keeps it. Review
- * runs before implement so it only acts on PRs labeled in a PRIOR pass (a PR
- * created by this pass waits for the next one, avoiding a same-cycle
- * GitHub-consistency race). Promote runs last so it sees labels this pass just
- * set. A config that reorders the built-ins gives those guarantees up.
+ * Order across lanes is no longer a guarantee, and nothing relied on it beyond
+ * pickup latency: each stage reads GitHub's labels as they stand, so review
+ * acting on a PR the build lane just opened, or promote seeing a label review
+ * just set, now happens one poll later or sooner, never wrongly.
  *
- * A stage that returns `blocked` or `failed` ends the pass: no later stage runs
- * for this repo until the next pass. Only custom stages return those (see
- * StageOutcome) — the built-ins keep their own failure counters, as before.
+ * A stage that returns `blocked` or `failed` ends the LANE's pass: no later
+ * stage of this lane runs for this repo until its next pass. Only custom stages
+ * return those (see StageOutcome) — the built-ins keep their own counters.
  *
- * What changed is that this is now the unit of concurrency. Repos no longer
- * queue behind each other: a 30-minute build on one service used to block the
- * other nineteen, because the old shape was six sequential loops over all
- * repos and every phase awaited each one in turn.
+ * Stages that change the repo's working clone hold its checkout lock while they
+ * run (stageNeedsCheckout), so reconcile, revise, implement and custom stages of
+ * one repo never overlap; everything else runs alongside them.
  */
-async function runRepoCycle(
+async function runLaneCycle(
   repoConfig: RepoConfig,
   config: AgentConfig,
+  lane: Lane,
   logger: Logger,
-  cycleNumber: number,
+  snapshot: SnapshotPolicy,
 ): Promise<RepoCycleResult> {
   const events: CycleEvent[] = [];
   let processed = 0;
   let lastImplementation: ImplementationResult | null = null;
 
-  const repoCycle = (repoCycleCounter.get(repoConfig.name) ?? 0) + 1;
-  repoCycleCounter.set(repoConfig.name, repoCycle);
+  const counterKey = `${repoConfig.name}/${lane.name}`;
+  const repoCycle = (laneCycleCounter.get(counterKey) ?? 0) + 1;
+  laneCycleCounter.set(counterKey, repoCycle);
   // The phase helpers use the cycle number for per-repo failure cooldowns
-  // ("retry after N idle cycles"), so they must count THIS repo's passes. With
-  // independent per-repo loops a fleet-wide counter no longer maps to a repo's
-  // own turns, and a cooldown measured in someone else's cycles is arbitrary.
-  cycleNumber = repoCycle;
-  const base = logger.child({ cycle: cycleNumber, repoCycle, repo: repoConfig.name });
+  // ("retry after N idle cycles"), so it counts THIS lane's passes on this repo:
+  // each of those maps belongs to exactly one lane, and a cooldown measured in
+  // another lane's passes would run at that lane's pace, not this one's.
+  const cycleNumber = repoCycle;
+  const base = logger.child({ cycle: cycleNumber, repoCycle, repo: repoConfig.name, lane: lane.name });
 
-  // The stages run in the configured order (default: reconcile, review, verify,
-  // promote, release, revise, implement, branch-sync, dependabot — see BUILTIN_STAGES). Each
-  // built-in below is the phase that used to be called here by name, unchanged.
-  const dispatched = await dispatchStages(config.stages, async (stage): Promise<StageResult> => {
-    // Review, revise, implement and custom stages each spawn a Claude session;
-    // release runs the Tech Lead and the SRE, whose deploy must never be cut
-    // off half-way. None may START once a shutdown is under way — see
-    // `shutdownRequested`. The pass ends there, as it did when the phases were inline.
-    const spawnsClaude = isCustomStage(stage) || stage.type === "review" || stage.type === "verify" || stage.type === "revise" || stage.type === "implement" || stage.type === "release";
-    if (spawnsClaude && shutdownRequested) return { outcome: "stop", reason: "shutdown requested" };
-
-    if (isCustomStage(stage)) {
-      const r = await tryCustomStage(repoConfig, stage, base, events);
-      if (r.ran) processed++;
-      return r;
-    }
-
-    switch (stage.type) {
-      // --- Reconcile orphaned commits (features ahead of develop with no PR) and dead zones ---
-      case "reconcile":
-        processed += await runReconcileStage(repoConfig, config, base, events);
-        break;
-
-      // --- Review open feature PRs (invokes the configured review skill). The
-      //    outcome-label reconcile (reviewLabelReconcile) runs inside tryReview. ---
-      case "review":
-        if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
-        break;
-
-      // --- Dev-verify PRs the reviewer merged (`pr merged` → `pr approved`).
-      //    A no-op unless srePath is configured (EM#440). ---
-      case "verify":
-        if (await tryVerify(repoConfig, config, base, cycleNumber, events)) processed++;
-        break;
-
-      // --- Revise PRs with pending review feedback ---
-      case "revise": {
-        const revisionInfo = await tryRevision(repoConfig, config, base, cycleNumber, events);
-        if (revisionInfo) {
-          events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
-          processed++;
-        }
-        break;
-      }
-
-      // --- Implement approved issues (one batch per repo) ---
-      case "implement": {
-        const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
-        if (implResult) {
-          processed++;
-          lastImplementation = implResult;
-        }
-        break;
-      }
-
-      // --- Reconcile branch drift (main → develop) for any repo with
-      //    post-promotion merge commits. Runs independently of promotion work so
-      //    drift is cleared even when no ready-for-prod issues exist. ---
-      case "branch-sync":
-        if (!(repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch)) {
-          if (trySyncDrift(repoConfig, base, cycleNumber)) {
-            events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged`, level: "info" });
-            processed++;
-          }
-        }
-        break;
-
-      // --- File ONE issue for the Dependabot PRs aimed at the feature
-      //    branch. Nothing in the pipeline merges those (see findDependencyPRs), so without this
-      //    they accumulate with no path forward at all. The issue puts them through
-      //    the implement session — which builds, boots the app and smoke-tests it —
-      //    instead of a CI rollup that only ever proved the code compiles. Filed
-      //    pre-approved on a repo that opts in (dependencyPreApproved), so it enters
-      //    the queue with no human step; bare everywhere else. ---
-      case "dependabot":
-        if (repoConfig.baseBranch !== repoConfig.productionBranch) {
-          const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
-          if (filed) {
-            events.push({
-              message: repoConfig.dependencyPreApproved
-                ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
-                : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
-              level: "info",
-            });
-            processed++;
-          }
-        }
-        break;
-
-      // --- Create promotion PRs for repos with ready-for-prod issues. Never
-      //    applies the ready-for-prod label itself (separation of duties). No
-      //    Discord message (owner direction, 2026-10-10): the release PR and
-      //    the issue labels are the record. ---
-      case "promote": {
-        const releaseActive = hasStage(config.stages, "release") && releaseStageReady(config);
-        const promotionResult = await tryPromotion(repoConfig, base, cycleNumber, releaseActive);
-        if (promotionResult === "promoted" || promotionResult === "synced") processed++;
-        break;
-      }
-
-      // --- Release the release PR (EM#578): Tech Lead approval, SRE deploy,
-      //    tag, prod verification, close or hold, soak. No Discord message on
-      //    any outcome; a no-op without srePath and techLeadPath. ---
-      case "release":
-        if (await tryRelease(repoConfig, config, base, cycleNumber)) processed++;
-        break;
-    }
-    return { outcome: "ok" };
+  const dispatched = await dispatchStages(lane.stages, async (stage): Promise<StageResult> => {
+    // Session stages (review, verify, revise, implement, release, custom) may
+    // not START once a shutdown is under way — see `shutdownRequested`. The
+    // release lane's deploy must never be cut off half-way; the drain waits for
+    // every lane pass already running.
+    if (stageSpawnsSession(stage) && shutdownRequested) return { outcome: "stop", reason: "shutdown requested" };
+    const run = () => runStage(stage, repoConfig, config, base, cycleNumber, events);
+    // Lock first, then the session slot: a stage waiting for the checkout never
+    // holds a slot another repo could use.
+    const withSlot = stageSpawnsSession(stage) ? () => withSessionSlot(run) : run;
+    const r = stageNeedsCheckout(stage) ? await withCheckoutLock(repoConfig.name, withSlot) : await withSlot();
+    processed += r.processed;
+    if (r.lastImplementation) lastImplementation = r.lastImplementation;
+    return r.result;
   });
 
   if (dispatched.stoppedAt && dispatched.stoppedAt.outcome !== "stop") {
     const { stage, outcome, reason } = dispatched.stoppedAt;
-    base.debug(`Pass stopped at stage "${stage}" (${outcome}${reason ? `: ${reason}` : ""}) — later stages skipped this pass`);
+    base.debug(`Lane pass stopped at stage "${stage}" (${outcome}${reason ? `: ${reason}` : ""}) — later stages of the ${lane.name} lane skipped this pass`);
   }
 
-  // Observers mirror GitHub's labels as they stand after the pass. Events move
-  // a card only when the Foreman acts on that issue, so a card it never acts on
-  // again (blocked by an old skip, then advanced by a label heal) stayed wrong
-  // for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
-  if (hasObservers()) {
-    try {
-      await publishSnapshot(repoConfig, base);
-    } catch (err) {
-      base.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  if (snapshot === "always" || (snapshot === "if-work" && processed > 0)) await publishBoard(repoConfig, base);
 
   return { processed, lastImplementation, events };
 }
 
+interface StageRun {
+  result: StageResult;
+  processed: number;
+  lastImplementation?: ImplementationResult;
+}
+
+/** Run one stage. Each built-in is the phase that used to be called by name, unchanged. */
+async function runStage(
+  stage: StageEntry,
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  base: Logger,
+  cycleNumber: number,
+  events: CycleEvent[],
+): Promise<StageRun> {
+  let processed = 0;
+  let lastImplementation: ImplementationResult | undefined;
+  // A shutdown can begin while this stage waited for the checkout or a slot.
+  if (stageSpawnsSession(stage) && shutdownRequested) return { result: { outcome: "stop", reason: "shutdown requested" }, processed };
+
+  if (isCustomStage(stage)) {
+    const r = await tryCustomStage(repoConfig, stage, base, events);
+    if (r.ran) processed++;
+    return { result: r, processed };
+  }
+
+  switch (stage.type) {
+    // --- Reconcile orphaned commits (features ahead of develop with no PR) and dead zones ---
+    case "reconcile":
+      processed += await runReconcileStage(repoConfig, config, base, events);
+      break;
+
+    // --- Review open feature PRs (invokes the configured review skill). The
+    //    outcome-label reconcile (reviewLabelReconcile) runs inside tryReview. ---
+    case "review":
+      if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
+      break;
+
+    // --- Dev-verify PRs the reviewer merged (`pr merged` → `pr approved`).
+    //    A no-op unless srePath is configured (EM#440). ---
+    case "verify":
+      if (await tryVerify(repoConfig, config, base, cycleNumber, events)) processed++;
+      break;
+
+    // --- Revise PRs with pending review feedback ---
+    case "revise": {
+      const revisionInfo = await tryRevision(repoConfig, config, base, cycleNumber, events);
+      if (revisionInfo) {
+        events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
+        processed++;
+      }
+      break;
+    }
+
+    // --- Implement approved issues (one batch per repo) ---
+    case "implement": {
+      const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
+      if (implResult) {
+        processed++;
+        lastImplementation = implResult;
+      }
+      break;
+    }
+
+    // --- Reconcile branch drift (main → develop) for any repo with
+    //    post-promotion merge commits. Runs independently of promotion work so
+    //    drift is cleared even when no ready-for-prod issues exist. ---
+    case "branch-sync":
+      if (!(repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch)) {
+        if (trySyncDrift(repoConfig, base, cycleNumber)) {
+          events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged`, level: "info" });
+          processed++;
+        }
+      }
+      break;
+
+    // --- File ONE issue for the Dependabot PRs aimed at the feature
+    //    branch. Nothing in the pipeline merges those (see findDependencyPRs), so without this
+    //    they accumulate with no path forward at all. The issue puts them through
+    //    the implement session — which builds, boots the app and smoke-tests it —
+    //    instead of a CI rollup that only ever proved the code compiles. Filed
+    //    pre-approved on a repo that opts in (dependencyPreApproved), so it enters
+    //    the queue with no human step; bare everywhere else. ---
+    case "dependabot":
+      if (repoConfig.baseBranch !== repoConfig.productionBranch) {
+        const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
+        if (filed) {
+          events.push({
+            message: repoConfig.dependencyPreApproved
+              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+              : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
+            level: "info",
+          });
+          processed++;
+        }
+      }
+      break;
+
+    // --- Create promotion PRs for repos with ready-for-prod issues. Never
+    //    applies the ready-for-prod label itself (separation of duties). No
+    //    Discord message (owner direction, 2026-10-10): the release PR and
+    //    the issue labels are the record. ---
+    case "promote": {
+      const releaseActive = hasStage(config.stages, "release") && releaseStageReady(config);
+      const promotionResult = await tryPromotion(repoConfig, base, cycleNumber, releaseActive);
+      if (promotionResult === "promoted" || promotionResult === "synced") processed++;
+      break;
+    }
+
+    // --- Release the release PR (EM#578): Tech Lead approval, SRE deploy,
+    //    tag, prod verification, close or hold, soak. No Discord message on
+    //    any outcome; a no-op without srePath and techLeadPath. ---
+    case "release":
+      if (await tryRelease(repoConfig, config, base, cycleNumber)) processed++;
+      break;
+  }
+  return { result: { outcome: "ok" }, processed, lastImplementation };
+}
+
 /**
- * One fleet pass: every repo runs its own pipeline, several at a time.
- *
- * The cap is about SPEND, not safety. Concurrent repos are safe on their own —
- * each has its own git working clone, so two of them can never touch the same
- * checkout, and a repo's phases stay sequential within `runRepoCycle`. What a
- * high cap actually buys you is N simultaneous Claude sessions (each up to 100
- * turns) and N times the GitHub API traffic, on an API that already returns
- * intermittent TLS timeouts at one.
- *
- * Set `maxConcurrentRepos` in .ai-agent.json or AI_AGENT_MAX_CONCURRENT_REPOS.
+ * One fleet pass (`--once`): every repo's lanes once, all side by side — the
+ * same shape the daemon runs continuously. `maxConcurrentSessions`, when set,
+ * still caps the sessions.
  */
 export async function runCycle(
   config: AgentConfig,
@@ -354,39 +406,25 @@ export async function runCycle(
   const cycleLogger = logger.child({ cycle: cycleNumber, phase: "poll" });
   // `--once` and programmatic callers start here, not in the daemon.
   configureBackoff(config.backoff);
+  setSessionLimit(config.maxConcurrentSessions);
 
   let totalProcessed = 0;
   let lastResult: ImplementationResult | null = null;
   const events: CycleEvent[] = [];
 
-  const limit = Math.max(1, Math.min(config.maxConcurrentRepos, config.repos.length));
-  const queue = [...config.repos];
-
-  if (limit > 1) {
-    cycleLogger.debug(`Running ${config.repos.length} repo(s), up to ${limit} concurrently`);
-  }
-
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const repoConfig = queue.shift();
-      if (!repoConfig) return;
-      try {
-        const result = await runRepoCycle(repoConfig, config, logger, cycleNumber);
-        totalProcessed += result.processed;
-        events.push(...result.events);
-        if (result.lastImplementation) lastResult = result.lastImplementation;
-      } catch (err) {
-        // One repo's pipeline must never take the fleet pass down with it —
-        // that would be the serial failure mode reintroduced through the back
-        // door, with every other repo starved by an unrelated crash.
-        logger.child({ cycle: cycleNumber, repo: repoConfig.name }).error("Repo cycle failed", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+  await Promise.all(config.repos.map(async (repoConfig) => {
+    try {
+      const result = await runRepoPass(repoConfig, config, logger);
+      totalProcessed += result.processed;
+      events.push(...result.events);
+      if (result.lastImplementation) lastResult = result.lastImplementation;
+    } catch (err) {
+      // One repo's pipeline must never take the fleet pass down with it.
+      logger.child({ cycle: cycleNumber, repo: repoConfig.name }).error("Repo cycle failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-  };
-
-  await Promise.all(Array.from({ length: limit }, () => worker()));
+  }));
 
   if (totalProcessed === 0) {
     cycleLogger.info("No work across all repos");
