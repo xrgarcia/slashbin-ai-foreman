@@ -63,6 +63,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         case "transition": return recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
         case "prLink": return recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
         case "blocked": return recordActivity(event.item.repo, event.item.issueNumber, "blocked");
+        case "escalated": return recordActivity(event.item.repo, event.item.issueNumber, "needs-ruling");
         case "merged": return recordActivity(event.item.repo, event.item.issueNumber, "merged");
         case "promoted": return clearActivity(event.item.repo, event.item.issueNumber);
         default: return;

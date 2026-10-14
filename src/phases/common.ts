@@ -276,7 +276,8 @@ export const MAX_CONSECUTIVE_NO_COMMIT = 1;
 // the last finding and the reviewer finds a new one in the answer. The retry cap
 // above counts only FAILED revisions, so a spiral of successful ones was silent —
 // slashbin_mcp_services PR 245 (2026-10-09) went six rounds, 3,286 lines, nobody
-// told. This only alerts; the revision still runs. Once per PR per daemon life.
+// told. At this count since the last EM scope ruling, revision stops and the card
+// goes to the EM (src/phases/revise.ts); escalated once per PR per newest review.
 export const REVIEW_ROUNDS_ALERT = 4;
 export const reviewRoundsAlerted = new Set<string>();
 export const reviewFailureCount = new Map<string, number>();

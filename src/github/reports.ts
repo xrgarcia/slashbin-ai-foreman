@@ -54,17 +54,53 @@ export function readLatestReviewBody(repo: string, pr: number, since: string, cw
   }
 }
 
-/**
- * How many CHANGES_REQUESTED reviews a PR has collected — the number of review
- * rounds it has been sent back on. Read from GitHub each time, never counted
- * locally. Null when it cannot be read.
- */
-export function countChangesRequested(repo: string, pr: number, cwd: string, logger: Logger): number | null {
+
+// --- Scope rulings (revise) ---
+
+/** A PR comment that opens with this is the EM's scope ruling: review rounds count afresh from it. */
+export const EM_RULING_PATTERN = /^\s*\*\*EM scope ruling/;
+/** A CHANGES_REQUESTED review whose body carries this says the finding is the spec's, not the code's. */
+export const TECH_LEAD_ESCALATE_MARKER = "<!-- tech-lead:escalate";
+
+export type ReviewFact = { id: number; state: string; at: string; escalate: boolean };
+export type CommentFact = { at: string; head: string };
+/** Where a PR stands against its last EM scope ruling. */
+export type RulingState = {
+  /** CHANGES_REQUESTED reviews submitted after the last ruling (all of them when there is none). */
+  roundsSinceRuling: number;
+  /** The newest review's id, null when there is none: an escalation is made once per id. */
+  latestReviewId: number | null;
+  /** The newest review asks for changes, came after the last ruling, and carries the Tech Lead's escalate marker. */
+  escalateRequested: boolean;
+  /** When the last ruling was posted, null when there is none. */
+  rulingAt: string | null;
+};
+
+/** Pure: a PR's reviews and comments → its ruling state. */
+export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: ReadonlyArray<CommentFact>): RulingState {
+  const rulings = comments.filter((c) => EM_RULING_PATTERN.test(c.head)).map((c) => c.at).sort();
+  const rulingAt = rulings.length ? rulings[rulings.length - 1]! : null;
+  const after = reviews.filter((r) => r.at && (rulingAt === null || r.at > rulingAt));
+  const latest = [...reviews].filter((r) => r.at).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id - b.id)).pop();
+  return {
+    roundsSinceRuling: after.filter((r) => r.state === "CHANGES_REQUESTED").length,
+    latestReviewId: latest?.id ?? null,
+    escalateRequested: !!latest && latest.state === "CHANGES_REQUESTED" && latest.escalate && (rulingAt === null || latest.at > rulingAt),
+    rulingAt,
+  };
+}
+
+/** A PR's ruling state, read from its reviews and comments. Null on a failed read. */
+export function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState | null {
   try {
-    const out = gh(["api", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd);
-    return (JSON.parse(out || "[]") as Array<{ state?: string }>).filter((r) => r.state === "CHANGES_REQUESTED").length;
+    const lines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    const reviews = lines(gh(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
+      `.[] | {id, state, at: (.submitted_at // ""), escalate: ((.body // "") | contains("${TECH_LEAD_ESCALATE_MARKER}"))} | @json`], cwd)) as ReviewFact[];
+    const comments = lines(gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
+      `.[] | {at: .created_at, head: ((.body // "") | .[0:80])} | @json`], cwd)) as CommentFact[];
+    return rulingState(reviews, comments);
   } catch (err) {
-    logger.debug(`countChangesRequested: PR #${pr} failed: ${formatGhError(err).message}`);
+    logger.debug(`readRulingState: PR #${pr} failed: ${formatGhError(err).message}`);
     return null;
   }
 }

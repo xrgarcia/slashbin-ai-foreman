@@ -93,6 +93,8 @@ export type WorkEvent =
   | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
   | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string }
+  /** Revision of `item`'s PR stopped for the EM's scope ruling; it resumes once a ruling is posted on the PR. */
+  | { readonly kind: "escalated"; readonly item: WorkItem; readonly reason: string }
   /** A block on `item` was resolved by one of the Foreman's unblock checks (src/unblock.ts). */
   | { readonly kind: "unblocked"; readonly item: WorkItem; readonly reason: string }
   /** The feature PR delivering `item` merged to the base branch. */

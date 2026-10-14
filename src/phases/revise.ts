@@ -4,7 +4,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, hasObservers } from "../work-source.js";
-import { findPendingRevisions, countChangesRequested, type PendingRevisionInfo } from "../github.js";
+import { findPendingRevisions, readRulingState, type PendingRevisionInfo } from "../github.js";
 import { revisePRFeedback } from "../agent.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { type BlockKind } from "../unblock.js";
@@ -89,19 +89,31 @@ export async function tryRevision(
     return null;
   }
 
-  const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}`;
-  if (!reviewRoundsAlerted.has(roundsKey)) {
-    const rounds = countChangesRequested(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
-    if (rounds !== null && rounds >= REVIEW_ROUNDS_ALERT) {
+  // A PR that is not converging waits for the EM's scope ruling instead of
+  // being revised again. Rounds count from the last ruling posted on the PR
+  // (a comment opening "**EM scope ruling"), so posting one resumes revision
+  // on the next cycle. The Tech Lead can ask for a ruling sooner by marking
+  // its review (TECH_LEAD_ESCALATE_MARKER). jerky_service PR #125 went 13
+  // rounds (2026-10-13) because each fix answered the last finding and the
+  // spec question underneath reached no one who owned the spec.
+  const ruling = readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
+  if (ruling && (ruling.roundsSinceRuling >= REVIEW_ROUNDS_ALERT || ruling.escalateRequested)) {
+    const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}@${ruling.latestReviewId ?? "none"}`;
+    if (!reviewRoundsAlerted.has(roundsKey)) {
       reviewRoundsAlerted.add(roundsKey);
-      revLogger.warn(`PR #${pending.pr.number} has been sent back ${rounds} times — revising again, but it may not be converging`);
-      events.push({
-        message:
-          `⚠️ ${repoConfig.githubRepo} — PR #${pending.pr.number} has had ${rounds} CHANGES_REQUESTED reviews and is being revised again. ` +
-          `If each round's finding sits in the last round's fix, it is not converging. EM: rule on scope.`,
-        level: "warn",
-      });
+      const why = ruling.escalateRequested
+        ? `the Tech Lead flagged a spec question on PR #${pending.pr.number}`
+        : `PR #${pending.pr.number} has been sent back ${ruling.roundsSinceRuling} times${ruling.rulingAt ? " since the last ruling" : ""}`;
+      const ask =
+        `${why}. Revision is paused. EM: run /rule-on-scope ${repoConfig.githubRepo} ${pending.pr.number} ` +
+        `(issues ${pending.issueNumbers.map((n) => `#${n}`).join(", ")}); a PR comment opening "**EM scope ruling" resumes it.`;
+      revLogger.warn(`${why} — revision paused for an EM scope ruling`);
+      events.push({ message: `⚠️ ${repoConfig.githubRepo} — ${ask}`, level: "warn" });
+      for (const n of pending.issueNumbers) await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason: ask }, repoConfig, revLogger);
+    } else {
+      revLogger.debug(`Skipping ${repoName} revision — PR #${pending.pr.number} awaits an EM scope ruling`);
     }
+    return null;
   }
 
   // Invoke the revision skill with specific PR and issue context

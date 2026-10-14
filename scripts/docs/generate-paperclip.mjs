@@ -92,6 +92,7 @@ const WHEN = {
   changesRequested: "The review asked for changes; the Foreman will revise.",
   approved: "The review approved the pull request.",
   blocked: "The Foreman declines the issue or runs out of revision retries (with its reason): it needs a person.",
+  escalated: "Revise found the PR not converging (sent back `REVIEW_ROUNDS_ALERT` times since the last EM scope ruling, or the Tech Lead's review carries its escalate marker): revision stops until a PR comment opening `**EM scope ruling` is posted.",
   merged: "The pull request is merged to the base branch.",
   releaseWaiting: "The issue is in an open release pull request (base branch → production branch). Written once per release pull request.",
   released: "That release pull request merges to the production branch.",
@@ -145,6 +146,7 @@ const STAGE_WHEN = {
   awaitingRelease: "In an open release pull request a person merges (the release stage is off); waiting for the release to merge.",
   releasing: "In the release pull request the Foreman owns (`release pending`): Tech Lead approval, SRE deploy and prod verification.",
   prodVerifyHeld: "Merged to production, but prod verification held (`prod verification held`); the SRE re-verifies it on a back-off.",
+  needsRuling: "Revision is paused for the EM's scope ruling; the ruling comment on the PR resumes it.",
   blocked: "Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries.",
 };
 const stageKeys = [...PAPERCLIP_STAGES];
