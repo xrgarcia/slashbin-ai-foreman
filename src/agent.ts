@@ -10,6 +10,7 @@ import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
 import { redactAll } from "./redact.js";
+import { claudeTrustEnabled, ensureClaudeTrust, isUntrustedWarning } from "./claude-trust.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./github/conventions.js";
 export { redactAll };
 
@@ -695,6 +696,11 @@ function spawnClaudeWithOptions(
 
   const env = buildSessionEnv(opts);
 
+  // Claude Code ignores an untrusted checkout's .claude/settings.json and .mcp.json
+  // and only says so on stderr. Trust it first — under the session's own HOME /
+  // CLAUDE_CONFIG_DIR, which is where this session will look (src/claude-trust.ts).
+  ensureClaudeTrust(opts.cwd, logger, env);
+
   // Everything the child prints is redacted at each sink — transcript, logger
   // lines, and the stdout/stderr handed back (which feed trailer parsing and
   // describeSpawnFailure, whose tails become logged errors). The allowlist keeps
@@ -703,8 +709,25 @@ function spawnClaudeWithOptions(
   const outRedactor = createStreamRedactor(secrets);
   const errRedactor = createStreamRedactor(secrets);
   let stderrLine = "";
+  let untrustedSeen = false;
   const warnStderr = (line: string) => {
-    if (line) logger.warn(`[claude stderr] ${redactAll(line, secrets)}`);
+    if (!line) return;
+    logger.warn(`[claude stderr] ${redactAll(line, secrets)}`);
+    // Still untrusted despite the check above (trust off, unparseable config, or a
+    // concurrent rewrite dropped it): name the path and trust it so the NEXT
+    // session in this checkout is clean. This session is not re-run.
+    if (!untrustedSeen && isUntrustedWarning(line)) {
+      untrustedSeen = true;
+      if (claudeTrustEnabled()) {
+        logger.warn(`Claude Code reports ${opts.cwd} is not trusted — this session ran without the repo's .claude/settings.json and .mcp.json; trusting it for the next one`);
+        const outcome = ensureClaudeTrust(opts.cwd, logger, env, "untrusted warning on stderr");
+        if (outcome === "already") {
+          logger.warn(`Claude Code trust: ${opts.cwd} is already marked trusted in the config this session reads, yet Claude Code still reports it untrusted — check HOME / CLAUDE_CONFIG_DIR in sessionEnv`);
+        }
+      } else {
+        logger.warn(`Claude Code reports ${opts.cwd} is not trusted, and trustManagedRepos is off — trust it yourself or the repo's .claude/settings.json and .mcp.json are ignored`);
+      }
+    }
   };
 
   return new Promise<SpawnResult>((resolve) => {

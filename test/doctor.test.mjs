@@ -58,7 +58,9 @@ function arrange(cfg, state) {
   writeFileSync(stateFile, JSON.stringify(state ?? {}));
   writeFileSync(logFile, "");
   return (extraEnv = {}) => {
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_GH_STATE: stateFile, FAKE_GH_LOG: logFile, ...extraEnv };
+    // HOME is the case dir: the doctor reads Claude Code's config there, never the operator's.
+    const env = { ...process.env, HOME: dir, PATH: `${bin}:${process.env.PATH}`, FAKE_GH_STATE: stateFile, FAKE_GH_LOG: logFile, ...extraEnv };
+    delete env.CLAUDE_CONFIG_DIR;
     for (const k of Object.keys(env)) if (k.startsWith("AI_AGENT_")) delete env[k];
     for (const k of ["FOREMAN_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY"]) if (!(k in extraEnv)) delete env[k];
     const r = spawnSync(process.execPath, [DOCTOR, cfgPath], { cwd: dir, env, encoding: "utf8" });
@@ -77,7 +79,7 @@ test("a ready install passes every check, exits 0, and never prints the token", 
   assert.equal(r.status, 0, r.out);
   assert.doesNotMatch(r.out, /^(FAIL|WARN)/m, r.out);
   assert.match(r.out, /^PASS  release stage — /m, r.out);
-  for (const check of ["node", "claude", "gh", "config", "FOREMAN_GITHUB_TOKEN", "a: checkout", "a: github", "a: branches", "a: skillPath", "a: labels"]) {
+  for (const check of ["node", "claude", "gh", "config", "FOREMAN_GITHUB_TOKEN", "a: checkout", "a: claude trust", "a: github", "a: branches", "a: skillPath", "a: labels"]) {
     assert.match(r.out, new RegExp(`^PASS  ${check} — `, "m"), `${check}\n${r.out}`);
   }
   assert.match(r.out, /Ready\. Start it with `npm start`/);
@@ -168,4 +170,19 @@ test("the daemon refuses to start with no config instead of working on its own c
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stderr, /no \.ai-agent\.json .* AI_AGENT_REPO_PATH is unset/s);
   assert.match(r.stderr, /docs\/setup\.md/);
+});
+
+test("claude trust: trusted passes, untrusted with trustManagedRepos off warns, an unparseable config warns and is left alone", () => {
+  const base = { repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] };
+  let r = arrange({ ...base, trustManagedRepos: false }, { "acme/a": ready() })();
+  assert.match(r.out, /^WARN  a: claude trust — not trusted, and trustManagedRepos is off/m, r.out);
+
+  const run = arrange(base, { "acme/a": ready() });
+  const dir = join(tmp, `case${n}`);
+  const claudeCfg = join(dir, ".claude.json");
+  writeFileSync(claudeCfg, JSON.stringify({ projects: { [join(dir, "checkout")]: { hasTrustDialogAccepted: true } } }));
+  assert.match(run().out, /^PASS  a: claude trust — trusted in Claude Code/m);
+  writeFileSync(claudeCfg, "{ not json");
+  assert.match(run().out, /^WARN  a: claude trust — .*does not parse/m);
+  assert.equal(readFileSync(claudeCfg, "utf8"), "{ not json", "the doctor wrote Claude Code's config");
 });

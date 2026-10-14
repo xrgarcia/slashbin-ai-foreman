@@ -138,6 +138,7 @@ src/
 ├── github-work-source.ts # GitHubIssueConnector: a move → its `gh issue edit`; labels → stages for snapshot
 ├── redact.ts / review-report.ts # Core helpers shared by the agent runner and plugins
 ├── agent.ts         # Spawns claude CLI (implement / revise / review)
+├── claude-trust.ts  # Claude Code workspace trust for every checkout a session runs in (`trustManagedRepos`)
 ├── backoff.ts       # Every retry wait: the `backoff` config block, the one formula, BackoffTracker
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks

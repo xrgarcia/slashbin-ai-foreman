@@ -7,6 +7,7 @@ import { findConfigFile, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
+import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
 import { addObserver } from "./work-source.js";
@@ -179,7 +180,10 @@ async function main(): Promise<void> {
   }
 
   if (once) {
-    // Single cycle mode
+    // Single cycle mode. The daemon does this on start and reload; --once must
+    // too, or trustManagedRepos: false would be ignored here.
+    configureClaudeTrust({ enabled: config.trustManagedRepos });
+    trustManagedRepos(config.repos, logger);
     try {
       const { lastImplementation } = await runCycle(config, logger, 1);
       process.exit(lastImplementation?.success === false ? 1 : 0);
