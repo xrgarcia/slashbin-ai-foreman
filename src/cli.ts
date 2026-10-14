@@ -8,6 +8,7 @@ import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
+import { buildRefusal } from "./build-info.js";
 import { addObserver } from "./work-source.js";
 import { secretValues } from "./agent.js";
 import { PaperclipClient } from "./paperclip/client.js";
@@ -191,6 +192,13 @@ async function main(): Promise<void> {
   } else {
     // Daemon mode.
     //
+    // Only a committed build runs as the daemon (src/build-info.ts).
+    const refusal = buildRefusal(__dirname);
+    if (refusal) {
+      logger.error(`Refusing to start: ${refusal}`);
+      process.exit(1);
+    }
+
     // Register the PID before starting any work. This is what makes `status`,
     // `stop` and `restart` see a daemon no matter how it was launched, and it
     // is the guard against a second daemon reviewing and merging the same PRs.
