@@ -25,6 +25,7 @@ import {
 import { findIssuesMergedToBase } from "../github.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
+import { devVerifyHolding } from "./verify.js";
 import {
   escalatedReason,
   foremanLogin,
@@ -407,21 +408,31 @@ export async function tryBatchImplementation(
   // bounced the Paperclip card implementing → blocked, for what is just the
   // queue (jerky_service #66/#70, 2026-10-05). Hold here: the issues show as
   // queued, say nothing to Discord, and build once the PR merges or closes.
-  const repoQueue = queuedBehind.get(repoName) ?? new Map<number, number>();
+  //
+  // Gate: the last merge has not passed dev verification. Merging frees the
+  // branch, but the issue is not done until it is verified on dev, and what the
+  // verification finds may change the next one (Ray, 2026-10-14: one issue in
+  // flight per repo). Queued the same way; see devVerifyHolding for what frees it.
+  const repoQueue = queuedBehind.get(repoName) ?? new Map<number, string>();
   queuedBehind.set(repoName, repoQueue);
-  const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : [];
+  const merged = !featurePr && config.srePath && config.buildWaitsForDevVerify
+    ? [...labels].filter(([, names]) => names.includes(repoConfig.lifecycleLabels.prMerged)).map(([n]) => n)
+    : [];
+  const verifying = devVerifyHolding(merged, loadRepoState(repoName).verifyHeld ?? {}, config.backoff.verifyRetry.maxAttempts);
+  const holder = featurePr ? `open feature PR #${featurePr.number}` : verifying !== null ? `#${verifying}'s dev verification` : null;
+  const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : holder ? actionableIssues : [];
   for (const n of [...repoQueue.keys()]) if (!queued.includes(n)) repoQueue.delete(n);
-  if (featurePr && queued.length > 0) {
-    const fresh = queued.filter((n) => repoQueue.get(n) !== featurePr!.number);
+  if (holder && queued.length > 0) {
+    const fresh = queued.filter((n) => repoQueue.get(n) !== holder);
     for (const n of fresh) {
-      repoQueue.set(n, featurePr.number);
+      repoQueue.set(n, holder);
       await advance(itemOf(repoConfig, n), "queue", repoConfig, repoLogger);
     }
-    repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind open feature PR #${featurePr.number} — builds once it merges or closes`);
+    repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind ${holder} — ${featurePr ? "builds once it merges or closes" : "builds once it passes, or waits on a person"}`);
     // A PR that names no issue is outside the lifecycle: nothing here moves it,
     // so say once that it holds the queue (jerky_service #99 held #102 for days).
     // The review stage hands it to the Tech Lead (adoptOrphanedReviewCandidate).
-    if (fresh.length > 0 && featurePr.issueNumbers.length === 0) {
+    if (featurePr && fresh.length > 0 && featurePr.issueNumbers.length === 0) {
       repoLogger.warn(`PR #${featurePr.number} names no issue and holds ${fresh.map((n) => `#${n}`).join(", ")} — the Tech Lead reviews it; they build once it merges or closes`);
     }
     if (failures > 0) failureCount.set(repoName, 0);

@@ -306,10 +306,11 @@ export const RECOVERY_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 export const lastFailureReason = new Map<string, string>(); // per-repo last failure for retry context
 
 /**
- * Per repo, the issues held behind an open feature PR and that PR's number.
- * Observers hear "queued" once per hold, not once per cycle.
+ * Per repo, the issues held in the build queue and what holds them (an open
+ * feature PR, or a merge awaiting dev verification). Observers hear "queued"
+ * once per hold, not once per cycle.
  */
-export const queuedBehind = new Map<string, Map<number, number>>();
+export const queuedBehind = new Map<string, Map<number, string>>();
 
 /**
  * The lifecycle state a review run's own trailer implies for the issues its PR

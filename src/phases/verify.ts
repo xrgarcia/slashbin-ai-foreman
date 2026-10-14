@@ -53,6 +53,30 @@ export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wai
   }
   return { kind: "charge" };
 }
+/**
+ * The merged issue whose dev verification holds the repo's next build, or
+ * null. Pure, exported for tests.
+ *
+ * Ray, 2026-10-14: one issue in flight per repo, from build until it is
+ * verified on dev — a fix the verification asks for lands before the next issue
+ * is built on top. A merge holds while the SRE has it: not yet verified, or
+ * held and still retrying. It frees the repo once its attempts are spent (it
+ * waits on a person) or it waits on a named time, so one stuck verification
+ * never stalls every issue behind it.
+ */
+export function devVerifyHolding(
+  merged: readonly number[],
+  held: Readonly<Record<number, VerifyHold>>,
+  maxAttempts: number,
+): number | null {
+  for (const n of [...merged].sort((a, b) => a - b)) {
+    const h = held[n];
+    if (h && (h.attempts >= maxAttempts || h.retryAt)) continue;
+    return n;
+  }
+  return null;
+}
+
 /** Per repo: the verify stage waiting after the SRE could not run at all (backoff.agentUnavailable). */
 export const verifyDefer = new BackoffTracker();
 

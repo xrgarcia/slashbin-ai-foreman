@@ -17,9 +17,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = orchestratorSource();
 
 const gateAt = src.indexOf("Gate: an open feature PR holds the branch");
-// The gate itself: from its comment to the end of the `if (featurePr && queued…)`
+// The gate itself: from its comment to the end of the `if (holder && queued…)`
 // branch. Ending at "// Invoke the skill" swept in the post-gate "Picked up" push.
-const block = src.slice(gateAt, src.indexOf("\n  }\n", src.indexOf("if (featurePr && queued.length > 0)", gateAt)) + 4);
+const block = src.slice(gateAt, src.indexOf("\n  }\n", src.indexOf("if (holder && queued.length > 0)", gateAt)) + 4);
 
 test("the queue gate runs before any claim, event or session", () => {
   assert.ok(gateAt > 0, "the open-feature-PR gate is gone");
@@ -39,9 +39,22 @@ test("a queued issue is reported as queued, never blocked, and returns quietly",
 });
 
 test("queued is announced once per hold, not once per cycle", () => {
-  assert.match(block, /repoQueue\.get\(n\) !== featurePr!\.number/);
+  assert.match(block, /repoQueue\.get\(n\) !== holder/);
 });
 
 test("an old skip on the open feature PR hands over to the gate", () => {
   assert.match(src, /prBlockingSkip\(entry\.reason\) === featurePr\.number/);
+});
+
+// Ray, 2026-10-14: one issue in flight per repo, from build until verified on
+// dev. Merging used to free the queue, so the next build started while the last
+// merge was still unverified, and a fix its verification asked for landed
+// behind work already built on top of it.
+test("a merge awaiting dev verification queues the next build, the same way", () => {
+  assert.match(block, /devVerifyHolding\(merged, loadRepoState\(repoName\)\.verifyHeld/,
+    "the gate must read the persisted verify holds, not a snapshot from before the cycle");
+  assert.match(block, /lifecycleLabels\.prMerged/, "a merge awaiting verification is the `pr merged` label");
+  assert.match(block, /config\.srePath && config\.buildWaitsForDevVerify/,
+    "no SRE means no verify stage, so nothing would ever free the queue");
+  assert.match(block, /: holder \? actionableIssues : \[\]/, "behind a verification, every candidate is queued");
 });

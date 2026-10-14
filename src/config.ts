@@ -160,6 +160,16 @@ export const configSchema = z.object({
   // reviewed and one deployed at a time. Raise it to let one session choose
   // among several and build one of them.
   buildBatchSize: z.coerce.number().int().positive().default(1),
+  // Hold a repo's next build until its last merge has passed dev verification,
+  // not just merged. One issue is in flight per repo, from build to verified on
+  // dev, so a fix the verification calls for lands before the next issue is
+  // built on top. A merge whose verification waits on a person (attempts spent)
+  // or on a named time frees the repo. No effect without an SRE (srePath).
+  // Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+  buildWaitsForDevVerify: z.preprocess(
+    (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
+    z.boolean(),
+  ).default(true),
   // Every wait before the Foreman tries something again — declined issues,
   // failed verifications, an unavailable reviewer, failing repos, upstream
   // limits, gh retries — each exponential and tunable. See src/backoff.ts and
@@ -413,6 +423,8 @@ export interface AgentConfig {
   trustManagedRepos: boolean;
   /** Most approved issues one build claims and hands its session (default 1). */
   buildBatchSize: number;
+  /** Hold a repo's next build until its last merge passes dev verification (default true). */
+  buildWaitsForDevVerify: boolean;
   /** Every back-off and retry limit (see src/backoff.ts). */
   backoff: BackoffConfig;
   /** How long a repo's open-issue snapshot stays warm (default 30s; 0 disables). */
@@ -534,6 +546,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxConcurrentSessions: process.env.AI_AGENT_MAX_CONCURRENT_SESSIONS ?? fileConfig.maxConcurrentSessions,
     trustManagedRepos: process.env.AI_AGENT_TRUST_MANAGED_REPOS ?? fileConfig.trustManagedRepos,
     buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
+    buildWaitsForDevVerify: process.env.AI_AGENT_BUILD_WAITS_FOR_DEV_VERIFY ?? fileConfig.buildWaitsForDevVerify,
     backoff: mergeBackoff(fileConfig.backoff, {
       skipBackoffMs: fileConfig.skipBackoffMs,
       upstreamBackoffBaseMs: fileConfig.upstreamBackoffBaseMs,
@@ -743,6 +756,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxConcurrentSessions: parsed.maxConcurrentSessions,
     trustManagedRepos: parsed.trustManagedRepos,
     buildBatchSize: parsed.buildBatchSize,
+    buildWaitsForDevVerify: parsed.buildWaitsForDevVerify,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,
     issueCacheTtlMs: parsed.issueCacheTtlMs,
