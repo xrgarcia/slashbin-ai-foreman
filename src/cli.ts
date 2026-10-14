@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findConfigFile, loadConfig } from "./config.js";
+import { findConfigFile, loadConfig, type AgentConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
@@ -161,10 +161,18 @@ async function main(): Promise<void> {
   logger.info(`slashbin-ai-agent v${getVersion()}`);
 
   // Paperclip mirror (EM#417): an observer of the Foreman's steps, never a work
-  // source. Read once at startup; a config reload does not add or drop it.
+  // source. Read once at startup; a config reload does not add or drop it, but
+  // its board mapping follows the reload, and the file it runs is published on
+  // its agent for anything else that places the same cards.
+  let mirror: PaperclipMirror | null = null;
+  let mirroredText: string | null = null;
+  const configText = (): string | null => {
+    const p = findConfigFile(configPath);
+    return p ? readFileSync(p, "utf-8") : null;
+  };
   if (config.paperclip.enabled) {
     if (config.paperclip.agentId && config.paperclip.companyId) {
-      const mirror = new PaperclipMirror(
+      mirror = new PaperclipMirror(
         new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId, apiKey: config.paperclip.apiKey }),
         config.paperclip,
         mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
@@ -173,6 +181,8 @@ async function main(): Promise<void> {
       addObserver(mirror);
       // Housekeeping off the observer queue: project backfill, retiring the old live task.
       mirror.start();
+      mirroredText = configText();
+      if (mirroredText !== null) void mirror.publishConfig(mirroredText);
       logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
     } else {
       logger.info("paperclip mirror enabled but no agentId configured; run npm run paperclip:register");
@@ -215,7 +225,15 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
-    const daemon = startDaemon(config, logger, { configPath, repoFilter });
+    // A reload whose file changed hands the mirror the new mapping, then publishes it.
+    const onReload = (fresh: AgentConfig): void => {
+      if (!mirror) return;
+      const text = configText();
+      if (text === null || text === mirroredText) return;
+      mirroredText = text;
+      if (mirror.reconfigure(fresh.paperclip)) void mirror.publishConfig(text);
+    };
+    const daemon = startDaemon(config, logger, { configPath, repoFilter, onReload });
 
     const shutdown = async () => {
       await daemon.stop();

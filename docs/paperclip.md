@@ -38,6 +38,7 @@ that one field. The block is read once at startup — restart the daemon after c
 | `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"releaseAuthorized":{"owner":"foreman","status":"in_review","label":"releaseAuthorized"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"releasing":{"owner":"foreman","status":"in_progress","label":"releasing"},"prodVerifyHeld":{"owner":"foreman","status":"in_review","label":"prodVerifyHeld"},"needsRuling":{"owner":"foreman","status":"blocked","label":"needsRuling"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
 | `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"pendingVerification":{"name":"Awaiting EM verification","color":"#7c3aed"},"releaseAuthorized":{"name":"Release authorized","color":"#4f46e5"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"releasing":{"name":"Releasing","color":"#16a34a"},"prodVerifyHeld":{"name":"Prod verification held","color":"#b45309"},"needsRuling":{"name":"Needs EM ruling","color":"#be185d"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
 | `liveLeaseMinutes` | integer | none | `15` | Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way. |
+| `publishConfig` | boolean | none | `true` | Publish the config file the Foreman loaded, verbatim, on its agent's metadata (foremanConfig: { sha256, publishedAt, text }) at start and on every reload that changes it, so a tool that places the same cards reads the mapping the Foreman runs instead of keeping its own copy. A file holding a secret-shaped key or a known secret value is never published. |
 | `comments` | object | none | `{"enabled":true,"events":{"implementStart":true,"implementEnd":true,"reviewStart":true,"reviewEnd":true,"reviseStart":true,"reviseEnd":true,"progress":true,"release":true,"blocked":true},"maxLength":3000,"includeDiffStat":true}` | What a card's thread says: { enabled, events, maxLength, includeDiffStat }. enabled false = the one-line note per step. events turns each comment off by kind (implementStart, implementEnd, reviewStart, reviewEnd, reviseStart, reviseEnd, progress, release, blocked). maxLength caps every comment, includeDiffStat adds the PR's files and +/- lines to the implement summary. Every comment is redacted (known secrets and token-shaped strings) and never repeats the task's latest comment. |
 
 `enabled` is a boolean; given as a string (as the env var always is) it takes `true` / `false`,
@@ -307,6 +308,17 @@ While any session runs, the Foreman's agent carries a lease in its metadata
 `liveLeaseMinutes` without renewal the lease is void. A Foreman that starts with a lease left
 by a process that died mid-session returns those tasks to their stages, and any other tool
 that writes the same tasks can read the lease to leave live ones alone.
+
+### The published config
+
+With `publishConfig` on (the default), the Foreman also writes the config file it loaded onto
+its agent's metadata (`foremanConfig`: `sha256`, `publishedAt`, `text`), at start and
+whenever a reload changes the file. The sha256 is of the file less its trailing newline. A tool
+that places the same cards reads its board mapping from there, so it never runs a copy the
+Foreman has moved on from. A file with a secret-shaped key (`apiKey`, `token`, `secret`,
+`password`) or a known secret value is not published, and the Foreman logs why. A reload that
+changes `enabled`, `url`, `companyId`, `agentId` or `identityKeyFormat` needs a
+restart: until then the mirror and the published config keep the old file.
 
 ## Assignment
 

@@ -171,6 +171,8 @@ export const paperclipConfigSchema = z.object({
   stageLabels: stageLabelsSchema,
   // Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way.
   liveLeaseMinutes: z.number().int().positive().default(15),
+  // Publish the config file the Foreman loaded, verbatim, on its agent's metadata (foremanConfig: { sha256, publishedAt, text }) at start and on every reload that changes it, so a tool that places the same cards reads the mapping the Foreman runs instead of keeping its own copy. A file holding a secret-shaped key or a known secret value is never published.
+  publishConfig: z.boolean().default(true),
   // What a card's thread says: { enabled, events, maxLength, includeDiffStat }. enabled false = the one-line note per step. events turns each comment off by kind (implementStart, implementEnd, reviewStart, reviewEnd, reviseStart, reviseEnd, progress, release, blocked). maxLength caps every comment, includeDiffStat adds the PR's files and +/- lines to the implement summary. Every comment is redacted (known secrets and token-shaped strings) and never repeats the task's latest comment.
   comments: commentsSchema,
 });

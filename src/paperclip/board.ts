@@ -25,6 +25,8 @@ export { SESSION_FALLBACK_STAGE, SESSION_STAGE } from "../lifecycle.js";
 
 /** The Foreman agent's metadata key holding its live-session lease. */
 export const LIVE_LEASE_KEY = "foremanLive";
+/** The agent-metadata key the Foreman publishes its loaded config under (`paperclip.publishConfig`). */
+export const CONFIG_KEY = "foremanConfig";
 
 /**
  * The unblock-descriptor action of a card the Foreman blocked itself (declined,
