@@ -154,6 +154,9 @@ export async function tryReview(
       const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${wait}` };
       reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
+      // A wait is a Blocked card that says what clears it; the next review session moves it on.
+      const why = `waiting on the Tech Lead: it could not take PR #${candidate.prNumber} (${result.reason}) — the review retries automatically in ${wait}`;
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
       return false;
     }
     reviewDefer.clear(repoName);

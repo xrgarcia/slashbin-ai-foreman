@@ -193,6 +193,8 @@ export async function tryVerify(
       const wait = formatWait(verifyDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
       vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
+      const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
+      for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       return false;
     }
     verifyDefer.clear(repoName);
@@ -206,6 +208,8 @@ export async function tryVerify(
       ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
       vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
       events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
+      const why = `waiting until ${plan.retryAt.slice(0, 16)}Z: the SRE says PR #${target.prNumber} is not observable before then (${reason}) — dev verification resumes automatically then`;
+      for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       return false;
     }
     let attempts = 0;
