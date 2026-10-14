@@ -25,14 +25,15 @@ import { findIssuesMergedToBase } from "../github.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import {
+  escalatedReason,
   foremanLogin,
   heldReason,
-  holdStatus,
   issueActivitySince,
   parseWaitingOn,
   refState,
+  skipGate,
   waitingOnLabel,
-  type HoldStatus,
+  type SkipGate,
 } from "../github/skip-hold.js";
 import {
   CycleEvent,
@@ -119,6 +120,25 @@ export function prBlockingSkip(reason: string): number | null {
 export function reportLaunchThrew(err: unknown): never {
   reportClaudeResult(false);
   throw err;
+}
+
+/**
+ * Skipped issues out of attempts (`backoff.skip.maxAttempts`): marked escalated
+ * so the filter stops every release but a person's change to the issue, and
+ * escalated for the EM's ruling, the card held Blocked at the approved stage.
+ */
+async function escalateSkips(items: { n: number; reason: string }[], repoName: string, repoConfig: RepoConfig, repoLogger: Logger): Promise<void> {
+  const state = loadRepoState(repoName);
+  const at = new Date().toISOString();
+  for (const { n } of items) {
+    const entry = state.skipped?.[n];
+    if (entry) state.skipped![n] = { ...entry, escalatedAt: at };
+  }
+  saveRepoState(repoName, state);
+  for (const { n, reason } of items) {
+    repoLogger.warn(`Escalated #${n} for the EM's ruling: ${reason}`);
+    await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved" }, repoConfig, repoLogger);
+  }
 }
 
 export async function tryBatchImplementation(
@@ -246,46 +266,55 @@ export async function tryBatchImplementation(
   const now = Date.now();
   const stillBackedOff: { n: number; reason: string }[] = [];
   const resolvedTransient: { n: number; reason: string }[] = [];
-  const released: { n: number; by: Extract<HoldStatus, { held: false }>["releasedBy"] }[] = [];
+  const released: { n: number; by: Exclude<Extract<SkipGate, { run: true }>["by"], undefined>; reset: boolean }[] = [];
+  const escalating: { n: number; reason: string }[] = [];
   handOff = handOff.filter((n) => {
     const entry = skippedMap[n];
     if (!entry) return true;
-    if (!skip.hold) {
-      const age = now - new Date(entry.lastSkippedAt).getTime();
-      if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) return true;
-    }
     // A skip on the open feature PR is the queue gate's to hold, not a skip's.
-    const onFeaturePr = featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number;
-    if (onFeaturePr || isResolvedTransientSkip(entry.reason, repoConfig, repoLogger)) {
-      resolvedTransient.push({ n, reason: entry.reason });
-      return true;
-    }
+    const transientCleared = () =>
+      (featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number) || isResolvedTransientSkip(entry.reason, repoConfig, repoLogger);
     if (skip.hold) {
-      const status = holdStatus(entry, repoConfig.githubRepo, {
+      const gate = skipGate(entry, repoConfig.githubRepo, skip.maxAttempts, {
         refState: (ref) => refState(ref, repoConfig.repoPath),
         activitySince: (since) => issueActivitySince(repoConfig.githubRepo, n, since, repoConfig.repoPath),
         self: foremanLogin(repoConfig.repoPath),
-      }, (what, err) => repoLogger.debug(`Hold on #${n}: could not read ${what} — still held: ${err instanceof Error ? err.message : String(err)}`));
-      if (!status.held) {
-        released.push({ n, by: status.releasedBy });
+      }, transientCleared, (what, err) => repoLogger.debug(`Hold on #${n}: could not read ${what} — still held: ${err instanceof Error ? err.message : String(err)}`));
+      if (gate.run) {
+        if (gate.by) released.push({ n, by: gate.by, reset: gate.reset });
         return true;
       }
-      stillBackedOff.push({ n, reason: heldReason(entry.reason, repoConfig.githubRepo, status.ref, status.refIsPr) });
+      if (gate.escalate) escalating.push({ n, reason: gate.reason });
+      stillBackedOff.push({ n, reason: gate.reason });
       return false;
+    }
+    const age = now - new Date(entry.lastSkippedAt).getTime();
+    if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) return true;
+    if (transientCleared()) {
+      resolvedTransient.push({ n, reason: entry.reason });
+      return true;
     }
     stillBackedOff.push({ n, reason: entry.reason });
     return false;
   });
+  // A release buys one session: the entry stays, marked, so the next skip adds
+  // to its count. A person's change to an escalated issue clears it instead.
   if (released.length > 0) {
     const freed = loadRepoState(repoName);
     freed.skipped = freed.skipped ?? {};
-    for (const { n } of released) delete freed.skipped[n];
+    const at = new Date().toISOString();
+    for (const { n, reset } of released) {
+      if (reset) delete freed.skipped[n];
+      else if (freed.skipped[n]) freed.skipped[n] = { ...freed.skipped[n], releasedAt: at };
+    }
     saveRepoState(repoName, freed);
     repoState.skipped = freed.skipped;
+    repoLogger.info(`Released ${released.length} held issue(s) for one session: ${released.map(({ n, by, reset }) => `#${n} (${by}${reset ? ", attempts reset" : ""})`).join("; ")}`);
     for (const { n, by } of released) {
       await releaseIfResolved("skip", { [by]: true }, [n], repoConfig, repoLogger);
     }
   }
+  if (escalating.length > 0) await escalateSkips(escalating, repoName, repoConfig, repoLogger);
   if (resolvedTransient.length > 0) {
     repoLogger.info(
       `Cleared ${resolvedTransient.length} resolved-transient skip entr${resolvedTransient.length === 1 ? "y" : "ies"}: ${resolvedTransient.map(({ n }) => `#${n}`).join(", ")}`,
@@ -610,8 +639,15 @@ export async function tryBatchImplementation(
       // The agent declined these; the source hears why. On GitHub this writes
       // nothing — the agent posts its own skip comment.
       // Held, the reason says what releases it.
+      // At the attempt cap it is escalated for the EM's ruling instead.
       const blockedReason = skip.hold ? heldReason(reason, repoConfig.githubRepo, waitingOn, waitingOnIsPr) : reason;
-      for (const n of skippedSet) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blockedReason }, repoConfig, repoLogger);
+      const outOfAttempts = skip.hold ? skippedSet.filter((n) => (updatedState.skipped![n]?.skipCount ?? 0) >= skip.maxAttempts) : [];
+      for (const n of skippedSet) {
+        if (!outOfAttempts.includes(n)) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blockedReason }, repoConfig, repoLogger);
+      }
+      if (outOfAttempts.length > 0) {
+        await escalateSkips(outOfAttempts.map((n) => ({ n, reason: escalatedReason(reason, updatedState.skipped![n].skipCount ?? 0) })), repoName, repoConfig, repoLogger);
+      }
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);

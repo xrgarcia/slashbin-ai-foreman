@@ -167,3 +167,60 @@ export function holdStatus(
   }
   return { held: true, ref, refIsPr };
 }
+
+/**
+ * The reason an escalated skip carries: why it stopped, how many sessions it
+ * took, and the one thing that releases it now.
+ */
+export function escalatedReason(reason: string, attempts: number): string {
+  return `${reason.split("\n")[0]} — skipped ${attempts} times in a row; held for the EM until this issue changes`;
+}
+
+/** What a held skip entry carries into the decision. */
+export interface HeldEntry {
+  lastSkippedAt: string;
+  reason: string;
+  skipCount?: number;
+  waitingOn?: string;
+  releasedAt?: string;
+  escalatedAt?: string;
+}
+
+/** Whether a held skip runs a session this cycle. */
+export type SkipGate =
+  /**
+   * Run it. `by` is the check that released it this cycle (absent: released
+   * on an earlier one, so nothing new to announce). `reset` clears the entry,
+   * attempt count included; otherwise the entry stays, marked released.
+   */
+  | { run: true; by?: "transientCauseGone" | "waitedOnDone" | "issueChanged"; reset: boolean }
+  /** Hold it, with the reason the card shows; `escalate` the first time it is out of attempts. */
+  | { run: false; reason: string; escalate: boolean };
+
+/**
+ * Decide one skipped issue under `backoff.skip.hold`. Under the cap, any cheap
+ * release (`transientCleared`, the waited-on reference done, the issue changed)
+ * buys one session and keeps the count. At the cap the issue is escalated and
+ * only a person changing the issue releases it, with the count reset; the
+ * transient and reference checks no longer run.
+ */
+export function skipGate(
+  entry: HeldEntry,
+  repo: string,
+  maxAttempts: number,
+  reads: HoldReads,
+  transientCleared: () => boolean,
+  onError: (what: string, err: unknown) => void = () => {},
+): SkipGate {
+  const attempts = entry.skipCount ?? 0;
+  if (entry.escalatedAt || attempts >= maxAttempts) {
+    const status = holdStatus({ lastSkippedAt: entry.lastSkippedAt }, repo, reads, onError);
+    if (!status.held) return { run: true, by: "issueChanged", reset: true };
+    return { run: false, reason: escalatedReason(entry.reason, attempts), escalate: !entry.escalatedAt };
+  }
+  if (entry.releasedAt) return { run: true, reset: false };
+  if (transientCleared()) return { run: true, by: "transientCauseGone", reset: false };
+  const status = holdStatus(entry, repo, reads, onError);
+  if (!status.held) return { run: true, by: status.releasedBy, reset: false };
+  return { run: false, reason: heldReason(entry.reason, repo, status.ref, status.refIsPr), escalate: false };
+}

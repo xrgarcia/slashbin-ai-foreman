@@ -51,7 +51,7 @@ const EVENTS = {
   transition: "A lifecycle move (the table below). `observed: true` when an AI session already wrote the labels itself and the Foreman is only reporting what it saw: the work source does not write again.",
   prLink: "The item's PR was opened.",
   blocked: "The Foreman stopped and needs a person (the reason says why).",
-  escalated: "Revision stopped: the PR is not converging under review, and the EM must post a scope ruling.",
+  escalated: "Work stopped for the EM's ruling: the PR is not converging under review (a scope ruling on the PR resumes it), or a skipped issue used up `backoff.skip.maxAttempts` sessions (a person changing the issue resumes it).",
   unblocked: "A check resolved an earlier block.",
   merged: "The item's PR merged to the base branch.",
   promoted: "A promotion PR to the production branch now carries the item.",
