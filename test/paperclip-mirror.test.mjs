@@ -697,6 +697,19 @@ test("snapshot: after a restart, a label-made block (its last note the sync note
   assert.equal(fake.rows[1].status, "blocked");
 });
 
+test("snapshot: after a restart, a label-made block is released though a later run note buried the sync note (jerky_service #132/#133)", async () => {
+  const fake = fakePaperclip([
+    row7("blocked", { unblockDescriptor: { action: "blocked: needs attention" } }),
+    { id: "r8", title: "t", status: "blocked", assigneeAgentId: AGENT, description: "source: example/r#8", unblockDescriptor: { action: "blocked: skipped: waiting on #5" } },
+  ]);
+  fake.comments.r7 = ["moved to match GitHub: feature, blocked, approved", "**Foreman started implementing**\n\nHanded this run with #8 — a run builds one of them."];
+  fake.comments.r8 = ["blocked: skipped: waiting on #5", "**Foreman started implementing**"];
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }, { number: 8, labels: ["approved"] }]), logger());
+  assert.equal(fake.rows[0].status, "todo", "the label is gone: back to the queue");
+  assert.equal(fake.rows[1].status, "blocked", "a Foreman block names its reason and stays");
+});
+
 test("snapshot: a card blocked at pr merged stays Blocked while its dev verification is held", async () => {
   const fake = fakePaperclip([row7("blocked", { unblockDescriptor: { action: "blocked: dev verification did not pass" } })]);
   const { mirror } = mirrorOn(fake);

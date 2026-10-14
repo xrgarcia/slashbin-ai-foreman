@@ -179,6 +179,11 @@ function fill(template: string, vars: Record<string, string> = {}): string {
 
 /** How long a full scan of the company's tasks answers a lookup that missed. */
 const INDEX_TTL_MS = 10 * 60_000;
+/**
+ * The unblock action of a card moved to Blocked with no reason of the Foreman's
+ * own: GitHub's blocked label put it there. A Foreman block names its reason.
+ */
+const LABEL_BLOCK_ACTION = `${FOREMAN_BLOCKED_PREFIX}needs attention`;
 
 /**
  * A lookup that misses rescans once the last scan is this old, so a row
@@ -249,6 +254,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly blockedAt = new Map<string, PaperclipStage | "done" | undefined>();
   /** Task ids this process moved to Blocked because GitHub's blocked label said so. */
   private readonly labelBlocked = new Set<string>();
+  /** Task id → a blocked card's unblock-descriptor action, as the last scan read it. */
+  private readonly blockAction = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
@@ -439,12 +446,16 @@ export class PaperclipMirror implements WorkObserver {
 
   /**
    * True when the card's block came from GitHub's blocked label: this process
-   * moved it there, or (after a restart) its latest note is the one that move
-   * posts. A Foreman block always ends on its own note, so it never reads so.
+   * moved it there, or (after a restart) it carries the action only that move
+   * writes, or its latest note is the one that move posts. A Foreman block
+   * names its reason and ends on its own note, so it never reads so. The note
+   * alone is not enough: a later run note buried it on jerky_service #132/#133,
+   * which sat Blocked behind a lifted label until Ray asked (2026-10-14).
    */
   private async blockedByLabel(id: string): Promise<boolean> {
     if (this.blockedAt.has(id)) return false;
     if (this.labelBlocked.has(id)) return true;
+    if (this.blockAction.get(id) === LABEL_BLOCK_ACTION) return true;
     const prefix = fill(PAPERCLIP_STEPS.synced.note, { detail: "" }).trim();
     return (await this.latestComment(id))?.startsWith(prefix) === true;
   }
@@ -849,6 +860,7 @@ export class PaperclipMirror implements WorkObserver {
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
+      const actions = new Map<string, string>();
       for await (const row of this.client.listIssues()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
         if (!line || idx.has(line)) continue;
@@ -861,8 +873,9 @@ export class PaperclipMirror implements WorkObserver {
         const blocked = row.status === this.statusName("blocked") && row.assigneeAgentId === this.cfg.agentId
           && !String(action ?? "").startsWith(FOREMAN_BLOCKED_PREFIX);
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
+        if (row.status === this.statusName("blocked") && action) actions.set(row.id, String(action));
       }
-      return { idx, state, repoOf };
+      return { idx, state, repoOf, actions };
     });
     if (!scanned.ok) return !!this.index;
     this.index = scanned.value.idx;
@@ -871,6 +884,8 @@ export class PaperclipMirror implements WorkObserver {
     for (const [k, v] of scanned.value.state) this.rowState.set(k, v);
     this.rowRepo.clear();
     for (const [k, v] of scanned.value.repoOf) this.rowRepo.set(k, v);
+    this.blockAction.clear();
+    for (const [k, v] of scanned.value.actions) this.blockAction.set(k, v);
     return true;
   }
 
@@ -914,7 +929,7 @@ export class PaperclipMirror implements WorkObserver {
       if (t.agentId) holder = { assigneeAgentId: t.agentId, assigneeUserId: null };
       // Paperclip takes `blocked` only with an unblock descriptor.
       if (bucket === "blocked") {
-        const action = this.blockedReason.get(id) ?? `${FOREMAN_BLOCKED_PREFIX}needs attention`;
+        const action = this.blockedReason.get(id) ?? LABEL_BLOCK_ACTION;
         holder.unblockDescriptor = { owner: t.agentId ? { agentId: t.agentId } : "board", action };
       }
     }
