@@ -280,9 +280,9 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 ### `stages`
 
-Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `revise` → `implement` → `branch-sync` → `dependabot` → `promote` → `release`
+Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot`
 
-The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the nine built-ins in order; the last, `release`, runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill when the pass reaches it. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages a repo pass runs, in order (see src/stages.ts). Omitted, it is the nine built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill when the pass reaches it. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 

@@ -18,7 +18,7 @@ import { configureIssueCache } from "../dist/github.js";
 import { setStatePath } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
 
-const DEFAULT = ["reconcile", "review", "verify", "revise", "implement", "branch-sync", "dependabot", "promote", "release"];
+const DEFAULT = ["reconcile", "review", "verify", "promote", "release", "revise", "implement", "branch-sync", "dependabot"];
 const logger = createLogger({ format: "text", level: "error" });
 const names = (stages) => stages.map((s) => s.type ?? s.id);
 
