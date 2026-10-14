@@ -68,6 +68,9 @@ export function isBackoffRefusal(err: unknown): err is UpstreamBackoffError {
   return err instanceof UpstreamBackoffError;
 }
 
+/** The most output one gh call may return before it fails: 64 MiB. */
+export const GH_MAX_BUFFER = 64 * 1024 * 1024;
+
 /** execFileSync gh with retry+backoff on transient (network/5xx/timeout) failures. */
 export function runGh(args: string[], cwd: string, token: string): string {
   // A limit is account-wide: while GitHub is backing off, spawning gh only
@@ -83,6 +86,11 @@ export function runGh(args: string[], cwd: string, token: string): string {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 30_000,
+        // execFileSync's default is 1 MiB, and exceeding it fails the call as
+        // ENOBUFS. The fleet-wide startup snapshot (github-state.ts, every open
+        // PR body in 22 repos) crossed it on 2026-10-14: every gh read in every
+        // repo failed from the restart on, and nothing ran.
+        maxBuffer: GH_MAX_BUFFER,
         env: { ...process.env, GH_TOKEN: token },
       }).trim();
     } catch (err) {
