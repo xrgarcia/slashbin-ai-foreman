@@ -279,7 +279,9 @@ export const MAX_CONSECUTIVE_NO_COMMIT = 1;
 // slashbin_mcp_services PR 245 (2026-10-09) went six rounds, 3,286 lines, nobody
 // told. At this count since the last EM scope ruling, revision stops and the card
 // goes to the EM (src/phases/revise.ts); escalated once per PR per newest review.
-export const REVIEW_ROUNDS_ALERT = 4;
+// 3, not 4 (2026-10-14): jerky_service PR 148 took ~35 min a round and four
+// rounds before a ruling — a fourth round is two hours spent before anyone rules.
+export const REVIEW_ROUNDS_ALERT = 3;
 export const reviewRoundsAlerted = new Set<string>();
 export const reviewFailureCount = new Map<string, number>();
 export const reviewFailurePause = new BackoffTracker();
