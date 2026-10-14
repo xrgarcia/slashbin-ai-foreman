@@ -350,6 +350,11 @@ stage: \`owner\` is \`${PAPERCLIP_FOREMAN_ROLE}\` (the Foreman's own agent) or a
 \`status\` a status bucket, and \`label\` a key of \`stageLabels\` or \`null\`. Each entry, and each
 field in it, falls back to its default on its own, so a config names only what it changes.
 
+A stage given to a role hands that role the card: an agent that wakes on assignment (the
+slashbin-ai-team bridge, the EM's included) is woken and works it, a \`blocked\` card included.
+A Foreman block it holds is released only by its issue moving on GitHub, never by that agent's
+wake checking the card out.
+
 | Stage | Meaning | Default owner | Default status | Default stage label |
 |---|---|---|---|---|
 ${stageRows.join("\n")}

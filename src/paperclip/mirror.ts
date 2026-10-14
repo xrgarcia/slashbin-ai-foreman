@@ -409,7 +409,10 @@ export class PaperclipMirror implements WorkObserver {
       if (state === `status:${this.statusName("cancelled")}`) continue;
       const want = `status:${this.statusName(stage === "done" ? "done" : stageTarget(this.cfg, stage).bucket)}`;
       if (state === want) continue;
-      if (state === blocked && stage !== "blocked") {
+      // A Foreman block is released by GitHub moving on, not by another writer:
+      // the stage owner's own wake checks the card out to in_progress, and
+      // matching that to GitHub took SLA-1335 out of the EM's hands (2026-10-14).
+      if ((state === blocked || this.blockedAt.has(id)) && stage !== "blocked") {
         if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && verifyHeld === true)) {
           this.blockedAt.set(id, stage);
           continue;
