@@ -33,17 +33,17 @@ The Foreman shines when you have **more approved work than time to implement**. 
 Each poll cycle runs these stages, in this order, across every configured repo (the order is configurable — see [Pipeline stages](#pipeline-stages)):
 
 ```
-Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release
+Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot
 ```
 
 1. **Reconcile** — detects orphaned commits on the features branch with no PR and creates one
 2. **Review** *(opt-in)* — when `reviewEnabled` is set, hands each open feature PR awaiting review to the **Tech Lead** (`techLeadPath`), which reviews under its own GitHub token and owns its own merge + label decisions; its label side effects (approve → `pr approved`; request-changes → `pr pending actions`) feed the Promote and Revise phases, and the Foreman reconciles the outcome label from the run's trailer if the skill merged without setting it. Disabled by default — see [Review phase](#review-phase-opt-in)
-3. **Revise** — finds PRs with pending review feedback and revises them (prioritized over new work)
-4. **Implement** — picks up approved issues and invokes the repo's implementation skill via Claude Code (up to 3 issues per cycle; 1 in greenfield repos)
-5. **Branch Sync** — merges main → develop to keep branches aligned after promotions
-6. **Dependabot** — files one issue covering the open Dependabot PRs on the working branches, so they go through the implement session (filed with the trigger label when the repo sets `dependencyPreApproved`)
-7. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`, moving them to `release pending`
-8. **Release** *(on when both `srePath` and `techLeadPath` are set)* — no Claude session: the Tech Lead approves the promotion PR at its head, the SRE merges, deploys and verifies it in production, the Foreman tags the merge commit (an annotated tag, never a GitHub Release) and closes each issue on a passed prod verification, or labels it `prod verification held` and re-verifies. It also adopts promotion PRs merged by anyone else in the last 48 hours. Full flow: [docs/lifecycle.md](docs/lifecycle.md#the-release-stage). The SRE's promotion-verify-sweep (a systemd timer on the owner's desktop) is retired once this ships
+3. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`, moving them to `release pending`
+4. **Release** *(on when both `srePath` and `techLeadPath` are set)* — no Claude session: the Tech Lead approves the promotion PR at its head, the SRE merges, deploys and verifies it in production, the Foreman tags the merge commit (an annotated tag, never a GitHub Release) and closes each issue on a passed prod verification, or labels it `prod verification held` and re-verifies. It also adopts promotion PRs merged by anyone else in the last 48 hours. Full flow: [docs/lifecycle.md](docs/lifecycle.md#the-release-stage). The SRE's promotion-verify-sweep (a systemd timer on the owner's desktop) is retired once this ships
+5. **Revise** — finds PRs with pending review feedback and revises them (prioritized over new work)
+6. **Implement** — picks up approved issues and invokes the repo's implementation skill via Claude Code (up to 3 issues per cycle; 1 in greenfield repos)
+7. **Branch Sync** — merges main → develop to keep branches aligned after promotions
+8. **Dependabot** — files one issue covering the open Dependabot PRs on the working branches, so they go through the implement session (filed with the trigger label when the repo sets `dependencyPreApproved`)
 
 - **Poll interval is configurable** — default 5 minutes (`pollIntervalMs` in config)
 - **Multi-repo** — manages multiple repos in a single daemon, each with its own skill paths and config
@@ -352,16 +352,17 @@ built-ins in the order above (verify only with `srePath`; release only with both
 
 ```json
 { "stages": [
-  { "type": "reconcile" }, { "type": "review" }, { "type": "verify" }, { "type": "revise" },
-  { "type": "implement" }, { "type": "branch-sync" }, { "type": "dependabot" }, { "type": "promote" },
-  { "type": "release" }
+  { "type": "reconcile" }, { "type": "review" }, { "type": "verify" }, { "type": "promote" },
+  { "type": "release" }, { "type": "revise" }, { "type": "implement" }, { "type": "branch-sync" },
+  { "type": "dependabot" }
 ] }
 ```
 
 Leave a built-in out and it never runs; reorder them and you give up what the
 default order guarantees (review before implement, so review only sees PRs
-labeled in an earlier pass; promote late, so it sees labels this pass just set;
-release after promote, so it acts on the PR promote just opened or updated).
+labeled in an earlier pass; promote after verify, so it sees labels this pass just set;
+release after promote, so it acts on the PR promote just opened or updated; both
+before revise and implement, so finished work never waits behind a build session).
 Each stage may appear once. A `reviewEnabled` repo needs `techLeadPath` only when
 `review` is in `stages`. An explicit `release` needs both `srePath` and `techLeadPath`;
 the config is refused at startup otherwise.

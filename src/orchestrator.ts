@@ -205,7 +205,7 @@ async function runRepoCycle(
   const base = logger.child({ cycle: cycleNumber, repoCycle, repo: repoConfig.name });
 
   // The stages run in the configured order (default: reconcile, review, verify,
-  // revise, implement, branch-sync, dependabot, promote, release — see BUILTIN_STAGES). Each
+  // promote, release, revise, implement, branch-sync, dependabot — see BUILTIN_STAGES). Each
   // built-in below is the phase that used to be called here by name, unchanged.
   const dispatched = await dispatchStages(config.stages, async (stage): Promise<StageResult> => {
     // Review, revise, implement and custom stages each spawn a Claude session;

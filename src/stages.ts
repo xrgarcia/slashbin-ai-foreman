@@ -12,9 +12,14 @@ import { z } from "zod";
  * order is load-bearing (see runRepoCycle): review runs before implement so it
  * only acts on PRs labeled in a PRIOR pass, verify right after review so a PR
  * merged this pass is verified in the same pass (the verifier waits on the
- * deploy itself), promote after the working stages so it sees the labels this
- * pass just set, and release last so it acts on the release PR promote just
- * opened or updated (EM#578). A config that reorders them accepts the
+ * deploy itself), promote right after verify so it sees the labels review and
+ * verify just set, and release right after promote so it acts on the release
+ * PR promote just opened or updated (EM#578). Shipping goes before building:
+ * revise and implement each run a session of up to 30 min, and a release
+ * queued behind them waited a whole build for no reason (jerky_service
+ * 2026-10-14: #130 and #141 sat in release PR #146 behind a revision and the
+ * next build). Nothing revise or implement does feeds promote: neither sets
+ * `ready for prod release`. A config that reorders them accepts the
  * consequence; nothing here forbids it. `release` runs only when both
  * `srePath` and `techLeadPath` are set (config.ts refuses an explicit one
  * without them; the default skips it with a startup warning).
@@ -23,12 +28,12 @@ export const BUILTIN_STAGES = [
   "reconcile",
   "review",
   "verify",
+  "promote",
+  "release",
   "revise",
   "implement",
   "branch-sync",
   "dependabot",
-  "promote",
-  "release",
 ] as const;
 
 export const stageTypeSchema = z.enum(BUILTIN_STAGES);
