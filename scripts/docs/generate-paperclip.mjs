@@ -399,6 +399,17 @@ While any session runs, the Foreman's agent carries a lease in its metadata
 by a process that died mid-session returns those tasks to their stages, and any other tool
 that writes the same tasks can read the lease to leave live ones alone.
 
+### The published config
+
+With \`publishConfig\` on (the default), the Foreman also writes the config file it loaded onto
+its agent's metadata (\`foremanConfig\`: \`sha256\`, \`publishedAt\`, \`text\`), at start and
+whenever a reload changes the file. The sha256 is of the file less its trailing newline. A tool
+that places the same cards reads its board mapping from there, so it never runs a copy the
+Foreman has moved on from. A file with a secret-shaped key (\`apiKey\`, \`token\`, \`secret\`,
+\`password\`) or a known secret value is not published, and the Foreman logs why. A reload that
+changes \`enabled\`, \`url\`, \`companyId\`, \`agentId\` or \`identityKeyFormat\` needs a
+restart: until then the mirror and the published config keep the old file.
+
 ## Assignment
 
 Every move to a lifecycle stage assigns the task to that stage's owner (see above). Note-only

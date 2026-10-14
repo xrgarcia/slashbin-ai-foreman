@@ -895,3 +895,62 @@ test("an owned release PR's open keeps its items releasing on the deployer's sea
   await mirror.onRelease(release("open", 12, [7]), logger());
   assert.deepEqual([r.status, r.assigneeAgentId], ["in_review", "agent-lead"], "a release PR the stage does not own still waits");
 });
+
+// --- the published config: one source for anything else that places the same cards ---
+
+test("the loaded config is published on the agent, less its trailing newline, beside the lease and other keys", async () => {
+  const { createHash } = await import("node:crypto");
+  const fake = fakePaperclip();
+  fake.agent.metadata = { other: 1 };
+  const { mirror, log } = mirrorOn(fake);
+  const text = JSON.stringify({ repos: [], paperclip: { board: { inReview: { owner: "em" } } } }, null, 2) + "\n";
+  await mirror.publishConfig(text);
+  const pub = fake.agent.metadata.foremanConfig;
+  assert.equal(pub.text, text.trimEnd());
+  assert.equal(pub.sha256, createHash("sha256").update(text.trimEnd()).digest("hex"));
+  assert.equal(fake.agent.metadata.other, 1);
+  assert.deepEqual(fake.agent.metadata.foremanLive.rows, []);
+  assert.ok(log.lines.some(([, m]) => m.startsWith("paperclip: published config sha256=")));
+  const writes = () => fake.calls.filter((c) => c.method === "PATCH" && c.path === `/api/agents/${AGENT}`).length;
+  const before = writes();
+  await mirror.publishConfig(text);
+  assert.equal(writes(), before, "unchanged text writes nothing");
+  // A lease renewal keeps the published config.
+  await mirror.onSession({ phase: "review", status: "started", repo: "example/r", items: [item], pr: 9 }, logger());
+  assert.equal(fake.agent.metadata.foremanConfig.sha256, pub.sha256);
+});
+
+test("a config holding a secret is never published", async () => {
+  for (const text of [
+    JSON.stringify({ paperclip: { apiKey: "pk_live_abc" } }),
+    JSON.stringify({ note: `x ${SECRET.value} y` }),
+  ]) {
+    const fake = fakePaperclip();
+    const { mirror, log } = mirrorOn(fake);
+    await mirror.publishConfig(text);
+    assert.equal(fake.agent.metadata.foremanConfig, undefined);
+    const warn = log.lines.find(([lvl]) => lvl === "warn")?.[1] ?? "";
+    assert.match(warn, /^paperclip: config not published: /);
+    assert.ok(!warn.includes(SECRET.value) && !warn.includes("pk_live_abc"), "the warning names the key, never the value");
+  }
+});
+
+test("publishConfig: false publishes nothing", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { publishConfig: false });
+  await mirror.publishConfig("{}");
+  assert.equal(fake.calls.length, 0);
+});
+
+test("a reload moves the board mapping; one that renames the agent is refused until a restart", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "todo" })]);
+  const base = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
+    identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false } };
+  const { mirror, log } = mirrorOn(fake, TEAM);
+  const leadReviews = { ...base, ...TEAM, board: { ...TEAM.board, inReview: { owner: "lead", status: "in_review", label: "inReview" } } };
+  assert.equal(mirror.reconfigure(leadReviews), true);
+  await mirror.onState(item, "new", "inReview", repoConfig, logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-lead");
+  assert.equal(mirror.reconfigure({ ...leadReviews, agentId: "agent-2" }), false);
+  assert.match(log.lines.find(([lvl]) => lvl === "warn")[1], /changes agentId; restart the Foreman/);
+});

@@ -58,12 +58,13 @@
 import type {
   PriorState, ReleaseEvent, SessionEvent, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
 } from "../adapters.js";
+import { createHash } from "node:crypto";
 import { redactAll } from "../redact.js";
 import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./config.js";
 import { STATE_STAGE } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {
-  ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  CONFIG_KEY, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
@@ -258,11 +259,13 @@ export class PaperclipMirror implements WorkObserver {
   private readonly deferred = new Map<string, Array<{ text: string; opts: NoteOpts }>>();
   /** Identity keys whose current claim repeats one that did not finish. */
   private readonly retrying = new Set<string>();
-  private readonly comments: CommentsConfig;
+  private comments: CommentsConfig;
+  /** The sha256 of the config text last published, so an unchanged reload writes nothing. */
+  private publishedSha: string | null = null;
 
   constructor(
     private readonly client: PaperclipClient,
-    private readonly cfg: PaperclipConfig,
+    private cfg: PaperclipConfig,
     private readonly secrets: ReadonlyArray<{ name: string; value: string }>,
     private readonly logger: Logger,
   ) {
@@ -522,11 +525,11 @@ export class PaperclipMirror implements WorkObserver {
    * whole metadata object, so the agent's other keys are read first when this
    * process has not seen them; unread, the lease is not written. Never throws.
    */
-  private async writeLease(): Promise<void> {
-    if (!this.cfg.agentId) return;
+  private async writeLease(): Promise<boolean> {
+    if (!this.cfg.agentId) return false;
     if (this.agentMetadata === null) {
       const agent = await this.safeCall("read agent", () => this.client.getAgent(this.cfg.agentId!));
-      if (!agent.ok) return;
+      if (!agent.ok) return false;
       const { [LIVE_LEASE_KEY]: _old, ...rest } = (agent.value?.metadata ?? {}) as Record<string, unknown>;
       this.agentMetadata = rest;
     }
@@ -534,8 +537,61 @@ export class PaperclipMirror implements WorkObserver {
       leaseAt: new Date().toISOString(),
       rows: [...this.holds].map(([id, h]) => ({ id, phase: h.phase })),
     };
-    await this.safeCall("update agent", () =>
+    const r = await this.safeCall("update agent", () =>
       this.client.updateAgent(this.cfg.agentId!, { metadata: { ...(this.agentMetadata ?? {}), [LIVE_LEASE_KEY]: lease } }));
+    return r.ok;
+  }
+
+  /**
+   * Take a reloaded config: the board mapping, roles, labels and comments follow
+   * it from the next move on. A change to what names the company, the agent or a
+   * task's identity needs a restart, so that config is refused, the running one
+   * kept, and false returned.
+   */
+  reconfigure(next: PaperclipConfig): boolean {
+    const fixed = ["enabled", "url", "companyId", "agentId", "identityKeyFormat"] as const;
+    const changed = fixed.filter((k) => next[k] !== this.cfg[k]);
+    if (changed.length) {
+      this.logger.warn(`paperclip: config reload changes ${changed.join(", ")}; restart the Foreman to apply it. The mirror keeps the config it started with.`);
+      return false;
+    }
+    this.cfg = next;
+    this.comments = commentsOf(next);
+    this.stageLabelIds = null;
+    return true;
+  }
+
+  /**
+   * Publish the config file this process runs on its agent's metadata
+   * (`foremanConfig`), so anything else that places the same cards reads the
+   * Foreman's mapping instead of a copy of it. `text` is the file as loaded; it
+   * is stored less its trailing newline and hashed that way. Refused, with a
+   * warning, when the file holds a secret-shaped key or a known secret value.
+   * Unchanged text writes nothing. Never throws.
+   */
+  async publishConfig(text: string): Promise<void> {
+    if (this.cfg.publishConfig === false || !this.cfg.agentId) return;
+    const body = text.replace(/\n+$/, "");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    if (sha256 === this.publishedSha) return;
+    const refusal = configSecretRefusal(body, this.secrets);
+    if (refusal) {
+      this.logger.warn(`paperclip: config not published: ${refusal}`);
+      return;
+    }
+    await this.recovery;
+    if (this.agentMetadata === null) {
+      const agent = await this.safeCall("read agent", () => this.client.getAgent(this.cfg.agentId!));
+      if (!agent.ok) return;
+      const { [LIVE_LEASE_KEY]: _old, ...rest } = (agent.value?.metadata ?? {}) as Record<string, unknown>;
+      this.agentMetadata = rest;
+    }
+    // The lease write carries every other key, so the config rides on it.
+    this.agentMetadata = { ...this.agentMetadata, [CONFIG_KEY]: { sha256, publishedAt: new Date().toISOString(), text: body } };
+    if (await this.writeLease()) {
+      this.publishedSha = sha256;
+      this.logger.info(`paperclip: published config sha256=${sha256.slice(0, 12)}`);
+    }
   }
 
   /** One housekeeping pass; never throws. */
@@ -1012,3 +1068,23 @@ function reasonOf(body: string): string {
 function sameItem(a: WorkItem | null, b: WorkItem): boolean {
   return !!a && a.repo === b.repo && a.issueNumber === b.issueNumber;
 }
+
+/** Why a config text must not be published, or null: a secret-shaped key holding a value, or a known secret's value anywhere in it. */
+export function configSecretRefusal(text: string, secrets: ReadonlyArray<{ name: string; value: string }>): string | null {
+  for (const s of secrets) if (s.value && text.includes(s.value)) return `it contains the value of ${s.name}`;
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return "it is not JSON"; }
+  const found: string[] = [];
+  const walk = (v: unknown, path: string): void => {
+    if (!v || typeof v !== "object") return;
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      const at = path ? `${path}.${k}` : k;
+      if (SECRET_KEY.test(k) && typeof x === "string" && x.length > 0) found.push(at);
+      walk(x, at);
+    }
+  };
+  walk(parsed, "");
+  return found.length ? `secret-shaped key ${found.join(", ")}` : null;
+}
+
+const SECRET_KEY = /(api[_-]?key|token|secret|password)$/i;

@@ -42,6 +42,7 @@ test("no paperclip block: mirror off, every default applied", () => {
   assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "blocked", "changesRequested", "inReview", "merged", "needsRuling", "pendingVerification", "prodVerifyHeld", "releaseAuthorized", "releasing"]);
   assert.deepEqual({ ...rest }, {
     liveLeaseMinutes: 15,
+    publishConfig: true,
     enabled: false,
     url: "http://127.0.0.1:3100",
     agentName: "Foreman",

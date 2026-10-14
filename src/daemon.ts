@@ -19,6 +19,8 @@ import { configureGhUsage } from "./gh-usage.js";
 export interface DaemonOptions {
   configPath?: string;
   repoFilter?: string;
+  /** Called with each config a reload loads; not called when the reload fails. */
+  onReload?: (config: AgentConfig) => void;
 }
 
 export interface DaemonHandle {
@@ -171,6 +173,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       configureBackoff(fresh.backoff);
       configureClaudeTrust({ enabled: fresh.trustManagedRepos });
       trustManagedRepos(fresh.repos, logger);
+      options?.onReload?.(fresh);
       return fresh;
     } catch (err) {
       logger.warn("Config reload failed, using previous config", {
