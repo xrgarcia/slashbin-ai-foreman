@@ -1,6 +1,6 @@
 import type { RepoConfig, AgentConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import type { StageOrDone, Transition } from "./lifecycle.js";
+import type { Stage, StageOrDone, Transition } from "./lifecycle.js";
 
 /**
  * One unit of work a source hands to the pipeline. Deliberately minimal: the
@@ -93,8 +93,13 @@ export type WorkEvent =
   | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
   | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string }
-  /** Revision of `item`'s PR stopped for the EM's scope ruling; it resumes once a ruling is posted on the PR. */
-  | { readonly kind: "escalated"; readonly item: WorkItem; readonly reason: string }
+  /**
+   * Work on `item` stopped for the EM's ruling: revision of its PR (resumes once
+   * a ruling is posted on the PR), or a skip that used up its attempts (resumes
+   * once the issue changes). `at` is the GitHub stage the hold belongs to.
+   * absent, `changesRequested`, where revise escalates.
+   */
+  | { readonly kind: "escalated"; readonly item: WorkItem; readonly reason: string; readonly at?: Stage }
   /** A block on `item` was resolved by one of the Foreman's unblock checks (src/unblock.ts). */
   | { readonly kind: "unblocked"; readonly item: WorkItem; readonly reason: string }
   /** The feature PR delivering `item` merged to the base branch. */

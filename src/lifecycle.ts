@@ -43,7 +43,7 @@ export const STAGE_MEANING: Readonly<Record<StageOrDone, string>> = Object.freez
   awaitingRelease: "In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran).",
   releasing: "In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production.",
   prodVerifyHeld: "Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off.",
-  needsRuling: "Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling.",
+  needsRuling: "Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue.",
   blocked: "Needs a person: blocked on the source, or the Foreman declined it or ran out of retries.",
   done: "Closed by the Foreman after the SRE's prod verification passed.",
 });

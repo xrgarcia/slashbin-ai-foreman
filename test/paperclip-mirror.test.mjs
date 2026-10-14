@@ -849,3 +849,15 @@ test("escalated with no roles configured stays with the Foreman", async () => {
   assert.equal(fake.rows[0].status, "blocked");
   assert.equal(fake.rows[0].assigneeAgentId, AGENT);
 });
+
+test("escalated at approved (a skip out of attempts): the issue still at approved keeps the hold", async () => {
+  const fake = fakePaperclip([row7("todo")]);
+  const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  await mirror.onEvent({ kind: "escalated", item, reason: "x — skipped 3 times in a row; held for the EM until this issue changes", at: "approved" }, logger());
+  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  const r = fake.rows[0];
+  assert.equal(r.status, "blocked", "anchored at changesRequested, the approved issue read as moved on");
+  assert.equal(r.assigneeAgentId, "em-agent");
+});

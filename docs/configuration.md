@@ -326,7 +326,7 @@ which only means it retries sooner.
 
 | Group | Waits with the defaults | Limit |
 |---|---|---|
-| `skip` | 5 min, 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 4 h | none |
+| `skip` | 5 min, 10 min | `maxAttempts` 3 |
 | `verifyRetry` | 10 min, 20 min | `maxAttempts` 3 |
 | `agentUnavailable` | 2 min, 4 min, 8 min, 16 min, 30 min | none |
 | `approvedUnmerged` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 4 h | none |
@@ -362,7 +362,7 @@ case, which beats the file.
 
 ### `backoff.skip`
 
-An issue the implement session declined on purpose (blocked on something outside the repo, investigation only, already done). With `hold` (the default) it is held in Blocked and no session runs on it until something moves: the issue changes after the skip (an edit, a comment or a label by anyone but the Foreman), or the issue or PR the skip names in `waiting_on` closes or merges. Each check is one cheap GitHub read. Set `hold` to false for the older timed retry: hidden for one window, each decline in a row doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still sets `baseMs`.
+An issue the implement session declined on purpose (blocked on something outside the repo, investigation only, already done). With `hold` (the default) it is held in Blocked and no session runs on it until something moves: the issue changes after the skip (an edit, a comment or a label by anyone but the Foreman), or the issue or PR the skip names in `waiting_on` closes or merges. Each check is one cheap GitHub read, and each release buys one session. After `maxAttempts` sessions in a row end in a skip, it is escalated to the `needsRuling` stage and stays Blocked: no session at all until a person changes the issue, which starts the count again. Set `hold` to false for the older timed retry (no cap): hidden for one window, each decline in a row doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still sets `baseMs`.
 
 | Field | Default | Env |
 |---|---|---|
@@ -370,6 +370,7 @@ An issue the implement session declined on purpose (blocked on something outside
 | `capMs` | `14400000` (4 h) | `AI_AGENT_BACKOFF_SKIP_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_SKIP_FACTOR` |
 | `hold` | `true` | `AI_AGENT_BACKOFF_SKIP_HOLD` |
+| `maxAttempts` | `3` | `AI_AGENT_BACKOFF_SKIP_MAX_ATTEMPTS` |
 
 ### `backoff.verifyRetry`
 

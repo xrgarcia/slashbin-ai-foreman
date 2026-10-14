@@ -36,11 +36,14 @@ export const backoffConfigSchema = z.object({
   // default) it is held in Blocked and no session runs on it until something
   // moves: the issue changes after the skip (an edit, a comment or a label by
   // anyone but the Foreman), or the issue or PR the skip names in `waiting_on`
-  // closes or merges. Each check is one cheap GitHub read. Set `hold` to false
-  // for the older timed retry: hidden for one window, each decline in a row
-  // doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still
-  // sets `baseMs`.
-  skip: z.object({ ...win(300_000, 14_400_000, 2), hold: flag(true) }).prefault({}),
+  // closes or merges. Each check is one cheap GitHub read, and each release
+  // buys one session. After `maxAttempts` sessions in a row end in a skip, it is
+  // escalated to the `needsRuling` stage and stays Blocked: no session at all
+  // until a person changes the issue, which starts the count again. Set `hold`
+  // to false for the older timed retry (no cap): hidden for one window, each
+  // decline in a row doubling it, 5 min rising to 4 h. The old top-level
+  // `skipBackoffMs` still sets `baseMs`.
+  skip: z.object({ ...win(300_000, 14_400_000, 2), hold: flag(true), maxAttempts: count(3) }).prefault({}),
   // A dev verification that ran and did not pass. The issue is re-verified after
   // one window, longer each time; after `maxAttempts` failed runs it waits for a
   // person (new commits on the base branch reopen it). Default 10 min, then

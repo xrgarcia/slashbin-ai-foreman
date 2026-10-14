@@ -283,7 +283,7 @@ export class PaperclipMirror implements WorkObserver {
       case "transition": return this.onState(event.item, event.from, event.to);
       case "prLink": return this.onPrLink(event.item, event.prUrl);
       case "blocked": return this.onBlocked(event.item, event.reason);
-      case "escalated": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.escalated);
+      case "escalated": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.escalated, event.at);
       case "unblocked": return this.onUnblocked(event.item, event.reason);
       case "merged": return this.onMerged(event.item);
       case "session": return this.onSession(event.session, logger);
@@ -348,21 +348,23 @@ export class PaperclipMirror implements WorkObserver {
 
   /** Blocked, or (`step` escalated) parked for the EM's ruling in the stage that holder owns. */
   async onBlocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger,
-    step: typeof PAPERCLIP_STEPS.blocked | typeof PAPERCLIP_STEPS.escalated = PAPERCLIP_STEPS.blocked): Promise<void> {
+    step: typeof PAPERCLIP_STEPS.blocked | typeof PAPERCLIP_STEPS.escalated = PAPERCLIP_STEPS.blocked,
+    at: PaperclipStage = "changesRequested"): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
     const text = fill(step.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
-    // An escalation only fires from revise, which only runs at changesRequested,
-    // so that is the stage the hold belongs to. The last snapshot can be older:
+    // An escalation names the stage its hold belongs to (`at`): revise's, the
+    // default, only runs at changesRequested; a skip escalation sits at approved.
+    // Anchored on the last snapshot instead, it could be stale:
     // the review that tipped the count moves the labels to `pr pending actions`
     // seconds before the escalation, and anchoring on the stale `pr under review`
     // let the next snapshot read it as "moved on" and release the hold
     // (slashbin_data_receiver#41, 2026-10-14: the card sat In Review on the
     // Foreman for ten hours with nobody told).
-    this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? "changesRequested" : this.ghStage.get(id));
+    this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : this.ghStage.get(id));
     await this.move(id, step.stage);
     await this.note(id, text, { event: "blocked" });
   }

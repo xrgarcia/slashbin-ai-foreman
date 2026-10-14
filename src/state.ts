@@ -21,6 +21,14 @@ interface SkippedIssue {
   // Absent (every entry written before it existed): held until the issue changes,
   // with `lastSkippedAt` as the "changed since" baseline.
   waitingOn?: string;
+  // Held: when a check let it run again (its issue changed, its `waiting_on`
+  // closed, a transient cleared). It is admitted until a session ends on it;
+  // `skipCount` stands, so the attempt cap counts every session.
+  releasedAt?: string;
+  // Held: when it used up `backoff.skip.maxAttempts` and was escalated for the
+  // EM's ruling. From then on only a person changing the issue releases it,
+  // and that release clears the entry, count included.
+  escalatedAt?: string;
 }
 
 interface HeldIssue {

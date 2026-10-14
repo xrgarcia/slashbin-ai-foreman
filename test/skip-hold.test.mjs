@@ -16,7 +16,7 @@ import { detectDeclaredSkip } from "../dist/agent.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { loadConfig } from "../dist/config.js";
 import { UNBLOCK_CHECKS, passingCheck } from "../dist/unblock.js";
-import { changedSince, heldReason, holdStatus, parseWaitingOn } from "../dist/github/skip-hold.js";
+import { changedSince, escalatedReason, heldReason, holdStatus, parseWaitingOn, skipGate } from "../dist/github/skip-hold.js";
 import { orchestratorSource } from "./source-text.mjs";
 
 const REPO = "xrgarcia/jerky_service";
@@ -121,6 +121,8 @@ test("migration: an existing entry with no waiting_on is held, baselined at last
 
 test("config: hold is the default; false opts back into the timed retry, from the file or env", () => {
   assert.equal(DEFAULT_BACKOFF.skip.hold, true);
+  assert.equal(DEFAULT_BACKOFF.skip.maxAttempts, 3);
+  assert.equal(load({ backoff: { skip: { maxAttempts: 5 } } }).backoff.skip.maxAttempts, 5);
   assert.equal(load({}).backoff.skip.hold, true);
   assert.equal(load({ backoff: { skip: { hold: false } } }).backoff.skip.hold, false);
   process.env.AI_AGENT_BACKOFF_SKIP_HOLD = "false";
@@ -133,14 +135,62 @@ test("config: hold is the default; false opts back into the timed retry, from th
 
 test("no session while held: a held issue leaves the hand-off before any session starts", () => {
   const src = orchestratorSource();
-  const filterAt = src.indexOf("const status = holdStatus(entry");
+  const filterAt = src.indexOf("const gate = skipGate(entry");
   const sessionAt = src.indexOf("implementApprovedIssues(repoConfig", filterAt);
   assert.ok(filterAt > 0, "the hold check is gone from the implement phase");
   assert.ok(sessionAt > filterAt, "a session launches before the hold check");
-  const branch = src.slice(filterAt, src.indexOf("stillBackedOff.push({ n, reason: entry.reason });", filterAt));
-  assert.match(branch, /stillBackedOff\.push\([^]*?\);\s*return false;/, "a held issue must be filtered out of the hand-off");
-  // The timed re-run is gone under hold: the age check only runs with hold off.
-  assert.match(src, /if \(!skip\.hold\) \{\s*const age = /);
+  const branch = src.slice(filterAt, src.indexOf("const age = now", filterAt));
+  assert.match(branch, /stillBackedOff\.push\([^]*?\);\s*return false;\s*\}/, "a held issue must be filtered out of the hand-off");
+  // The timed re-run is gone under hold: the age check only runs after the hold branch returned.
+  assert.ok(src.indexOf("const age = now", filterAt) > filterAt);
+});
+
+// Ray, 2026-10-14: "put it in blocked and leave it there. Needs to escalate and
+// assign it to the EM after it exhausts its attempts, but leave it in blocked."
+const gate = (e, r, transient = false) => skipGate(e, REPO, 3, r, () => transient);
+const changed = { activity: [{ at: "2026-10-14T15:00:00Z", login: "xrgarcia" }] };
+
+test("cap: under it, a cheap release buys one session and keeps the count", () => {
+  for (const [r, transient, by] of [[reads(changed), false, "issueChanged"], [reads({ ref: { open: false, isPr: true, merged: true } }), false, "waitedOnDone"], [reads(), true, "transientCauseGone"]]) {
+    const g = gate({ ...entry("#166"), skipCount: 2 }, r, transient);
+    assert.deepEqual(g, { run: true, by, reset: false });
+  }
+});
+
+test("cap: a released entry runs until a session ends on it, with no further reads", () => {
+  const r = reads();
+  assert.deepEqual(gate({ ...entry(), skipCount: 1, releasedAt: "2026-10-14T15:01:00Z" }, r), { run: true, reset: false });
+  assert.deepEqual(r.calls, { ref: 0, activity: 0 });
+});
+
+test("cap: out of attempts, it is escalated once and stays held, with no session", () => {
+  const r = reads({ ref: { open: false, isPr: true, merged: true } });
+  const g = gate({ ...entry("#166"), skipCount: 3 }, r, true);
+  assert.equal(g.run, false);
+  assert.equal(g.escalate, true);
+  assert.equal(g.reason, escalatedReason("refund_policy.md not on main", 3));
+  assert.match(g.reason, /skipped 3 times in a row; held for the EM until this issue changes$/);
+  assert.deepEqual(r.calls, { ref: 0, activity: 1 }, "a merged reference or a cleared transient no longer releases it");
+  const again = gate({ ...entry("#166"), skipCount: 3, escalatedAt: "2026-10-14T13:13:00Z" }, reads(), true);
+  assert.deepEqual([again.run, again.escalate], [false, false], "escalated once, not every cycle");
+});
+
+test("cap: an escalated issue is released only by a person changing it, and the count resets", () => {
+  const e = { ...entry(), skipCount: 4, escalatedAt: "2026-10-14T13:13:00Z", releasedAt: "2026-10-14T12:00:00Z" };
+  assert.deepEqual(gate(e, reads(changed)), { run: true, by: "issueChanged", reset: true });
+  assert.equal(gate(e, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "slashbin-foreman" }] })).run, false, "the Foreman's own write is not a release");
+  assert.equal(gate(e, reads({ activity: new Error("timeout") })).run, false, "unknown never releases");
+});
+
+test("migration: an entry already past the cap (jerky_service#127, skipped 8 times) is escalated", () => {
+  const g = gate({ lastSkippedAt: SKIPPED, reason: "x", skipCount: 8 }, reads());
+  assert.deepEqual([g.run, g.escalate], [false, true]);
+});
+
+test("escalation: the skip phase escalates at the cap, anchored at approved", () => {
+  const src = orchestratorSource();
+  assert.match(src, /kind: "escalated", item: itemOf\(repoConfig, n\), reason, at: "approved"/);
+  assert.match(src, />= skip\.maxAttempts/);
 });
 
 function load(extra) {
