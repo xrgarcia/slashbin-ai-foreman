@@ -156,6 +156,31 @@ export function findSreSweepHold(config: RepoConfig, num: number): { pr: number;
   return m ? { pr: Number(m[1]), url: hold.url } : null;
 }
 
+/** How the release stage starts the comment it writes when it stops a release for a person. */
+export const RELEASE_STOP_MARK = "**Release stopped: needs a person.**";
+
+/**
+ * Why issue `num`'s release is held, from the latest stop comment on it: the
+ * release stage's own ({@link RELEASE_STOP_MARK}) or the SRE sweep's
+ * ({@link SRE_SWEEP_HOLD}). `hold` is a short name (`predeploy-stop`,
+ * `tech-lead-refusal`, `no-carrying-release`, `sre-sweep-hold`, else
+ * `release-stop`); `pr` is the release PR the comment names. Null when the
+ * issue carries no such comment. Throws on a failed read.
+ */
+export function findReleaseStop(config: RepoConfig, num: number): { pr: number | null; hold: string } | null {
+  const stop = comments(config, num)
+    .filter((c) => c.body.startsWith(RELEASE_STOP_MARK) || c.body.startsWith(SRE_SWEEP_HOLD)).at(-1);
+  if (!stop) return null;
+  const m = /Release PR #(\d+)/.exec(stop.body) ?? /\/pull\/(\d+)/.exec(stop.body);
+  const pr = m ? Number(m[1]) : null;
+  if (stop.body.startsWith(SRE_SWEEP_HOLD)) return { pr, hold: "sre-sweep-hold" };
+  const hold = /`predeploy-stop`/.test(stop.body) ? "predeploy-stop"
+    : /Tech Lead refused/.test(stop.body) ? "tech-lead-refusal"
+      : /no release carries this issue/.test(stop.body) ? "no-carrying-release"
+        : "release-stop";
+  return { pr, hold };
+}
+
 /** The SHA of the production branch's head. Throws on a failed read. */
 export function productionHead(config: RepoConfig): string {
   return gh(["api", `repos/${config.githubRepo}/commits/${config.productionBranch}`, "--jq", ".sha"], config.repoPath).trim();

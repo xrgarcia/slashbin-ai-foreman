@@ -22,7 +22,7 @@ import { tryRelease, resetReleaseStage, SOAK_DELAY_MS } from "../dist/phases/rel
 import { tryPromotion } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/agent.js";
-import { readPvResult, configureIssueCache } from "../dist/github.js";
+import { readPvResult, configureIssueCache, productionDriftFiles } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -91,7 +91,10 @@ if (a[0] === "api") {
   let m;
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
   if (/\\/commits\\//.test(path)) out(st.prodHead);
-  if (/\\/compare\\//.test(path)) out({ ahead: st.compareFiles > 0 ? 2 : 1, files: st.compareFiles });
+  if (/\\/compare\\//.test(path)) {
+    const files = st.comparePaths ? st.comparePaths.length : st.compareFiles;
+    out({ ahead: files > 0 ? 2 : 1, files, ...(st.comparePaths ? { paths: st.comparePaths } : {}) });
+  }
   if ((m = /git\\/matching-refs\\/tags\\/(.*)$/.exec(path))) out(st.refs.filter((r) => r.ref.startsWith("refs/tags/" + m[1])));
   if (method === "GET" && (m = /git\\/tags\\/([0-9a-f]+)$/.exec(path))) out(st.tagObjects[m[1]].object);
   if (method === "POST" && /git\\/tags$/.test(path)) {
@@ -189,11 +192,11 @@ const mergedPr = (number, body, mergeSha, minutesAgo) =>
 
 let stateDir;
 /** A fresh world: GitHub, the agents' answers, the Foreman's state and the stage's memory. */
-function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, prodHead = MERGE }, ctl = {}) {
+function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, prodHead = MERGE }, ctl = {}) {
   writeFileSync(GH_STATE, JSON.stringify({
     issues: Object.fromEntries(issues.map((i) => [i.number, i])),
     prs: Object.fromEntries(prs.map((p) => [p.number, p])),
-    comments, refs, tagObjects, compareFiles, prodHead,
+    comments, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}),
   }));
   writeFileSync(CTL, JSON.stringify(ctl));
   writeFileSync(GH_LOG, "");
@@ -623,7 +626,110 @@ test("a promotion stall comments once on each issue waiting on EM verification, 
   assert.deepEqual(loadRepoState("rel").promotionStallNoted, [5]);
 });
 
+/** A logger that keeps every line, by level. */
+function captureLogger() {
+  const lines = [];
+  const l = {
+    debug: (msg) => lines.push(["debug", msg]),
+    info: (msg) => lines.push(["info", msg]),
+    warn: (msg) => lines.push(["warn", msg]),
+    error: (msg) => lines.push(["error", msg]),
+    child: () => l,
+    at: (level) => lines.filter(([lv]) => lv === level).map(([, m]) => m),
+    clear: () => { lines.length = 0; },
+  };
+  return l;
+}
+const STALLED = /promotion is STALLED/;
+
+test("a develop-vs-main difference confined to .claude/ is not a stalled promotion: no WARN, no comment", async () => {
+  world({
+    issues: [issue(5, "pr approved")],
+    comparePaths: [".claude/skills/implement-approved-issues/SKILL.md", ".claude/skills/revise-pr-feedback/SKILL.md"],
+  });
+  const log = captureLogger();
+  await tryPromotion(repo, log, 20_000, true);
+  assert.deepEqual(log.at("warn"), [], "nothing at WARN");
+  assert.ok(!log.at("info").some((m) => /waiting on EM verification/.test(m)), "nothing at INFO either");
+  assert.ok(log.at("debug").some((m) => /only under \.claude\//.test(m)), "a debug line says why");
+  assert.deepEqual(commentsOn(5), [], "the pr-approved issue is not told a release is stalled");
+});
+
+test("one file outside .claude/ still counts: the stall is reported, with only the production files counted", async () => {
+  world({ issues: [], comparePaths: [".claude/skills/a/SKILL.md", "src/server.ts"] });
+  const log = captureLogger();
+  await tryPromotion(repo, log, 21_000, true);
+  const warns = log.at("warn");
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], STALLED);
+  assert.match(warns[0], /carries 1 changed file\(s\)/);
+});
+
+test("a release stopped for a person names its issue and hold, once per change — never 'no issue names the work'", async () => {
+  // The SRE's pre-deploy check stops release PR #100: #5 and #6 are blocked, `release pending` stays.
+  world(pending(), {
+    approve: { exit: 0 },
+    deploy: { exit: 0, out: "SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=predeploy-stop evidence=https://example.test/stop" },
+  });
+  assert.equal(await run(), true);
+  const before = { 5: commentsOn(5).length, 6: commentsOn(6).length };
+
+  const log = captureLogger();
+  const base = 22_000;
+  await tryPromotion(repo, log, base, true);
+  const warns = log.at("warn");
+  assert.equal(warns.length, 1, "one WARN");
+  assert.ok(!STALLED.test(warns[0]), "not reported as an unnamed stall");
+  assert.match(warns[0], /release of #5 held: blocked after predeploy-stop on PR #100 — waiting on a person/);
+  assert.match(warns[0], /release of #6 held: blocked after predeploy-stop on PR #100 — waiting on a person/);
+  assert.equal(loadRepoState("rel").promotionHeldNoted, "5,6");
+
+  // The next check, unchanged: a debug line, no WARN, no comment read, nothing commented.
+  log.clear();
+  const callsBefore = ghCalls().length;
+  await tryPromotion(repo, log, base + STALL_CHECK_CYCLE_INTERVAL, true);
+  assert.deepEqual(log.at("warn"), [], "not repeated at WARN");
+  assert.ok(log.at("debug").some((m) => /release of #5 held/.test(m)), "named at debug");
+  assert.ok(!ghCalls().slice(callsBefore).some((c) => c.some((x) => /issues\/\d+\/comments/.test(x))), "no comments read on a repeat");
+  assert.deepEqual({ 5: commentsOn(5).length, 6: commentsOn(6).length }, before, "the stop comment is the record; nothing more is written");
+
+  // A change in what is held is named again.
+  const st = gh();
+  st.issues[6].labels = st.issues[6].labels.filter((l) => l !== "blocked");
+  st.issues[6].state = "CLOSED";
+  writeFileSync(GH_STATE, JSON.stringify(st));
+  log.clear();
+  await tryPromotion(repo, log, base + 2 * STALL_CHECK_CYCLE_INTERVAL, true);
+  const again = log.at("warn");
+  assert.equal(again.length, 1);
+  assert.match(again[0], /release of #5 held/);
+  assert.ok(!/#6/.test(again[0]));
+  assert.equal(loadRepoState("rel").promotionHeldNoted, "5");
+});
+
+test("a held issue with no stop comment is still named, by the release PR that lists it", async () => {
+  world({
+    issues: [issue(1283, "release pending", "blocked")],
+    prs: [releasePr(1292, "## Production Promotion\n\n### Issues included\n- #1283: Issue 1283")],
+    compareFiles: 4,
+  });
+  const log = captureLogger();
+  await tryPromotion(repo, log, 23_000, true);
+  const warns = log.at("warn");
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /release of #1283 held: blocked on PR #1292 — waiting on a person/);
+});
+
 // --- Pure pieces ------------------------------------------------------------------
+
+test("productionDriftFiles: .claude/ paths do not count; unknown or possibly truncated lists count everything", () => {
+  const d = (paths, files = paths?.length ?? 0) => ({ developAheadOfMain: 2, developBehindMain: 0, developAheadFiles: files, ...(paths ? { developAheadPaths: paths } : {}) });
+  assert.equal(productionDriftFiles(d([".claude/skills/a/SKILL.md", ".claude/settings.json"])), 0);
+  assert.equal(productionDriftFiles(d([".claude/skills/a/SKILL.md", "src/a.ts", ".claudeignore"])), 2, "only the .claude/ directory is exempt");
+  assert.equal(productionDriftFiles(d(undefined, 3)), 3, "no path list: every file counts");
+  assert.equal(productionDriftFiles(d([".claude/x"], 2)), 2, "a list that disagrees with the count: every file counts");
+  assert.equal(productionDriftFiles(d(Array.from({ length: 300 }, (_, i) => `.claude/f${i}`))), 300, "a list at GitHub's cap may hide files");
+});
 
 test("parseDeployTrailer: the last trailer for the PR wins; a malformed sha reads as none", () => {
   const out = [

@@ -153,6 +153,10 @@ export interface RepoState {
   // Issues the promote stage already commented on for a promotion stall, so a
   // stall that lasts days comments once, not every hour (EM#578).
   promotionStallNoted?: number[];
+  // The held release the promote stage last named in the log (issue numbers,
+  // e.g. "1283"), so a release stopped for a person is WARNed once per change
+  // rather than every stall check while it waits.
+  promotionHeldNoted?: string;
 }
 
 /**
@@ -278,6 +282,7 @@ function loadRepoStateCopy(repoName: string): RepoState {
       prodReleases: Object.fromEntries(Object.entries(repo.prodReleases ?? {}).map(([k, v]) => [k, { ...v, issues: [...v.issues] }])),
       prodVerified: { ...(repo.prodVerified ?? {}) },
       ...(repo.promotionStallNoted ? { promotionStallNoted: [...repo.promotionStallNoted] } : {}),
+      ...(repo.promotionHeldNoted ? { promotionHeldNoted: repo.promotionHeldNoted } : {}),
     };
   }
 
