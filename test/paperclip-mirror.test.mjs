@@ -1235,3 +1235,28 @@ test("handoff: an owned card at another seat's stage says the next action under 
   assert.equal(lines[1], "GitHub: open · stage pendingVerification");
   assert.equal(lines[2], "Next: Engineering Manager — run the EM release gate (/deliver-to-prod 3a) for example/r#7, then apply `ready for prod release`");
 });
+
+test("a dev-verification wait stays in review, never Blocked; the same reason twice writes nothing (jerky_ops#18)", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake);
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onState(item, "inReview", "approved", repoConfig, logger());
+  const why = "waiting until 2026-10-15T18:42Z: the SRE says PR #19 is not observable before then (wait-until-20261015T1842Z)";
+  await mirror.onEvent({ kind: "verifyWaiting", item, reason: why }, logger());
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.notEqual(fake.rows[0].status, "blocked");
+  const notes = fake.comments["row-1"].length;
+  await mirror.onEvent({ kind: "verifyWaiting", item, reason: why }, logger());
+  assert.equal(fake.comments["row-1"].length, notes, "a repeated wait adds no note");
+  assert.equal(fake.comments["row-1"].at(-1), `merged; dev verification waiting: ${why}`);
+});
+
+test("a card a wait finds in Blocked comes back to review", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake);
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "earlier wait", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  await mirror.onEvent({ kind: "verifyWaiting", item, reason: "deploy building" }, logger());
+  assert.equal(fake.rows[0].status, "in_review");
+});

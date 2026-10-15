@@ -152,6 +152,12 @@ export type WorkEvent =
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
   | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string }
   /**
+   * Dev verification of `item` waits on something that clears by itself (the deploy
+   * is still building, or the SRE could not run) and resumes on its own. Not a
+   * block: no person is needed, so the card stays in review with the reason.
+   */
+  | { readonly kind: "verifyWaiting"; readonly item: WorkItem; readonly reason: string }
+  /**
    * Work on `item` stopped for the EM's ruling: revision of its PR (resumes once
    * a ruling is posted on the PR), or a skip that used up its attempts (resumes
    * once the issue changes). `at` is the GitHub stage the hold belongs to.

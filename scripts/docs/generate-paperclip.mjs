@@ -116,6 +116,7 @@ const WHEN = {
   reviewFinished: "The review ends, with its outcome.",
   reviewFailed: "The review fails.",
   awaitingVerify: "The Tech Lead approved and merged the pull request; the issue waits for dev verification.",
+  verifyWaiting: "Dev verification waits on something that clears by itself (the deploy is still building, or the SRE could not run) and resumes on its own. The card stays in review; Blocked is for holds a person must clear.",
   verifyStarted: "A dev-verification session starts on the merged pull request; the note names the verifier.",
   verifyFinished: "Dev verification passes; the issue moves on to release.",
   verifyFailed: "Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most.",

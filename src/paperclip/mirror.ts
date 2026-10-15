@@ -106,6 +106,7 @@ export const PAPERCLIP_STEPS = Object.freeze({
   changesRequested: { stage: "changesRequested", note: "changes requested" },
   approved: { stage: "pendingVerification", note: "approved" },
   awaitingVerify: { stage: "merged", note: "merged; awaiting dev verification" },
+  verifyWaiting: { stage: "merged", note: "merged; dev verification waiting: {reason}" },
   blocked: { stage: "blocked", note: "blocked: {reason}" },
   escalated: { stage: "needsRuling", note: "blocked: needs an EM scope ruling: {reason}" },
   merged: { stage: null, note: "merged" },
@@ -319,6 +320,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rowStage = new Map<string, PaperclipStage>();
   /** Task id → why the Foreman blocked it, the unblock descriptor's action when it moves to `blocked`. */
   private readonly blockedReason = new Map<string, string>();
+  /** The last dev-verification wait note per row, so a repeated wait writes nothing. */
+  private readonly verifyWaitNote = new Map<string, string>();
   /** Task id → the GitHub stage last seen for its issue, from the cycle snapshot. */
   private readonly ghStage = new Map<string, PaperclipStage | "done">();
   /**
@@ -392,6 +395,7 @@ export class PaperclipMirror implements WorkObserver {
       case "prLink": return this.onPrLink(event.item, event.prUrl);
       case "blocked": return this.onBlocked(event.item, event.reason);
       case "escalated": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.escalated, event.at);
+      case "verifyWaiting": return this.onVerifyWaiting(event.item, event.reason);
       case "unblocked": return this.onUnblocked(event.item, event.reason);
       case "merged": return this.onMerged(event.item);
       case "session": return this.onSession(event.session, logger);
@@ -479,6 +483,25 @@ export class PaperclipMirror implements WorkObserver {
     this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : this.ghStage.get(id));
     await this.move(id, step.stage);
     await this.note(id, text, { event: "blocked", handoff: handoffTo(step.stage, item) });
+  }
+
+  /**
+   * Dev verification waits on something that clears by itself: the card stays in
+   * review with the reason, never Blocked, which is a person's queue (jerky_ops#18,
+   * 2026-10-15, sat in Blocked through a ten-minute deploy). The same reason twice
+   * writes nothing.
+   */
+  async onVerifyWaiting(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
+    const id = await this.resolve(item, false);
+    if (!id || this.holds.has(id)) return;
+    const step = PAPERCLIP_STEPS.verifyWaiting;
+    const text = fill(step.note, { reason: this.clean(reason) });
+    if (this.verifyWaitNote.get(id) === text) return;
+    this.verifyWaitNote.set(id, text);
+    this.blockedAt.delete(id);
+    this.blockedReason.delete(id);
+    await this.move(id, step.stage);
+    await this.note(id, text, { event: "progress" });
   }
 
   /**
