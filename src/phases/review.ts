@@ -14,6 +14,7 @@ import {
   findOpenPromotionPR,
 } from "../github.js";
 import { reviewViaTechLead } from "../agent.js";
+import { REVIEW_MILESTONES, ReviewProgressRelay } from "../review-progress.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { BackoffTracker, formatWait } from "../backoff.js";
 import {
@@ -142,13 +143,23 @@ export async function tryReview(
   let report: SessionReport | undefined;
   const reviewSince = new Date();
   const reviewer = "Tech Lead";
+  // The Tech Lead's milestones (reading, depth check, final check), relayed to
+  // the cards as it reaches each stage — at most one comment per stage, since
+  // Paperclip cannot edit one (review-progress.ts). Off the build path, never
+  // fatal: emit queues for observers and swallows their errors.
+  const progress = new ReviewProgressRelay((milestones) =>
+    hasObservers() ? emit({ kind: "reviewProgress", repo: repoConfig.githubRepo, pr: candidate.prNumber, items: session.items, milestones }, null, reviewLogger) : undefined);
+  const onProgress = (m: Parameters<ReviewProgressRelay["push"]>[0]) => {
+    reviewLogger.info(`Tech Lead PR #${candidate.prNumber}: ${REVIEW_MILESTONES[m.milestone]}${m.detail ? ` — ${m.detail}` : ""}`);
+    progress.push(m);
+  };
 
   try {
     await emit({ kind: "session", session: { ...session, status: "started", reviewer } }, null, reviewLogger);
     // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
     // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
     // failure is charged and the repo asks again after a backoff.agentUnavailable wait.
-    const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath)
+    const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress)
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
@@ -303,6 +314,11 @@ export async function tryReview(
     return false;
   } finally {
     activeRuns.delete(runAbort);
+    // The end comment carries the whole checklist, so a stage post still
+    // settling is dropped rather than sent after it.
+    progress.close();
+    const milestones = progress.milestones;
+    if (milestones.length > 0) report = { ...(report ?? {}), milestones };
     await emit({ kind: "session", session: { ...session, ...ended, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In

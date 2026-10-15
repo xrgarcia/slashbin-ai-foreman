@@ -1,6 +1,7 @@
 import type { RepoConfig, AgentConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { Stage, StageOrDone, Transition } from "./lifecycle.js";
+import type { ReviewMilestone } from "./review-progress.js";
 
 /**
  * One unit of work a source hands to the pipeline. Deliberately minimal: the
@@ -108,6 +109,12 @@ export type WorkEvent =
   /** A Claude (or Tech Lead / SRE) session on a repo started, changed hands, or ended. */
   | { readonly kind: "session"; readonly session: SessionEvent }
   /**
+   * A running review reached a new stage: every milestone so far, for the
+   * cards of the issues the PR delivers (review-progress.ts). Sent at most
+   * once per stage; the review's end comes as its session event.
+   */
+  | { readonly kind: "reviewProgress"; readonly repo: string; readonly pr: number; readonly items: ReadonlyArray<WorkItem>; readonly milestones: ReadonlyArray<ReviewMilestone> }
+  /**
    * The repo's FULL set of items waiting out a back-off this cycle, each with
    * the reason it waits. An item missing from a later set has stopped waiting.
    */
@@ -197,6 +204,8 @@ export interface SessionReport {
   readonly pr?: SessionPr;
   /** A review's outcome, from its trailer and the review it posted. */
   readonly review?: SessionReview;
+  /** A Tech Lead review's milestones, as far as it got (review-progress.ts). */
+  readonly milestones?: ReadonlyArray<ReviewMilestone>;
 }
 
 export interface SessionPr {

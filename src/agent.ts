@@ -10,6 +10,7 @@ import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
 import { redactAll } from "./redact.js";
+import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "./review-progress.js";
 import { claudeTrustEnabled, ensureClaudeTrust, isUntrustedWarning } from "./claude-trust.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./github/conventions.js";
 export { redactAll };
@@ -1461,6 +1462,10 @@ export async function runCustomStage(
  * `{ fallback: true }` and the caller waits and offers the PR again — never to
  * Claude (Ray, 2026-10-10). Any other non-zero exit is an ordinary failure: it
  * may have written.
+ *
+ * While it runs, each `TECH_LEAD_PROGRESS` line on its stderr (reading, depth
+ * check, final check: review-progress.ts) goes to `onProgress` as it arrives.
+ * A callback that throws is ignored: progress never fails a review.
  */
 export async function reviewViaTechLead(
   repoConfig: RepoConfig,
@@ -1469,6 +1474,7 @@ export async function reviewViaTechLead(
   logger: Logger,
   abortSignal?: AbortSignal,
   transcriptPath?: string,
+  onProgress?: (m: ReviewMilestone) => void,
 ): Promise<ReviewResult | { fallback: true; reason: string }> {
   const techLead = agentConfig.techLeadPath;
   if (!techLead) return { fallback: true, reason: "techLeadPath not configured" };
@@ -1492,19 +1498,21 @@ export async function reviewViaTechLead(
     let stdout = "", stderr = "", timedOut = false;
     const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath)) : null;
     child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
-    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); });
+    const milestones = onProgress ? milestoneReader(onProgress) : null;
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); milestones?.push(t); });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, agentConfig.reviewMaxDurationMs);
     const onAbort = () => child.kill("SIGTERM");
     abortSignal?.addEventListener("abort", onAbort, { once: true });
     child.on("close", (code) => {
       clearTimeout(timer);
       abortSignal?.removeEventListener("abort", onAbort);
+      milestones?.end();
       if (log) {
         log.write(outRedactor.flush());
         log.write(errRedactor.flush());
         log.end();
       }
-      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(stderr, secrets), timedOut });
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(withoutProgressLines(stderr), secrets), timedOut });
     });
   });
 
@@ -1515,7 +1523,7 @@ export async function reviewViaTechLead(
   }
   if (out.timedOut) return { success: false, error: "Tech Lead review timed out" };
   if (out.code !== 0) {
-    return { success: false, error: `Tech Lead review failed (exit ${out.code}): ${(out.stderr || out.stdout).trim().slice(-400)}` };
+    return { success: false, error: `Tech Lead review failed (exit ${out.code}): ${(out.stderr.trim() || out.stdout).trim().slice(-400)}` };
   }
 
   const trailers = parseReviewTrailerRecords(out.stdout);
