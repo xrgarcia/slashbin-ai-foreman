@@ -135,7 +135,7 @@ six status buckets. Each is sent to Paperclip under its
 |---|---|---|
 | `todo` | task creation, `queued`, `changesRequested` | `statusMap.todo`, else `todo` |
 | `in_progress` | `claim`, `releaseQueued`, `reviseStarted`, `reviewStarted`, `verifyStarted` | `statusMap.in_progress`, else `in_progress` |
-| `in_review` | `inReview`, `approved`, `awaitingVerify`, `releaseWaiting`, `prodHeld` | `statusMap.in_review`, else `in_review` |
+| `in_review` | `inReview`, `approved`, `awaitingVerify`, `verifyWaiting`, `releaseWaiting`, `prodHeld` | `statusMap.in_review`, else `in_review` |
 | `blocked` | `blocked`, `escalated`, `waiting` | `statusMap.blocked`, else `blocked` |
 | `done` | `released`, `inProduction`, `prodVerified` | `statusMap.done`, else `done` |
 | `cancelled` | never by default | `statusMap.cancelled`, else `cancelled` |
@@ -187,6 +187,7 @@ knows of are redacted from every note before it is sent.
 | `changesRequested` | The review asked for changes; the Foreman will revise. | `changesRequested` | `changes requested` |
 | `approved` | The review approved the pull request. | `pendingVerification` | `approved` |
 | `awaitingVerify` | The Tech Lead approved and merged the pull request; the issue waits for dev verification. | `merged` | `merged; awaiting dev verification` |
+| `verifyWaiting` | Dev verification waits on something that clears by itself (the deploy is still building, or the SRE could not run) and resumes on its own. The card stays in review; Blocked is for holds a person must clear. | `merged` | `merged; dev verification waiting: {reason}` |
 | `blocked` | The Foreman declines the issue or runs out of revision retries (with its reason): it needs a person. | `blocked` | `blocked: {reason}` |
 | `escalated` | Revise found the PR not converging (sent back `REVIEW_ROUNDS_ALERT` times since the last EM scope ruling, or the Tech Lead's review carries its escalate marker): revision stops until a PR comment opening `**EM scope ruling` is posted. Or a held skip used up `backoff.skip.maxAttempts` sessions: no session runs until a person changes the issue. | `needsRuling` | `blocked: needs an EM scope ruling: {reason}` |
 | `merged` | The pull request is merged to the base branch. | unchanged | `merged` |
