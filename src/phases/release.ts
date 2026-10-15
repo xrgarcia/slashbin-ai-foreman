@@ -47,6 +47,7 @@ import {
   findPvComment,
   readPvResult,
   findSreSweepHold,
+  RELEASE_STOP_MARK,
   ensureReleaseTag,
   addBlockedLabel,
   removeBlockedLabel,
@@ -263,7 +264,7 @@ async function holdRelease(
 /** A STOP: the issues need a person. Blocked, with the reason on each; `release pending` stays. */
 async function stopRelease(repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger): Promise<void> {
   const body =
-    `**Release stopped: needs a person.** ${pr ? `Release PR #${pr}: ` : ""}${reason}${evidence ? ` (${evidence})` : ""}. ` +
+    `${RELEASE_STOP_MARK} ${pr ? `Release PR #${pr}: ` : ""}${reason}${evidence ? ` (${evidence})` : ""}. ` +
     `The Foreman will not retry it while this issue carries \`${repoConfig.github.blockedLabel}\`; remove the label to release it again.`;
   for (const n of issues) {
     try {

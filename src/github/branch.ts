@@ -81,6 +81,35 @@ export interface BranchDrift {
   developAheadOfMain: number;
   /** Files differing between main and develop. Zero means merge-commit-only drift. */
   developAheadFiles: number;
+  /**
+   * The paths of those files, as GitHub lists them (capped at
+   * {@link COMPARE_FILE_CAP}). Absent when the compare did not return them.
+   */
+  developAheadPaths?: string[];
+}
+
+/** GitHub's compare API lists at most this many files; a list this long may be truncated. */
+export const COMPARE_FILE_CAP = 300;
+
+/**
+ * A path whose change has no production effect: agent tooling under `.claude/`
+ * (the skill syncs, chore commits). It rides the next real release and never
+ * makes `develop` worth promoting on its own (jerky_shipping, 2026-10-15:
+ * develop ahead by two SKILL.md files, WARNed as a stalled promotion hourly).
+ */
+export function isNonProductionPath(path: string): boolean {
+  return path.startsWith(".claude/");
+}
+
+/**
+ * How many of the drift's changed files can change production: every file
+ * outside `.claude/`. Unknown counts as production: without the path list, or
+ * when it may be truncated, the full file count is returned.
+ */
+export function productionDriftFiles(drift: BranchDrift): number {
+  const paths = drift.developAheadPaths;
+  if (!paths || paths.length !== drift.developAheadFiles || paths.length >= COMPARE_FILE_CAP) return drift.developAheadFiles;
+  return paths.filter((p) => !isNonProductionPath(p)).length;
 }
 
 /**
@@ -97,7 +126,7 @@ export function checkBranchDrift(
   try {
     const json = gh([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}`,
-      "--jq", '{"ahead": .ahead_by, "behind": .behind_by, "files": ((.files // []) | length)}',
+      "--jq", '{"ahead": .ahead_by, "behind": .behind_by, "files": ((.files // []) | length), "paths": [(.files // [])[].filename]}',
     ], cwd);
 
     const result = JSON.parse(json);
@@ -110,6 +139,7 @@ export function checkBranchDrift(
       // Counting commits alone flags every repo, forever. GitHub truncates this
       // array on very large diffs but never empties it, so 0 really means 0.
       developAheadFiles: result.files ?? 0,
+      ...(Array.isArray(result.paths) ? { developAheadPaths: result.paths.filter((p: unknown): p is string => typeof p === "string") } : {}),
     };
   } catch (err) {
     if (isBackoffRefusal(err)) {

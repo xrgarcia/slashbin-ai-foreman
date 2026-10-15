@@ -31,6 +31,8 @@ import {
   hasLabel,
   commentOnIssue,
   productionHead,
+  productionDriftFiles,
+  findReleaseStop,
   type PromotionIssue,
 } from "../github.js";
 import { emit, advance } from "../work-source.js";
@@ -171,7 +173,7 @@ const STALL_MARK = "<!-- foreman:promotion-stall -->";
  * so a later stall comments again. With nobody to comment on, the log line is
  * the record.
  */
-function noteStall(repoConfig: RepoConfig, files: number, logger: Logger): void {
+function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): void {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
   const waiting = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
     .filter((i) => hasLabel(i, prApproved) && !hasLabel(i, repoConfig.github.blockedLabel))
@@ -179,7 +181,8 @@ function noteStall(repoConfig: RepoConfig, files: number, logger: Logger): void 
   const st = loadRepoState(repoConfig.name);
   const noted = new Set((st.promotionStallNoted ?? []).filter((n) => waiting.includes(n)));
   const fresh = waiting.filter((n) => !noted.has(n));
-  if (waiting.length === 0) {
+  // A held release names the work: `noteHeldRelease` already said whose it is.
+  if (waiting.length === 0 && held.length === 0) {
     logger.warn(
       `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch} and no issue carries ` +
       `"${readyForProd}" or "${prApproved}": promotion is STALLED and no issue names the work. Nothing was commented.`,
@@ -208,6 +211,65 @@ function noteStall(repoConfig: RepoConfig, files: number, logger: Logger): void 
     else delete st.promotionStallNoted;
     saveRepoState(repoConfig.name, st);
   }
+}
+
+/**
+ * Open issues in the release that a stop holds: `release pending` and
+ * `blocked` (a predeploy-stop, a Tech Lead refusal, an SRE sweep hold). Their
+ * work is what `develop` carries, so the drift is theirs, not unnamed.
+ */
+function heldReleaseIssues(repoConfig: RepoConfig, logger: Logger): number[] {
+  const { releasePending } = repoConfig.lifecycleLabels;
+  return getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => hasLabel(i, releasePending) && hasLabel(i, repoConfig.github.blockedLabel))
+    .map((i) => i.number)
+    .sort((a, b) => a - b);
+}
+
+/** One held issue, worded for the log: whose release, which hold, on which PR. */
+function describeHeld(repoConfig: RepoConfig, n: number, fallbackPr: number | null, logger: Logger): string {
+  let stop: { pr: number | null; hold: string } | null = null;
+  try {
+    stop = findReleaseStop(repoConfig, n);
+  } catch (err) {
+    logger.debug(`Could not read the release stop on #${n}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const pr = stop?.pr ?? fallbackPr;
+  return `release of #${n} held: ${repoConfig.github.blockedLabel}${stop ? ` after ${stop.hold}` : ""}` +
+    `${pr ? ` on PR #${pr}` : ""} — waiting on a person`;
+}
+
+/**
+ * `develop` carries work whose release a stop is holding. Named in the log
+ * once per change of the held set (persisted, so a restart does not repeat
+ * it); while it is unchanged, each check is a debug line. The issue already
+ * carries the stop's own comment, so nothing is commented here. Returns the
+ * line for observers.
+ */
+function noteHeldRelease(repoConfig: RepoConfig, held: number[], files: number, logger: Logger): string {
+  const key = held.join(",");
+  const st = loadRepoState(repoConfig.name);
+  const prefix = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}: `;
+  if (st.promotionHeldNoted === key) {
+    const line = held.map((n) => `release of #${n} held (${repoConfig.github.blockedLabel})`).join("; ");
+    logger.debug(`${prefix}${line} — unchanged since last noted`);
+    return line;
+  }
+  const open = findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
+  const listed = open ? new Set(releaseIssues(open.body)) : new Set<number>();
+  const line = held.map((n) => describeHeld(repoConfig, n, open && listed.has(n) ? open.number : null, logger)).join("; ");
+  logger.warn(`${prefix}${line}.`);
+  st.promotionHeldNoted = key;
+  saveRepoState(repoConfig.name, st);
+  return line;
+}
+
+/** Forget the noted held release once it no longer holds `develop`, so a later stop is named again. */
+function clearHeldNote(repoConfig: RepoConfig): void {
+  const st = loadRepoState(repoConfig.name);
+  if (st.promotionHeldNoted === undefined) return;
+  delete st.promotionHeldNoted;
+  saveRepoState(repoConfig.name, st);
 }
 
 /**
@@ -287,21 +349,36 @@ export async function tryPromotion(
       // ahead in the steady state — the main -> develop sync PR's merge commit,
       // which carries no file change. Warning on `ahead > 0` fires on every repo
       // on every check, forever, and a warning that is always on is not a signal.
-      if (drift && drift.developAheadFiles > 0) {
-        promoLogger.info(
-          `${repoName}: ${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch} ` +
-          `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${repoConfig.lifecycleLabels.readyForProd}" — ` +
-          "promotion is waiting on EM verification.",
-          { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles },
-        );
-        noteStall(repoConfig, drift.developAheadFiles, promoLogger);
-        await emit({
-          kind: "promotionStall",
-          repo: repoConfig.githubRepo,
-          detail: `${repoConfig.baseBranch} carries ${drift.developAheadFiles} changed file(s) not on ${repoConfig.productionBranch}; ` +
-            `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`,
-        }, null, promoLogger);
+      //
+      // And only on files that can change production: a drift confined to
+      // `.claude/` (skill syncs) rides the next real release and is not a stall.
+      const files = drift ? productionDriftFiles(drift) : 0;
+      if (drift && files > 0) {
+        const held = heldReleaseIssues(repoConfig, promoLogger);
+        let detail: string;
+        if (held.length > 0) {
+          detail = noteHeldRelease(repoConfig, held, files, promoLogger);
+        } else {
+          clearHeldNote(repoConfig);
+          promoLogger.info(
+            `${repoName}: ${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch} ` +
+            `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${repoConfig.lifecycleLabels.readyForProd}" — ` +
+            "promotion is waiting on EM verification.",
+            { developAheadOfMain: drift.developAheadOfMain, developAheadFiles: drift.developAheadFiles, productionFiles: files },
+          );
+          detail = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}; ` +
+            `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`;
+        }
+        noteStall(repoConfig, files, promoLogger, held);
+        await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail }, null, promoLogger);
       } else if (drift) {
+        if (drift.developAheadFiles > 0) {
+          promoLogger.debug(
+            `${repoConfig.baseBranch} differs from ${repoConfig.productionBranch} only under .claude/ ` +
+            `(${drift.developAheadFiles} file(s)): no production effect, rides the next release`,
+          );
+        }
+        clearHeldNote(repoConfig);
         await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
       }
     }
@@ -309,6 +386,7 @@ export async function tryPromotion(
   }
 
   // Issues are ready, so promotion is moving, not stalled.
+  clearHeldNote(repoConfig);
   await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
   if (issues.length > 0) promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
