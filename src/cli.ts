@@ -177,6 +177,7 @@ async function main(): Promise<void> {
         config.paperclip,
         mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
         logger,
+        config.lifecycleLabels,
       );
       addObserver(mirror);
       // Housekeeping off the observer queue: project backfill, retiring the old live task.

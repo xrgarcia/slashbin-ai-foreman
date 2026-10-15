@@ -274,8 +274,8 @@ the snapshot of the repo:
 
 - an open issue with no card gets one (at most 20 card writes a cycle), filed in the Unplaced project;
 - title \`{name}#{N} {title}\`; description: identity line, \`GitHub: open · stage <stage>\`,
-  \`GitHub: open · not approved\` or \`GitHub: closed completed|not_planned\`, a blank line, the
-  issue's URL (\`stage awaitingRelease\` when an open PR into the production branch names it);
+  \`GitHub: open · not approved\` or \`GitHub: closed completed|not_planned\` (at a stage a role
+  holds, then \`Next: <role> — <action>\`; see **Handoffs**), a blank line, the issue's URL (\`stage awaitingRelease\` when an open PR into the production branch names it);
 - not approved: \`backlog\`, nobody's, no stage label; closed: \`done\`, or \`cancelled\` when
   not planned, no stage label, the last holder kept; approved: the lifecycle stage, as before;
 - held by the blocked label: the holder's reason as the unblock descriptor
@@ -436,6 +436,20 @@ ${rolesExample}
 
 \`reportsTo\` names another role key or \`${PAPERCLIP_FOREMAN_ROLE}\`; \`agentReportsTo\` is the
 Foreman's own. Both are applied at registration; left unset, Paperclip's value is kept.
+
+### Handoffs
+
+When a step moves a card to a stage a role holds (not the Foreman's own agent), the step's note
+carries a handoff block: **Next: \`<role name>\` — action needed** (or *no action needed from this
+card*, at a stage the Foreman drives itself), then **Do**, **Why** (the stage's reason plus the
+last session's outcome and time), **Links** (issue, PR, evidence) and **Done when** (the signal
+the Foreman watches). The text for every stage is one table, \`STAGE_HANDOFF\` in
+\`src/paperclip/handoff.ts\`; label names come from \`lifecycleLabels\`. A session's start note
+carries none: the session runs on the seat that already holds the card. On a card the Foreman
+owns (\`ownsCards\`), the description gets the same action as a third line,
+\`Next: <role name> — <action>\`. SLA-1550 (2026-10-15): a card reached the EM at
+\`pendingVerification\` saying only "Dev verification passed" and "approved", and the release
+gate sat.
 
 ### Live sessions
 

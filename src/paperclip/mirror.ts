@@ -64,9 +64,10 @@ import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./c
 import { STATE_STAGE } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {
-  BACKLOG_STATUS, CONFIG_KEY, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  BACKLOG_STATUS, CONFIG_KEY, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
+import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFacts, type HandoffLabels } from "./handoff.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment, type PaperclipIssue } from "./client.js";
 import { commentsOf, finishComment, redactComment, reviewProgressComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
 import type { ReviewMilestone } from "../review-progress.js";
@@ -221,8 +222,35 @@ const LEASE_RENEW_MS = 4 * 60_000;
 
 type SessionPhase = keyof typeof SESSION_STAGE;
 
-/** How a note is posted: the comment event that gates it, and what kind of step wrote it. */
-type NoteOpts = { readonly event: PaperclipCommentEvent; readonly tag?: "prLink" | "merged" | "session" };
+/**
+ * How a note is posted: the comment event that gates it, what kind of step
+ * wrote it, and the stage its step moved the card to (`handoff`): when another
+ * seat holds that stage, the note carries the handoff (handoff.ts), rendered
+ * when it is posted, so a note a session deferred names the session's outcome.
+ */
+type NoteOpts = {
+  readonly event: PaperclipCommentEvent;
+  readonly tag?: "prLink" | "merged" | "session";
+  readonly handoff?: { readonly stage: PaperclipStage; readonly item: WorkItem };
+};
+
+/** The handoff option for a move to `to`: only a lifecycle stage can hand a card to a seat. */
+function handoffTo(to: PaperclipStepMove | PaperclipStage | "done", item: WorkItem): NoteOpts["handoff"] {
+  return to === null || to === "done" || to === "waiting" ? undefined : { stage: to, item };
+}
+
+/** The outcome a session's end leaves on its cards, for the next handoff's "why". */
+function outcomeOf(e: SessionEvent): string {
+  const detail = (e.detail ?? "").trim();
+  if (detail) return detail;
+  const v = e.report?.review;
+  if (e.phase === "review" && v) return `${e.reviewer ?? "review"} verdict: ${v.verdict}`;
+  if (e.phase === "verify") return e.status === "finished" ? "dev verification passed" : "dev verification did not pass";
+  return `${e.phase} ${e.status}`;
+}
+
+/** The longest session outcome a handoff quotes. */
+const EVIDENCE_CAP = 240;
 
 /** What a card shows that the Foreman writes with `ownsCards`, as the last scan (or write) left it. */
 type RowContent = { title: string; description: string; assigneeAgentId: string | null; assigneeUserId: string | null };
@@ -324,14 +352,22 @@ export class PaperclipMirror implements WorkObserver {
   private readonly holdAction = new Map<string, string>();
   /** "<task id> <comment url>": the holder's comment is on the card, posted or found; never read again. */
   private readonly holdCommented = new Set<string>();
+  /** Task id → the PR last seen delivering its issue (a PR link, a session), for the handoff's links. */
+  private readonly prOf = new Map<string, { number: number; url?: string }>();
+  /** Task id → the last session's outcome on it and when, the next handoff's "why"; used once. */
+  private readonly evidence = new Map<string, { text: string; at: string }>();
+  /** The lifecycle label names a handoff quotes. */
+  private readonly labels: HandoffLabels;
 
   constructor(
     private readonly client: PaperclipClient,
     private cfg: PaperclipConfig,
     private readonly secrets: ReadonlyArray<{ name: string; value: string }>,
     private readonly logger: Logger,
+    labels: Partial<HandoffLabels> = {},
   ) {
     this.comments = commentsOf(cfg);
+    this.labels = { ...DEFAULT_HANDOFF_LABELS, ...labels };
   }
 
   /**
@@ -411,12 +447,15 @@ export class PaperclipMirror implements WorkObserver {
     const id = await this.resolve(item, false);
     if (!id) return;
     await this.move(id, step.stage);
-    await this.note(id, step.note, { event: "progress" });
+    await this.note(id, step.note, { event: "progress", handoff: handoffTo(step.stage, item) });
   }
 
   async onPrLink(item: WorkItem, prUrl: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const id = await this.resolve(item, false);
-    if (id) await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }), { event: "progress", tag: "prLink" });
+    if (!id) return;
+    const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
+    if (n) this.prOf.set(id, { number: Number(n), url: prUrl });
+    await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }), { event: "progress", tag: "prLink" });
   }
 
   /** Blocked, or (`step` escalated) parked for the EM's ruling in the stage that holder owns. */
@@ -439,7 +478,7 @@ export class PaperclipMirror implements WorkObserver {
     // Foreman for ten hours with nobody told).
     this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : this.ghStage.get(id));
     await this.move(id, step.stage);
-    await this.note(id, text, { event: "blocked" });
+    await this.note(id, text, { event: "blocked", handoff: handoffTo(step.stage, item) });
   }
 
   /**
@@ -456,7 +495,7 @@ export class PaperclipMirror implements WorkObserver {
     this.blockedReason.delete(id);
     const stage = this.ghStage.get(id) ?? "approved";
     if (!(await this.move(id, stage))) return;
-    await this.note(id, this.clean(reason), { event: "progress" });
+    await this.note(id, this.clean(reason), { event: "progress", handoff: handoffTo(stage, item) });
   }
 
   /**
@@ -556,7 +595,7 @@ export class PaperclipMirror implements WorkObserver {
       if (stage === "blocked") this.labelBlocked.add(id);
       else this.labelBlocked.delete(id);
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
-      await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress" });
+      await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress", handoff: handoffTo(stage, item) });
     }
     // Without the cards, a card for an issue closed since the last read follows it.
     if (!owned) {
@@ -613,13 +652,19 @@ export class PaperclipMirror implements WorkObserver {
     logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
   }
 
-  /** What a card the Foreman owns says: title and description, from its issue. */
-  private cardContent(c: SnapshotCard): { title: string; description: string } {
+  /**
+   * What a card the Foreman owns says: title and description, from its issue.
+   * At a stage another seat holds, the line under `stage <stage>` says what that
+   * seat does next; line 2 keeps its shape, which readers of the board parse.
+   */
+  private cardContent(c: SnapshotCard, id: string | null = null): { title: string; description: string } {
     const [owner = "", name = ""] = c.item.repo.split("/");
     const line = c.state !== "open" ? `GitHub: closed ${c.state}` : `GitHub: open · ${c.stage ? `stage ${c.stage}` : "not approved"}`;
+    const facts = c.state === "open" && c.stage && c.stage !== "done" ? this.handoffFacts(id, c.stage, c.item) : null;
+    const next = facts && c.stage && c.stage !== "done" ? `\n${handoffNextLine(c.stage, facts, this.labels)}` : "";
     return {
       title: fill(PAPERCLIP_OWNED_TITLE_FORMAT, { repo: c.item.repo, owner, name, N: String(c.item.issueNumber), title: c.title }),
-      description: `${this.keyOf(c.item)}\n${line}\n\n${c.url}`,
+      description: `${this.keyOf(c.item)}\n${line}${next}\n\n${c.url}`,
     };
   }
 
@@ -643,7 +688,7 @@ export class PaperclipMirror implements WorkObserver {
    * left as they are, as the lifecycle pass leaves them.
    */
   private async syncCard(id: string, c: SnapshotCard, budget: { left: number }, unconfirmed = false): Promise<void> {
-    const want = this.cardContent(c);
+    const want = this.cardContent(c, id);
     const have = this.rowContent.get(id);
     const state = this.rowState.get(id) ?? "";
     const body: Record<string, unknown> = {};
@@ -754,7 +799,7 @@ export class PaperclipMirror implements WorkObserver {
       // once GitHub reads it open).
       if (event.state === "open" && this.isClosedCard(id)) continue;
       if (step.stage && !(await this.move(id, step.stage))) continue;
-      await this.note(id, fill(step.note, vars), { event: "release" });
+      await this.note(id, fill(step.note, vars), { event: "release", handoff: handoffTo(step.stage, item) });
     }
   }
 
@@ -1045,6 +1090,19 @@ export class PaperclipMirror implements WorkObserver {
       const retry = event.phase === "implement" && event.status === "started" && this.retrying.has(this.keyOf(item));
       // The step notes speak for the item worked; an untouched one gets none.
       const text = this.comments.enabled ? sessionComment(event, item, this.comments, retry) : untouched(event, item) ? undefined : legacy;
+      // What the next handoff on this card cites: the PR, and this session's outcome.
+      const pr = event.report?.pr ?? (event.pr !== undefined ? { number: event.pr } : undefined);
+      if (pr && !untouched(event, item)) this.prOf.set(id, { number: pr.number, ...(pr.url ? { url: pr.url } : {}) });
+      if (event.status === "started") this.evidence.delete(id);
+      else if ((event.status === "finished" || event.status === "failed") && !untouched(event, item)) {
+        const said = this.clean(outcomeOf(event));
+        this.evidence.set(id, { text: said.length > EVIDENCE_CAP ? `${said.slice(0, EVIDENCE_CAP - 1)}…` : said, at: new Date().toISOString() });
+      }
+      // The stage this session's note hands the card to: on the end, the stage
+      // it returns to, unless a state reported meanwhile moves it (that state's
+      // deferred note carries it). A start hands nothing over: the session runs
+      // on the seat that already holds the card, and its note names who.
+      let handoff: NoteOpts["handoff"];
       let released = false;
       if (event.status === "started" && phase in SESSION_STAGE) {
         const h = this.holds.get(id);
@@ -1063,11 +1121,12 @@ export class PaperclipMirror implements WorkObserver {
         if (h && --h.count <= 0) {
           this.holds.delete(id);
           await this.move(id, h.restore ?? SESSION_FALLBACK_STAGE[h.phase]);
+          if (h.restore === null) handoff = handoffTo(SESSION_FALLBACK_STAGE[h.phase], item);
           leaseChanged = true;
           released = true;
         }
       }
-      if (text) await this.note(id, text, opts);
+      if (text) await this.note(id, text, handoff ? { ...opts, handoff } : opts);
       if (released) await this.flushDeferred(id, event);
     }
     if (leaseChanged) await this.writeLease();
@@ -1337,7 +1396,8 @@ export class PaperclipMirror implements WorkObserver {
       this.deferred.set(id, q);
       return;
     }
-    const body = finishComment(text, this.comments, this.secrets);
+    const handoff = opts.handoff ? this.handoffFor(id, opts.handoff.stage, opts.handoff.item) : null;
+    const body = finishComment(handoff ? `${text}\n\n${handoff}` : text, this.comments, this.secrets);
     if (!body) return;
     // Never the same note twice in a row (SLA-514 got one four times).
     if ((await this.latestComment(id)) === body) return;
@@ -1348,6 +1408,26 @@ export class PaperclipMirror implements WorkObserver {
       ? await this.safeCall("post note", () => this.client.updateIssue(id, { comment: body, status }), id)
       : await this.safeCall("post note", () => this.client.createComment(id, body), id);
     if (sent.ok) this.lastNote.set(id, body);
+  }
+
+  /**
+   * The handoff a note to a card moved to `stage` carries: null when the
+   * Foreman holds that stage. Cites the last session's outcome once, so a later
+   * handoff never offers it as its reason.
+   */
+  private handoffFor(id: string, stage: PaperclipStage, item: WorkItem): string | null {
+    const evidence = this.evidence.get(id);
+    this.evidence.delete(id);
+    const facts = this.handoffFacts(id, stage, item, evidence);
+    return facts ? handoffComment(stage, facts, this.labels) : null;
+  }
+
+  /** What a handoff to `stage` names, or null when the Foreman holds that stage. */
+  private handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"]): HandoffFacts | null {
+    const seat = stageSeat(this.cfg, stage);
+    if (!seat) return null;
+    const pr = id ? this.prOf.get(id) : undefined;
+    return { repo: item.repo, issueNumber: item.issueNumber, seat, ...(pr ? { pr } : {}), ...(evidence ? { evidence } : {}) };
   }
 
   /**
