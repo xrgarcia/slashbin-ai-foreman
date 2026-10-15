@@ -166,6 +166,10 @@ on its own checkout. **A new precondition the daemon needs is a doctor check.**
 Tokens: `FOREMAN_GITHUB_TOKEN`; `TECHLEAD_GITHUB_KEY` for review and sync merges;
 `SRE_GITHUB_KEY` with `srePath`.
 
+**Restart with `scripts/restart-drained.sh`, never by waiting for idle.** SIGTERM is the
+restart: new sessions stop at once, work in flight gets up to 60 min to finish, and the
+script exits 0 only on the new process's `Daemon starting`. A busy fleet is never idle.
+
 ## Key design decisions
 
 - **Skills own the workflow; the Foreman just triggers.** Implement/revise/review logic
