@@ -24,6 +24,7 @@ export const CONTRACT_READER_REL = join("scripts", "process", "handoff-contract-
 
 /** The EM's reader client, beside the reader: the one policy for calling it. */
 const CONTRACT_CLIENT = "handoff-contract-client.mjs";
+// Synchronous require of an ES module: Node 22.12+, the floor package.json declares.
 const load = createRequire(import.meta.url);
 
 const BEGIN = "--- Handoff contract ---";
