@@ -68,7 +68,8 @@ import {
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
-import { commentsOf, finishComment, redactComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
+import { commentsOf, finishComment, redactComment, reviewProgressComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
+import type { ReviewMilestone } from "../review-progress.js";
 
 export type { PaperclipBucket } from "./board.js";
 type Bucket = PaperclipBucket;
@@ -299,6 +300,7 @@ export class PaperclipMirror implements WorkObserver {
       case "unblocked": return this.onUnblocked(event.item, event.reason);
       case "merged": return this.onMerged(event.item);
       case "session": return this.onSession(event.session, logger);
+      case "reviewProgress": return this.onReviewProgress(event.pr, event.items, event.milestones);
       case "waiting": return this.onWaiting(event.repo, event.items, logger);
       case "release": return this.onRelease(event.release, logger);
       case "backoff": return event.paused ? this.onBackoffPause(event.upstream, event.reason ?? "", logger) : this.onBackoffResume(event.upstream, logger);
@@ -778,6 +780,21 @@ export class PaperclipMirror implements WorkObserver {
     }
     if (leaseChanged) await this.writeLease();
     await this.syncAgentStatus();
+  }
+
+  /**
+   * A running review reached a new stage: the checklist so far, on each
+   * item's card. Summaries only (`comments.enabled`), under the `progress`
+   * toggle; posted at once, like the session's own notes, not held behind it.
+   */
+  async onReviewProgress(pr: number, items: ReadonlyArray<WorkItem>, milestones: ReadonlyArray<ReviewMilestone>): Promise<void> {
+    if (!this.comments.enabled || !this.comments.events.progress || milestones.length === 0) return;
+    await this.recovery;
+    const text = reviewProgressComment(pr, milestones);
+    for (const item of items) {
+      const id = await this.resolve(item, false);
+      if (id) await this.note(id, text, { event: "progress", tag: "session" });
+    }
   }
 
   /** The agent's status: running while any session runs, else idle. Written only on a change. */

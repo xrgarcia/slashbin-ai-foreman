@@ -56,6 +56,7 @@ const EVENTS = {
   merged: "The item's PR merged to the base branch.",
   promoted: "A promotion PR to the production branch now carries the item.",
   session: "A session (implement, review, verify, revise) started or ended, with the items it held.",
+  reviewProgress: "A running Tech Lead review reached a new stage (reading, depth check, final check): every milestone so far, at most once per stage.",
   waiting: "Items the Foreman is holding, and on what (an occupied branch, a back-off).",
   release: "A release PR opened, merged or closed, with the items it carries.",
   promotionStall: "Promotion is stuck (the base branch is ahead of production and nothing is marked ready), or cleared.",

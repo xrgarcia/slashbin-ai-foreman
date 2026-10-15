@@ -180,7 +180,7 @@ no extra model call:
 | `reviewStart` | Who is reviewing which pull request; a hand-off to another reviewer, with the reason. |
 | `reviewEnd` | The verdict, whether it merged and deployed, the review's opening paragraph, and each finding as a bullet with its severity and location, read from the review the reviewer posted on the pull request. |
 | `reviseStart` / `reviseEnd` | The revision starting, then what it addressed (the agent's closing summary), or why it changed nothing. |
-| `progress` | The status notes: queued, under review, changes requested, approved, merged, waiting, back-off. |
+| `progress` | The status notes: queued, under review, changes requested, approved, merged, waiting, back-off; and a running Tech Lead review's checklist (reading, depth check, final check), at most one comment per stage, since Paperclip cannot edit a comment in place. |
 | `release` | The release notes: waiting on the release pull request, released, in production. |
 | `blocked` | Why the Foreman cannot go on, in its own words. |
 

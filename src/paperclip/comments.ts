@@ -9,6 +9,7 @@
 
 import type { SessionEvent, SessionReview, WorkItem } from "../adapters.js";
 import { redactAll } from "../redact.js";
+import { milestoneChecklist, type ReviewMilestone } from "../review-progress.js";
 import type { PaperclipCommentEvent, PaperclipConfig } from "./config.js";
 
 export type CommentsConfig = PaperclipConfig["comments"];
@@ -108,6 +109,18 @@ export function untouched(event: Pick<SessionEvent, "phase" | "status" | "worked
 }
 
 /**
+ * A running Tech Lead review's progress: the checklist so far. One per stage
+ * at most (review-progress.ts): Paperclip cannot edit a comment in place.
+ */
+export function reviewProgressComment(pr: number, milestones: ReadonlyArray<ReviewMilestone>): string {
+  return join(`**Tech Lead review of PR #${pr}: in progress**`, milestoneChecklist(milestones));
+}
+
+/** A review's checklist under its end comment, when the Tech Lead reported any. */
+const progressOf = (r: { milestones?: ReadonlyArray<ReviewMilestone> }): string | undefined =>
+  r.milestones?.length ? milestoneChecklist(r.milestones) : undefined;
+
+/**
  * The comment a session event posts on `item`'s card, or null when it posts
  * none. `retry` marks an implement start that repeats an attempt which did not
  * finish.
@@ -166,7 +179,7 @@ export function sessionComment(event: SessionEvent, item: WorkItem, c: CommentsC
       return join(`**Review handed to ${reviewer}**`, detail);
     case "review:finished": {
       const v = r.review;
-      if (!v) return join(`**Review finished** — ${prRef(r.pr, event.pr)}`, detail, text && text !== detail ? text : undefined);
+      if (!v) return join(`**Review finished** — ${prRef(r.pr, event.pr)}`, detail, text && text !== detail ? text : undefined, progressOf(r));
       const outcome = [
         v.merged ? "merged" : "not merged",
         v.deploy && !/^(NA|N\/A|none)$/i.test(v.deploy) ? `deploy ${v.deploy}` : "no deploy",
@@ -179,10 +192,11 @@ export function sessionComment(event: SessionEvent, item: WorkItem, c: CommentsC
         v.hold && `Held: ${v.hold}`,
         v.summary,
         findings,
+        progressOf(r),
       );
     }
     case "review:failed":
-      return `**Review failed** — ${prRef(r.pr, event.pr)}: ${detail || "unknown error"}`;
+      return join(`**Review failed** — ${prRef(r.pr, event.pr)}: ${detail || "unknown error"}`, progressOf(r));
     // Verify shares the review comment toggles (reviewStart / reviewEnd).
     case "verify:started":
       return `**${reviewer} verifying ${prRef(r.pr, event.pr)} in dev**`;
