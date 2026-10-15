@@ -27,22 +27,23 @@ test("Tech Lead and SRE envs carry the reader path when the EM checkout is confi
   }
 });
 
-test("a reader that prints the contract is wrapped in the delimiters", () => {
-  writeFileSync(reader, "console.log('contract slashbin.handoff-contract revision R');\n");
+// How the reader is called is the EM client's (tested in the EM repo); a stub client
+// beside the reader proves the Foreman delegates to it and only frames the text.
+const client = join(em, "scripts", "process", "handoff-contract-client.mjs");
+
+test("the client beside the reader answers, wrapped in the delimiters", () => {
+  writeFileSync(client, "export const contractText = (r) => 'contract slashbin.handoff-contract revision R via ' + r.split('/').pop();\n");
   const b = contractBlock(reader);
   assert.match(b, /^--- Handoff contract ---\n/);
-  assert.match(b, /contract slashbin\.handoff-contract revision R/);
+  assert.match(b, /contract slashbin\.handoff-contract revision R via handoff-contract-snapshot\.mjs/);
   assert.match(b, /\n--- End handoff contract ---$/);
 });
 
-test("the reader's own CONTRACT UNAVAILABLE passes through with its reason", () => {
-  writeFileSync(reader, "console.log('CONTRACT UNAVAILABLE: snapshot stale. Do not reconstruct.'); process.exit(1);\n");
-  assert.match(contractBlock(reader), /CONTRACT UNAVAILABLE: snapshot stale/);
-});
-
-test("no reader, a missing reader, or a crashing reader is CONTRACT UNAVAILABLE, never a throw", () => {
+test("no checkout, a relative reader, or no loadable client is CONTRACT UNAVAILABLE, never a throw", () => {
   assert.match(contractBlock(undefined), /CONTRACT UNAVAILABLE: no EM checkout configured/);
-  assert.match(contractBlock(join(em, "absent.mjs")), /CONTRACT UNAVAILABLE: contract reader not found/);
-  writeFileSync(reader, "throw new Error('boom');\n");
-  assert.match(contractBlock(reader), /CONTRACT UNAVAILABLE: contract reader exited 1 with no contract/);
+  assert.match(contractBlock("relative.mjs"), /CONTRACT UNAVAILABLE: contract reader not found/);
+  assert.match(contractBlock(join(tmpdir(), "no-em-here", "reader.mjs")), /CONTRACT UNAVAILABLE: contract client did not load beside/);
+  const broken = mkdtempSync(join(tmpdir(), "em-broken-"));
+  writeFileSync(join(broken, "handoff-contract-client.mjs"), "throw new Error('boom');\n");
+  assert.match(contractBlock(join(broken, "handoff-contract-snapshot.mjs")), /CONTRACT UNAVAILABLE: contract client did not load beside .*boom/);
 });

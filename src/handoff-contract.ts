@@ -1,6 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, isAbsolute, join } from "node:path";
 
 /**
  * The shared handoff contract (EM#614), as every runner the Foreman starts sees it.
@@ -13,17 +12,23 @@ import { isAbsolute, join } from "node:path";
  *
  * The env name is the one seam: the builder prompt gets the block from here, and
  * the Tech Lead and SRE get the path and render the block themselves.
+ *
+ * How the reader is called — invocation, timeout, what counts as a failure — is
+ * the EM's handoff-contract-client.mjs, loaded from beside the reader. It is the
+ * one copy the Tech Lead and SRE load too; the Foreman keeps only its framing.
  */
 export const CONTRACT_READER_ENV = "HANDOFF_CONTRACT_READER";
 
 /** Where the reader lives inside an EM checkout. */
 export const CONTRACT_READER_REL = join("scripts", "process", "handoff-contract-snapshot.mjs");
 
+/** The EM's reader client, beside the reader: the one policy for calling it. */
+const CONTRACT_CLIENT = "handoff-contract-client.mjs";
+// Synchronous require of an ES module: Node 22.12+, the floor package.json declares.
+const load = createRequire(import.meta.url);
+
 const BEGIN = "--- Handoff contract ---";
 const END = "--- End handoff contract ---";
-
-/** A reader that does not answer inside this is reported unavailable, never waited on. */
-const READER_TIMEOUT_MS = 10_000;
 
 /** The reader's absolute path for an EM checkout, or undefined when none is configured. */
 export function contractReaderPath(emRepoPath: string | undefined): string | undefined {
@@ -45,21 +50,23 @@ function unavailable(reason: string): string {
  * The contract block a builder prompt carries. Never throws: a missing reader, a
  * stale or absent snapshot, or a reader that fails all yield an explicit
  * CONTRACT UNAVAILABLE block naming why, so a runner never fills the gap from
- * memory. The reader runs in its own process, so a fault in it cannot reach the
- * daemon.
+ * memory. The client runs the reader in its own process, so a fault in the
+ * reader cannot reach the daemon.
  */
 export function contractBlock(readerPath: string | undefined): string {
   let text: string;
   if (!readerPath) {
     text = unavailable("no EM checkout configured (AI_AGENT_EM_REPO_PATH / emRepoPath), so no contract reader");
-  } else if (!existsSync(readerPath)) {
+  } else if (!isAbsolute(readerPath)) {
     text = unavailable(`contract reader not found at ${readerPath}`);
   } else {
-    const r = spawnSync(process.execPath, [readerPath, "--block"], { encoding: "utf8", timeout: READER_TIMEOUT_MS });
-    const out = (r.stdout ?? "").trim();
-    if (out.startsWith("CONTRACT UNAVAILABLE:") || (r.status === 0 && out)) text = out;
-    else if (r.error) text = unavailable(`contract reader did not run (${r.error.message})`);
-    else text = unavailable(`contract reader exited ${r.status ?? r.signal} with no contract`);
+    try {
+      const client = load(join(dirname(readerPath), CONTRACT_CLIENT)) as { contractText: (reader: string) => string };
+      text = client.contractText(readerPath);
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      text = unavailable(`contract client did not load beside ${readerPath} (${err.code ?? err.message})`);
+    }
   }
   return `${BEGIN}\n` +
     "This is the shared Slashbin handoff contract: authority for who owns each step and what each handoff carries. " +

@@ -14,7 +14,7 @@ and runs setup. This page is the same thing by hand.
 
 | Tool | Check |
 |---|---|
-| Node.js 18 or newer | `node --version` |
+| Node.js 22.12 or newer (the handoff-contract client is an ES module loaded with `require`) | `node --version` |
 | Claude Code, logged in | `claude --version` |
 | GitHub CLI | `gh --version` |
 
