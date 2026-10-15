@@ -41,7 +41,7 @@ node --version; claude --version; gh --version
 ls .ai-agent.json ai-agent.config.json 2>/dev/null
 ```
 
-- A missing tool → say which and how to get it (Node 18+, Claude Code logged in, the
+- A missing tool → say which and how to get it (Node 22.12+, Claude Code logged in, the
   GitHub CLI), and stop until it is there.
 - **A config already exists** → do not interview from scratch. Run `npm run build &&
   npm run doctor`, show the result, and go to step 5 to fix what it reports. Change the

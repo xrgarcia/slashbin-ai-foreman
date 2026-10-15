@@ -15,7 +15,7 @@
 // sync `ls-tree`, `cat-file` and `log` — reads of refs as last fetched, never a
 // fetch. A token is reported as set or unset, never printed.
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,9 +53,15 @@ function reason(err) {
 
 // --- Tools ---
 
-const major = Number(process.versions.node.split(".")[0]);
-if (major >= 18) line("PASS", "node", `v${process.versions.node}`);
-else line("FAIL", "node", `v${process.versions.node}; the Foreman needs 18 or newer.`);
+// The floor is package.json's engines.node (">=X.Y"), never a second copy here.
+const floor = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).engines.node.replace(/^>=\s*/, "");
+const atLeast = (have, want) => {
+  const [a, b] = [have, want].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return true;
+};
+if (atLeast(process.versions.node, floor)) line("PASS", "node", `v${process.versions.node}`);
+else line("FAIL", "node", `v${process.versions.node}; the Foreman needs ${floor} or newer.`);
 
 let haveGh = false;
 for (const [tool, hint] of [["claude", "install Claude Code and log in: https://docs.claude.com/claude-code"], ["gh", "install the GitHub CLI: https://cli.github.com"]]) {
