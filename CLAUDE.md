@@ -165,6 +165,8 @@ config file and no `AI_AGENT_REPO_PATH` the daemon refuses to start rather than 
 on its own checkout. **A new precondition the daemon needs is a doctor check.**
 Tokens: `FOREMAN_GITHUB_TOKEN`; `TECHLEAD_GITHUB_KEY` for review and sync merges;
 `SRE_GITHUB_KEY` with `srePath`.
+Skill copies follow a golden via `skillSync` (`docs/skill-sync.md`): code syncs a stale
+copy in the commit before an implement session, never a session, never all repos at once.
 
 **Restart with `scripts/restart-drained.sh`, never by waiting for idle.** SIGTERM is the
 restart: new sessions stop at once, work in flight gets up to 60 min to finish, and the

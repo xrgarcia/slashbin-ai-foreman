@@ -127,6 +127,7 @@ const human = (key, v) => (/Ms$/.test(key) && typeof v === "number" && v > 0 ? `
 const SEE = {
   lifecycleLabels: "see [Lifecycle labels](#lifecycle-labels-lifecyclelabels)",
   paperclip: "see [paperclip.md](paperclip.md)",
+  skillSync: "see [skill-sync.md](skill-sync.md)",
   github: "see [GitHub conventions](#github-conventions-github)",
   stages: `the built-ins in order: ${BUILTIN_STAGES.map(code).join(" → ")}`,
 };
@@ -308,6 +309,7 @@ out(
   "",
   "- `stages`: the stage list and custom stages, README \"Pipeline stages\" and `src/stages.ts`.",
   "- `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).",
+  "- `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).",
   "- The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).",
   "",
 );

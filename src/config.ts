@@ -9,6 +9,7 @@ import {
 } from "./paperclip/config.js";
 import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./github/conventions.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
+import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSyncConfig } from "./skill-sync.js";
 
 // --- Schemas ---
 
@@ -86,6 +87,9 @@ const repoEntrySchema = z.object({
   // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
   // the batch unapproved, as before, and nothing builds until a human approves.
   dependencyPreApproved: z.boolean().optional(),
+  // The skills this repo's copy follows when skillSync is on, in place of
+  // skillSync.skills. [] opts the repo out of skill sync.
+  skillSyncSkills: z.array(z.string()).optional(),
 });
 
 export const configSchema = z.object({
@@ -346,6 +350,11 @@ export const configSchema = z.object({
   // Global, never per repo: one Foreman is one Paperclip agent. prefault for
   // the same reason as above.
   paperclip: paperclipConfigSchema.prefault({}),
+
+  // Keep each repo's skill copies on a golden source, one approved issue at a
+  // time, off unless `enabled` (docs/skill-sync.md). prefault for the same
+  // reason as above.
+  skillSync: skillSyncConfigSchema.prefault({}),
 });
 
 // --- Types ---
@@ -402,6 +411,8 @@ export interface RepoConfig {
   reviewerLogin?: string;
   // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
   dependencyPreApproved: boolean;
+  /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
+  skillSyncSkills?: readonly string[];
   /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
   lifecycleLabels: LifecycleLabels;
   /** The fleet-wide GitHub conventions (`github` block) — the global value. */
@@ -461,6 +472,8 @@ export interface AgentConfig {
   stages: readonly StageEntry[];
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
+  /** Skill sync settings. Always present; `enabled` is false unless opted in. */
+  skillSync: SkillSyncConfig;
 }
 
 // --- Helpers ---
@@ -593,6 +606,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     stages: fileConfig.stages,
     github: fileConfig.github,
     paperclip: mergePaperclip(fileConfig.paperclip),
+    skillSync: mergeSkillSync(fileConfig.skillSync),
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -658,6 +672,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         reviewSkillPath: entry.reviewSkillPath ?? parsed.reviewSkillPath,
         reviewerLogin: entry.reviewerLogin ?? parsed.reviewerLogin,
         dependencyPreApproved: entry.dependencyPreApproved ?? false,
+        ...(entry.skillSyncSkills ? { skillSyncSkills: Object.freeze([...entry.skillSyncSkills]) } : {}),
         ...globals,
       };
     });
@@ -780,5 +795,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     github,
     stages,
     paperclip,
+    skillSync: resolveSkillSync(parsed.skillSync),
   });
 }
