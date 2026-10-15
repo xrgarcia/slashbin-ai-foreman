@@ -253,7 +253,40 @@ another tool created for the same issue is reused, not duplicated, **provided bo
 format**. A task the Foreman creates is titled from \`taskTitleFormat\` (default
 ${code(defaults.taskTitleFormat)}; \`{owner}\` and \`{name}\` are the two halves of \`{repo}\`), its
 description is the identity line, a blank line, and the issue's GitHub URL. The title is only
-ever written at creation, and never used to find a task, so changing the format renames nothing.
+ever written at creation, and never used to find a task, so changing the format renames nothing
+(with \`ownsCards\` off; see **Who writes which card**).
+
+When two tasks carry the same identity line, the card is the oldest one that is not cancelled
+(else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
+the receiver's sync the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+
+## Who writes which card
+
+Every card has one writer. The rule, which any writer evaluates from the config the Foreman
+publishes on its agent (\`foremanConfig\`) with \`foremanOwnsCard\` in \`dist/paperclip/board.js\`:
+a card whose identity line names a repo the Foreman serves (a \`repos[].githubRepo\`), and mirrors
+(\`paperclip.repos\`, all when unset), is **the Foreman's** when \`paperclip.ownsCards\` is on.
+Every other card is another writer's: the EM repo's issues and epics, cards for repos the Foreman
+does not serve, and anything with no identity line.
+
+On its cards, with \`ownsCards\` on, the Foreman writes everything the card says, each cycle from
+the snapshot of the repo:
+
+- an open issue with no card gets one (at most 20 card writes a cycle), filed in the Unplaced project;
+- title \`{name}#{N} {title}\`; description: identity line, \`GitHub: open · stage <stage>\`,
+  \`GitHub: open · not approved\` or \`GitHub: closed completed|not_planned\`, a blank line, the
+  issue's URL (\`stage awaitingRelease\` when an open PR into the production branch names it);
+- not approved: \`backlog\`, nobody's, no stage label; closed: \`done\`, or \`cancelled\` when
+  not planned, no stage label, the last holder kept; approved: the lifecycle stage, as before;
+- held by the blocked label: the holder's reason as the unblock descriptor
+  (\`blocked: on GitHub — <their comment's first line> (<login>, <date>) <url>\`), and their
+  comment copied once, never on another agent's card;
+- a second card for the same issue is retired by housekeeping: cancelled, nobody's, its identity
+  line rewritten to \`duplicate of <card> (<key>)\` so nothing adopts it again.
+
+Another writer may set where one of these cards is filed (project, project workspace, goal,
+parent, priority) and nothing else. With \`ownsCards\` off the Foreman creates a card only on a
+claim and moves it by its own steps, and leaves a card's content to whoever wrote it.
 
 ## Status mapping
 

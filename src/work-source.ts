@@ -93,6 +93,17 @@ export function hasObservers(): boolean {
   return observers.length > 0;
 }
 
+/** True when an observer writes every card itself (`WorkObserver.wantsCards`). */
+export function wantsCards(): boolean {
+  return observers.some((o) => {
+    try {
+      return o.wantsCards?.() === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * Deliver one event to every observer, in registration order. Each call is
  * awaited on its own, raced against the timeout, and any error is logged at
@@ -167,11 +178,15 @@ export function advance(
  */
 export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): Promise<void> {
   if (!hasObservers()) return;
-  const items = await workSourceFor(repoConfig).snapshot(repoConfig, logger);
+  const source = workSourceFor(repoConfig);
+  const items = await source.snapshot(repoConfig, logger);
+  // Every card, not only the lifecycle's, read only when an observer writes them all.
+  const cards = source.cards && wantsCards() ? await source.cards(repoConfig, logger) : undefined;
   const held = loadRepoState(repoConfig.name).verifyHeld ?? {};
   await emit({
     kind: "snapshot",
     repo: repoConfig.githubRepo,
     items: items.map((i) => (held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i)),
+    ...(cards ? { cards } : {}),
   }, null, logger);
 }

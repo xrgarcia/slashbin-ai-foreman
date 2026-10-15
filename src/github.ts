@@ -8,6 +8,7 @@ export {
   dropIssueSnapshot,
   openIssueLabels,
   getOpenIssues,
+  getOpenPrs,
   hasLabel,
   forgetOpenPrs,
   isPrOpen,

@@ -7,7 +7,7 @@ export {
 export { createLogger, type Logger, type LogLevel } from "./logger.js";
 export { hasPendingRevisions, verifyPRExists } from "./github.js";
 export { GitHubIssueConnector } from "./github-work-source.js";
-export type { WorkItem, WorkSourceAdapter, WorkObserver, WorkEvent, SnapshotItem } from "./adapters.js";
+export type { WorkItem, WorkSourceAdapter, WorkObserver, WorkEvent, SnapshotItem, SnapshotCard, SnapshotHold } from "./adapters.js";
 export { DEFAULT_BACKOFF, backoffDelay, type BackoffConfig, type BackoffWindow } from "./backoff.js";
 export { STAGES, MOVES, transition, type Stage, type Move, type Transition } from "./lifecycle.js";
 export { configureClaudeTrust, ensureClaudeTrust, trustManagedRepos, claudeConfigPath } from "./claude-trust.js";

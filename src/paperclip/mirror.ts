@@ -56,7 +56,7 @@
 // retired "Foreman — live" summary task.
 
 import type {
-  PriorState, ReleaseEvent, SessionEvent, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
+  PriorState, ReleaseEvent, SessionEvent, SnapshotCard, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
 } from "../adapters.js";
 import { createHash } from "node:crypto";
 import { redactAll } from "../redact.js";
@@ -64,10 +64,10 @@ import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./c
 import { STATE_STAGE } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {
-  CONFIG_KEY, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
+  BACKLOG_STATUS, CONFIG_KEY, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageTarget, statusName, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
-import { PaperclipClientError, type PaperclipClient, type PaperclipComment } from "./client.js";
+import { PaperclipClientError, type PaperclipClient, type PaperclipComment, type PaperclipIssue } from "./client.js";
 import { commentsOf, finishComment, redactComment, reviewProgressComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
 import type { ReviewMilestone } from "../review-progress.js";
 
@@ -193,6 +193,22 @@ const LABEL_BLOCK_ACTION = `${FOREMAN_BLOCKED_PREFIX}needs attention`;
  */
 const MISS_RESCAN_MS = 60_000;
 
+/**
+ * With `ownsCards`, the most card writes (creates and content PATCHes) one
+ * snapshot makes; the rest wait for the next cycle. An observer call has 30
+ * seconds, and a repo's first snapshot after the switch may find many cards to
+ * write.
+ */
+const CARD_WRITES_PER_SNAPSHOT = 20;
+/** With `ownsCards`, the most second cards one housekeeping pass retires. */
+const RETIRES_PER_PASS = 25;
+/** The title of a card the Foreman owns: the issue's repo name, number and title, as the receiver wrote it. */
+export const PAPERCLIP_OWNED_TITLE_FORMAT = "{name}#{N} {title}";
+/** The comment on a second card for one issue when it is retired. */
+const DUPLICATE_NOTE = "retired: a second card for {key}; {winner} is the card for this issue";
+/** The text the receiver's sync wrote on a card entering Blocked before it read why; replaceable by the reason. */
+const RECEIVER_HOLD_ENTRY = /^GitHub issue is labelled \S+$/;
+
 /** How often a held lease is renewed; well inside the shortest sensible `liveLeaseMinutes`. */
 const LEASE_RENEW_MS = 4 * 60_000;
 
@@ -200,6 +216,29 @@ type SessionPhase = keyof typeof SESSION_STAGE;
 
 /** How a note is posted: the comment event that gates it, and what kind of step wrote it. */
 type NoteOpts = { readonly event: PaperclipCommentEvent; readonly tag?: "prLink" | "merged" | "session" };
+
+/** What a card shows that the Foreman writes with `ownsCards`, as the last scan (or write) left it. */
+type RowContent = { title: string; description: string; assigneeAgentId: string | null; assigneeUserId: string | null };
+
+/** A second card for an issue that already has one: retired by housekeeping when the Foreman owns the cards. */
+type Duplicate = { readonly id: string; readonly key: string; readonly repo: string; readonly winner: string; readonly title: string; readonly status: string };
+
+/**
+ * Which of the rows carrying one identity key is the card: the oldest that is
+ * not cancelled, else the oldest. A row with no creation time sorts by the
+ * order it was listed in, after every dated one. Both writers' rows for
+ * jerky_ops#11 stood open side by side because each kept a different one of the
+ * pair: the Foreman the first listed, the receiver the last (2026-10-15).
+ */
+export function pickCard<T extends { status: string; createdAt?: string }>(rows: readonly T[], cancelled: string): T | undefined {
+  const time = (r: T) => {
+    const t = Date.parse(r.createdAt ?? "");
+    return Number.isNaN(t) ? Infinity : t;
+  };
+  const ranked = rows.map((r, i) => ({ r, i })).sort((a, b) =>
+    Number(a.r.status === cancelled) - Number(b.r.status === cancelled) || time(a.r) - time(b.r) || a.i - b.i);
+  return ranked[0]?.r;
+}
 
 export class PaperclipMirror implements WorkObserver {
   /** Identity key → Paperclip task id, for every task this mirror has resolved. */
@@ -270,6 +309,14 @@ export class PaperclipMirror implements WorkObserver {
   private comments: CommentsConfig;
   /** The sha256 of the config text last published, so an unchanged reload writes nothing. */
   private publishedSha: string | null = null;
+  /** Task id → its title, description and holders, as the last scan or write left them (`ownsCards`). */
+  private readonly rowContent = new Map<string, RowContent>();
+  /** Every second card the last scan found, for housekeeping to retire (`ownsCards`). */
+  private duplicates: Duplicate[] = [];
+  /** Task id → the reason its issue is held on GitHub, from the last snapshot's cards: what it says entering Blocked. */
+  private readonly holdAction = new Map<string, string>();
+  /** "<task id> <comment url>": the holder's comment is on the card, posted or found; never read again. */
+  private readonly holdCommented = new Set<string>();
 
   constructor(
     private readonly client: PaperclipClient,
@@ -284,6 +331,11 @@ export class PaperclipMirror implements WorkObserver {
    * The one entry point: each event the Foreman emits goes to its handler
    * below. The handlers stay public so a test can drive one step directly.
    */
+  /** True when the Foreman writes every card of its repos (`ownsCards`): the snapshot then carries them all. */
+  wantsCards(): boolean {
+    return this.cfg.ownsCards === true;
+  }
+
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
     if (!this.mirrors(event)) {
       // A claim outside `repos` is still the one build running: forget the last
@@ -304,7 +356,7 @@ export class PaperclipMirror implements WorkObserver {
       case "waiting": return this.onWaiting(event.repo, event.items, logger);
       case "release": return this.onRelease(event.release, logger);
       case "backoff": return event.paused ? this.onBackoffPause(event.upstream, event.reason ?? "", logger) : this.onBackoffResume(event.upstream, logger);
-      case "snapshot": return this.onSnapshot(event.repo, event.items, logger);
+      case "snapshot": return this.onSnapshot(event.repo, event.items, logger, event.cards);
       // A promotion PR owns the item; its card moves on the release event, not here.
       case "promoted": return;
       case "promotionStall": return;
@@ -413,9 +465,25 @@ export class PaperclipMirror implements WorkObserver {
    * a restart released cmneb_data_publisher#199 to the SRE's To-do after the
    * SRE had given up on it (2026-10-05).
    */
-  async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger): Promise<void> {
+  async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, cards?: ReadonlyArray<SnapshotCard>): Promise<void> {
     if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
+    // With `ownsCards`, every issue has a card before the lifecycle pass places
+    // them, and a held issue's reason is at hand for a card entering Blocked.
+    const owned = this.cfg.ownsCards === true && cards ? cards : null;
+    const budget = { left: CARD_WRITES_PER_SNAPSHOT };
+    const ids: Array<[SnapshotCard, string]> = [];
+    for (const c of owned ?? []) {
+      let id = await this.resolve(c.item, false);
+      if (!id && c.state === "open" && budget.left > 0) {
+        id = await this.createCard(c);
+        if (id) budget.left--;
+      }
+      if (!id) continue;
+      ids.push([c, id]);
+      if (c.hold) this.holdAction.set(id, c.hold.action);
+      else this.holdAction.delete(id);
+    }
     for (const { item, stage, detail, verifyHeld } of items) {
       const id = await this.resolve(item, false);
       if (!id) continue;
@@ -448,6 +516,110 @@ export class PaperclipMirror implements WorkObserver {
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
       await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress" });
     }
+    for (const [c, id] of ids) {
+      if (budget.left <= 0) {
+        logger.info(`Paperclip: ${_repo} card writes capped at ${CARD_WRITES_PER_SNAPSHOT} this cycle; the rest follow next cycle`);
+        break;
+      }
+      await this.syncCard(id, c, budget);
+    }
+  }
+
+  /** What a card the Foreman owns says: title and description, from its issue. */
+  private cardContent(c: SnapshotCard): { title: string; description: string } {
+    const [owner = "", name = ""] = c.item.repo.split("/");
+    const line = c.state !== "open" ? `GitHub: closed ${c.state}` : `GitHub: open · ${c.stage ? `stage ${c.stage}` : "not approved"}`;
+    return {
+      title: fill(PAPERCLIP_OWNED_TITLE_FORMAT, { repo: c.item.repo, owner, name, N: String(c.item.issueNumber), title: c.title }),
+      description: `${this.keyOf(c.item)}\n${line}\n\n${c.url}`,
+    };
+  }
+
+  /**
+   * The card for an open issue that has none (`ownsCards`): filed in the
+   * Unplaced project like a claim's, in backlog when the issue is not approved,
+   * else in the create status for the lifecycle pass to place.
+   */
+  private async createCard(c: SnapshotCard): Promise<string | null> {
+    const status = c.stage === null ? BACKLOG_STATUS : this.statusName(PAPERCLIP_CREATE_STATUS);
+    return this.createTask(c.item, { ...this.cardContent(c), status });
+  }
+
+  /**
+   * Bring a card the Foreman owns in step with its issue (`ownsCards`): title
+   * and description; closed → done, or cancelled when not planned, with no stage
+   * label and the last holder kept; not approved → backlog, nobody's, no stage
+   * label; a held card's reason as its unblock descriptor, and the holder's
+   * comment once. One PATCH, only when something differs. A card a session holds
+   * keeps its status; a cancelled card of an open issue and a waiting hold are
+   * left as they are, as the lifecycle pass leaves them.
+   */
+  private async syncCard(id: string, c: SnapshotCard, budget: { left: number }): Promise<void> {
+    const want = this.cardContent(c);
+    const have = this.rowContent.get(id);
+    const state = this.rowState.get(id) ?? "";
+    const body: Record<string, unknown> = {};
+    if (have?.title !== want.title) body.title = want.title;
+    if (have?.description !== want.description) body.description = want.description;
+    const free = !this.holds.has(id) && !state.startsWith("waiting\n");
+    // The receiver's entry text on a Foreman-held card reads as a waiting hold; it is GitHub's hold, unread.
+    const entry = !this.holds.has(id) && state.startsWith("waiting\n") && RECEIVER_HOLD_ENTRY.test(state.slice(8));
+    let status = state.startsWith("status:") ? state.slice(7) : entry ? this.statusName("blocked") : null;
+    if (free && c.state !== "open") {
+      const target = this.statusName(c.state === "not_planned" ? "cancelled" : "done");
+      if (status !== target) {
+        body.status = target;
+        const labelIds = await this.labelIdsFor(id, null);
+        if (labelIds) body.labelIds = labelIds;
+      }
+    } else if (free && c.stage === null && status !== this.statusName("cancelled")) {
+      if (status !== BACKLOG_STATUS || have?.assigneeAgentId || have?.assigneeUserId) {
+        Object.assign(body, { status: BACKLOG_STATUS, assigneeAgentId: null, assigneeUserId: null });
+        const labelIds = await this.labelIdsFor(id, null);
+        if (labelIds) body.labelIds = labelIds;
+      }
+    } else if ((free || entry) && c.hold && status === this.statusName("blocked")) {
+      const action = this.blockAction.get(id) ?? null;
+      if (action !== c.hold.action && (action === null || action === LABEL_BLOCK_ACTION || action.startsWith(HOLD_PREFIX) || RECEIVER_HOLD_ENTRY.test(action))) {
+        const t = stageTarget(this.cfg, "blocked");
+        body.unblockDescriptor = { owner: t.agentId ? { agentId: t.agentId } : "board", action: c.hold.action };
+        body.status = status;
+      }
+    }
+    // The holder's words, once, on a card whose descriptor names them, and never
+    // on another agent's card: a comment wakes the agent that holds it.
+    const hold = c.state === "open" ? c.hold : undefined;
+    const named = (body.unblockDescriptor as { action?: string } | undefined)?.action ?? (status === this.statusName("blocked") ? this.blockAction.get(id) : undefined);
+    const holder = "assigneeAgentId" in body ? body.assigneeAgentId : have?.assigneeAgentId ?? null;
+    const seen = hold?.commentUrl ? `${id} ${hold.commentUrl}` : "";
+    if (hold?.comment && hold.commentUrl && named === hold.action && !this.holdCommented.has(seen) && (!holder || holder === this.cfg.agentId)) {
+      const r = await this.safeCall("read comments", () => this.client.getIssueComments(id), id);
+      if (r.ok && (Array.isArray(r.value) ? r.value : []).some((x) => isHoldComment(x.body, { comment: hold.comment!, url: hold.commentUrl! }))) this.holdCommented.add(seen);
+      else if (r.ok) {
+        body.comment = redactComment(hold.comment, this.secrets);
+        // A board user's comment on a blocked card reopens it unless the same request restates the status.
+        body.status ??= status;
+      }
+    }
+    if (!Object.keys(body).length || budget.left <= 0) return;
+    budget.left--;
+    if (!(await this.patch(id, body))) return;
+    if (body.comment) {
+      this.holdCommented.add(seen);
+      this.lastNote.set(id, String(body.comment));
+    }
+    if (typeof body.status === "string") {
+      status = body.status;
+      this.rowState.set(id, `status:${status}`);
+    }
+    const unblock = body.unblockDescriptor as { action: string } | undefined;
+    if (unblock) this.blockAction.set(id, unblock.action);
+    this.rowContent.set(id, {
+      title: want.title,
+      description: want.description,
+      assigneeAgentId: "assigneeAgentId" in body ? null : have?.assigneeAgentId ?? null,
+      assigneeUserId: "assigneeUserId" in body ? null : have?.assigneeUserId ?? null,
+    });
   }
 
   /**
@@ -461,7 +633,8 @@ export class PaperclipMirror implements WorkObserver {
   private async blockedByLabel(id: string): Promise<boolean> {
     if (this.blockedAt.has(id)) return false;
     if (this.labelBlocked.has(id)) return true;
-    if (this.blockAction.get(id) === LABEL_BLOCK_ACTION) return true;
+    const action = this.blockAction.get(id);
+    if (action === LABEL_BLOCK_ACTION || action?.startsWith(HOLD_PREFIX)) return true;
     const prefix = fill(PAPERCLIP_STEPS.synced.note, { detail: "" }).trim();
     return (await this.latestComment(id))?.startsWith(prefix) === true;
   }
@@ -618,9 +791,36 @@ export class PaperclipMirror implements WorkObserver {
     try {
       if (!(await this.ensureIndex(true))) return;
       await this.retireLiveTask();
+      if (this.cfg.ownsCards === true) await this.retireDuplicates();
     } finally {
       this.housekeeping = false;
     }
+  }
+
+  /**
+   * Retire every second card the last scan found for an issue in a mirrored
+   * repo (`ownsCards`): cancelled, nobody's, its identity line rewritten to name
+   * the card that stays so no writer adopts it again, its title saying so, and a
+   * note — one PATCH each, at most RETIRES_PER_PASS a pass.
+   */
+  private async retireDuplicates(): Promise<void> {
+    const cancelled = this.statusName("cancelled");
+    let left = RETIRES_PER_PASS;
+    for (const d of this.duplicates) {
+      if (left-- <= 0) break;
+      if (this.cfg.repos && !this.cfg.repos.includes(d.repo)) continue;
+      const tag = `[duplicate of ${d.winner}] `;
+      const r = await this.safeCall("retire duplicate", () => this.client.updateIssue(d.id, {
+        status: cancelled,
+        assigneeAgentId: null,
+        assigneeUserId: null,
+        title: d.title.startsWith(tag) ? d.title : `${tag}${d.title}`,
+        description: `duplicate of ${d.winner} (${d.key})`,
+        comment: fill(DUPLICATE_NOTE, { key: d.key, winner: d.winner }),
+      }), d.id);
+      if (r.ok) this.log("info", `Paperclip mirror: retired a second card for ${d.key}; ${d.winner} stays`);
+    }
+    this.duplicates = [];
   }
 
   /** Cancel the live summary task an earlier version kept, once. */
@@ -845,25 +1045,31 @@ export class PaperclipMirror implements WorkObserver {
       return found;
     }
     if (!create) return null;
+    const [owner = "", name = ""] = item.repo.split("/");
+    return this.createTask(item, {
+      title: fill(this.cfg.taskTitleFormat ?? PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, owner, name, N: String(item.issueNumber) }),
+      description: `${key}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
+      status: this.statusName(PAPERCLIP_CREATE_STATUS),
+    });
+  }
 
+  /** Create `item`'s task, filed where every task the Foreman creates goes; its id, or null. */
+  private async createTask(item: WorkItem, content: { title: string; description: string; status: string }): Promise<string | null> {
     // An explicit project wins; the Unplaced lookup files nothing until it finds one.
     const unplaced = !this.cfg.projectId && this.cfg.projects;
     const projectId = this.cfg.projectId ?? (unplaced ? await this.unplacedProjectId() : null);
     if (unplaced && !projectId) return null;
-    const [owner = "", name = ""] = item.repo.split("/");
     const made = await this.safeCall("create task", () =>
-      this.client.createIssue({
-        title: fill(this.cfg.taskTitleFormat ?? PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, owner, name, N: String(item.issueNumber) }),
-        status: this.statusName(PAPERCLIP_CREATE_STATUS),
-        description: `${key}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
-        ...(projectId ? { projectId } : {}),
-      }),
+      this.client.createIssue({ ...content, ...(projectId ? { projectId } : {}) }),
     );
     if (!made.ok || !made.value?.id) return null;
     const id = made.value.id;
+    const key = this.keyOf(item);
     this.taskUuidCache.set(key, id);
     this.index?.set(key, id);
     this.rowRepo.set(id, item.repo);
+    this.rowState.set(id, `status:${content.status}`);
+    this.rowContent.set(id, { title: content.title, description: content.description, assigneeAgentId: null, assigneeUserId: null });
     return id;
   }
 
@@ -876,18 +1082,33 @@ export class PaperclipMirror implements WorkObserver {
   private async ensureIndex(fresh = false): Promise<boolean> {
     if (!fresh && this.index && Date.now() - this.indexedAt <= INDEX_TTL_MS) return true;
     const keyRe = this.keyPattern();
+    const cancelled = this.statusName("cancelled");
     const scanned = await this.safeCall("scan tasks", async () => {
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
       const actions = new Map<string, string>();
+      const content = new Map<string, RowContent>();
+      const duplicates: Duplicate[] = [];
+      const byLine = new Map<string, PaperclipIssue[]>();
       for await (const row of this.client.listIssues()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
-        if (!line || idx.has(line)) continue;
+        if (!line) continue;
+        byLine.set(line, [...(byLine.get(line) ?? []), row]);
+      }
+      for (const [line, rows] of byLine) {
+        const row = pickCard(rows, cancelled)!;
         idx.set(line, row.id);
         const m = keyRe.exec(line);
         if (!m?.groups) continue;
+        for (const r of rows) {
+          if (r !== row) duplicates.push({ id: r.id, key: line, repo: m.groups.repo, winner: row.identifier || row.id, title: String(r.title ?? ""), status: r.status });
+        }
         repoOf.set(row.id, m.groups.repo);
+        content.set(row.id, {
+          title: String(row.title ?? ""), description: String(row.description ?? ""),
+          assigneeAgentId: row.assigneeAgentId ?? null, assigneeUserId: row.assigneeUserId ?? null,
+        });
         const action = row.unblockDescriptor?.action;
         // A Foreman-held blocked row is a waiting hold, unless the Foreman blocked it for good.
         const blocked = row.status === this.statusName("blocked") && row.assigneeAgentId === this.cfg.agentId
@@ -895,7 +1116,7 @@ export class PaperclipMirror implements WorkObserver {
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
         if (row.status === this.statusName("blocked") && action) actions.set(row.id, String(action));
       }
-      return { idx, state, repoOf, actions };
+      return { idx, state, repoOf, actions, content, duplicates };
     });
     if (!scanned.ok) return !!this.index;
     this.index = scanned.value.idx;
@@ -906,6 +1127,14 @@ export class PaperclipMirror implements WorkObserver {
     for (const [k, v] of scanned.value.repoOf) this.rowRepo.set(k, v);
     this.blockAction.clear();
     for (const [k, v] of scanned.value.actions) this.blockAction.set(k, v);
+    this.rowContent.clear();
+    for (const [k, v] of scanned.value.content) this.rowContent.set(k, v);
+    this.duplicates = scanned.value.duplicates;
+    // A key whose card the scan settled on differently follows it.
+    for (const [key, id] of this.taskUuidCache) {
+      const now = this.index.get(key);
+      if (now && now !== id) this.taskUuidCache.set(key, now);
+    }
     return true;
   }
 
@@ -962,7 +1191,8 @@ export class PaperclipMirror implements WorkObserver {
       if (t.agentId) holder = { assigneeAgentId: t.agentId, assigneeUserId: null };
       // Paperclip takes `blocked` only with an unblock descriptor.
       if (bucket === "blocked") {
-        const action = this.blockedReason.get(id) ?? LABEL_BLOCK_ACTION;
+        // A card held on GitHub says why, as the holder wrote it (`ownsCards`).
+        const action = this.blockedReason.get(id) ?? (to === "blocked" ? this.holdAction.get(id) : undefined) ?? LABEL_BLOCK_ACTION;
         holder.unblockDescriptor = { owner: t.agentId ? { agentId: t.agentId } : "board", action };
       }
     }
@@ -970,6 +1200,8 @@ export class PaperclipMirror implements WorkObserver {
     const ok = await this.patch(id, { status: this.statusName(bucket), ...holder, ...(labelIds ? { labelIds } : {}) });
     if (ok) {
       this.rowState.set(id, `status:${this.statusName(bucket)}`);
+      const unblock = holder.unblockDescriptor as { action: string } | undefined;
+      if (unblock) this.blockAction.set(id, unblock.action);
       if (to !== "done") this.rowStage.set(id, to);
       if (bucket !== "blocked") this.blockedReason.delete(id);
     }

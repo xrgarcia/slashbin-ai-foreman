@@ -35,6 +35,46 @@ export const CONFIG_KEY = "foremanConfig";
  */
 export const FOREMAN_BLOCKED_PREFIX = "blocked: ";
 
+/**
+ * The unblock-descriptor action of a card held because its issue carries the
+ * work source's blocked label, when the source read why (`SnapshotHold`): it
+ * starts with FOREMAN_BLOCKED_PREFIX, so no reader takes it for a waiting hold,
+ * and it ends when the label goes. The text slashbin_data_receiver#43 wrote, so
+ * a card it held reads the same.
+ */
+export const HOLD_PREFIX = `${FOREMAN_BLOCKED_PREFIX}on GitHub — `;
+
+/**
+ * Whether a card comment is a holder's words a source copied (`SnapshotHold.comment`),
+ * the comment at `url`: same first line, ending on the URL. A mere link to it is not.
+ */
+export function isHoldComment(body: string | null | undefined, hold: { comment: string; url: string }): boolean {
+  const text = String(body ?? "").trim();
+  const head = hold.comment.trim().split("\n")[0];
+  return !!head && text.split("\n")[0] === head && text.split("\n").at(-1)?.trim() === hold.url;
+}
+
+/** The status of a card for an issue outside the lifecycle (not approved): nobody's yet. */
+export const BACKLOG_STATUS = "backlog";
+
+/**
+ * Who writes a card: true when it is the Foreman's alone. The rule every writer
+ * of the board evaluates, from the config the Foreman publishes on its agent
+ * (`foremanConfig`): the card's identity key names `repo`, the config serves
+ * `repo` (`servedRepos`: each `repos[].githubRepo`), the mirror mirrors it
+ * (`paperclip.repos`, all when unset), and `paperclip.ownsCards` is on. Every
+ * other card (the EM repo's, an epic's, a repo the Foreman does not serve) is
+ * another writer's. On the Foreman's cards another writer may set where the card
+ * is filed (project, workspace, goal, parent, priority) and nothing else.
+ */
+export function foremanOwnsCard(
+  pcfg: { readonly ownsCards?: boolean; readonly repos?: readonly string[] | null },
+  servedRepos: readonly string[],
+  repo: string,
+): boolean {
+  return pcfg.ownsCards === true && servedRepos.includes(repo) && (!pcfg.repos || pcfg.repos.includes(repo));
+}
+
 /** The lease: the cards a running session holds in progress, renewed while any runs. */
 export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE }> };
 

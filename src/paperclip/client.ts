@@ -21,6 +21,10 @@ export type PaperclipIssue = {
   projectId?: string | null;
   /** The task's labels; a PATCH of labelIds replaces the whole set. */
   labelIds?: string[];
+  /** The board's short name for the task (e.g. SLA-1500). */
+  identifier?: string | null;
+  /** When the task was created (ISO): of two tasks for one issue, the older is the card. */
+  createdAt?: string;
 };
 
 export type PaperclipLabel = {
