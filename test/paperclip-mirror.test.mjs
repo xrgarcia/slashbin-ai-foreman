@@ -9,6 +9,11 @@ import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
 
+// GitHub reads every issue the existing tests snapshot as open: a card moves
+// only on a confirmed state (the closed-issue cases are in paperclip-closed-cards).
+async function allOpen(ns) { return new Map(ns.map((n) => [n, "open"])); }
+function onSnap(mirror, repo, items, log) { return mirror.onSnapshot(repo, items, log, { states: allOpen }); }
+
 const CID = "company-1";
 const AGENT = "agent-1";
 const SECRET = { name: "TEST_TOKEN", value: "secret-value-0123456789" };
@@ -441,7 +446,7 @@ test("repos: a repo left out gets no card and no write; a listed one and daemon-
   await mirror.onEvent({ kind: "claim", item: other }, logger());
   await mirror.onEvent({ kind: "blocked", item: other, reason: "x" }, logger());
   await mirror.onEvent({ kind: "session", session: { phase: "implement", status: "started", repo: "example/q", items: [other] } }, logger());
-  await mirror.onEvent({ kind: "snapshot", repo: "example/q", items: [] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/q", items: [] }, logger());
   assert.equal(writes(), 0, "nothing written for the repo left out");
   assert.equal(fake.rows.length, 1);
   await mirror.onEvent({ kind: "claim", item }, logger());
@@ -512,15 +517,15 @@ test("a session that starts while Paperclip is down puts its card in progress on
   const { mirror } = mirrorOn(flaky, { ...TEAM, board: { ...TEAM.board,
     merged: { owner: "reviewer", status: "todo", label: null }, verifying: { owner: "reviewer", status: "in_progress", label: null } } });
   down = false;
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   down = true;
   await mirror.onSession({ phase: "verify", status: "started", repo: "example/r", items: [item], pr: 9, reviewer: "SRE" }, logger());
   assert.equal(fake.rows[0].status, "todo");
   down = false;
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   assert.equal(fake.rows[0].status, "in_progress", "the held card takes its session's column once Paperclip answers");
   assert.equal(fake.rows[0].assigneeAgentId, "agent-rev");
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   assert.equal(fake.rows[0].status, "in_progress", "and the snapshot still leaves a held card alone");
   await mirror.onSession({ phase: "verify", status: "finished", repo: "example/r", items: [item], pr: 9 }, logger());
   assert.equal(fake.rows[0].status, "todo", "the session's end still returns it");
@@ -674,7 +679,7 @@ test("snapshot: a card in the wrong column moves to the one its labels call for,
   const fake = fakePaperclip([row7("todo")]);
   const { mirror } = mirrorOn(fake);
   const log = logger();
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), log);
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), log);
   assert.equal(fake.rows[0].status, "in_review");
   assert.deepEqual(fake.comments.r7, ["moved to match GitHub: approved, pr under review"]);
   assert.ok(log.lines.some(([, m]) => /todo → in_review to match GitHub/.test(m)));
@@ -683,8 +688,8 @@ test("snapshot: a card in the wrong column moves to the one its labels call for,
 test("snapshot: a card already in its column is not written", async () => {
   const fake = fakePaperclip([row7("in_review")]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   assert.equal(statusPatches(fake).length, 0);
 });
 
@@ -694,7 +699,7 @@ test("snapshot: an old Foreman block is released once GitHub moved past approved
     { id: "r8", title: "t", status: "blocked", assigneeAgentId: AGENT, description: "source: example/r#8", unblockDescriptor: { action: "blocked: open feature PR" } },
   ]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }, { number: 8, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }, { number: 8, labels: ["approved"] }]), logger());
   assert.equal(fake.rows[0].status, "in_review");
   assert.equal(fake.rows[1].status, "blocked");
 });
@@ -702,9 +707,9 @@ test("snapshot: an old Foreman block is released once GitHub moved past approved
 test("snapshot: a block GitHub's blocked label made is released when the label goes (jerky_service #132/#133)", async () => {
   const fake = fakePaperclip([row7("todo")]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "blocked"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "blocked"] }]), logger());
   assert.equal(fake.rows[0].status, "blocked", "the label blocks it");
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
   assert.equal(fake.rows[0].status, "todo", "the label is gone: back to the queue");
 });
 
@@ -716,7 +721,7 @@ test("snapshot: after a restart, a label-made block (its last note the sync note
   fake.comments.r7 = ["queued", "moved to match GitHub: feature, blocked, approved"];
   fake.comments.r8 = ["blocked: skipped: waiting on #5"];
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }, { number: 8, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }, { number: 8, labels: ["approved"] }]), logger());
   assert.equal(fake.rows[0].status, "todo");
   assert.equal(fake.rows[1].status, "blocked");
 });
@@ -729,7 +734,7 @@ test("snapshot: after a restart, a label-made block is released though a later r
   fake.comments.r7 = ["moved to match GitHub: feature, blocked, approved", "**Foreman started implementing**\n\nHanded this run with #8 — a run builds one of them."];
   fake.comments.r8 = ["blocked: skipped: waiting on #5", "**Foreman started implementing**"];
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }, { number: 8, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }, { number: 8, labels: ["approved"] }]), logger());
   assert.equal(fake.rows[0].status, "todo", "the label is gone: back to the queue");
   assert.equal(fake.rows[1].status, "blocked", "a Foreman block names its reason and stays");
 });
@@ -737,21 +742,21 @@ test("snapshot: after a restart, a label-made block is released though a later r
 test("snapshot: a card blocked at pr merged stays Blocked while its dev verification is held", async () => {
   const fake = fakePaperclip([row7("blocked", { unblockDescriptor: { action: "blocked: dev verification did not pass" } })]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }], [7]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }], [7]), logger());
   assert.equal(fake.rows[0].status, "blocked", "a held verify is still waiting on a person");
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
   assert.equal(fake.rows[0].status, "in_review", "released once GitHub moves on");
 });
 
 test("snapshot: a block made this run stands until the issue moves on, then is released", async () => {
   const fake = fakePaperclip([row7("in_review")]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   await mirror.onBlocked(item, "dev verification did not pass; retrying in 60 min", ghRepo, logger());
   assert.equal(fake.rows[0].status, "blocked");
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   assert.equal(fake.rows[0].status, "blocked", "the snapshot undid a block the Foreman just made");
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
   assert.equal(fake.rows[0].status, "in_review");
 });
 
@@ -765,7 +770,7 @@ test("snapshot: leaves a session-held card, a waiting hold, a cancelled card and
   const { mirror } = mirrorOn(fake);
   await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
   const before = statusPatches(fake).length;
-  await mirror.onSnapshot("example/r", snap([
+  await onSnap(mirror, "example/r", snap([
     { number: 7, labels: ["pr under review"] },
     { number: 8, labels: ["pr under review"] },
     { number: 9, labels: ["approved", "pr under review"] },
@@ -777,7 +782,7 @@ test("snapshot: leaves a session-held card, a waiting hold, a cancelled card and
 test("snapshot: an issue with no card gets none", async () => {
   const fake = fakePaperclip([]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
   assert.equal(fake.rows.length, 0);
 });
 
@@ -785,7 +790,7 @@ test("snapshot: an issue with no card gets none", async () => {
 test("unblock: a Foreman block resolved by a check returns the card to its GitHub column at once", async () => {
   const fake = fakePaperclip([row7("in_review")]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   await mirror.onBlocked(item, "dev verification did not pass; no more retries", ghRepo, logger());
   assert.equal(fake.rows[0].status, "blocked");
   await mirror.onUnblocked(item, "unblocked: new commits landed on the base branch", ghRepo, logger());
@@ -795,7 +800,7 @@ test("unblock: a Foreman block resolved by a check returns the card to its GitHu
 test("unblock: leaves a card that is not Blocked alone", async () => {
   const fake = fakePaperclip([row7("in_review")]);
   const { mirror } = mirrorOn(fake);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   const before = statusPatches(fake).length;
   await mirror.onUnblocked(item, "unblocked: x", ghRepo, logger());
   assert.equal(statusPatches(fake).length, before);
@@ -857,14 +862,14 @@ test("escalated: the card parks Blocked in the EM's hands until revision resumes
   const fake = fakePaperclip([row7("todo")]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
   const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
   await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
   const r = fake.rows[0];
   assert.equal(r.status, "blocked", "blocked, so a board sync leaves it alone and the EM's inbox lists it");
   assert.equal(r.assigneeAgentId, "em-agent");
   assert.equal(r.unblockDescriptor.owner.agentId, "em-agent");
   assert.match(r.unblockDescriptor.action, /^blocked: needs an EM scope ruling: PR #3/);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
   assert.equal(r.status, "blocked", "the snapshot undid the escalation");
   await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", pr: 3, items: [item] }, logger());
   assert.equal(r.status, "in_progress", "the revision after the ruling takes the card back");
@@ -875,13 +880,13 @@ test("escalated: a snapshot taken before the review that tipped it does not rele
   const fake = fakePaperclip([row7("todo")]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
   const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
   await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
   const r = fake.rows[0];
   assert.equal(r.status, "blocked", "the review's own label move read as the issue moving on");
   assert.equal(r.assigneeAgentId, "em-agent");
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
   assert.notEqual(r.status, "blocked", "an issue that really moves on still releases the hold");
 });
 
@@ -889,12 +894,12 @@ test("escalated: the EM's wake checking the card out does not release the hold",
   const fake = fakePaperclip([row7("todo")]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
   const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
   await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
   const r = fake.rows[0];
   r.status = "in_progress";
   await mirror.ensureIndex(true);
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
   assert.equal(r.status, "in_progress", "the snapshot moved a card the EM is working");
   assert.equal(r.assigneeAgentId, "em-agent", "the snapshot took the card off the EM");
   await mirror.onSession({ phase: "revise", status: "started", repo: "example/r", pr: 3, items: [item] }, logger());
@@ -913,9 +918,9 @@ test("escalated at approved (a skip out of attempts): the issue still at approve
   const fake = fakePaperclip([row7("todo")]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
   const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
   await mirror.onEvent({ kind: "escalated", item, reason: "x — skipped 3 times in a row; held for the EM until this issue changes", at: "approved" }, logger());
-  await mirror.onSnapshot("example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
   const r = fake.rows[0];
   assert.equal(r.status, "blocked", "anchored at changesRequested, the approved issue read as moved on");
   assert.equal(r.assigneeAgentId, "em-agent");
@@ -1015,7 +1020,7 @@ test("ownsCards off: the snapshot's cards are not asked for and nothing is creat
   const fake = fakePaperclip([]);
   const { mirror } = mirrorOn(fake);
   assert.equal(mirror.wantsCards(), false);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards: [card(7)] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
   assert.equal(fake.rows.length, 0);
 });
 
@@ -1023,7 +1028,7 @@ test("ownsCards: an open issue with no card gets one — not approved: backlog, 
   const fake = fakePaperclip([]);
   const { mirror } = mirrorOn(fake, OWNED);
   assert.equal(mirror.wantsCards(), true);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards: [card(7)] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
   assert.equal(fake.rows.length, 1);
   const r = fake.rows[0];
   assert.equal(r.status, "backlog");
@@ -1032,14 +1037,14 @@ test("ownsCards: an open issue with no card gets one — not approved: backlog, 
   assert.equal(r.assigneeAgentId, undefined);
   // The next cycle finds it as it should be and writes nothing.
   const writes = fake.calls.filter((c) => c.method !== "GET").length;
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards: [card(7)] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
   assert.equal(fake.calls.filter((c) => c.method !== "GET").length, writes);
 });
 
 test("ownsCards: an approved issue's new card is placed by the lifecycle pass in the same cycle", async () => {
   const fake = fakePaperclip([]);
   const { mirror } = mirrorOn(fake, OWNED);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: snap([{ number: 7, labels: ["approved", "pr under review"] }]),
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["approved", "pr under review"] }]),
     cards: [card(7, { stage: "inReview" })] }, logger());
   assert.equal(fake.rows.length, 1);
   assert.equal(fake.rows[0].status, "in_review");
@@ -1049,7 +1054,7 @@ test("ownsCards: an approved issue's new card is placed by the lifecycle pass in
 test("ownsCards: title and description follow the issue; an unapproved card held by an agent goes to backlog, nobody's", async () => {
   const fake = fakePaperclip([row7("todo", { title: "example/r#7", description: `source: example/r#7\n\n${URL7}` })]);
   const { mirror } = mirrorOn(fake, OWNED);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards: [card(7)] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
   const r = fake.rows[0];
   assert.equal(r.title, "r#7 issue 7");
   assert.equal(r.description, `source: example/r#7\nGitHub: open · not approved\n\n${URL7}`);
@@ -1064,7 +1069,7 @@ test("ownsCards: a closed issue's card is done, or cancelled when not planned; i
     { id: "r8", title: "r#8 issue 8", status: "todo", assigneeAgentId: AGENT, description: "source: example/r#8\nGitHub: closed not_planned\n\nhttps://github.com/example/r/issues/8" },
   ]);
   const { mirror } = mirrorOn(fake, OWNED);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8, { state: "not_planned" })] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8, { state: "not_planned" })] }, logger());
   assert.equal(fake.rows[0].status, "done");
   assert.equal(fake.rows[0].assigneeAgentId, AGENT);
   assert.equal(fake.rows[0].description.split("\n")[1], "GitHub: closed completed");
@@ -1074,7 +1079,7 @@ test("ownsCards: a closed issue's card is done, or cancelled when not planned; i
 test("ownsCards: a closed issue with no card gets none; a cancelled card of an open issue is left alone", async () => {
   const fake = fakePaperclip([{ id: "r8", title: "t", status: "cancelled", description: "source: example/r#8" }]);
   const { mirror } = mirrorOn(fake, OWNED);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8)] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8)] }, logger());
   assert.equal(fake.rows.length, 1);
   assert.equal(fake.rows[0].status, "cancelled");
 });
@@ -1088,7 +1093,7 @@ const HOLD = {
 test("ownsCards: a held issue's card enters Blocked with the holder's reason, and their comment is copied once", async () => {
   const fake = fakePaperclip([ownedRow("todo", { description: `source: example/r#7\nGitHub: open · stage blocked\n\n${URL7}` })]);
   const { mirror } = mirrorOn(fake, OWNED);
-  const ev = { kind: "snapshot", repo: "example/r", items: snap([{ number: 7, labels: ["approved", "blocked"] }]), cards: [card(7, { stage: "blocked", hold: HOLD })] };
+  const ev = { kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["approved", "blocked"] }]), cards: [card(7, { stage: "blocked", hold: HOLD })] };
   await mirror.onEvent(ev, logger());
   assert.equal(fake.rows[0].status, "blocked");
   assert.equal(fake.rows[0].unblockDescriptor.action, HOLD.action);
@@ -1108,7 +1113,7 @@ test("ownsCards: a generic hold is rewritten to the holder's reason; a Foreman r
   ]);
   const { mirror } = mirrorOn(fake, OWNED);
   const hold = (n) => ({ ...HOLD, action: `${HOLD.action} #${n}` });
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: snap([7, 8, 9].map((number) => ({ number, labels: ["blocked"] }))),
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([7, 8, 9].map((number) => ({ number, labels: ["blocked"] }))),
     cards: [7, 8, 9].map((n) => card(n, { stage: "blocked", hold: hold(n) })) }, logger());
   assert.equal(fake.rows[0].unblockDescriptor.action, hold(7).action);
   assert.equal(fake.rows[1].unblockDescriptor.action, hold(8).action);
@@ -1120,14 +1125,14 @@ test("ownsCards: the holder's comment is never posted on another agent's card", 
   const fake = fakePaperclip([ownedRow("blocked", { assigneeAgentId: "agent-tech-lead", description: `source: example/r#7\nGitHub: open · stage blocked\n\n${URL7}`,
     unblockDescriptor: { owner: "board", action: HOLD.action } })]);
   const { mirror } = mirrorOn(fake, OWNED);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: snap([{ number: 7, labels: ["blocked"] }]), cards: [card(7, { stage: "blocked", hold: HOLD })] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["blocked"] }]), cards: [card(7, { stage: "blocked", hold: HOLD })] }, logger());
   assert.equal(fake.comments.r7, undefined);
 });
 
 test("ownsCards: a card the holder released from GitHub's hold follows GitHub on", async () => {
   const fake = fakePaperclip([ownedRow("blocked", { description: `source: example/r#7\nGitHub: open · stage inReview\n\n${URL7}`, unblockDescriptor: { owner: "board", action: HOLD.action } })]);
   const { mirror } = mirrorOn(fake, OWNED);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: snap([{ number: 7, labels: ["approved", "pr under review"] }]), cards: [card(7, { stage: "inReview" })] }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["approved", "pr under review"] }]), cards: [card(7, { stage: "inReview" })] }, logger());
   assert.equal(fake.rows[0].status, "in_review");
 });
 
@@ -1135,9 +1140,9 @@ test("ownsCards: at most 20 card writes a cycle; the rest follow", async () => {
   const fake = fakePaperclip([]);
   const { mirror } = mirrorOn(fake, OWNED);
   const cards = Array.from({ length: 30 }, (_, i) => card(i + 1));
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
   assert.equal(fake.rows.length, 20);
-  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], cards }, logger());
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
   assert.equal(fake.rows.length, 30);
 });
 

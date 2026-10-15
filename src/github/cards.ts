@@ -15,7 +15,7 @@
 // holdReason, paperclip-sync.mjs readClosedSince / readHoldReasons), which wrote
 // these cards before the Foreman owned them.
 
-import type { SnapshotHold } from "../adapters.js";
+import type { ItemState, SnapshotHold } from "../adapters.js";
 import type { Logger } from "../logger.js";
 import { gh } from "./gh.js";
 
@@ -32,6 +32,8 @@ const CLOSED_MAX_PAGES = 4;
 export const HOLD_TTL_MS = 10 * 60_000;
 /** Held issues read per request. */
 const HOLDS_PER_REQUEST = 25;
+/** Issues whose state is read per request. */
+const STATES_PER_REQUEST = 25;
 
 /**
  * The line a card held on GitHub shows. It starts with `blocked: ` (the Paperclip
@@ -182,6 +184,37 @@ export function holdReasons(repo: string, cwd: string, label: string, numbers: r
       });
     } catch (err) {
       logger.warn(`cards: ${repo} hold reasons not read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether each of `numbers` is open or how it closed, read live from GitHub,
+ * 25 to a request. Not the open-issue view: a full read of it carried
+ * cmneb_data_receiver#218, closed minutes before, with its old labels, and
+ * the card went done → in_review (2026-10-15). A number that cannot be read
+ * (a failed request, a missing issue) is left out, so nothing is guessed.
+ * Never throws. `query` is the GraphQL call (tests inject one).
+ */
+export function issueStates(
+  repo: string, cwd: string, numbers: readonly number[], logger: Logger,
+  query: (q: string, cwd: string) => Record<string, unknown> = graphql,
+): Map<number, ItemState> {
+  const out = new Map<number, ItemState>();
+  const want = [...new Set(numbers)];
+  for (let i = 0; i < want.length; i += STATES_PER_REQUEST) {
+    const batch = want.slice(i, i + STATES_PER_REQUEST);
+    try {
+      const d = query(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `s${j}: issue(number: ${n}) { state stateReason }`).join(" ")} } }`, cwd);
+      const r = d.repository as Record<string, { state?: string; stateReason?: string | null } | null> | null;
+      batch.forEach((n, j) => {
+        const st = r?.[`s${j}`]?.state;
+        if (st === "OPEN") out.set(n, "open");
+        else if (st === "CLOSED") out.set(n, r?.[`s${j}`]?.stateReason === "NOT_PLANNED" ? "not_planned" : "completed");
+      });
+    } catch (err) {
+      logger.warn(`cards: ${repo} issue states not read: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return out;

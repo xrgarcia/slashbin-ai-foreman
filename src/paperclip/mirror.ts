@@ -56,7 +56,7 @@
 // retired "Foreman — live" summary task.
 
 import type {
-  PriorState, ReleaseEvent, SessionEvent, SnapshotCard, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
+  ItemState, PriorState, ReleaseEvent, SessionEvent, SnapshotCard, SnapshotClosed, SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkState,
 } from "../adapters.js";
 import { createHash } from "node:crypto";
 import { redactAll } from "../redact.js";
@@ -80,6 +80,13 @@ type Bucket = PaperclipBucket;
  * "waiting" (status blocked, held by the Foreman this cycle), or null (a note only).
  */
 export type PaperclipStepMove = PaperclipStage | "done" | "waiting" | null;
+
+/** What a snapshot carries beyond its items (the `snapshot` event's optional fields). */
+export interface SnapshotReads {
+  readonly cards?: ReadonlyArray<SnapshotCard>;
+  readonly closed?: ReadonlyArray<SnapshotClosed>;
+  readonly states?: (issueNumbers: readonly number[]) => Promise<ReadonlyMap<number, ItemState>>;
+}
 
 /** One step the mirror writes: where it moves the card, and the note. */
 export type PaperclipStep = { readonly stage: PaperclipStepMove; readonly note: string };
@@ -356,7 +363,7 @@ export class PaperclipMirror implements WorkObserver {
       case "waiting": return this.onWaiting(event.repo, event.items, logger);
       case "release": return this.onRelease(event.release, logger);
       case "backoff": return event.paused ? this.onBackoffPause(event.upstream, event.reason ?? "", logger) : this.onBackoffResume(event.upstream, logger);
-      case "snapshot": return this.onSnapshot(event.repo, event.items, logger, event.cards);
+      case "snapshot": return this.onSnapshot(event.repo, event.items, logger, { cards: event.cards, closed: event.closed, states: event.states });
       // A promotion PR owns the item; its card moves on the release event, not here.
       case "promoted": return;
       case "promotionStall": return;
@@ -465,9 +472,10 @@ export class PaperclipMirror implements WorkObserver {
    * a restart released cmneb_data_publisher#199 to the SRE's To-do after the
    * SRE had given up on it (2026-10-05).
    */
-  async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, cards?: ReadonlyArray<SnapshotCard>): Promise<void> {
+  async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
     if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
+    const cards = read.cards;
     // With `ownsCards`, every issue has a card before the lifecycle pass places
     // them, and a held issue's reason is at hand for a card entering Blocked.
     const owned = this.cfg.ownsCards === true && cards ? cards : null;
@@ -484,7 +492,13 @@ export class PaperclipMirror implements WorkObserver {
       if (c.hold) this.holdAction.set(id, c.hold.action);
       else this.holdAction.delete(id);
     }
+    // Closed on GitHub, read live: the open-issue view the items come from can
+    // still carry such an issue with its old labels. Its card is not placed by them.
+    const closed = new Map<number, "completed" | "not_planned">();
+    for (const c of cards ?? read.closed ?? []) if (c.state !== "open") closed.set(c.item.issueNumber, c.state);
+    const movers: Array<{ item: WorkItem; id: string; stage: SnapshotItem["stage"]; detail: string; state: string; want: string }> = [];
     for (const { item, stage, detail, verifyHeld } of items) {
+      if (closed.has(item.issueNumber)) continue;
       const id = await this.resolve(item, false);
       if (!id) continue;
       this.ghStage.set(id, stage);
@@ -509,6 +523,34 @@ export class PaperclipMirror implements WorkObserver {
           continue;
         }
       }
+      movers.push({ item, id, stage, detail, state, want });
+    }
+    // An owned card of an open, unapproved issue goes to backlog, and that too
+    // waits on the issue reading open.
+    const toBacklog = ids.filter(([c, id]) => c.state === "open" && c.stage === null && !closed.has(c.item.issueNumber) && this.wouldBacklog(id));
+    // Every column a label would change is confirmed against GitHub's live
+    // state first, in one read: a closed issue's card goes to done, or
+    // cancelled when not planned, whatever labels it still shows; one whose
+    // state cannot be read is left where it is (cmneb_data_receiver#218 went
+    // done → in_review on a stale open view, 2026-10-15).
+    const asked = [...movers.map((m) => m.item.issueNumber), ...toBacklog.map(([c]) => c.item.issueNumber)];
+    let live: ReadonlyMap<number, ItemState> = new Map();
+    if (asked.length && read.states) {
+      try {
+        live = await read.states(asked);
+      } catch (err) {
+        logger.warn(`Paperclip: ${_repo} issue states not read: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const unread = asked.filter((n) => !live.has(n));
+    if (unread.length) logger.info(`Paperclip: ${_repo} left ${unread.map((n) => `#${n}`).join(", ")} where they are: GitHub state not read`);
+    for (const { item, id, stage, detail, state, want } of movers) {
+      const now = live.get(item.issueNumber);
+      if (now === undefined) continue;
+      if (now !== "open") {
+        if (!owned) await this.closeCard(id, now, item, logger);
+        continue;
+      }
       if (!(await this.move(id, stage))) continue;
       this.blockedAt.delete(id);
       if (stage === "blocked") this.labelBlocked.add(id);
@@ -516,13 +558,59 @@ export class PaperclipMirror implements WorkObserver {
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
       await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress" });
     }
+    // Without the cards, a card for an issue closed since the last read follows it.
+    if (!owned) {
+      for (const [n, how] of closed) {
+        const id = await this.resolve({ issueNumber: n, repo: _repo }, false);
+        if (id) await this.closeCard(id, how, { issueNumber: n, repo: _repo }, logger);
+      }
+    }
+    const backlogged = new Set(toBacklog.map(([, id]) => id));
     for (const [c, id] of ids) {
       if (budget.left <= 0) {
         logger.info(`Paperclip: ${_repo} card writes capped at ${CARD_WRITES_PER_SNAPSHOT} this cycle; the rest follow next cycle`);
         break;
       }
-      await this.syncCard(id, c, budget);
+      const now = live.get(c.item.issueNumber);
+      // An issue the open view carries but GitHub reads closed is synced as closed.
+      const card: SnapshotCard = c.state === "open" && now !== undefined && now !== "open" ? { ...c, state: now, stage: null } : c;
+      await this.syncCard(id, card, budget, backlogged.has(id) && now !== "open");
     }
+  }
+
+  /** True when the card shows done or cancelled. */
+  private isClosedCard(id: string): boolean {
+    const state = this.rowState.get(id);
+    return state === `status:${this.statusName("done")}` || state === `status:${this.statusName("cancelled")}`;
+  }
+
+  /** True when syncing an open, unapproved issue's card would move it to backlog. */
+  private wouldBacklog(id: string): boolean {
+    if (this.holds.has(id)) return false;
+    const state = this.rowState.get(id) ?? "";
+    if (!state.startsWith("status:")) return false;
+    const status = state.slice(7);
+    return status !== BACKLOG_STATUS && status !== this.statusName("cancelled");
+  }
+
+  /**
+   * A card whose issue is closed: done, or cancelled when not planned, with no
+   * stage label. A card a session holds, a waiting hold, and one already
+   * there are left alone. With `ownsCards` the card sync does this instead.
+   */
+  private async closeCard(id: string, how: "completed" | "not_planned", item: WorkItem, logger: Logger): Promise<void> {
+    if (this.holds.has(id)) return;
+    const state = this.rowState.get(id);
+    if (!state || state.startsWith("waiting\n")) return;
+    const target = this.statusName(how === "not_planned" ? "cancelled" : "done");
+    if (state === `status:${target}`) return;
+    const labelIds = await this.labelIdsFor(id, null);
+    if (!(await this.patch(id, { status: target, ...(labelIds ? { labelIds } : {}) }))) return;
+    this.rowState.set(id, `status:${target}`);
+    this.blockedAt.delete(id);
+    this.labelBlocked.delete(id);
+    this.blockedReason.delete(id);
+    logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
   }
 
   /** What a card the Foreman owns says: title and description, from its issue. */
@@ -554,7 +642,7 @@ export class PaperclipMirror implements WorkObserver {
    * keeps its status; a cancelled card of an open issue and a waiting hold are
    * left as they are, as the lifecycle pass leaves them.
    */
-  private async syncCard(id: string, c: SnapshotCard, budget: { left: number }): Promise<void> {
+  private async syncCard(id: string, c: SnapshotCard, budget: { left: number }, unconfirmed = false): Promise<void> {
     const want = this.cardContent(c);
     const have = this.rowContent.get(id);
     const state = this.rowState.get(id) ?? "";
@@ -572,7 +660,7 @@ export class PaperclipMirror implements WorkObserver {
         const labelIds = await this.labelIdsFor(id, null);
         if (labelIds) body.labelIds = labelIds;
       }
-    } else if (free && c.stage === null && status !== this.statusName("cancelled")) {
+    } else if (free && c.stage === null && status !== this.statusName("cancelled") && !unconfirmed) {
       if (status !== BACKLOG_STATUS || have?.assigneeAgentId || have?.assigneeUserId) {
         Object.assign(body, { status: BACKLOG_STATUS, assigneeAgentId: null, assigneeUserId: null });
         const labelIds = await this.labelIdsFor(id, null);
@@ -661,6 +749,10 @@ export class PaperclipMirror implements WorkObserver {
       this.claimed.delete(this.keyOf(item));
       const id = await this.resolve(item, false);
       if (!id) continue;
+      // A release PR's body can name an issue already closed: an open release
+      // never pulls its card out of done or cancelled (the snapshot places it
+      // once GitHub reads it open).
+      if (event.state === "open" && this.isClosedCard(id)) continue;
       if (step.stage && !(await this.move(id, step.stage))) continue;
       await this.note(id, fill(step.note, vars), { event: "release" });
     }

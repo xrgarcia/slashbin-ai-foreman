@@ -77,6 +77,30 @@ export interface WorkSourceAdapter {
    * observers no cards. Never throws; a failed read gives what it could.
    */
   cards?(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotCard[]>;
+
+  /**
+   * The items closed since the last read, with how they closed, for an
+   * observer that does not own the cards (`cards` carries them when one does).
+   * Optional. Never throws; a failed read gives what it could.
+   */
+  closed?(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotClosed[]>;
+
+  /**
+   * Whether each of `issueNumbers` is open or how it closed, read live, not
+   * from the open-issue view a snapshot is built from: that view can carry a
+   * closed issue with its old labels (cmneb_data_receiver#218, 2026-10-15).
+   * A number that cannot be read is left out. Optional. Never throws.
+   */
+  states?(repoConfig: RepoConfig, issueNumbers: readonly number[], logger: Logger): Promise<Map<number, ItemState>>;
+}
+
+/** An item open, or how it closed. */
+export type ItemState = "open" | "completed" | "not_planned";
+
+/** An item the source closed, and how. */
+export interface SnapshotClosed {
+  readonly item: WorkItem;
+  readonly state: "completed" | "not_planned";
 }
 
 /**
@@ -97,7 +121,7 @@ export interface SnapshotCard {
   readonly title: string;
   readonly url: string;
   /** Open, or how it closed. */
-  readonly state: "open" | "completed" | "not_planned";
+  readonly state: ItemState;
   /** An open item's lifecycle stage; null when it is in none (not approved). Null when closed. */
   readonly stage: StageOrDone | null;
   /** An open held item's reason, when it was read. */
@@ -163,6 +187,14 @@ export type WorkEvent =
     readonly kind: "snapshot"; readonly repo: string; readonly items: ReadonlyArray<SnapshotItem>;
     /** Every item a card exists for (`WorkSourceAdapter.cards`), only when an observer owns the cards. */
     readonly cards?: ReadonlyArray<SnapshotCard>;
+    /** The items closed since the last read (`WorkSourceAdapter.closed`), when `cards` is not carried. */
+    readonly closed?: ReadonlyArray<SnapshotClosed>;
+    /**
+     * Reads, live, whether items are open or how they closed
+     * (`WorkSourceAdapter.states`): a number left out could not be read.
+     * Absent when the source has no such read; nothing can then be confirmed.
+     */
+    readonly states?: (issueNumbers: readonly number[]) => Promise<ReadonlyMap<number, ItemState>>;
   };
 
 export type WorkEventKind = WorkEvent["kind"];

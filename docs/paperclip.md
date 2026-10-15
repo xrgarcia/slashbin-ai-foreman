@@ -107,6 +107,24 @@ Another writer may set where one of these cards is filed (project, project works
 parent, priority) and nothing else. With `ownsCards` off the Foreman creates a card only on a
 claim and moves it by its own steps, and leaves a card's content to whoever wrote it.
 
+### A closed issue's card
+
+Labels never move a closed issue's card. Each cycle the Foreman moves a card to the column its
+issue's labels call for, but the open-issue view those labels come from can still carry an
+issue GitHub has closed, with its old labels: cmneb_data_receiver#218 went done → in_review
+13 minutes after its release closed it (2026-10-15). So every card a label would move is first
+checked against GitHub's live state, in one batched read per snapshot:
+
+- open: the card moves to the labels' column, as before;
+- closed as completed: `done`; closed as not planned: `cancelled` — whatever labels remain;
+- not readable (the read failed, or the source has no such read): the card stays where it is.
+
+The issues closed since the last read (one read per repo every 10 minutes; the first after a
+start looks back 7 days) take their cards to `done` or `cancelled` too, with `ownsCards` on
+or off, and an issue in both that read and the open view is closed. An open release pull request
+naming an issue never pulls its card out of `done` or `cancelled`. A cancelled card of an
+open issue, a waiting hold and a card a session holds are left alone, as everywhere.
+
 ## Status mapping
 
 Each step moves the task to a lifecycle stage (see **Board stages**), and the stage sets one of

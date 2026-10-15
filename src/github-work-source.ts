@@ -2,7 +2,7 @@
 // translates the core lifecycle (lifecycle.ts) into issue labels and back,
 // and is the only module that knows which label means which stage.
 
-import type { SnapshotCard, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
+import type { ItemState, SnapshotCard, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import {
   closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, gh, ghKeyed, hasLabel,
@@ -13,7 +13,7 @@ import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
-import { holdReasons, recentlyClosed } from "./github/cards.js";
+import { holdReasons, issueStates, recentlyClosed } from "./github/cards.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
 export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
@@ -118,6 +118,17 @@ const blockerHoldAnnounced = new Map<string, string>();
  * Stateless: construct one where it is used.
  */
 
+/**
+ * The open cards and the closed ones as one list. An issue in both is closed:
+ * the closed read is live, while the open list is a view that has carried a
+ * closed issue with its old labels (cmneb_data_receiver#218, 2026-10-15). An
+ * issue reopened since is placed again once a live read finds it open.
+ */
+export function closedWins(open: readonly SnapshotCard[], closed: readonly SnapshotCard[]): SnapshotCard[] {
+  const shut = new Set(closed.map((c) => c.item.issueNumber));
+  return [...open.filter((c) => !shut.has(c.item.issueNumber)), ...closed];
+}
+
 export class GitHubIssueConnector implements WorkSourceAdapter {
   async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
     return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
@@ -162,13 +173,21 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         ...(hold ? { hold } : {}),
       };
     });
-    const openNumbers = new Set(open.map((i) => i.number));
-    for (const c of recentlyClosed(repo, repoConfig.repoPath, logger)) {
-      // A reopened issue is in the open list already; the open read wins.
-      if (openNumbers.has(c.number)) continue;
-      out.push({ item: { issueNumber: c.number, repo }, title: c.title, url: c.url, state: c.state, stage: null });
-    }
-    return out;
+    const closed = recentlyClosed(repo, repoConfig.repoPath, logger)
+      .map((c): SnapshotCard => ({ item: { issueNumber: c.number, repo }, title: c.title, url: c.url, state: c.state, stage: null }));
+    return closedWins(out, closed);
+  }
+
+  /** The issues closed since the last read (github/cards.ts), for a mirror that does not own the cards. */
+  async closed(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotClosed[]> {
+    const repo = repoConfig.githubRepo;
+    return recentlyClosed(repo, repoConfig.repoPath, logger).map((c) => ({ item: { issueNumber: c.number, repo }, state: c.state }));
+  }
+
+  /** Each issue's state read live from GitHub, not from the open-issue view (github/cards.ts issueStates). */
+  async states(repoConfig: RepoConfig, issueNumbers: readonly number[], logger: Logger): Promise<Map<number, ItemState>> {
+    if (!issueNumbers.length) return new Map();
+    return issueStates(repoConfig.githubRepo, repoConfig.repoPath, issueNumbers, logger);
   }
 
   async snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]> {
