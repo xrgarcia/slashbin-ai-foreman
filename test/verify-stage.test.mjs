@@ -101,3 +101,17 @@ test("devVerifyHolding: an unverified merge holds the next build until it passes
   assert.equal(devVerifyHolding([140, 131], { 131: { heldAt: at, prNumber: 148, reason: "no-merged-pr", attempts: 3 } }, 3), 140,
     "the first merge still with the SRE is the one named");
 });
+
+test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged hold reports blocked", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf8");
+  const d = src.indexOf('if (plan.kind === "defer")');
+  const defer = src.slice(d, src.indexOf("verifyDefer.clear(repoName)", d));
+  const wait = src.slice(src.indexOf('if (plan.kind === "wait")'), src.indexOf("let attempts = 0;"));
+  const charge = src.slice(src.indexOf("let attempts = 0;"));
+  for (const [name, b] of [["defer", defer], ["wait", wait]]) {
+    assert.match(b, /kind: "verifyWaiting"/, name);
+    assert.doesNotMatch(b, /kind: "blocked"/, name);
+  }
+  assert.match(charge, /kind: "blocked"/);
+});
