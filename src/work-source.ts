@@ -182,11 +182,16 @@ export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): P
   const items = await source.snapshot(repoConfig, logger);
   // Every card, not only the lifecycle's, read only when an observer writes them all.
   const cards = source.cards && wantsCards() ? await source.cards(repoConfig, logger) : undefined;
+  // Otherwise the closed items alone: a card the Foreman moved follows its issue to done.
+  const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
   const held = loadRepoState(repoConfig.name).verifyHeld ?? {};
+  const read = source.states?.bind(source);
   await emit({
     kind: "snapshot",
     repo: repoConfig.githubRepo,
     items: items.map((i) => (held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i)),
     ...(cards ? { cards } : {}),
+    ...(closed ? { closed } : {}),
+    ...(read ? { states: (ns: readonly number[]) => read(repoConfig, ns, logger) } : {}),
   }, null, logger);
 }
