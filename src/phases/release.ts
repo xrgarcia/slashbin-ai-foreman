@@ -57,7 +57,7 @@ import {
 } from "../github.js";
 import { releaseTagName } from "../github/conventions.js";
 import { releaseIssues } from "../release-tracker.js";
-import { loadRepoState, saveRepoState, type ProdRelease, type RepoState } from "../state.js";
+import { loadRepoState, saveRepoState, type ProdRelease, type ProdVerified, type RepoState } from "../state.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
@@ -415,7 +415,11 @@ async function blockOrphans(repoConfig: RepoConfig, st: RepoState, logger: Logge
  * prod verification grades its acceptance, and the release closes it on a pass.
  * A `soaking` release already passed without it, so it goes back to `merged` to
  * be verified again (jerky_skuvault_service #433, 2026-10-12: labelled 2 s
- * before PR #439 was cut, orphaned only after #439 passed). True when joined.
+ * before PR #439 was cut, orphaned only after #439 passed). A release whose
+ * soak passed is no longer tracked, so it is found by its `prodVerified` merge
+ * and tracked again, soaked, to be verified once more
+ * (slashbin_mcp_services #322, 2026-10-15: ready 8 min after PR #326's soak
+ * passed). True when joined.
  */
 async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphans: number[], logger: Logger): Promise<boolean> {
   let head: string;
@@ -425,17 +429,21 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
     logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
     return false;
   }
-  const rel = Object.values(st.prodReleases ?? {})
+  const tracked = Object.values(st.prodReleases ?? {})
     .find((r) => r.mergeSha === head && r.phase !== "deploying");
-  if (!rel) return false;
+  const done = tracked ? undefined : Object.values(st.prodVerified ?? {}).find((v) => v.mergeSha === head);
+  if (!tracked && !done) return false;
   const titles = new Map(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i.title]));
+  const prNumber = tracked?.pr ?? done!.pr;
+  let rel: ProdRelease;
   try {
-    const pr = viewReleasePr(repoConfig, rel.pr);
+    const pr = viewReleasePr(repoConfig, prNumber);
+    rel = tracked ?? passedRelease(st, pr, done!);
     const named = new Set(releaseIssues(pr.body));
     const missing = orphans.filter((n) => !named.has(n));
     if (missing.length) addReleasePrIssues(repoConfig, pr, missing.map((n) => ({ number: n, title: titles.get(n) ?? `#${n}` })));
   } catch (err) {
-    logger.warn(`Could not add ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr}: ${errText(err)}`);
+    logger.warn(`Could not add ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${prNumber}: ${errText(err)}`);
     return false;
   }
   const issues = [...rel.issues, ...orphans.filter((n) => !rel.issues.includes(n))];
@@ -452,6 +460,22 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
   }
   logger.info(`Joined ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr} (production head ${short(head)})`);
   return true;
+}
+
+/**
+ * A release that passed and soaked, rebuilt from what its pass recorded, so a
+ * joined issue can be verified by it. Already soaked: the next pass closes and
+ * drops it without a second soak.
+ */
+function passedRelease(st: RepoState, pr: ReleasePrView, done: ProdVerified): ProdRelease {
+  const issues = Object.entries(st.prodVerified ?? {})
+    .filter(([, v]) => v.pr === done.pr && v.mergeSha === done.mergeSha)
+    .map(([n]) => Number(n));
+  return {
+    pr: done.pr, url: pr.url, headSha: pr.headSha, issues, phase: "soaking", mergeSha: done.mergeSha,
+    mergedAt: pr.mergedAt ?? done.at, soaked: true, attempts: 0, since: iso(now()),
+    ...(done.tag ? { tag: done.tag } : {}), ...(done.evidence ? { evidence: done.evidence } : {}),
+  };
 }
 
 /** The verdict for a merged release: the SRE's posted Production Verification if there is one, else a fresh run. */
