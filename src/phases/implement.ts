@@ -26,6 +26,7 @@ import { findIssuesMergedToBase } from "../github.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import { devVerifyHolding } from "./verify.js";
+import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import {
   escalatedReason,
   foremanLogin,
@@ -170,6 +171,10 @@ export async function tryBatchImplementation(
     repoLogger.info(`Failure pause over for ${repoName} — retrying`);
     failureCount.set(repoName, 0);
   }
+
+  // Read-only: say once per golden version that this repo's skill copy is
+  // behind. The copy changes only below, when an approved issue is built.
+  if (config.skillSync?.enabled) noticeSkillDrift(config.skillSync, repoConfig, repoLogger);
 
   // Gate: are there approved issues to implement? The work source offers
   // every eligible item, uncapped. Two lists are cut from that offer:
@@ -455,12 +460,19 @@ export async function tryBatchImplementation(
   // The items the session actually worked. A run builds one of its batch; the
   // outcome is told only to that one, never to the issues it left alone.
   let worked: number[] | undefined;
+  // The skill-sync commit made for this session, settled once it ends.
+  let skillSync: SyncOutcome | null = null;
 
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
     for (const n of actionableIssues) await emit({ kind: "claim", item: itemOf(repoConfig, n) }, repoConfig, repoLogger);
     const goals = startReport(repoConfig, actionableIssues, repoLogger);
     await emit({ kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
+
+    // A stale skill copy is brought to the golden in a commit the session
+    // builds on and pushes with its work (docs/skill-sync.md). The code makes
+    // it, never the session; it cannot fail the issue.
+    if (config.skillSync?.enabled) skillSync = syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
 
     const priorFailure = lastFailureReason.get(repoName) || null;
     const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues)
@@ -704,6 +716,7 @@ export async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(runAbort);
+    if (skillSync) settleSkillSync(repoConfig, skillSync, repoLogger);
     await emit({ kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }
 }

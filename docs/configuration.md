@@ -314,12 +314,19 @@ Type: object · Default: see [paperclip.md](paperclip.md)
 
 The optional Paperclip board mirror, off unless `enabled` (docs/paperclip.md). Global, never per repo: one Foreman is one Paperclip agent. prefault for the same reason as above.
 
+### `skillSync`
+
+Type: object · Default: see [skill-sync.md](skill-sync.md)
+
+Keep each repo's skill copies on a golden source, one approved issue at a time, off unless `enabled` (docs/skill-sync.md). prefault for the same reason as above.
+
 ## Per-repo entries (`repos[]`)
 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
 
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
 - `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
+- `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
 
 ```json
 {
@@ -547,4 +554,5 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 
 - `stages`: the stage list and custom stages, README "Pipeline stages" and `src/stages.ts`.
 - `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).
+- `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).
 - The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).

@@ -11,8 +11,9 @@
 // Exits 1 on any FAIL; a WARN alone exits 0. `npm run setup` runs it last.
 //
 // Read-only by construction: gh is only ever called with `api` and no method
-// flag (a GET) or with `auth status`; git only with `rev-parse`. A token is
-// reported as set or unset, never printed.
+// flag (a GET) or with `auth status`; git only with `rev-parse`, and for skill
+// sync `ls-tree`, `cat-file` and `log` — reads of refs as last fetched, never a
+// fetch. A token is reported as set or unset, never printed.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -26,6 +27,7 @@ if (!existsSync(built)) {
 }
 const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning } = await import(built);
 const { claudeConfigPath, claudeTrustStatus } = await import(join(root, "dist", "claude-trust.js"));
+const { readGolden, skillsFor, driftAt, describeDrift } = await import(join(root, "dist", "skill-sync.js"));
 
 const args = process.argv.slice(2);
 const configArg = args.includes("--config") ? args[args.indexOf("--config") + 1] : args.find((a) => !a.startsWith("-"));
@@ -110,6 +112,22 @@ else if (config.stages.some((s) => s.type === "release") && releaseStageReady(co
   else line("PASS", "release stage", `on — labels "${config.lifecycleLabels.releasePending}" and "${config.lifecycleLabels.prodVerifyHeld}" are checked per repo below`);
 }
 
+// --- Skill sync ---
+
+// The golden as last fetched: the doctor fetches nothing. The daemon fetches
+// before it syncs, so a stale read here only under-reports drift.
+let golden = null;
+if (config.skillSync.enabled) {
+  try {
+    golden = readGolden(config.skillSync, { fetch: false });
+    line("PASS", "skill sync", `on — golden ${golden.label}@${golden.version}: ${[...golden.skills.keys()].sort().join(", ")}`);
+    const unknown = config.skillSync.skills.filter((n) => !golden.skills.has(n));
+    if (unknown.length) line("WARN", "skill sync", `skillSync.skills names ${unknown.join(", ")}, which the golden does not have — never synced.`);
+  } catch (err) {
+    line("WARN", "skill sync", `on, but the golden is unreadable — no repo is synced until it reads: ${reason(err)}`);
+  }
+}
+
 // --- Per repo ---
 
 const skillFile = (repo, path) => (path === "builtin:" ? join(root, "skills") : isAbsolute(path) ? path : resolve(repo.repoPath, path));
@@ -167,6 +185,24 @@ for (const repo of config.repos) {
       line("PASS", `${at}: ${key}`, path);
     } else {
       line("FAIL", `${at}: ${key}`, `${path} not found in ${repo.repoPath}. Use "builtin:" or fix the path.`);
+    }
+  }
+
+  // Drift is a WARN, never a FAIL: a stale copy still builds, and the next
+  // approved issue here syncs it (docs/skill-sync.md).
+  if (golden) {
+    const names = skillsFor(config.skillSync, golden, repo.skillSyncSkills);
+    const ref = `origin/${repo.featureBranch}`;
+    if (names.length === 0) {
+      line("PASS", `${at}: skill sync`, "opted out (skillSyncSkills is empty)");
+    } else {
+      try {
+        const stale = describeDrift(driftAt(repo.repoPath, ref, config.skillSync, golden, names));
+        if (stale) line("WARN", `${at}: skill sync`, `${ref} is behind ${golden.label}@${golden.version}: ${stale} — synced with the next approved issue here.`);
+        else line("PASS", `${at}: skill sync`, `${names.join(", ")} current at ${ref}`);
+      } catch (err) {
+        line("WARN", `${at}: skill sync`, `could not read ${ref} — ${reason(err)}`);
+      }
     }
   }
 

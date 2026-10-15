@@ -14,6 +14,7 @@ stale), so they describe what runs, not what was meant to.
 | Rename the blocked or priority labels, or change the PR titles and signature the Foreman writes | [configuration.md#github-conventions-github](configuration.md#github-conventions-github) — the `github` block |
 | Know which state an issue is in, what moves it, what each event means | [lifecycle.md](lifecycle.md) *(generated)* |
 | Turn the Paperclip board mirror on, map its columns, check it | [paperclip.md](paperclip.md) *(generated)* |
+| Keep each repo's skill copies on a golden source, one approved issue at a time | [skill-sync.md](skill-sync.md) |
 | Reorder the pipeline or add a stage that runs your own skill | README "Pipeline stages" and "Custom stages"; `src/stages.ts` |
 | Turn on review, the Tech Lead or the SRE | README "Review phase (opt-in)"; [configuration.md#review-phase](configuration.md#review-phase) |
 | Understand the code: one file per concern | [../CLAUDE.md](../CLAUDE.md) "Architecture" and "Key design decisions" |
