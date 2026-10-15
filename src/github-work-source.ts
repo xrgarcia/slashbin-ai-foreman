@@ -2,10 +2,10 @@
 // translates the core lifecycle (lifecycle.ts) into issue labels and back,
 // and is the only module that knows which label means which stage.
 
-import type { SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
+import type { SnapshotCard, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import {
-  closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, gh, ghKeyed, hasLabel,
+  closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, gh, ghKeyed, hasLabel,
   isBackoffRefusal, openIssueLabels, type ReviewOutcome,
 } from "./github.js";
 import type { Move, StageOrDone } from "./lifecycle.js";
@@ -13,6 +13,7 @@ import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
+import { holdReasons, recentlyClosed } from "./github/cards.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
 export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
@@ -125,6 +126,49 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   async record(event: WorkEvent, repoConfig: RepoConfig, logger: Logger): Promise<boolean> {
     if (event.kind !== "transition") return false;
     return LABEL_WRITE[event.move](this, repoConfig, event.item.issueNumber, logger);
+  }
+
+  /**
+   * Every card the repo has, for an observer that owns them all: each open
+   * issue with its stage (null: not approved) and title, `inRelease` read from
+   * the open PRs into the production branch that name it (#N in the body, the
+   * rule the receiver's sync used), a held issue's reason, and the issues
+   * closed since the last read (github/cards.ts).
+   */
+  async cards(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotCard[]> {
+    const repo = repoConfig.githubRepo;
+    const url = (n: number) => `https://github.com/${repo}/issues/${n}`;
+    const blockedLabel = repoConfig.github.blockedLabel;
+    let release = new Set<number>();
+    try {
+      release = new Set(getOpenPrs(repo, repoConfig.repoPath)
+        .filter((p) => p.baseRefName === repoConfig.productionBranch)
+        .flatMap((p) => [...String(p.body ?? "").matchAll(/#(\d+)\b/g)].map((m) => Number(m[1]))));
+    } catch (err) {
+      logger.debug(`cards: ${repo} release PRs not read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const open = getOpenIssues(repo, repoConfig.repoPath, logger);
+    const labelsOf = (i: { labels: { name: string }[] }) => i.labels.map((l) => l.name);
+    const holds = holdReasons(repo, repoConfig.repoPath, blockedLabel,
+      open.filter((i) => labelsOf(i).includes(blockedLabel)).map((i) => i.number), logger);
+    const out: SnapshotCard[] = open.map((i) => {
+      const hold = holds.get(i.number);
+      return {
+        item: { issueNumber: i.number, repo },
+        title: i.title,
+        url: url(i.number),
+        state: "open" as const,
+        stage: issueStage(labelsOf(i), release.has(i.number), repoConfig.lifecycleLabels, repoConfig.triggerLabel, blockedLabel),
+        ...(hold ? { hold } : {}),
+      };
+    });
+    const openNumbers = new Set(open.map((i) => i.number));
+    for (const c of recentlyClosed(repo, repoConfig.repoPath, logger)) {
+      // A reopened issue is in the open list already; the open read wins.
+      if (openNumbers.has(c.number)) continue;
+      out.push({ item: { issueNumber: c.number, repo }, title: c.title, url: c.url, state: c.state, stage: null });
+    }
+    return out;
   }
 
   async snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]> {

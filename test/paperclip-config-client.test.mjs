@@ -49,6 +49,7 @@ test("no paperclip block: mirror off, every default applied", () => {
     identityKeyFormat: "source: {repo}#{N}",
     taskTitleFormat: "{repo}#{N}",
     projects: false,
+    ownsCards: false,
     agentStatus: true,
     comments: {
       enabled: true,

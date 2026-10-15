@@ -69,9 +69,42 @@ export interface WorkSourceAdapter {
    * reconcile to. Items outside the lifecycle are left out.
    */
   snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]>;
+
+  /**
+   * Every item a card exists for, for an observer that owns the cards
+   * (`WorkObserver.wantsCards`): each open item, in the lifecycle or not, and
+   * the items closed since the last read. Optional: a source without it gives
+   * observers no cards. Never throws; a failed read gives what it could.
+   */
+  cards?(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotCard[]>;
+}
+
+/**
+ * Why the source holds an item, as its holder said it (GitHub: the comment the
+ * person who added the blocked label posted with it). `action` is the line a
+ * card shows; `comment` the holder's full words, posted once; `commentUrl`
+ * where they are. The last two are null when the holder posted no reason.
+ */
+export interface SnapshotHold {
+  readonly action: string;
+  readonly comment: string | null;
+  readonly commentUrl: string | null;
 }
 
 /** One item as the work source shows it at the end of a cycle. */
+export interface SnapshotCard {
+  readonly item: WorkItem;
+  readonly title: string;
+  readonly url: string;
+  /** Open, or how it closed. */
+  readonly state: "open" | "completed" | "not_planned";
+  /** An open item's lifecycle stage; null when it is in none (not approved). Null when closed. */
+  readonly stage: StageOrDone | null;
+  /** An open held item's reason, when it was read. */
+  readonly hold?: SnapshotHold;
+}
+
+/** One lifecycle item as the work source shows it at the end of a cycle. */
 export interface SnapshotItem {
   readonly item: WorkItem;
   readonly stage: StageOrDone;
@@ -126,7 +159,11 @@ export type WorkEvent =
   /** An upstream (github / claude) started refusing work (`reason`), or stopped. */
   | { readonly kind: "backoff"; readonly upstream: string; readonly paused: boolean; readonly reason?: string }
   /** The repo's open items at the end of a cycle, as the source shows them: the record a mirror reconciles to. */
-  | { readonly kind: "snapshot"; readonly repo: string; readonly items: ReadonlyArray<SnapshotItem> };
+  | {
+    readonly kind: "snapshot"; readonly repo: string; readonly items: ReadonlyArray<SnapshotItem>;
+    /** Every item a card exists for (`WorkSourceAdapter.cards`), only when an observer owns the cards. */
+    readonly cards?: ReadonlyArray<SnapshotCard>;
+  };
 
 export type WorkEventKind = WorkEvent["kind"];
 
@@ -142,6 +179,8 @@ export type WorkEventKind = WorkEvent["kind"];
  */
 export interface WorkObserver {
   onEvent(event: WorkEvent, logger: Logger): Promise<void>;
+  /** True when this observer writes every card itself and needs a snapshot's `cards`. */
+  wantsCards?(): boolean;
 }
 
 /**

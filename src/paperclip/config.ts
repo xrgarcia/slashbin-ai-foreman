@@ -157,6 +157,8 @@ export const paperclipConfigSchema = z.object({
   // = every configured repo. A repo left out is never touched in Paperclip; its
   // existing cards stay as they are.
   repos: z.array(z.string().regex(/^[\w.-]+\/[\w.-]+$/, "a repo as owner/name")).min(1).optional(),
+  // The Foreman is the only writer of every card for an issue in a mirrored repo: it creates one for each open issue (approved or not), keeps its title ("{name}#{N} {title}"), description and status in step with GitHub (not approved: backlog, unassigned; closed: done, or cancelled when not planned), writes a held issue's reason from GitHub, and retires a second card for the same issue. Published with the config, so another sync reads it and leaves those cards' content alone; where a card is filed (project, parent, goal, priority) stays that sync's. Off = cards are created on claim and moved by the Foreman's own steps only.
+  ownsCards: z.boolean().default(false),
   // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
   agentStatus: z.boolean().default(true),
   // Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card.
