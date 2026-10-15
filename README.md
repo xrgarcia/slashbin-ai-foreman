@@ -94,7 +94,7 @@ npm run setup                              # install, build, create the labels, 
 npm start                                  # once the doctor says Ready
 ```
 
-**[docs/setup.md](docs/setup.md)** lists what you need first (Node 18+, the `claude`
+**[docs/setup.md](docs/setup.md)** lists what you need first (Node 22.12+, the `claude`
 and `gh` CLIs, a checkout of each repo, three branches, the GitHub tokens) and the
 smallest working config. `npm run doctor` re-checks everything at any time, read-only.
 
