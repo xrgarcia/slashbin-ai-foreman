@@ -1170,3 +1170,68 @@ test("ownsCards off: housekeeping leaves a second card alone", async () => {
   await mirror.housekeep();
   assert.equal(fake.rows[1].status, "in_progress");
 });
+
+// --- Handoffs: a card moved to another seat says who acts, what, why, links, done ---
+// SLA-1550 (2026-10-15): Slashbin-console#1283 reached the EM at
+// pendingVerification saying only "Dev verification passed" and "approved"; the
+// EM read it as a status ping and the release gate sat.
+
+const SEATS = {
+  roles: { em: { name: "Engineering Manager", id: "agent-em" }, sre: { name: "SRE", id: "agent-sre" } },
+  board: {
+    merged: { owner: "sre", status: "in_review", label: "merged" },
+    verifying: { owner: "sre", status: "in_progress", label: "merged" },
+    pendingVerification: { owner: "em", status: "todo", label: "pendingVerification" },
+  },
+};
+const console1283 = { issueNumber: 1283, repo: "xrgarcia/Slashbin-console" };
+const verifySession = (status, extra = {}) => ({ phase: "verify", status, repo: console1283.repo, items: [console1283], pr: 1291, reviewer: "SRE", ...extra });
+
+test("handoff: dev verification passing hands the card to the EM with the release gate to run, why, links and done", async () => {
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: "agent-sre", description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const { mirror } = mirrorOn(fake, { ...SEATS, ...rich() });
+  await mirror.onSession(verifySession("started"), logger());
+  await mirror.onState(console1283, "merged", "approved", repoConfig, logger());
+  await mirror.onSession(verifySession("finished", { detail: "PR #1291 verified in dev (deploy SUCCESS)" }), logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-em");
+  const notes = fake.comments.r1283;
+  const handoff = notes.at(-1);
+  assert.match(handoff, /^approved\n\n\*\*Next: Engineering Manager — action needed\*\*/);
+  assert.ok(handoff.includes("- **Do:** Run the EM release gate (`/deliver-to-prod` step 3a) for xrgarcia/Slashbin-console#1283 and, if it passes, apply `ready for prod release` to the issue. The prod release does not start until you do."));
+  assert.match(handoff, /- \*\*Why:\*\* dev verification passed \(`pr approved`\) — PR #1291 verified in dev \(deploy SUCCESS\) \(\d{4}-\d\d-\d\d \d\d:\d\dZ\)/);
+  assert.ok(handoff.includes("[xrgarcia/Slashbin-console#1283](https://github.com/xrgarcia/Slashbin-console/issues/1283)"));
+  assert.ok(handoff.includes("[PR #1291](https://github.com/xrgarcia/Slashbin-console/pull/1291)"));
+  assert.ok(handoff.includes("- **Done when:** `ready for prod release` is on xrgarcia/Slashbin-console#1283"));
+  assert.equal(notes.filter((n) => n.includes("**Next:")).length, 1, "one handoff, in the step's own note");
+});
+
+test("handoff: a move to a seat the Foreman drives says so; a Foreman-held stage and a session start carry none", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "todo" })]);
+  const { mirror } = mirrorOn(fake, TEAM);
+  await mirror.onState(item, "changesRequested", "inReview", repoConfig, logger());
+  const toReviewer = fake.comments.r7.at(-1);
+  assert.match(toReviewer, /\*\*Next: Reviewer — no action needed from this card\*\*/);
+  assert.ok(toReviewer.includes("- **Done when:** the review's verdict is on the PR"));
+  await mirror.onSession({ phase: "review", status: "started", repo: "example/r", items: [item], pr: 9, reviewer: "Tech Lead" }, logger());
+  assert.equal(fake.comments.r7.at(-1), "Tech Lead reviewing PR #9", "a session runs on the seat already told");
+  await mirror.onSession({ phase: "review", status: "finished", repo: "example/r", items: [item], pr: 9 }, logger());
+  await mirror.onState(item, "inReview", "changesRequested", repoConfig, logger());
+  assert.ok(!fake.comments.r7.at(-1).includes("**Next:"), "the Foreman holds changesRequested: no handoff");
+});
+
+test("handoff: with no roles every stage is the Foreman's and no note grows a handoff", async () => {
+  const fake = fakePaperclip([row("r7", 7)]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onState(item, "merged", "approved", repoConfig, logger());
+  assert.deepEqual(fake.comments.r7, ["approved"]);
+});
+
+test("handoff: an owned card at another seat's stage says the next action under its stage line", async () => {
+  const fake = fakePaperclip([]);
+  const { mirror } = mirrorOn(fake, { ...OWNED, ...SEATS });
+  const c = { item: { issueNumber: 7, repo: "example/r" }, title: "issue 7", url: URL7, state: "open", stage: "pendingVerification" };
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["approved", "pr approved"] }]), cards: [c] }, logger());
+  const lines = fake.rows[0].description.split("\n");
+  assert.equal(lines[1], "GitHub: open · stage pendingVerification");
+  assert.equal(lines[2], "Next: Engineering Manager — run the EM release gate (/deliver-to-prod 3a) for example/r#7, then apply `ready for prod release`");
+});

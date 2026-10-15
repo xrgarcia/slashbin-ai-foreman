@@ -108,6 +108,20 @@ export function stageTarget(cfg: BoardConfig, stage: PaperclipStage): { bucket: 
   return { bucket: s.status, agentId: agentFor(cfg, s.owner), label: s.label };
 }
 
+/**
+ * The name of the seat a stage hands its card to: the holding role's `name`
+ * (its key when unnamed), or null when the Foreman's own agent holds it (the
+ * "foreman" role, or a role with no id yet). A stage with a seat gets a
+ * handoff (handoff.ts): the holder is told what to do.
+ */
+export function stageSeat(cfg: BoardConfig, stage: PaperclipStage): string | null {
+  const owner = filled(cfg).board[stage]?.owner;
+  if (!owner || owner === PAPERCLIP_FOREMAN_ROLE) return null;
+  const id = agentFor(cfg, owner);
+  if (!id || id === cfg.agentId) return null;
+  return filled(cfg).roles[owner]?.name ?? owner;
+}
+
 /** The GitHub label that puts an item in a person's hands: its card is held by `humanUserId`. */
 export const HUMAN_HOLD_LABEL = "approved-for-human";
 /**
