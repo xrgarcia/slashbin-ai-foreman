@@ -571,6 +571,34 @@ test("an issue orphaned after its release passed rejoins it, and the release is 
   assert.deepEqual(commentsOn(5), [], "the issue the first pass closed is left alone");
 });
 
+test("an issue orphaned after its release soaked and was dropped rejoins it from the recorded pass", async () => {
+  world({
+    issues: [{ number: 5, title: "Issue 5", state: "CLOSED", labels: ["approved"] }, issue(9, "release pending")],
+    prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE,
+  }, { prod: VERIFY(100) });
+  editState((st) => {
+    st.prodReleases = {};
+    st.prodVerified = { 5: { pr: 100, mergeSha: MERGE, tag: "release-x-pr100", at: "2026-10-15T18:12:00Z" } };
+  });
+  await run();
+  assert.ok(!gh().issues[9].labels.includes("blocked"), "not blocked");
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/, "the release PR now names it");
+  assert.match(commentsOn(9)[0], /^\*\*Joined release PR #100\.\*\*.*re-run production verification/s);
+  assert.deepEqual(agentCalls(), [["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]], "a fresh verification, with #9 named");
+  assertClosedVerified(9);
+  assert.equal(loadRepoState("rel").prodReleases[100], undefined, "already soaked, so the pass drops it without a second soak");
+  assert.equal(loadRepoState("rel").prodVerified[9].pr, 100);
+  assert.deepEqual(commentsOn(5), [], "the issue the first pass closed is left alone");
+});
+
+test("an orphan with no release, tracked or passed, at production's head is still blocked", async () => {
+  world({ issues: [issue(9, "release pending")], compareFiles: 0, prodHead: MERGE });
+  editState((st) => { st.prodReleases = {}; st.prodVerified = { 5: { pr: 90, mergeSha: OLD, at: "2026-10-09T00:00:00Z" } }; });
+  await run();
+  assert.ok(gh().issues[9].labels.includes("blocked"));
+  assert.match(commentsOn(9)[0], /no release carries this issue/);
+});
+
 test("without srePath and techLeadPath the stage does nothing at all", async () => {
   const off = loadConfig(writeCfg("cfg-off.json", {}));
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
