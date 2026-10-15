@@ -38,7 +38,7 @@
     "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "license": "MIT",
   "publishConfig": {
