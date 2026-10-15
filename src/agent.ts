@@ -13,6 +13,7 @@ import { redactAll } from "./redact.js";
 import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "./review-progress.js";
 import { claudeTrustEnabled, ensureClaudeTrust, isUntrustedWarning } from "./claude-trust.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./github/conventions.js";
+import { contractBlock, contractReaderPath, setContractReaderEnv } from "./handoff-contract.js";
 export { redactAll };
 
 const FOREMAN_OVERRIDES = resolve(
@@ -534,8 +535,10 @@ function setLabelEnv(
  * The Tech Lead hand-off's environment. It reads TECHLEAD_GITHUB_KEY by name and
  * sets GH_TOKEN itself — so it receives its own token (account slasbhin-techlead)
  * and never the Foreman's or the EM's,
- * plus its own TECH_LEAD_* settings and the configured label names. It reads
- * nothing from the EM checkout (review moved wholly to it, 2026-10-10).
+ * plus its own TECH_LEAD_* settings and the configured label names. From the EM
+ * checkout it gets one thing: the handoff-contract reader's path (EM#614), which
+ * it renders into its review prompt as authority, not as rubric. Review itself
+ * moved wholly to it, 2026-10-10.
  */
 export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
@@ -544,6 +547,7 @@ export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfi
   // The configured label names, exactly as every Claude session gets them
   // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
   setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
+  setContractReaderEnv(env, agentConfig.emRepoPath);
   return env;
 }
 
@@ -623,6 +627,11 @@ function spawnClaudeWithOptions(
   logger: Logger,
   abortSignal?: AbortSignal
 ): Promise<SpawnResult> {
+  // Every builder session — implement, revise, custom stage — carries the shared
+  // handoff contract (EM#614), or an explicit CONTRACT UNAVAILABLE naming why.
+  // The EM checkout comes from the daemon env (AI_AGENT_EM_REPO_PATH), the only
+  // place a builder spawn can see it.
+  prompt = `${prompt}\n\n${contractBlock(contractReaderPath(process.env.AI_AGENT_EM_REPO_PATH))}`;
   const args = [
     "--print",
     prompt,
@@ -1549,6 +1558,7 @@ export function buildSreEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): R
   setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("SRE_")), env);
   if (agentConfig.emRepoPath && !env.SRE_EM_REPO) env.SRE_EM_REPO = agentConfig.emRepoPath;
+  setContractReaderEnv(env, agentConfig.emRepoPath);
   return env;
 }
 
