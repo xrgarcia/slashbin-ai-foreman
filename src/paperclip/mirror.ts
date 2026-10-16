@@ -1408,8 +1408,11 @@ export class PaperclipMirror implements WorkObserver {
     return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
   }
 
-  /** A `comment` in `body` is credited to `commentAuthor`; none = the key's own user (a person's words, or no agent with that login). */
-  private async patch(id: string, body: Record<string, unknown>, commentAuthor: string | null = null): Promise<boolean> {
+  /**
+   * A `comment` in `body` is credited to `commentAuthor`: null = the key's own user (a
+   * person's words, or no agent with that login); omitted = the Foreman, as every write is.
+   */
+  private async patch(id: string, body: Record<string, unknown>, commentAuthor?: string | null): Promise<boolean> {
     const r = await this.safeCall("update task", () => this.client.updateIssue(id, body, { commentAuthor }), id);
     return r.ok;
   }

@@ -334,3 +334,24 @@ test("client: a comment's credited author rides only on a write that posts one; 
   await assert.rejects(c.createComment("i", "hi", { commentAuthor: "agent:a" }), (e) => e instanceof PaperclipClientError && e.status === 403);
   assert.deepEqual(seen, ["POST agent:a"], "any other refusal is the caller's, not retried");
 });
+
+test("client: with actingAs, every write is credited to it unless the call names an author or null; reads never are", async () => {
+  const seen = [];
+  const fetch = async (url, init = {}) => {
+    seen.push(`${init.method} ${init.headers?.["x-slashbin-comment-author"] ?? null}`);
+    return new Response(JSON.stringify(init.method === "GET" ? [] : { id: "x" }), { status: 200 });
+  };
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman" });
+  await c.updateIssue("i", { status: "blocked" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:sre" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: null });
+  await c.createComment("i", "hi");
+  await c.createIssue({ title: "t", status: "todo" });
+  await c.updateAgent("a", { status: "idle" });
+  await c.getAgent("a");
+  assert.deepEqual(seen, [
+    "PATCH agent:foreman", "PATCH agent:foreman", "PATCH agent:sre", "PATCH null",
+    "POST agent:foreman", "POST agent:foreman", "PATCH agent:foreman", "GET null",
+  ]);
+});
