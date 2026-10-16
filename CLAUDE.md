@@ -171,6 +171,8 @@ copy in the commit before an implement session, never a session, never all repos
 **Restart with `scripts/restart-drained.sh`, never by waiting for idle.** SIGTERM is the
 restart: new sessions stop at once, work in flight gets up to 60 min to finish, and the
 script exits 0 only on the new process's `Daemon starting`. A busy fleet is never idle.
+The new process loads `dist/` when the drain ends, not when you ask: **never build during
+a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to start).
 
 ## Key design decisions
 
