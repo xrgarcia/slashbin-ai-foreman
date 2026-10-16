@@ -559,6 +559,16 @@ test("a restart returns the cards a dead session left in progress, and keeps the
   assert.deepEqual(fake.agent.metadata.foremanLive.rows, []);
 });
 
+test("a key set on the agent while the Foreman runs survives its next lease write", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "in_review", assigneeAgentId: "agent-rev" })]);
+  const { mirror } = mirrorOn(fake, TEAM);
+  await mirror.recoverLease();
+  fake.agent.metadata = { ...fake.agent.metadata, githubLogin: "slashbin-foreman" };
+  await mirror.onSession({ phase: "review", status: "started", repo: "example/r", items: [item], pr: 9, reviewer: "Tech Lead" }, logger());
+  assert.equal(fake.agent.metadata.githubLogin, "slashbin-foreman");
+  assert.deepEqual(fake.agent.metadata.foremanLive.rows, [{ id: "r7", phase: "review" }]);
+});
+
 test("no labels endpoint: the status still moves, and the failure is logged once", async () => {
   const base = fakePaperclip([row("r7", 7, { status: "todo" })]);
   const fake = { ...base, fetch: async (url, init) => (new URL(url).pathname.endsWith("/labels")

@@ -881,17 +881,18 @@ export class PaperclipMirror implements WorkObserver {
 
   /**
    * The lease: the cards held right now, stamped now. Paperclip replaces the
-   * whole metadata object, so the agent's other keys are read first when this
-   * process has not seen them; unread, the lease is not written. Never throws.
+   * whole metadata object, so the agent's other keys are read fresh before every
+   * write: a key someone else set since (githubLogin, by the EM's github-login.mjs)
+   * survives, and only the lease and the published config are the Foreman's.
+   * Unread, the lease is not written. Never throws.
    */
   private async writeLease(): Promise<boolean> {
     if (!this.cfg.agentId) return false;
-    if (this.agentMetadata === null) {
-      const agent = await this.safeCall("read agent", () => this.client.getAgent(this.cfg.agentId!));
-      if (!agent.ok) return false;
-      const { [LIVE_LEASE_KEY]: _old, ...rest } = (agent.value?.metadata ?? {}) as Record<string, unknown>;
-      this.agentMetadata = rest;
-    }
+    const agent = await this.safeCall("read agent", () => this.client.getAgent(this.cfg.agentId!));
+    if (!agent.ok) return false;
+    const { [LIVE_LEASE_KEY]: _old, ...rest } = (agent.value?.metadata ?? {}) as Record<string, unknown>;
+    const config = this.agentMetadata?.[CONFIG_KEY];
+    this.agentMetadata = config === undefined ? rest : { ...rest, [CONFIG_KEY]: config };
     const lease: LiveLease = {
       leaseAt: new Date().toISOString(),
       rows: [...this.holds].map(([id, h]) => ({ id, phase: h.phase })),
