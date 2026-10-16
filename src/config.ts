@@ -196,7 +196,7 @@ export const configSchema = z.object({
   // Most turns an implement or revise session may take. Per repo too.
   maxTurns: z.coerce.number().int().positive().default(30),
   // Longest an implement or revise session may run before it is stopped. Per repo too.
-  maxDurationMs: z.coerce.number().int().positive().default(1_800_000),
+  maxDurationMs: z.coerce.number().int().positive().default(3_600_000),
   // Model for the implement/revise phases, cascading to every repo that does not
   // set its own. Omit to let the Claude CLI pick its default. Global because the
   // model is a spend/quality dial for the whole fleet, not a per-repo trait —
