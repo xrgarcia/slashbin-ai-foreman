@@ -88,14 +88,22 @@ export type PaperclipClientOptions = {
   apiKey?: string;
   /** Injected for tests; defaults to the global fetch. */
   fetch?: typeof fetch;
-  /** Told when the board refuses a comment's credited author and the comment is posted under the key's own user. */
+  /** Told when the board refuses a credited author and the write is sent as the key's own user. */
   warn?: (message: string) => void;
+  /**
+   * `agent:<id>`: every write this client makes is credited to it, so the board's
+   * activity feed names that agent and not the key's user (the fork credits the
+   * request's activity as well as its comment). A call that names its own comment
+   * author overrides it; `null` there sends none.
+   */
+  actingAs?: string;
 };
 
 /**
- * Who a comment is credited to: `agent:<agentId>` or `user:<userId>`. Sent as
- * this header by an instance-admin board key, and only the comment's author
- * changes (the Slashbin fork, slashbin/PATCHES.md "Credited comment authors").
+ * Who a write is credited to: `agent:<agentId>` or `user:<userId>`. Sent as this
+ * header by an instance-admin board key; the comment's author and the activity
+ * row's actor change, nothing else (the Slashbin fork, slashbin/PATCHES.md
+ * "Credited comment authors").
  */
 export const COMMENT_AUTHOR_HEADER = "x-slashbin-comment-author";
 /** The board's refusals of that header: not an admin board key, or an author it cannot credit. */
@@ -128,6 +136,7 @@ export class PaperclipClient {
   private readonly fetchImpl: typeof fetch;
   private readonly apiKey: string | undefined;
   private readonly warn: (message: string) => void;
+  private readonly actingAs: string | null;
 
   constructor(opts: PaperclipClientOptions) {
     this.base = opts.url.replace(/\/+$/, "");
@@ -135,6 +144,7 @@ export class PaperclipClient {
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
     this.apiKey = opts.apiKey || undefined;
     this.warn = opts.warn ?? (() => {});
+    this.actingAs = opts.actingAs || null;
   }
 
   /** `GET /api/health`: resolves when the server answers 2xx. */
@@ -170,9 +180,9 @@ export class PaperclipClient {
     return this.request("GET", `/api/issues/${encodeURIComponent(id)}`);
   }
 
-  /** With `commentAuthor`, a `comment` in the body is credited to it; the rest of the write stays the key's own. */
+  /** With `commentAuthor`, a `comment` in the body and the write's activity are credited to it; else to `actingAs`. */
   updateIssue(id: string, body: Partial<PaperclipIssue> & Record<string, unknown>, opts: CommentOpts = {}): Promise<PaperclipIssue> {
-    const author = typeof body.comment === "string" ? opts.commentAuthor : null;
+    const author = typeof body.comment === "string" ? opts.commentAuthor : undefined;
     return this.request("PATCH", `/api/issues/${encodeURIComponent(id)}`, body, author);
   }
 
@@ -225,13 +235,15 @@ export class PaperclipClient {
    * refuses a key that is not an instance-admin board key) is retried once without
    * it: the comment then reads as the key's user, as it did before credit existed.
    */
-  private async request<T>(method: string, path: string, body?: unknown, commentAuthor?: string | null): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, credit?: string | null): Promise<T> {
+    // Unnamed (undefined) → `actingAs` on a write; a named author, or null for none, wins.
+    const commentAuthor = credit !== undefined ? credit : method === "GET" ? null : this.actingAs;
     if (!commentAuthor) return this.send<T>(method, path, body, null);
     try {
       return await this.send<T>(method, path, body, commentAuthor);
     } catch (err) {
       if (!(err instanceof PaperclipClientError) || ![403, 422].includes(err.status) || !COMMENT_AUTHOR_REFUSED.test(err.body)) throw err;
-      this.warn(`Paperclip ${method} ${path}: the board refused crediting the comment to ${commentAuthor} (${err.status}); posting it as the key's own user`);
+      this.warn(`Paperclip ${method} ${path}: the board refused crediting the write to ${commentAuthor} (${err.status}); sending it as the key's own user`);
       return this.send<T>(method, path, body, null);
     }
   }

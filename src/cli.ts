@@ -173,7 +173,14 @@ async function main(): Promise<void> {
   if (config.paperclip.enabled) {
     if (config.paperclip.agentId && config.paperclip.companyId) {
       mirror = new PaperclipMirror(
-        new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId, apiKey: config.paperclip.apiKey, warn: (m) => logger.warn(m) }),
+        new PaperclipClient({
+          url: config.paperclip.url,
+          companyId: config.paperclip.companyId,
+          apiKey: config.paperclip.apiKey,
+          warn: (m) => logger.warn(m),
+          // The activity feed names the Foreman for its own writes, not the key's user.
+          actingAs: config.paperclip.agentId ? `agent:${config.paperclip.agentId}` : undefined,
+        }),
         config.paperclip,
         mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
         logger,
