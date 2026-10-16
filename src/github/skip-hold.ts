@@ -58,10 +58,11 @@ export function refState(ref: WaitingOn, cwd: string): RefState {
   return { open: s.state !== "closed", isPr: s.pr, merged: s.merged };
 }
 
-/** One change on the issue: when, and by whom. */
+/** One change on the issue: when, by whom, and what kind (absent reads as an action). */
 export interface IssueActivity {
   at: string;
   login?: string;
+  kind?: "edit" | "comment" | "event";
 }
 
 /**
@@ -75,6 +76,28 @@ export function changedSince(activity: IssueActivity[], since: string, self: str
   if (Number.isNaN(t)) return true;
   const me = self?.toLowerCase();
   return activity.some((a) => new Date(a.at).getTime() > t && (!me || a.login?.toLowerCase() !== me));
+}
+
+/**
+ * Who changed an escalated issue after `since`, for the cap: `person` for
+ * anyone not the Foreman and not one of `agents`; `agent` for an agent's edit
+ * or label, never its comment. An agent's comment is talk, not an action: two
+ * agents answering each other's "still held" would otherwise restart the count
+ * forever. Undefined when nothing counts.
+ */
+export function escalatedChangeBy(activity: IssueActivity[], since: string, self: string | undefined, agents: readonly string[] = []): "person" | "agent" | undefined {
+  const t = new Date(since).getTime();
+  if (Number.isNaN(t)) return "person";
+  const me = self?.toLowerCase();
+  const bots = new Set(agents.map((a) => a.toLowerCase()));
+  let by: "agent" | undefined;
+  for (const a of activity) {
+    const login = a.login?.toLowerCase();
+    if (new Date(a.at).getTime() <= t || (me && login === me)) continue;
+    if (!login || !bots.has(login)) return "person";
+    if (a.kind !== "comment") by = "agent";
+  }
+  return by;
 }
 
 const ACTIVITY_QUERY = `query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){
@@ -102,9 +125,9 @@ export function issueActivitySince(repo: string, issue: number, since: string, c
   if (!i) return [];
   const nodes = (x: { nodes?: Node[] } | undefined) => x?.nodes ?? [];
   return [
-    ...nodes(i.userContentEdits).map((e) => ({ at: e.editedAt ?? "", login: e.editor?.login })),
-    ...nodes(i.comments).map((c) => ({ at: c.createdAt ?? "", login: c.author?.login })),
-    ...nodes(i.timelineItems).filter((e) => e.createdAt).map((e) => ({ at: e.createdAt!, login: e.actor?.login })),
+    ...nodes(i.userContentEdits).map((e) => ({ at: e.editedAt ?? "", login: e.editor?.login, kind: "edit" as const })),
+    ...nodes(i.comments).map((c) => ({ at: c.createdAt ?? "", login: c.author?.login, kind: "comment" as const })),
+    ...nodes(i.timelineItems).filter((e) => e.createdAt).map((e) => ({ at: e.createdAt!, login: e.actor?.login, kind: "event" as const })),
   ];
 }
 
@@ -128,6 +151,8 @@ export interface HoldReads {
   activitySince(since: string): IssueActivity[];
   /** The Foreman's own login; its writes never release a hold. */
   self: string | undefined;
+  /** Other agents' logins (`backoff.skip.agentLogins`); their comments never release an escalated hold. */
+  agents?: readonly string[];
 }
 
 /** Whether a held issue stays held, and if not, what released it. */
@@ -200,9 +225,11 @@ export type SkipGate =
 /**
  * Decide one skipped issue under `backoff.skip.hold`. Under the cap, any cheap
  * release (`transientCleared`, the waited-on reference done, the issue changed)
- * buys one session and keeps the count. At the cap the issue is escalated and
- * only a person changing the issue releases it, with the count reset; the
- * transient and reference checks no longer run.
+ * buys one session and keeps the count. At the cap the issue is escalated: a
+ * person changing the issue releases it with the count reset; an agent's edit
+ * or label buys one session and keeps the count, so the next skip escalates
+ * again; an agent's comment releases nothing. The transient and reference
+ * checks no longer run.
  */
 export function skipGate(
   entry: HeldEntry,
@@ -214,8 +241,13 @@ export function skipGate(
 ): SkipGate {
   const attempts = entry.skipCount ?? 0;
   if (entry.escalatedAt || attempts >= maxAttempts) {
-    const status = holdStatus({ lastSkippedAt: entry.lastSkippedAt }, repo, reads, onError);
-    if (!status.held) return { run: true, by: "issueChanged", reset: true };
+    let by: "person" | "agent" | undefined;
+    try {
+      by = escalatedChangeBy(reads.activitySince(entry.lastSkippedAt), entry.lastSkippedAt, reads.self, reads.agents);
+    } catch (err) {
+      onError("issue activity", err);
+    }
+    if (by) return { run: true, by: "issueChanged", reset: by === "person" };
     return { run: false, reason: escalatedReason(entry.reason, attempts), escalate: !entry.escalatedAt };
   }
   if (entry.releasedAt) return { run: true, reset: false };

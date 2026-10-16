@@ -21,6 +21,11 @@ const win = (baseMs: number, capMs: number, f: number) => ({
 const count = (n: number) => z.coerce.number().int().positive().default(n);
 // NOT z.coerce.boolean(): an env override arrives as a string, and
 // Boolean("false") is true.
+// A list of logins: a JSON array in the file, comma-separated from the env.
+const logins = z.preprocess(
+  (v) => (typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean) : v),
+  z.array(z.string()),
+).default([]);
 const flag = (d: boolean) => z.preprocess(
   (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
   z.boolean(),
@@ -39,11 +44,14 @@ export const backoffConfigSchema = z.object({
   // closes or merges. Each check is one cheap GitHub read, and each release
   // buys one session. After `maxAttempts` sessions in a row end in a skip, it is
   // escalated to the `needsRuling` stage and stays Blocked: no session at all
-  // until a person changes the issue, which starts the count again. Set `hold`
+  // until a person changes the issue, which starts the count again. An account
+  // in `agentLogins` (another agent: the EM, the SRE, a reviewer) is not a
+  // person there: its edit or label buys one session and keeps the count, and
+  // its comment releases nothing. Set `hold`
   // to false for the older timed retry (no cap): hidden for one window, each
   // decline in a row doubling it, 5 min rising to 4 h. The old top-level
   // `skipBackoffMs` still sets `baseMs`.
-  skip: z.object({ ...win(300_000, 14_400_000, 2), hold: flag(true), maxAttempts: count(3) }).prefault({}),
+  skip: z.object({ ...win(300_000, 14_400_000, 2), hold: flag(true), maxAttempts: count(3), agentLogins: logins }).prefault({}),
   // A dev verification that ran and did not pass. The issue is re-verified after
   // one window, longer each time; after `maxAttempts` failed runs it waits for a
   // person (new commits on the base branch reopen it). Default 10 min, then
