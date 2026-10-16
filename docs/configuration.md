@@ -156,7 +156,7 @@ Most turns an implement or revise session may take. Per repo too.
 
 ### `maxDurationMs`
 
-Type: integer · Default: `1800000` (30 min) · Env: `AI_AGENT_MAX_DURATION_MS` · Per repo: yes, falls back to this value
+Type: integer · Default: `3600000` (60 min, the same as `reviewMaxDurationMs` and the restart drain) · Env: `AI_AGENT_MAX_DURATION_MS` · Per repo: yes, falls back to this value
 
 Longest an implement or revise session may run before it is stopped. Per repo too.
 

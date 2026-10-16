@@ -41,7 +41,7 @@
   "featureBranch": "features",
   "pollIntervalMs": 300000,
   "maxTurns": 30,
-  "maxDurationMs": 1800000,
+  "maxDurationMs": 3600000,
   "model": "claude-opus-5-5",
   "logFormat": "text",
   "logLevel": "info",
