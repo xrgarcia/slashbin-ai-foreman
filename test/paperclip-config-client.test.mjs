@@ -305,3 +305,32 @@ test("a refused request's error names method, path and status, never the key", a
     return true;
   });
 });
+
+test("client: a comment's credited author rides only on a write that posts one; a refusal posts it as the key's user", async () => {
+  const seen = [];
+  let refuse = null;
+  const fetch = async (url, init = {}) => {
+    const author = init.headers?.["x-slashbin-comment-author"] ?? null;
+    seen.push(`${init.method} ${author}`);
+    if (author && refuse) return new Response(JSON.stringify({ error: "no", code: refuse.code }), { status: refuse.status });
+    return new Response(JSON.stringify({ id: "x" }), { status: 200 });
+  };
+  const warned = [];
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, warn: (m) => warned.push(m) });
+  await c.updateIssue("i", { status: "blocked" }, { commentAuthor: "agent:a" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:a" });
+  await c.createComment("i", "hi", { commentAuthor: "agent:a" });
+  await c.createComment("i", "hi");
+  assert.deepEqual(seen, ["PATCH null", "PATCH agent:a", "POST agent:a", "POST null"]);
+
+  for (const r of [{ status: 403, code: "comment_author_override_denied" }, { status: 422, code: "comment_author_override_invalid" }]) {
+    refuse = r; seen.length = 0;
+    await c.createComment("i", "hi", { commentAuthor: "agent:a" });
+    assert.deepEqual(seen, ["POST agent:a", "POST null"], `${r.code}: retried once without the credit`);
+  }
+  assert.equal(warned.length, 2);
+
+  refuse = { status: 403, code: "forbidden" }; seen.length = 0;
+  await assert.rejects(c.createComment("i", "hi", { commentAuthor: "agent:a" }), (e) => e instanceof PaperclipClientError && e.status === 403);
+  assert.deepEqual(seen, ["POST agent:a"], "any other refusal is the caller's, not retried");
+});

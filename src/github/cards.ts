@@ -81,13 +81,14 @@ export function holdReason(label: string, events: readonly LabelEvent[], comment
     : null;
   if (!R) {
     const by = `labelled ${label} by ${login ?? "unknown"} on ${L ? day(L.createdAt) : "unknown date"}`;
-    return { action: `${HOLD_PREFIX}${by}; no reason posted on the issue`, comment: null, commentUrl: null };
+    return { action: `${HOLD_PREFIX}${by}; no reason posted on the issue`, comment: null, commentUrl: null, author: null };
   }
   const signed = `(${login}, ${day(R.createdAt)})`;
   return {
     action: HOLD_PREFIX + [headline(R.body), signed, R.url].filter(Boolean).join(" "),
     comment: `${HOLD_COMMENT_HEAD}${login}, ${day(R.createdAt)}:\n\n${String(R.body ?? "").slice(0, HOLD_COMMENT_MAX)}\n\n${R.url}`,
     commentUrl: R.url,
+    author: login,
   };
 }
 
