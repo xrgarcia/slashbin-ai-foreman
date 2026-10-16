@@ -203,3 +203,44 @@ function load(extra) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// SLA-1559, 2026-10-16: the EM bot answered each "clear this hold" with a
+// "nothing has changed, the hold stays" comment. Every comment by an account
+// that is not the Foreman counted as the issue changing, so at the cap it reset
+// the count and the two agents could restart each other without end.
+const AGENTS = ["Agent-Manager", "agent-ops"];
+const escalated = { ...entry(), skipCount: 3, escalatedAt: "2026-10-14T13:13:00Z" };
+const at = "2026-10-14T15:00:00Z";
+const agentReads = (activity) => ({ ...reads({ activity }), agents: AGENTS });
+
+test("cap: another agent's comment does not release an escalated issue", () => {
+  const g = gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }]));
+  assert.equal(g.run, false, "an agent's comment is talk, not a change");
+  assert.equal(g.escalate, false);
+});
+
+test("cap: another agent's label or edit buys one session and keeps the count", () => {
+  for (const kind of ["event", "edit"]) {
+    assert.deepEqual(gate(escalated, agentReads([{ at, login: "agent-ops", kind }])), { run: true, by: "issueChanged", reset: false });
+  }
+});
+
+test("cap: a person's comment still releases it and resets the count, agents' comments around it or not", () => {
+  const g = gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }, { at, login: "xrgarcia", kind: "comment" }]));
+  assert.deepEqual(g, { run: true, by: "issueChanged", reset: true });
+});
+
+test("under the cap an agent's comment still buys a session: the cap is what bounds it", () => {
+  assert.deepEqual(gate({ ...entry(), skipCount: 1 }, agentReads([{ at, login: "agent-manager", kind: "comment" }])), { run: true, by: "issueChanged", reset: false });
+});
+
+test("config: agentLogins defaults to none, from the file as a list or the env comma-separated", () => {
+  assert.deepEqual(DEFAULT_BACKOFF.skip.agentLogins, []);
+  assert.deepEqual(load({ backoff: { skip: { agentLogins: ["a", "b"] } } }).backoff.skip.agentLogins, ["a", "b"]);
+  process.env.AI_AGENT_BACKOFF_SKIP_AGENT_LOGINS = "a, b";
+  try {
+    assert.deepEqual(load({}).backoff.skip.agentLogins, ["a", "b"]);
+  } finally {
+    delete process.env.AI_AGENT_BACKOFF_SKIP_AGENT_LOGINS;
+  }
+});

@@ -285,6 +285,7 @@ export async function tryBatchImplementation(
         refState: (ref) => refState(ref, repoConfig.repoPath),
         activitySince: (since) => issueActivitySince(repoConfig.githubRepo, n, since, repoConfig.repoPath),
         self: foremanLogin(repoConfig.repoPath),
+        agents: skip.agentLogins,
       }, transientCleared, (what, err) => repoLogger.debug(`Hold on #${n}: could not read ${what} — still held: ${err instanceof Error ? err.message : String(err)}`));
       if (gate.run) {
         if (gate.by) released.push({ n, by: gate.by, reset: gate.reset });
