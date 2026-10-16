@@ -571,6 +571,30 @@ test("an issue orphaned after its release passed rejoins it, and the release is 
   assert.deepEqual(commentsOn(5), [], "the issue the first pass closed is left alone");
 });
 
+test("an issue that shipped unlisted joins the release at production's head after that release settled", async () => {
+  // Slashbin-console #1297: on `main` via a release naming only another issue; the head release had already settled.
+  world({
+    issues: [{ number: 5, title: "Issue 5", state: "CLOSED", labels: ["approved"] }, issue(9, "release pending")],
+    prs: [mergedPr(90, "### Issues included\n- #4: Issue 4", OLD, 300), mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 120)],
+    compareFiles: 0, prodHead: MERGE,
+  }, { prod: VERIFY(100) });
+  editState((st) => { st.prodVerified = { 5: { pr: 100, mergeSha: MERGE, at: new Date().toISOString() } }; });
+  await run();
+  assert.ok(!gh().issues[9].labels.includes("blocked"), "not blocked");
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/, "the head release now names it");
+  assert.match(commentsOn(9)[0], /did not name it; release PR #100 is at production's head/);
+  assert.deepEqual(agentCalls(), [["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]], "verified fresh, with #9 named");
+  assertClosedVerified(9);
+  assert.deepEqual(commentsOn(5), [], "the head release's own issue is left alone");
+});
+
+test("no release at production's head: the issue is still blocked for a person", async () => {
+  world({ issues: [issue(9, "release pending")], prs: [mergedPr(90, "- #4", OLD, 300)], compareFiles: 0, prodHead: MERGE });
+  await run();
+  assert.ok(gh().issues[9].labels.includes("blocked"));
+  assert.match(commentsOn(9)[0], /no release carries this issue/);
+});
+
 test("without srePath and techLeadPath the stage does nothing at all", async () => {
   const off = loadConfig(writeCfg("cfg-off.json", {}));
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });

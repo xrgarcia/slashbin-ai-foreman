@@ -425,8 +425,26 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
     logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
     return false;
   }
-  const rel = Object.values(st.prodReleases ?? {})
+  let rel = Object.values(st.prodReleases ?? {})
     .find((r) => r.mergeSha === head && r.phase !== "deploying");
+  // The head release already settled and left the state, and the orphan shipped
+  // unlisted inside an earlier one (Slashbin-console #1297, 2026-10-16: on `main`
+  // via #1302, which named only #1285, and #1312 settled at the head before it
+  // was ready). Production's head carries everything on it, so track the head
+  // release again for these issues alone; its issues already closed stay closed.
+  const shippedUnlisted = !rel;
+  if (!rel) {
+    try {
+      const pr = recentMergedReleasePrs(repoConfig, iso(now() - ADOPT_WINDOW_MS)).find((p) => p.mergeSha === head);
+      if (pr) {
+        const t = iso(now());
+        rel = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: [], phase: "merged", mergeSha: head,
+          mergedAt: pr.mergedAt ?? t, attempts: 0, since: t };
+      }
+    } catch (err) {
+      logger.debug(`Could not list merged release PRs: ${errText(err)}`);
+    }
+  }
   if (!rel) return false;
   const titles = new Map(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i.title]));
   try {
@@ -446,8 +464,10 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
   for (const n of orphans) {
     if (rel.phase === "held") await advance(itemOf(repoConfig, n), "prodHeld", repoConfig, logger);
     comment(repoConfig, n,
-      `**Joined release PR #${rel.pr}.** This issue's work shipped in that release (\`${repoConfig.productionBranch}\` is at its merge, \`${short(head)}\`), ` +
-      "which was opened before this issue was ready for production. The release now names it, so its " +
+      `**Joined release PR #${rel.pr}.** This issue's work ${shippedUnlisted
+        ? `reached production in a release that did not name it; release PR #${rel.pr} is at production's head (\`${short(head)}\`), so it carries this work`
+        : `shipped in that release (\`${repoConfig.productionBranch}\` is at its merge, \`${short(head)}\`), which was opened before this issue was ready for production`}. ` +
+      "The release now names it, so its " +
       `${reverify ? "re-run " : ""}production verification grades this issue and closes it on a pass.`, logger);
   }
   logger.info(`Joined ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr} (production head ${short(head)})`);
