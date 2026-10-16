@@ -24,11 +24,17 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
   const calls = [];
   const comments = {};
   const agent = { id: AGENT, metadata: {} };
+  // The board's agents, as `GET /companies/:id/agents` lists them; each may carry metadata.githubLogin.
+  const boardAgents = [];
+  // Who each comment was credited to (x-slashbin-comment-author), in posting order; null = the key's user.
+  const credits = [];
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path: u.pathname, body });
+    if (method === "GET" && u.pathname === `/api/companies/${CID}/agents`) return new Response(JSON.stringify(boardAgents), { status: 200 });
+    if (body && ((method === "POST" && u.pathname.endsWith("/comments")) || (method === "PATCH" && "comment" in body))) credits.push(init.headers?.["x-slashbin-comment-author"] ?? null);
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
@@ -90,7 +96,7 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
     }
     return ok({}, 404);
   };
-  return { rows, projects, labels, agent, calls, comments, fetch };
+  return { rows, projects, labels, agent, boardAgents, credits, calls, comments, fetch };
 }
 
 function logger() {
@@ -1119,6 +1125,29 @@ test("ownsCards: a generic hold is rewritten to the holder's reason; a Foreman r
   assert.equal(fake.rows[1].unblockDescriptor.action, hold(8).action);
   assert.equal(fake.rows[2].unblockDescriptor.action, "blocked: dev verification did not pass");
   assert.ok(fake.rows.every((r) => r.status === "blocked"));
+});
+
+test("ownsCards: the holder's comment is credited to the agent whose githubLogin it is; a person's stays the key's user", async () => {
+  const EM = "agent-em";
+  const held = (by) => ({ ...HOLD, author: by, comment: HOLD.comment.replace("ray", by), action: `${HOLD.action} ${by}` });
+  for (const [by, want] of [["Slashbin-Engineering-Manager", `agent:${EM}`], ["xrgarcia", null]]) {
+    const fake = fakePaperclip([ownedRow("todo", { description: `source: example/r#7\nGitHub: open · stage blocked\n\n${URL7}` })]);
+    fake.boardAgents.push({ id: EM, name: "EM", metadata: { githubLogin: "slashbin-engineering-manager" } }, { id: "gone", name: "Old", status: "terminated", metadata: { githubLogin: "xrgarcia" } });
+    const { mirror } = mirrorOn(fake, OWNED);
+    await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["approved", "blocked"] }]), cards: [card(7, { stage: "blocked", hold: held(by) })] }, logger());
+    const at = fake.comments.r7.indexOf(held(by).comment);
+    assert.ok(at >= 0);
+    assert.equal(fake.credits[at], want, `${by}: a login no live agent carries is no credit`);
+    assert.ok(fake.credits.every((c, i) => i === at || c === `agent:${AGENT}`), "the Foreman's own notes are its agent's");
+  }
+});
+
+test("the Foreman's own notes are credited to its agent", async () => {
+  const fake = fakePaperclip([row("r7", 7), row("r8", 8, { status: "done" })]);
+  const { mirror } = mirrorOn(fake, { agentStatus: false });
+  await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #4" }], logger());
+  await mirror.onMerged({ issueNumber: 8, repo: "example/r" }, repoConfig, logger());
+  assert.deepEqual(fake.credits, [`agent:${AGENT}`, `agent:${AGENT}`]);
 });
 
 test("ownsCards: the holder's comment is never posted on another agent's card", async () => {

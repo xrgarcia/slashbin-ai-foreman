@@ -201,6 +201,12 @@ const LABEL_BLOCK_ACTION = `${FOREMAN_BLOCKED_PREFIX}needs attention`;
  * at the next ten-minute refresh.
  */
 const MISS_RESCAN_MS = 60_000;
+/**
+ * How long the board's GitHub logins are trusted before a re-read. Each agent's
+ * `metadata.githubLogin` is the golden source for who it is on GitHub (Ray,
+ * 2026-10-16), so a hold comment is credited to the agent whose words it is.
+ */
+const GITHUB_LOGINS_TTL_MS = 10 * 60_000;
 
 /**
  * With `ownsCards`, the most card writes (creates and content PATCHes) one
@@ -361,6 +367,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly evidence = new Map<string, { text: string; at: string }>();
   /** The lifecycle label names a handoff quotes. */
   private readonly labels: HandoffLabels;
+  /** GitHub login → the agent whose `metadata.githubLogin` it is, and when the board was read. */
+  private githubAgents: { at: number; byLogin: Map<string, string> } | null = null;
 
   constructor(
     private readonly client: PaperclipClient,
@@ -759,7 +767,8 @@ export class PaperclipMirror implements WorkObserver {
     }
     if (!Object.keys(body).length || budget.left <= 0) return;
     budget.left--;
-    if (!(await this.patch(id, body))) return;
+    const holderAgent = body.comment && hold?.author ? await this.agentForLogin(hold.author) : null;
+    if (!(await this.patch(id, body, holderAgent ? `agent:${holderAgent}` : null))) return;
     if (body.comment) {
       this.holdCommented.add(seen);
       this.lastNote.set(id, String(body.comment));
@@ -977,7 +986,7 @@ export class PaperclipMirror implements WorkObserver {
         title: d.title.startsWith(tag) ? d.title : `${tag}${d.title}`,
         description: `duplicate of ${d.winner} (${d.key})`,
         comment: fill(DUPLICATE_NOTE, { key: d.key, winner: d.winner }),
-      }), d.id);
+      }, this.ownComment()), d.id);
       if (r.ok) this.log("info", `Paperclip mirror: retired a second card for ${d.key}; ${d.winner} stays`);
     }
     this.duplicates = [];
@@ -992,7 +1001,7 @@ export class PaperclipMirror implements WorkObserver {
     const cancelled = this.statusName("cancelled");
     if (!row.ok || row.value?.status === cancelled) return;
     // Status and note in one PATCH: a note alone on an agent-held row reopens it.
-    await this.safeCall("retire live task", () => this.client.updateIssue(id, { status: cancelled, comment: LEGACY_LIVE_NOTE }), id);
+    await this.safeCall("retire live task", () => this.client.updateIssue(id, { status: cancelled, comment: LEGACY_LIVE_NOTE }, this.ownComment()), id);
   }
 
   /**
@@ -1398,9 +1407,31 @@ export class PaperclipMirror implements WorkObserver {
     return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
   }
 
-  private async patch(id: string, body: Record<string, unknown>): Promise<boolean> {
-    const r = await this.safeCall("update task", () => this.client.updateIssue(id, body), id);
+  /** A `comment` in `body` is credited to `commentAuthor`; none = the key's own user (a person's words, or no agent with that login). */
+  private async patch(id: string, body: Record<string, unknown>, commentAuthor: string | null = null): Promise<boolean> {
+    const r = await this.safeCall("update task", () => this.client.updateIssue(id, body, { commentAuthor }), id);
     return r.ok;
+  }
+
+  /** The Foreman's own notes are its agent's words. */
+  private ownComment(): { commentAuthor: string | null } {
+    return { commentAuthor: this.cfg.agentId ? `agent:${this.cfg.agentId}` : null };
+  }
+
+  /** The agent whose `metadata.githubLogin` is `login`, or null. A failed read keeps the last answer. */
+  private async agentForLogin(login: string): Promise<string | null> {
+    if (!this.githubAgents || Date.now() - this.githubAgents.at > GITHUB_LOGINS_TTL_MS) {
+      const r = await this.safeCall("read agents", () => this.client.listAgents());
+      if (r.ok && Array.isArray(r.value)) {
+        const byLogin = new Map<string, string>();
+        for (const a of r.value) {
+          const l = a.metadata?.githubLogin;
+          if (typeof l === "string" && l && a.status !== "terminated") byLogin.set(l.toLowerCase(), a.id);
+        }
+        this.githubAgents = { at: Date.now(), byLogin };
+      }
+    }
+    return this.githubAgents?.byLogin.get(login.toLowerCase()) ?? null;
   }
 
   /**
@@ -1428,8 +1459,8 @@ export class PaperclipMirror implements WorkObserver {
     const status = row.ok ? row.value?.status : undefined;
     const held = (["blocked", "done", "cancelled"] as const).map((b) => this.statusName(b));
     const sent = status && held.includes(status)
-      ? await this.safeCall("post note", () => this.client.updateIssue(id, { comment: body, status }), id)
-      : await this.safeCall("post note", () => this.client.createComment(id, body), id);
+      ? await this.safeCall("post note", () => this.client.updateIssue(id, { comment: body, status }, this.ownComment()), id)
+      : await this.safeCall("post note", () => this.client.createComment(id, body, this.ownComment()), id);
     if (sent.ok) this.lastNote.set(id, body);
   }
 

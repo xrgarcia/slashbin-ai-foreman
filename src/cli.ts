@@ -173,7 +173,7 @@ async function main(): Promise<void> {
   if (config.paperclip.enabled) {
     if (config.paperclip.agentId && config.paperclip.companyId) {
       mirror = new PaperclipMirror(
-        new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId, apiKey: config.paperclip.apiKey }),
+        new PaperclipClient({ url: config.paperclip.url, companyId: config.paperclip.companyId, apiKey: config.paperclip.apiKey, warn: (m) => logger.warn(m) }),
         config.paperclip,
         mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
         logger,

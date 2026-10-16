@@ -88,7 +88,21 @@ export type PaperclipClientOptions = {
   apiKey?: string;
   /** Injected for tests; defaults to the global fetch. */
   fetch?: typeof fetch;
+  /** Told when the board refuses a comment's credited author and the comment is posted under the key's own user. */
+  warn?: (message: string) => void;
 };
+
+/**
+ * Who a comment is credited to: `agent:<agentId>` or `user:<userId>`. Sent as
+ * this header by an instance-admin board key, and only the comment's author
+ * changes (the Slashbin fork, slashbin/PATCHES.md "Credited comment authors").
+ */
+export const COMMENT_AUTHOR_HEADER = "x-slashbin-comment-author";
+/** The board's refusals of that header: not an admin board key, or an author it cannot credit. */
+const COMMENT_AUTHOR_REFUSED = /comment_author_override_(denied|invalid)/;
+
+/** Per-call options for a request that posts a comment. */
+export type CommentOpts = { commentAuthor?: string | null };
 
 /**
  * Any failed Paperclip call. `status` is the HTTP status, or 0 when no response
@@ -113,12 +127,14 @@ export class PaperclipClient {
   private readonly companyId: string;
   private readonly fetchImpl: typeof fetch;
   private readonly apiKey: string | undefined;
+  private readonly warn: (message: string) => void;
 
   constructor(opts: PaperclipClientOptions) {
     this.base = opts.url.replace(/\/+$/, "");
     this.companyId = opts.companyId;
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
     this.apiKey = opts.apiKey || undefined;
+    this.warn = opts.warn ?? (() => {});
   }
 
   /** `GET /api/health`: resolves when the server answers 2xx. */
@@ -154,16 +170,18 @@ export class PaperclipClient {
     return this.request("GET", `/api/issues/${encodeURIComponent(id)}`);
   }
 
-  updateIssue(id: string, body: Partial<PaperclipIssue> & Record<string, unknown>): Promise<PaperclipIssue> {
-    return this.request("PATCH", `/api/issues/${encodeURIComponent(id)}`, body);
+  /** With `commentAuthor`, a `comment` in the body is credited to it; the rest of the write stays the key's own. */
+  updateIssue(id: string, body: Partial<PaperclipIssue> & Record<string, unknown>, opts: CommentOpts = {}): Promise<PaperclipIssue> {
+    const author = typeof body.comment === "string" ? opts.commentAuthor : null;
+    return this.request("PATCH", `/api/issues/${encodeURIComponent(id)}`, body, author);
   }
 
   getIssueComments(id: string): Promise<PaperclipComment[]> {
     return this.request("GET", `/api/issues/${encodeURIComponent(id)}/comments`);
   }
 
-  createComment(id: string, commentBody: string): Promise<PaperclipComment> {
-    return this.request("POST", `/api/issues/${encodeURIComponent(id)}/comments`, { body: commentBody });
+  createComment(id: string, commentBody: string, opts: CommentOpts = {}): Promise<PaperclipComment> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(id)}/comments`, { body: commentBody }, opts.commentAuthor);
   }
 
   /** Every project in the company, archived ones included, so the Unplaced lookup sees an archived duplicate too. */
@@ -202,7 +220,23 @@ export class PaperclipClient {
     return `/api/companies/${encodeURIComponent(this.companyId)}`;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /**
+   * A refused `commentAuthor` (a board without the patch ignores it; one with it
+   * refuses a key that is not an instance-admin board key) is retried once without
+   * it: the comment then reads as the key's user, as it did before credit existed.
+   */
+  private async request<T>(method: string, path: string, body?: unknown, commentAuthor?: string | null): Promise<T> {
+    if (!commentAuthor) return this.send<T>(method, path, body, null);
+    try {
+      return await this.send<T>(method, path, body, commentAuthor);
+    } catch (err) {
+      if (!(err instanceof PaperclipClientError) || ![403, 422].includes(err.status) || !COMMENT_AUTHOR_REFUSED.test(err.body)) throw err;
+      this.warn(`Paperclip ${method} ${path}: the board refused crediting the comment to ${commentAuthor} (${err.status}); posting it as the key's own user`);
+      return this.send<T>(method, path, body, null);
+    }
+  }
+
+  private async send<T>(method: string, path: string, body: unknown, commentAuthor: string | null): Promise<T> {
     const what = `${method} ${path}`;
     let res: Response;
     try {
@@ -210,6 +244,7 @@ export class PaperclipClient {
         ? { accept: "application/json" }
         : { accept: "application/json", "content-type": "application/json" };
       if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+      if (commentAuthor) headers[COMMENT_AUTHOR_HEADER] = commentAuthor;
       res = await this.fetchImpl(`${this.base}${path}`, {
         method,
         headers,

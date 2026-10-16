@@ -107,12 +107,14 @@ export interface SnapshotClosed {
  * Why the source holds an item, as its holder said it (GitHub: the comment the
  * person who added the blocked label posted with it). `action` is the line a
  * card shows; `comment` the holder's full words, posted once; `commentUrl`
- * where they are. The last two are null when the holder posted no reason.
+ * where they are; `author` the holder's login on the source, which a mirror
+ * credits the comment to. The last three are null when the holder posted no reason.
  */
 export interface SnapshotHold {
   readonly action: string;
   readonly comment: string | null;
   readonly commentUrl: string | null;
+  readonly author?: string | null;
 }
 
 /** One item as the work source shows it at the end of a cycle. */
