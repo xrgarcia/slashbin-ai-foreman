@@ -27,7 +27,7 @@ user chose) in Paperclip.
 Run every command from the Foreman repo root. The config file is `.ai-agent.json`
 (or `ai-agent.config.json` if that is the one present; use the same path in every
 step). If neither exists, stop: the Foreman itself is not configured yet — point the
-user to the README.
+user to `docs/setup.md`.
 
 Do the steps in order. A step that fails stops the skill: report what failed, in the
 command's own words, and do not work around it.
