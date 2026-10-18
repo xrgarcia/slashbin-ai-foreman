@@ -1,5 +1,15 @@
 # Configuring repos and labels
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [Single-repo mode](#single-repo-mode)
+- [Lifecycle labels](#lifecycle-labels)
+- [Multi-repo mode](#multi-repo-mode)
+- [GitHub tokens](#github-tokens)
+- [Discord notifications](#discord-notifications)
+
 A guide to the common settings. **[configuration.md](configuration.md) is the complete
 reference** *(generated)*: every key, its default, its env override and what it does,
 built from the code so it cannot fall behind. The smallest working config is in
@@ -92,8 +102,9 @@ What each label means and what moves an issue between them: [lifecycle.md](lifec
 Use the `repos` array to manage multiple repos in a single daemon. Each repo entry may
 override any of: `triggerLabel`, `baseBranch`, `featureBranch`, `productionBranch`,
 `skillPath`, `revisionSkillPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs` (every
-per-repo key: [configuration.md](configuration.md#per-repo-entries-repos)). Anything not
-specified on the entry falls back to the top-level value (or its default).
+per-repo key: [configuration.md](configuration.md#per-repo-entries-repos)). The
+reference marks which fields fall back to a top-level value; other fields apply
+only to the entry that sets them.
 
 ```json
 {

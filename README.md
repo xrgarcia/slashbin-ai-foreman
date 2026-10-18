@@ -1,126 +1,285 @@
-# Foreman
+# Slashbin AI Foreman
 
-**A software engineering team orchestrator for GitHub.** The Foreman runs a team of AI
-agents — a builder, a reviewer (the Tech Lead), a verifier (the SRE) and a release
-step — through your normal GitHub workflow: approved issue → pull request → review →
-revision → merge → verification in dev → release to production. One process runs it
-across every repo you own.
+**Turn approved GitHub issues into pull requests, and keep review feedback moving.**
 
-- **You approve, it delivers.** Label an issue `approved`; the Foreman builds it, opens
-  the PR, answers review, and carries it to production. A person still authorizes each
-  production release with one label.
-- **No self-approval.** The builder and the reviewer act under separate GitHub accounts,
-  and every PR goes through your branch protection.
-- **No per-run fees.** Sessions run through the Claude Code CLI under your own Claude
-  plan — no API charges, no SaaS subscription.
-- **Many repos, one daemon.** Point it at your fleet and let it work overnight; each
-  repo keeps its own branches, labels, skills and limits.
+Getting an AI to write code is only part of the job. You still have to start the next
+session, pass it the issue, bring back review feedback, and check what happened across
+your repos. The backlog moves when you are there to move it.
+
+Foreman runs that loop for you. It watches GitHub for approved work, runs Claude Code
+in the right repo, opens a pull request, and revises it when changes are requested.
+Connect a reviewer and verifier when you want the loop to continue through merge,
+dev verification, and an authorized production release.
+
+**Free, MIT-licensed code from Slashbin.** Run it on your own machine, with your own
+Claude Code access and GitHub credentials. Start with one repo. Paperclip is optional;
+Discord is not required.
+
+[Get started](#start-with-one-repo) · [Paperclip integration](#see-the-work-in-paperclip) ·
+[Documentation](docs/README.md)
+
+## Contents
+
+- [Who this is for](#who-this-is-for)
+- [What happens after you approve an issue](#what-happens-after-you-approve-an-issue)
+- [See the work in Paperclip](#see-the-work-in-paperclip)
+- [Start with one repo](#start-with-one-repo)
+- [Give it its first issue](#give-it-its-first-issue)
+- [Extend the loop through review and release](#extend-the-loop-through-review-and-release)
+- [Make it fit your repos](#make-it-fit-your-repos)
+- [Why we built it](#why-we-built-it)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Who this is for
 
-The Foreman pays off when you have **more approved work than time to implement it**.
+Foreman fits developers and teams with **approved work ready to build**, especially
+when that work lives across several repos.
 
-- **Consultancies and agencies** maintaining repos for several clients: one daemon
-  polls every client's repo, each with its own trigger label, branches and skills.
-  Your hours go to strategy and review; implementation ships overnight.
-- **Operators of several businesses**, each with its own backlog: each business is an
-  entry in the `repos` list, with its own review flow, skills and branch protection.
-- **One business, many repos** — microservices, internal tools, a monolith with
-  satellites: the Foreman picks up an approved issue in whichever repo it is labeled
-  on and ships a PR there.
-- **Solo developers** who want the backlog to shrink while they sleep, and anyone whose
-  AI already does the planning and needs the execution done.
+- A solo developer who wants to review a PR instead of opening another coding session.
+- A consultancy maintaining repos for several clients, each with its own conventions.
+- A team whose planner already writes clear issues and needs a way to execute them.
+- An operator who wants to see what is building, waiting for review, or blocked.
 
-## What it does
+You supply the outcome, acceptance criteria, and repo instructions. Foreman supplies
+the recurring execution loop. It runs locally against your checkouts; GitHub issues,
+PRs, labels, and comments carry the work between steps.
 
-Every feature, one line each. The link has the detail.
+## What happens after you approve an issue
 
-### The delivery pipeline
+Apply the trigger label (`approved` by default) to an issue in a configured repo.
 
-| Feature | What it does for you | Details |
-|---|---|---|
-| Pipeline of stages | Runs nine stages on every repo — reconcile, review, verify, promote, release, revise, implement, branch sync, dependency batches — in an order you can change. | [pipeline.md](docs/pipeline.md#the-stages) |
-| Lanes in parallel | Stages are grouped into lanes that run side by side, so a 30-minute build never holds up a review or a release on the same repo. | [pipeline.md](docs/pipeline.md#lanes-stages-run-side-by-side) |
-| Implement | Picks up approved issues by priority, then age, and has Claude Code build them on the feature branch and open a PR. | [pipeline.md](docs/pipeline.md#the-stages), [skills.md](docs/skills.md) |
-| Review *(opt-in)* | Hands each open PR to a separate reviewer program, the Tech Lead, which reviews and merges under its own account. | [review.md](docs/review.md) |
-| Revise loop | Answers review feedback on the PR, ahead of new work; a PR that keeps bouncing is held for a person's ruling. | [pipeline.md](docs/pipeline.md#the-stages) |
-| Outcome-label repair and declared holds | If the reviewer merged but forgot the label, the Foreman sets it from the review's own report; a reviewer can declare a deliberate hold instead. | [review.md](docs/review.md#outcome-label-reconciliation) |
-| Orphan recovery (reconcile) | Finds commits on the feature branch that no PR carries and opens one, so finished work is never stranded. | [pipeline.md](docs/pipeline.md#the-stages) |
-| Dev verification (SRE) | Has a verifier check each merged change in the dev environment, retries a failure, and can hold the next build until the last one passes. | [pipeline.md](docs/pipeline.md#the-stages) |
-| Promotion and release to production | Opens the promotion PR for authorized work; with the release stage, has it approved, deployed, verified in production, tagged and closed. | [lifecycle.md](docs/lifecycle.md#the-release-stage) |
-| Branch sync | Merges the production branch back into the base branch after each release, so the two never drift. | [pipeline.md](docs/pipeline.md#the-stages) |
-| Dependency batches | Gathers open Dependabot (or Renovate) PRs into one issue that goes through the normal build. | [pipeline.md](docs/pipeline.md#the-stages) |
-| Custom stages | Adds a stage that runs your own skill, such as a security scan, and can block the rest of its lane until it passes. | [pipeline.md](docs/pipeline.md#custom-stages) |
-| One state machine | Every issue is in one named state, moved only by named steps; the table of both is generated from the code. | [lifecycle.md](docs/lifecycle.md) |
+1. **Build.** Foreman selects eligible work by priority and age, then starts Claude
+   Code with the issue, the repo's implementation skill, and your configured limits.
+2. **Open a PR.** The implementation commits to the configured feature branch and
+   opens a PR into the base branch. The issue moves to `pr under review`.
+3. **Revise.** When a reviewer requests changes and the issue moves to
+   `pr pending actions`, Foreman runs the revision skill and returns the PR for review.
+   Revisions take priority over new builds.
+4. **Continue as configured.** An optional Tech Lead handles review and merge; an
+   optional SRE verifies merged work in dev. Production promotion requires a separate
+   authorization label. The release stage can then coordinate approval, deployment,
+   production verification, tagging, and closure.
 
-### Repos, labels and configuration
+The work stays visible on GitHub. Failed attempts back off; unresolved problems get
+a reason on the issue. State persists across restarts, and repeated review cycles can
+pause for a scope ruling.
 
-| Feature | What it does for you | Details |
-|---|---|---|
-| Multi-repo or single-repo | One daemon manages one repo or many, each with its own branches, skills, model and time limits. | [config-guide.md](docs/config-guide.md#multi-repo-mode) |
-| Repo onboarding | Before a repo's first piece of work, creates the labels the Foreman runs on that it is missing — never changing existing ones. Add a repo to the config and the running daemon picks it up. | [onboarding.md](docs/onboarding.md) |
-| Your own labels and GitHub names | Every label, PR title, tag name and signature the Foreman writes is a setting, so it fits your conventions. | [config-guide.md](docs/config-guide.md#lifecycle-labels), [configuration.md](docs/configuration.md#github-conventions-github) |
-| Retry back-offs | Every wait before a retry grows the same predictable way and is tunable, so a blip costs a short wait and only lasting trouble gets long ones. | [running.md](docs/running.md#back-offs) |
-| GitHub API budget | Shares one issue snapshot per repo per cycle and logs its expected request rate, so a large fleet stays under GitHub's limits. | [running.md](docs/running.md#github-api-budget) |
-| Full configuration reference | Every setting, its default and its environment variable, generated from the code. | [configuration.md](docs/configuration.md) |
+The [pipeline guide](docs/pipeline.md) explains which stages run, their requirements,
+and how lanes let a build, review, and release progress alongside one another. The
+[lifecycle reference](docs/lifecycle.md) defines the states and transitions.
 
-### Setup and operation
+## See the work in Paperclip
 
-| Feature | What it does for you | Details |
-|---|---|---|
-| Guided setup | `npm run setup` installs, builds, creates the labels and checks everything; or ask Claude Code to "set up the Foreman". | [setup.md](docs/setup.md) |
-| Doctor | `npm run doctor` says, line by line and read-only, whether the Foreman is ready and what to fix. | [setup.md](docs/setup.md#3-run-setup) |
-| Label install | `npm run labels:install` creates any missing label on every configured repo. | [config-guide.md](docs/config-guide.md#lifecycle-labels) |
-| Daemon management | Start, stop, restart, status and logs, a single-instance guard, live config reload and a graceful stop that lets running work finish. | [running.md](docs/running.md#daemon-management) |
+Already managing agents in [Paperclip](https://github.com/paperclipai/paperclip)?
+Foreman can show its GitHub work on your board: who holds the next action, where the
+issue is in the pipeline, and what happened during build, review, and revision.
 
-### Skills and sessions
+The integration can:
 
-| Feature | What it does for you | Details |
-|---|---|---|
-| Built-in skills | Ships generic implement and revise instructions, so a repo needs no skill files of its own; add repo rules with an overlay file. | [skills.md](docs/skills.md#built-in-skills) |
-| Skill sync | Keeps each repo's copy of its skills on one golden source, updated one repo at a time as approved work comes through. | [skill-sync.md](docs/skill-sync.md) |
-| Image handling | Images in an issue or review comment — mockups, screenshots — are fetched and read as part of the spec. | [skills.md](docs/skills.md#image-handling-in-issue-bodies) |
-| Session security | Each session gets one token and an allowlisted environment, a hook blocks commands that would print a secret, and tokens are redacted from logs. | [security.md](docs/security.md) |
-| Workspace trust | Marks every repo checkout trusted in Claude Code, so sessions get the repo's own settings, tools and hooks. | [security.md](docs/security.md#claude-code-workspace-trust) |
+- Move cards through the lifecycle with an owner and a stage label.
+- Post session summaries, PR links, review findings, and reasons for holds.
+- Assign stages to configured roles, with handoffs that say what to do and when it is done.
+- Mirror all open issues in the selected repos when `paperclip.ownsCards` is enabled.
 
-### Optional integrations and extending it
+**GitHub is the work source.** A Paperclip assignment does not start a Foreman build;
+the GitHub trigger label does. Foreman's Paperclip agent is registered with its wake
+paths off because the daemon runs its own loop.
 
-| Feature | What it does for you | Details |
-|---|---|---|
-| Paperclip board *(optional, off by default)* | Mirrors every issue as a card on a [Paperclip](https://github.com/paperclipai/paperclip) board — who holds it, which column, what happened. The Foreman runs fully without it. | [paperclip.md](docs/paperclip.md) |
-| Discord *(not used by the daemon)* | The daemon sends no chat messages: what needs a person is a label and a comment on the issue. A Discord bridge client is exported for other agents. | [config-guide.md](docs/config-guide.md#discord-notifications) |
-| Programmatic usage | Start the daemon, or one pass, from your own Node code. | [architecture.md](docs/architecture.md#programmatic-usage) |
-| Architecture | How the Foreman fits a team of agents, and one source file per concern. | [architecture.md](docs/architecture.md) |
+Paperclip is off by default. A board outage does not stop GitHub work; notes due
+during the outage are skipped. The daemon sends no Discord messages—its operating
+surfaces are GitHub, logs, and the optional board.
 
-Every doc, by question: [docs/README.md](docs/README.md).
+[Set up and verify the Paperclip mirror →](docs/paperclip.md#set-up)
 
-## Quick start
+## Start with one repo
+
+You need Node.js **22.12+**, a logged-in Claude Code CLI, the GitHub CLI, and a local
+checkout of the repo Foreman will edit. That repo needs the configured feature, base,
+and production branches; the defaults are `features`, `develop`, and `main`.
+
+Set `FOREMAN_GITHUB_TOKEN` in the daemon's environment to use a dedicated GitHub
+account with write access. Without it, Foreman uses the account logged into `gh`.
+Keep tokens out of the config file.
 
 ```bash
 git clone https://github.com/xrgarcia/slashbin-ai-foreman.git
 cd slashbin-ai-foreman
 ```
 
-Then either open Claude Code here and say **"set up the Foreman"** — it asks which
-repos, branches and labels to use, writes `.ai-agent.json` after showing it to you,
-and runs setup — or do it by hand:
+For guided setup, open Claude Code here and say **"set up the Foreman"**. It asks
+which repos and conventions to use, shows you the config, and runs setup.
 
-```bash
-cp .ai-agent.example.json .ai-agent.json   # keep only your repos; see docs/setup.md
-npm run setup                              # install, build, create the labels, run the doctor
-npm start                                  # once the doctor says Ready
+To configure it yourself, create a gitignored `.ai-agent.json`. This example runs
+implementation, revision, and orphan-PR recovery for one repo:
+
+```json
+{
+  "repos": [
+    {
+      "name": "api",
+      "repoPath": "../my-api",
+      "githubRepo": "your-org/my-api",
+      "skillPath": "builtin:",
+      "revisionSkillPath": "builtin:"
+    }
+  ],
+  "stages": [
+    { "type": "reconcile" },
+    { "type": "revise" },
+    { "type": "implement" }
+  ]
+}
 ```
 
-**[docs/setup.md](docs/setup.md)** lists what you need first (Node 22.12+, the `claude`
-and `gh` CLIs, a checkout of each repo, three branches, the GitHub tokens) and the
-smallest working config. Then label an issue `approved` and watch `npm run logs`.
+Replace the repo name and path, and set `featureBranch`, `baseBranch`, or
+`productionBranch` if your branches differ. The built-in skills ship with Foreman;
+your repo needs no skill files to get started.
 
-## Built with
+The explicit `stages` list keeps this first setup focused on producing and revising
+PRs. Omitting it enables the default pipeline, including branch sync, dependency
+batches, and promotion; review, verification, and release have additional requirements.
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — the AI implementation engine
-- [GitHub CLI (gh)](https://cli.github.com/) — issue polling and PR management
-- TypeScript + Zod — type-safe configuration
+```bash
+npm run setup       # install, build, create missing labels, check readiness
+npm run doctor      # read-only readiness check; fix any FAIL before starting
+npm start           # run in the background
+npm run status
+npm run logs
+```
+
+Setup creates missing labels and leaves existing ones unchanged.
+[The setup guide](docs/setup.md) covers prerequisites, tokens, configuration, and
+running as a service. [Daemon operations](docs/running.md) covers stop, restart,
+foreground runs, and retries.
+
+## Give it its first issue
+
+Choose a small, bounded change in your repo. Write the issue so a developer or an LLM
+can tell what success looks like:
+
+- **Problem:** what happens today and who it affects.
+- **Expected result:** the observable behavior after the change.
+- **Acceptance:** the steps or checks that show it works.
+- **Out of scope:** what this issue should leave alone.
+- **References:** the relevant files, screenshots, or existing behavior.
+
+Apply `approved` to the issue and watch the logs. On its next eligible pass, Foreman
+starts a build and opens a PR for review. If the issue is unclear or blocked, it can
+stop with a reason rather than produce a PR.
+
+With the starter config above, **you review and merge the PR**. To send it back for
+revision, request changes on the PR and replace the linked issue's `pr under review`
+label with `pr pending actions`. Foreman revises the PR and returns the issue to
+`pr under review`. These are the default label names; use yours if you renamed them.
+
+That first PR is the useful starting point. Add more repos or more of the delivery
+pipeline once the workflow fits how you work.
+
+## Extend the loop through review and release
+
+The implement and revise skills are included. Automated review and deployment use
+separate programs with their own procedures; configuring a path connects those
+programs rather than creating a reviewer or a deployment setup for you.
+
+| Add this | What it does | What you supply |
+|---|---|---|
+| Automated review | Hands the PR to a Tech Lead that reviews, merges, and records the outcome. | `reviewEnabled: true`, a compatible Tech Lead checkout at `techLeadPath`, and `TECHLEAD_GITHUB_KEY` for a separate reviewer account. |
+| Dev verification | Asks an SRE to verify the merged work in dev; can hold the next build until it passes. | A compatible SRE checkout at `srePath`, its environment-specific verification procedure, and `SRE_GITHUB_KEY`. |
+| Promotion | Opens a base-to-production PR for work authorized to release. | The `promote` stage and a person applying `ready for prod release` (or your configured name). |
+| Automated release | Coordinates Tech Lead approval and SRE deployment, verifies production, tags the merge, and closes verified issues. | The `release` stage, both agent paths and credentials, and a deployment/verification procedure for your environment. |
+
+The builder and reviewer use separate GitHub identities. Review and merge follow
+your branch protection; an `approved` build label alone does not authorize production.
+
+Add the stages you need to the starter config, or use the default pipeline.
+Read [automated review](docs/review.md), [pipeline stages](docs/pipeline.md#the-stages),
+and the [release contract](docs/lifecycle.md#the-release-stage) before enabling them.
+
+## Make it fit your repos
+
+| Your situation | Foreman's support | Details |
+|---|---|---|
+| Several repos or clients | One daemon, per-repo branches, skills, models, and run budgets; live config reload. | [Repos and labels](docs/config-guide.md) |
+| Existing conventions | Configurable trigger, lifecycle, blocked, and priority labels, PR titles, tag names, and signatures. | [Configuration reference](docs/configuration.md) |
+| Repo-specific instructions | Built-in skills, overlays, or your own implement and revise skills; images in issues and review comments are included in the default prompts. | [Skills](docs/skills.md) |
+| Shared skills across repos | Optional skill sync updates copies as approved work reaches each repo. | [Skill sync](docs/skill-sync.md) |
+| More parallel work | Independent repo lanes, checkout locks, and a configurable fleet session limit. | [Stages and lanes](docs/pipeline.md#lanes-stages-run-side-by-side) |
+| Interrupted or failed work | Persistent state, retry back-offs, orphan-PR recovery, and holds with reasons. | [Operations](docs/running.md) |
+| Extra checks | Custom skill stages that gate the next stage in their lane. | [Custom stages](docs/pipeline.md#custom-stages) |
+| Dependency updates | Batch Dependabot or Renovate PRs into an issue for the normal implementation flow. | [Pipeline](docs/pipeline.md#the-stages) |
+
+Sessions run unattended with Claude Code permission prompts disabled. Foreman limits
+the session environment, blocks common secret-printing operations, and redacts its
+own logs. Sessions still have the filesystem access of the user running them. Read
+[session security](docs/security.md) when choosing the account and environment.
+
+## Why we built it
+
+We built Foreman to carry implementation work across the repos behind
+[Slashbin](https://slashbin.io). The recurring work was starting builds, carrying
+review feedback back to the builder, and following changes past the first PR.
+Foreman puts those handoffs into a loop with a visible record.
+
+[Slashbin AI Team](https://github.com/xrgarcia/slashbin-ai-team) and Foreman serve
+different parts of that workflow. AI Team gives agents roles, context, tools, and
+ways to receive work through Paperclip, Discord, or both. Foreman runs the GitHub
+implementation pipeline. You can use Foreman without the AI Team harness or a
+Paperclip board.
+
+We are sharing it as free community code. Use it, change it, and bring back what
+you learn. The offer here is the working repo: your own execution loop, under
+your control.
+
+## Documentation
+
+[All docs by question →](docs/README.md)
+
+| Read this | For |
+|---|---|
+| [Setup](docs/setup.md) | Tools, accounts, branches, config, and the readiness check. |
+| [Repo onboarding](docs/onboarding.md) | What happens before a new repo's first piece of work. |
+| [Running the daemon](docs/running.md) | Commands, logs, restarts, retries, and GitHub API use. |
+| [Repos and labels](docs/config-guide.md) | Common configuration choices and multi-repo setups. |
+| [Configuration reference](docs/configuration.md) | Every key, default, and environment override; generated from source. |
+| [Pipeline](docs/pipeline.md) | Built-in stages, parallel lanes, and custom stages. |
+| [Review](docs/review.md) | Tech Lead integration, outcome labels, and deliberate holds. |
+| [Lifecycle reference](docs/lifecycle.md) | States, moves, events, and the release contract; generated from source. |
+| [Paperclip](docs/paperclip.md) | Optional board mirror, roles, handoffs, setup, and checks; generated from source. |
+| [Skills](docs/skills.md) | Built-ins, overlays, prompt variables, and image handling. |
+| [Skill sync](docs/skill-sync.md) | Keeping repo copies aligned with a shared source. |
+| [Security](docs/security.md) | Session access, identities, secret handling, and workspace trust. |
+| [Architecture](docs/architecture.md) | Components, extension points, and programmatic use. |
+| [Cache self-heal design](docs/implemented-cache-self-heal.md) | Historical context for implemented-work recovery. |
+
+Each page has its own contents list and a link back to the documentation index.
+For an LLM setting up Foreman, start with [setup](docs/setup.md), use the
+[configuration reference](docs/configuration.md) for exact keys, and check the
+[pipeline](docs/pipeline.md) before choosing stages. `CLAUDE.md` is contributor
+context, not the installation guide.
+
+## Contributing
+
+Issues and pull requests are welcome. Describe the behavior you want or the problem
+you can reproduce, and include the repo configuration with secrets removed when it
+helps explain it.
+
+For code changes, the repository checks are:
+
+```bash
+npm install
+npm run build
+npm test
+npm run docs:check
+```
+
+The package and CLI executable are named `slashbin-ai-agent`; this repository is
+`slashbin-ai-foreman`. Generated references are maintained through the prose templates
+in `scripts/docs/` and the source declarations they read:
+`npm run docs:generate` rebuilds them.
 
 ## License
 
-MIT
+[MIT](LICENSE). Foreman is free software; you supply the machine, Claude Code access,
+and any services your workflow uses.

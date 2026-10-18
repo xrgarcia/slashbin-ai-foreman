@@ -1,5 +1,14 @@
 # Setting up the Foreman
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [1. Before setup](#1-before-setup)
+- [2. The config](#2-the-config)
+- [3. Run setup](#3-run-setup)
+- [Giving it work](#giving-it-work)
+
 Three steps: have the tools and tokens, write a config, run `npm run setup`. Setup
 installs the labels on every repo and finishes with a check that says, line by line,
 whether the Foreman is ready to start and what to fix if not.
@@ -43,7 +52,15 @@ token into a chat or into the config file.
 
 The config is `.ai-agent.json` in the Foreman checkout (gitignored). Only the repos are
 required; everything else has a default, listed in
-[configuration.md](configuration.md). The smallest working config:
+[configuration.md](configuration.md).
+
+[The README's starter config](../README.md#start-with-one-repo) explicitly selects
+implementation, revision, and orphan-PR recovery. The example below leaves
+`stages` unset, so it uses the default pipeline: branch sync, dependency batches,
+and promotion are included; automated review, verification, and release require
+the additional configuration described in [pipeline.md](pipeline.md).
+
+The smallest working config using those defaults:
 
 ```json
 {
@@ -76,7 +93,7 @@ Add only what differs from the defaults:
 | Your "on hold" label or your priority labels differ | the `github` block: `blockedLabel`, `priorityLabels` |
 | Dependency PRs come from Renovate, not Dependabot | `github.dependencyBranchPrefixes: ["renovate/"]` |
 | Each repo needs a different model or longer runs | `model`, `maxTurns`, `maxDurationMs` per repo |
-| PRs should be reviewed before merge | `reviewEnabled: true` and `techLeadPath` — [review.md](review.md) |
+| You want automated PR review | `reviewEnabled: true` and `techLeadPath` — [review.md](review.md) |
 
 `.ai-agent.example.json` shows a fuller config with comments.
 

@@ -1,5 +1,14 @@
 # The pipeline: stages and lanes
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [The stages](#the-stages)
+- [Lanes: stages run side by side](#lanes-stages-run-side-by-side)
+- [Pipeline stages (`stages`)](#pipeline-stages-stages)
+- [Custom stages](#custom-stages)
+
 What the Foreman does on every configured repo, stage by stage, how the stages run side
 by side, and how to reorder them or add your own. The state each issue is in, and every
 move between states, is in [lifecycle.md](lifecycle.md) *(generated)*.
