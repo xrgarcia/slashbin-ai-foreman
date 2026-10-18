@@ -14,7 +14,7 @@ the daemon's machine, its three branches, and write access for the Foreman's tok
 
 ## What the Foreman does before the first piece of work
 
-1. **Creates the labels it runs on** (`onboardRepos`, default on). Before the repo's
+1. **Creates the labels it runs on** (`onboarding`, default on). Before the repo's
    first lane pass — at start-up for repos already in the config, and for any repo a
    reload adds — the Foreman reads the repo's labels and creates the ones that are
    missing: the trigger label, every `lifecycleLabels` value and `github.blockedLabel`,
@@ -24,12 +24,12 @@ the daemon's machine, its three branches, and write access for the Foreman's tok
      never touched, and nothing is edited or deleted. New labels get GitHub's default
      grey.
    - No lane runs on the repo until every label exists. If GitHub refuses (no access,
-     an outage), a warning is logged and the attempt is retried on a later pass, no
-     sooner than a minute later. Other repos are not held up.
+     an outage), a warning is logged and the attempt is retried on the repo's next
+     pass. Other repos are not held up.
    - Renaming a label in the config onboards the repo again under the new names.
    - Without this, the first sign of a missing label would be the first label write of
      an issue's life — mid-flow, with the issue already half-moved.
-   - Set `onboardRepos: false` (or `AI_AGENT_ONBOARD_REPOS=false`) to manage the labels
+   - Set `onboarding: false` (or `AI_AGENT_ONBOARDING=false`) to manage the labels
      yourself ([configuration.md](configuration.md#onboardrepos)).
 2. **Syncs its skills** (when `skillSync` is on). Before the implement session for the
    repo's first approved issue starts, the Foreman copies the golden skill files into

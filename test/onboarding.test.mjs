@@ -11,7 +11,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
-import { labelsFor, onboardRepo, resetOnboarding, ONBOARD_RETRY_MS } from "../dist/onboarding.js";
+import { labelsFor, onboardRepo, resetOnboarding } from "../dist/onboarding.js";
+import { requiredLabels } from "../dist/config.js";
 import { runLanePass } from "../dist/orchestrator.js";
 import { lanesFor } from "../dist/lanes.js";
 import { configureIssueCache } from "../dist/github.js";
@@ -116,20 +117,36 @@ test("configured label names are the ones installed", async () => {
   for (const name of ["approved", "pr under review", "blocked"]) assert.ok(!have.includes(name), name);
 });
 
-test("an unreadable repo: false, nothing written, no retry inside the window, one retry after it", async () => {
+test("an unreadable repo: false, nothing written; the very next pass tries again", async () => {
   const repo = load().repos[0];
   arrange({});
-  const t0 = Date.now();
-  assert.equal(await onboardRepo(repo, logger, t0), false);
+  assert.equal(await onboardRepo(repo, logger), false);
   assert.deepEqual(methods(), ["GET"]);
-
-  writeFileSync(F.log, "");
-  assert.equal(await onboardRepo(repo, logger, t0 + ONBOARD_RETRY_MS - 1), false);
-  assert.equal(calls().length, 0);
 
   arrange({ "example/svc": [...DEFAULTS] });
-  assert.equal(await onboardRepo(repo, logger, t0 + ONBOARD_RETRY_MS), true);
+  assert.equal(await onboardRepo(repo, logger), true);
   assert.deepEqual(methods(), ["GET"]);
+});
+
+test("a failed create is retried on the next pass, and then the lanes are admitted", async () => {
+  const repo = load().repos[0];
+  arrange({ "example/svc": [], refuse: ["blocked"] });
+  assert.equal(await onboardRepo(repo, logger), false);
+  const st = state();
+  st.refuse = [];
+  writeFileSync(F.state, JSON.stringify(st));
+  writeFileSync(F.log, "");
+  assert.equal(await onboardRepo(repo, logger), true);
+  assert.deepEqual(methods(), ["GET", "POST"]);
+});
+
+test("onboarding, labels:install and doctor share one selection rule", () => {
+  assert.equal(labelsFor, requiredLabels);
+  for (const f of ["scripts/install-labels.mjs", "scripts/doctor.mjs"]) {
+    const src = readFileSync(join(saved.cwd, f), "utf8");
+    assert.match(src, /requiredLabels\(repo\)/, f);
+    assert.doesNotMatch(src, /new Set\(\[repo\.triggerLabel/, f);
+  }
 });
 
 test("a label that cannot be created: false; the rest are still created", async () => {
@@ -160,9 +177,12 @@ test("a lane pass on a repo that cannot be onboarded runs no stage", async () =>
   assert.deepEqual(calls().map((a) => a.slice(0, 2)), [["api", "-X"]], "only the label read ran");
 });
 
-test("onboardRepos: false skips onboarding; the lane runs", async () => {
-  const config = load({ onboardRepos: false });
-  arrange({});
-  await runLanePass(config.repos[0], config, lanesFor(config.stages)[0], logger, "never");
-  assert.equal(labelCalls().length, 0);
+test("onboarding: false in the file skips onboarding, missing labels or a refused read alike", async () => {
+  const config = load({ onboarding: false });
+  assert.equal(config.onboarding, false);
+  for (const st of [{ "example/svc": [] }, {}]) {
+    arrange(st);
+    await runLanePass(config.repos[0], config, lanesFor(config.stages)[0], logger, "never");
+    assert.equal(labelCalls().length, 0);
+  }
 });

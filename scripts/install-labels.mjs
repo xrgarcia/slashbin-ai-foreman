@@ -29,7 +29,7 @@ if (!existsSync(built)) {
   console.error(`${built} not found — run \`npm run build\` first.`);
   process.exit(1);
 }
-const { loadConfig } = await import(built);
+const { loadConfig, requiredLabels } = await import(built);
 
 // GitHub's own default label colour; colour is not configurable.
 const COLOR = "ededed";
@@ -79,12 +79,11 @@ try {
   process.exit(1);
 }
 
-const lifecycle = [...Object.values(config.lifecycleLabels), config.github.blockedLabel];
 const failures = [];
 
 for (const repo of config.repos) {
   const target = repo.githubRepo;
-  const wanted = [...new Set([repo.triggerLabel, ...lifecycle])];
+  const wanted = requiredLabels(repo);
 
   let existing;
   try {
