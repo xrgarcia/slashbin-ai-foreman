@@ -216,7 +216,7 @@ for (const repo of config.repos) {
   try {
     const have = new Set(run("gh", ["api", `repos/${repo.githubRepo}/labels`, "--paginate", "--jq", ".[].name"]).split("\n"));
     const absent = wanted.filter((l) => !have.has(l));
-    if (absent.length) line("FAIL", `${at}: labels`, `missing ${absent.map((l) => `"${l}"`).join(", ")}. Run \`npm run labels:install\`.`);
+    if (absent.length) line("FAIL", `${at}: labels`, `missing ${absent.map((l) => `"${l}"`).join(", ")}. Run \`npm run labels:install\`, or start the daemon: with onboardRepos on it creates them before any work runs here.`);
     else line("PASS", `${at}: labels`, `all ${wanted.length} present`);
   } catch (err) {
     line("FAIL", `${at}: labels`, `could not read labels — ${reason(err)}`);

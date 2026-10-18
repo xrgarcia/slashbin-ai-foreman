@@ -118,6 +118,12 @@ Type: boolean · Default: `true` · Env: `AI_AGENT_TRUST_MANAGED_REPOS`
 
 Mark every configured repo checkout, and every directory a session runs in, as trusted in Claude Code's global config ($CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json). Without trust a headless session silently ignores the repo's .claude/settings.json and .mcp.json. Listing a repo here is the consent; set false to manage Claude Code trust yourself. Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
 
+### `onboardRepos`
+
+Type: boolean · Default: `true` · Env: `AI_AGENT_ONBOARD_REPOS`
+
+Onboard a repo before its first piece of work: on start-up and on every repo a config reload adds, create the labels the Foreman runs on that the repo is missing (the trigger label, every lifecycleLabels value and github.blockedLabel — the set `npm run labels:install` creates). Read, then create only; an existing label is never edited or deleted. No lane runs on the repo until it succeeds; a failure is retried on the next pass. Set false to manage the labels yourself. Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+
 ### `buildBatchSize`
 
 Type: integer · Default: `1` · Env: `AI_AGENT_BUILD_BATCH_SIZE`
@@ -156,7 +162,7 @@ Most turns an implement or revise session may take. Per repo too.
 
 ### `maxDurationMs`
 
-Type: integer · Default: `3600000` (60 min, the same as `reviewMaxDurationMs` and the restart drain) · Env: `AI_AGENT_MAX_DURATION_MS` · Per repo: yes, falls back to this value
+Type: integer · Default: `3600000` (1 h) · Env: `AI_AGENT_MAX_DURATION_MS` · Per repo: yes, falls back to this value
 
 Longest an implement or revise session may run before it is stopped. Per repo too.
 
@@ -393,7 +399,7 @@ case, which beats the file.
 
 ### `backoff.skip`
 
-An issue the implement session declined on purpose (blocked on something outside the repo, investigation only, already done). With `hold` (the default) it is held in Blocked and no session runs on it until something moves: the issue changes after the skip (an edit, a comment or a label by anyone but the Foreman), or the issue or PR the skip names in `waiting_on` closes or merges. Each check is one cheap GitHub read, and each release buys one session. After `maxAttempts` sessions in a row end in a skip, it is escalated to the `needsRuling` stage and stays Blocked: no session at all until a person changes the issue, which starts the count again. An account listed in `agentLogins` (another agent: a manager bot, an SRE bot, a reviewer) is not a person there: its edit or label buys one session and keeps the count, and its comment releases nothing, so two agents answering each other's "still held" cannot restart the count. Set `hold` to false for the older timed retry (no cap): hidden for one window, each decline in a row doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still sets `baseMs`.
+An issue the implement session declined on purpose (blocked on something outside the repo, investigation only, already done). With `hold` (the default) it is held in Blocked and no session runs on it until something moves: the issue changes after the skip (an edit, a comment or a label by anyone but the Foreman), or the issue or PR the skip names in `waiting_on` closes or merges. Each check is one cheap GitHub read, and each release buys one session. After `maxAttempts` sessions in a row end in a skip, it is escalated to the `needsRuling` stage and stays Blocked: no session at all until a person changes the issue, which starts the count again. An account in `agentLogins` (another agent: the EM, the SRE, a reviewer) is not a person there: its edit or label buys one session and keeps the count, and its comment releases nothing. Set `hold` to false for the older timed retry (no cap): hidden for one window, each decline in a row doubling it, 5 min rising to 4 h. The old top-level `skipBackoffMs` still sets `baseMs`.
 
 | Field | Default | Env |
 |---|---|---|
@@ -402,7 +408,7 @@ An issue the implement session declined on purpose (blocked on something outside
 | `factor` | `2` | `AI_AGENT_BACKOFF_SKIP_FACTOR` |
 | `hold` | `true` | `AI_AGENT_BACKOFF_SKIP_HOLD` |
 | `maxAttempts` | `3` | `AI_AGENT_BACKOFF_SKIP_MAX_ATTEMPTS` |
-| `agentLogins` | `[]` | `AI_AGENT_BACKOFF_SKIP_AGENT_LOGINS` (comma-separated) |
+| `agentLogins` | `` | `AI_AGENT_BACKOFF_SKIP_AGENT_LOGINS` |
 
 ### `backoff.verifyRetry`
 

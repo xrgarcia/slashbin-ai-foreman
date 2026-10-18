@@ -157,6 +157,18 @@ export const configSchema = z.object({
     (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
     z.boolean(),
   ).default(true),
+  // Onboard a repo before its first piece of work: on start-up and on every
+  // repo a config reload adds, create the labels the Foreman runs on that the
+  // repo is missing (the trigger label, every lifecycleLabels value and
+  // github.blockedLabel — the set `npm run labels:install` creates). Read, then
+  // create only; an existing label is never edited or deleted. No lane runs on
+  // the repo until it succeeds; a failure is retried on the next pass. Set false
+  // to manage the labels yourself.
+  // Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+  onboardRepos: z.preprocess(
+    (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
+    z.boolean(),
+  ).default(true),
   // How many approved issues one build claims. The Foreman picks them before
   // the session — priority tier (github.priorityLabels), then oldest — hands the
   // session only those, and claims only those; the rest stay queued (todo, on
@@ -432,6 +444,8 @@ export interface AgentConfig {
   maxConcurrentSessions: number;
   /** Trust each managed checkout in Claude Code's global config (default true). */
   trustManagedRepos: boolean;
+  /** Create a repo's missing labels before its first lane pass (onboarding.ts). */
+  onboardRepos: boolean;
   /** Most approved issues one build claims and hands its session (default 1). */
   buildBatchSize: number;
   /** Hold a repo's next build until its last merge passes dev verification (default true). */
@@ -558,6 +572,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
     maxConcurrentSessions: process.env.AI_AGENT_MAX_CONCURRENT_SESSIONS ?? fileConfig.maxConcurrentSessions,
     trustManagedRepos: process.env.AI_AGENT_TRUST_MANAGED_REPOS ?? fileConfig.trustManagedRepos,
+    onboardRepos: process.env.AI_AGENT_ONBOARD_REPOS ?? fileConfig.onboardRepos,
     buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
     buildWaitsForDevVerify: process.env.AI_AGENT_BUILD_WAITS_FOR_DEV_VERIFY ?? fileConfig.buildWaitsForDevVerify,
     backoff: mergeBackoff(fileConfig.backoff, {
@@ -770,6 +785,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
     maxConcurrentSessions: parsed.maxConcurrentSessions,
     trustManagedRepos: parsed.trustManagedRepos,
+    onboardRepos: parsed.onboardRepos,
     buildBatchSize: parsed.buildBatchSize,
     buildWaitsForDevVerify: parsed.buildWaitsForDevVerify,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
