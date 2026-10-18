@@ -1,5 +1,13 @@
 # Running the daemon
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [Daemon management](#daemon-management)
+- [Back-offs](#back-offs)
+- [GitHub API budget](#github-api-budget)
+
 Starting, stopping and watching the Foreman, how long it waits before retrying
 something, and what it spends of GitHub's API budget.
 

@@ -1,5 +1,12 @@
 # Skill sync
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Config](#config)
+
 A session runs the skill file in the repo it works in (`.claude/skills/<name>/SKILL.md`).
 Skill sync keeps those copies on one golden source. The copies are updated one repo
 at a time, as approved work comes through, not all at once.

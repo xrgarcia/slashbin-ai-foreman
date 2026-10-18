@@ -1,5 +1,15 @@
 # Skills: what a session is told to do
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [Built-in skills](#built-in-skills)
+- [Keeping skill copies in step](#keeping-skill-copies-in-step)
+- [Prompt template variables](#prompt-template-variables)
+- [Image handling in issue bodies](#image-handling-in-issue-bodies)
+- [Skills in this repo](#skills-in-this-repo)
+
 The Foreman delegates work by invoking Claude Code skills on each service repo. Two
 skill paths per repo:
 

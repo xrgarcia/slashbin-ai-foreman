@@ -1,5 +1,12 @@
 # Onboarding a repo
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [Adding a repo](#adding-a-repo)
+- [What the Foreman does before the first piece of work](#what-the-foreman-does-before-the-first-piece-of-work)
+
 What happens when the Foreman first sees a repo, before it gives the repo any work.
 
 ## Adding a repo
@@ -30,7 +37,7 @@ the daemon's machine, its three branches, and write access for the Foreman's tok
    - Without this, the first sign of a missing label would be the first label write of
      an issue's life — mid-flow, with the issue already half-moved.
    - Set `onboarding: false` (or `AI_AGENT_ONBOARDING=false`) to manage the labels
-     yourself ([configuration.md](configuration.md#onboardrepos)).
+     yourself ([configuration.md](configuration.md#onboarding)).
 2. **Syncs its skills** (when `skillSync` is on). Before the implement session for the
    repo's first approved issue starts, the Foreman copies the golden skill files into
    the checkout and commits them on the feature branch, so the session runs on the

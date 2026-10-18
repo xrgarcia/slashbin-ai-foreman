@@ -1,5 +1,14 @@
 # Architecture
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [How it fits together](#how-it-fits-together)
+- [Two kinds of listener](#two-kinds-of-listener)
+- [Source layout](#source-layout)
+- [Programmatic usage](#programmatic-usage)
+
 How the Foreman fits into an AI engineering team, how its code is laid out, and how to
 run it from your own code. The design decisions behind it are in
 [../CLAUDE.md](../CLAUDE.md) ("Key design decisions").
@@ -70,7 +79,7 @@ Branch sync and dependency batches live in `phases/promote.ts`.
 ## Programmatic usage
 
 ```typescript
-import { startDaemon, loadConfig, createLogger } from "slashbin-ai-foreman";
+import { startDaemon, loadConfig, createLogger } from "slashbin-ai-agent";
 
 const config = loadConfig();
 const logger = createLogger({ format: "json", level: "info" });

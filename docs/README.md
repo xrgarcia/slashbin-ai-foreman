@@ -1,62 +1,103 @@
-# Foreman docs: where to look
+# Foreman documentation
 
-Start here when you need to run, configure, change or debug the Foreman. Each question
-points at the one place that answers it. The pages marked *generated* are built from the
-code (`npm run build && npm run docs:generate`; `npm run docs:check` fails when one is
-stale), so they describe what runs, not what was meant to.
+[Project README](../README.md)
 
-| You want to… | Read |
+Foreman turns approved GitHub issues into pull requests and carries review feedback
+back to the builder. Start with one repo and a PR you can review. Add automated
+review, verification, release, or a Paperclip board when you need them.
+
+## Contents
+
+- [Choose your next step](#choose-your-next-step)
+- [All pages](#all-pages)
+- [Commands](#commands)
+- [Skills in this repo](#skills-in-this-repo)
+- [Maintaining the references](#maintaining-the-references)
+
+## Choose your next step
+
+| You are here | Read next |
 |---|---|
-| Know what the Foreman does, feature by feature | [../README.md](../README.md) — the feature map |
-| Set up a new install: what you need, the smallest config, `npm run setup` | [setup.md](setup.md) — or ask Claude to "set up the Foreman" |
-| Add a repo, and know what happens before its first piece of work | [onboarding.md](onboarding.md) |
-| Start, stop and watch the daemon; tune retries; stay inside GitHub's API budget | [running.md](running.md) |
-| Configure repos, branches and labels: single-repo and multi-repo mode, lifecycle labels | [config-guide.md](config-guide.md) |
-| Change any setting: what it does, its default, its env var | [configuration.md](configuration.md) *(generated)* |
-| Make it retry sooner or later, or give up after more tries | [running.md#back-offs](running.md#back-offs); every key in [configuration.md#back-offs](configuration.md#back-offs) |
-| Rename the blocked or priority labels, or change the PR titles and signature the Foreman writes | [configuration.md#github-conventions-github](configuration.md#github-conventions-github) — the `github` block |
-| Know what each stage does, how lanes run side by side, reorder the pipeline or add a stage that runs your own skill | [pipeline.md](pipeline.md); `src/stages.ts` |
-| Turn on review (the Tech Lead), outcome-label reconciliation, declared holds | [review.md](review.md); [configuration.md#review-phase](configuration.md#review-phase) |
-| Turn on dev verification (the SRE) and the release stage | [pipeline.md#the-stages](pipeline.md#the-stages); [lifecycle.md#the-release-stage](lifecycle.md#the-release-stage) |
-| Know which state an issue is in, what moves it, what each event means | [lifecycle.md](lifecycle.md) *(generated)* |
-| Know what a session is told: skill paths, built-in skills, overlays, prompt variables, images | [skills.md](skills.md) |
-| Keep each repo's skill copies on a golden source, one approved issue at a time | [skill-sync.md](skill-sync.md) |
-| Know what a session can see and leak: tokens, the secret gate, redaction, workspace trust | [security.md](security.md) |
-| Turn the Paperclip board mirror on (optional), map its columns, check it | [paperclip.md](paperclip.md) *(generated)* |
-| Understand the code, or run the Foreman from your own code | [architecture.md](architecture.md); [../CLAUDE.md](../CLAUDE.md) "Architecture" and "Key design decisions" |
-| Know why an issue is tracked as implemented when it is not | [implemented-cache-self-heal.md](implemented-cache-self-heal.md) |
+| Evaluating whether Foreman solves your problem | [README: what happens after approval](../README.md#what-happens-after-you-approve-an-issue) |
+| Ready to get a first PR | [README: starter configuration](../README.md#start-with-one-repo), then [setup](setup.md) for prerequisites and checks |
+| Already using Paperclip | [Paperclip setup](paperclip.md#set-up). GitHub remains the work source; the board mirrors it. |
+| Ready to automate PR review | [Review](review.md). You supply a compatible Tech Lead program and a separate GitHub identity. |
+| Ready to automate verification or release | [Pipeline stages](pipeline.md#the-stages), then the [release contract](lifecycle.md#the-release-stage). You supply the verifier and environment-specific procedures. |
+| Giving these docs to an LLM | Read [setup](setup.md), resolve exact keys in [configuration](configuration.md), and check stage requirements in [pipeline](pipeline.md). Keep credentials in the environment. |
+
+## All pages
+
+This is the table of contents for the documentation directory. Each page also has
+its own section contents and links back here.
+
+| Page | What it answers |
+|---|---|
+| [Setup](setup.md) | What tools, accounts, local checkouts, and branches do I need? How do I configure and check an install? |
+| [Repo onboarding](onboarding.md) | What happens when I add a repo, and before its first build? |
+| [Running the daemon](running.md) | How do I start, stop, inspect, and restart it? How do retries and GitHub API use work? |
+| [Repos and labels](config-guide.md) | How do single-repo and multi-repo configs work? How do I use my own labels and branches? |
+| [Configuration reference](configuration.md) *(generated)* | What does each setting mean, what is its default, and which environment variable overrides it? |
+| [Pipeline](pipeline.md) | Which stages run, what do they require, and how do lanes and custom gates work? |
+| [Review](review.md) | How does the Tech Lead review and merge? How are missing outcome labels and deliberate holds handled? |
+| [Lifecycle reference](lifecycle.md) *(generated)* | What state is an issue in, what moves it, and what constitutes a verified release? |
+| [Paperclip](paperclip.md) *(generated)* | How do I enable the board mirror, map roles and stages, verify it, or remove it? |
+| [Skills](skills.md) | What instructions does a session receive? How do built-ins, overlays, prompt variables, and images work? |
+| [Skill sync](skill-sync.md) | How do repo skill copies pick up a shared version as approved work arrives? |
+| [Session security](security.md) | Which credentials and files can a session access? What do the secret gate and log redaction cover? |
+| [Architecture](architecture.md) | How do the work source, observers, and orchestrator fit together? What can I import? |
+| [Cache self-heal design](implemented-cache-self-heal.md) | Why was the implemented-work cache changed? This is a historical design note. |
+
+For contributor context, see [CLAUDE.md](../CLAUDE.md). For the included execution
+instructions, see [implement](../skills/implement/SKILL.md) and
+[revise](../skills/revise/SKILL.md).
 
 ## Commands
 
 | Command | Does |
 |---|---|
-| `npm run setup` | Install, build, create any missing label, then run the doctor. Needs a config; safe to re-run. |
-| `npm run doctor` | Read-only: is the Foreman ready? Tools, tokens, config, and per repo the checkout, branches, skills and labels. Exits non-zero on any FAIL. |
-| `npm run build` | Compile `src/` to `dist/`. Every other command runs the built code. |
-| `npm start` / `stop` / `restart` / `status` / `logs` | Manage the daemon in the background (`agent-manager.mjs`). |
-| `npm run once` | One poll cycle in the foreground, then exit. Add `-- --repo <name>` for one repo. |
-| `npm test` | Build, then run every test in `test/`. |
-| `npm run labels:install` | Create any missing trigger, lifecycle or blocked label on every configured repo. Never changes an existing one. |
-| `npm run paperclip:register` | Register the Foreman as a Paperclip agent and write its id into the config. |
-| `npm run paperclip:doctor` | Read-only check of the Paperclip integration; exits non-zero on any FAIL. |
-| `npm run docs:generate` / `docs:check` | Rebuild the generated docs, or fail when one is stale. |
+| `npm run setup` | Install, build, create missing labels, and run the doctor. Requires a config; safe to rerun. |
+| `npm run doctor` | Read-only readiness check: tools, tokens, config, checkouts, branches, skills, and labels. Exits nonzero on a FAIL. |
+| `npm run build` | Compile `src/` to `dist/`. Operational commands run the built code. |
+| `npm start` / `npm stop` / `npm restart` | Manage the daemon in the background. |
+| `npm run status` / `npm run logs` | Inspect the running daemon and its log. |
+| `npm run once` | Run one poll cycle in the foreground, then exit. Add `-- --repo <name>` for one repo. This executes eligible work. |
+| `npm run labels:install` | Create missing trigger, lifecycle, and blocked labels on configured repos; leave existing labels unchanged. |
+| `npm run paperclip:register` | Register Foreman and configured roles in Paperclip; write their IDs into the local config. |
+| `npm run paperclip:doctor` | Check the Paperclip integration read-only; exit nonzero on a FAIL. |
+| `npm test` | Build, then run the tests in `test/`. |
+| `npm run docs:generate` / `npm run docs:check` | Rebuild generated references, or check whether they are current. Build first. |
 
-The CLI itself: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`, and `--help`.
+CLI: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`; use `--help`
+for usage. Repo and package names differ: the package and executable are
+`slashbin-ai-agent`.
 
 ## Skills in this repo
 
-- `.claude/skills/setup-foreman` — "set up the Foreman": interviews the user, writes the config, runs setup until the doctor says Ready.
-- `.claude/skills/install-labels` — "install the labels": runs `labels:install`.
-- `.claude/skills/setup-paperclip-integration` — walks through turning on the Paperclip mirror.
-- `skills/implement`, `skills/revise` — the built-in implement and revise skills a repo gets with
-  `skillPath: "builtin:"` / `revisionSkillPath: "builtin:"`.
+Open Claude Code in the Foreman checkout and ask:
 
-## Rules that hold everywhere
+- **"Set up the Foreman"** — `.claude/skills/setup-foreman` gathers your repo
+  configuration, shows it before writing, and runs setup.
+- **"Install the labels"** — `.claude/skills/install-labels` runs `labels:install`.
+- **"Integrate the Foreman into my Paperclip app"** —
+  `.claude/skills/setup-paperclip-integration` configures the optional mirror.
 
-- Every state change is a named move in `src/lifecycle.ts`; nothing else writes lifecycle labels.
-- Every retry wait comes from the `backoff` config block through one formula in `src/backoff.ts`;
-  a new wait is a new group there, never a constant in a phase.
-- Every GitHub name the Foreman reads or writes is a config key: the trigger label, `lifecycleLabels`,
-  or the `github` block (`src/github/conventions.ts`); a new one goes there, never a literal in a phase.
-- Every setting is commented where it is declared; the config doc generator refuses an
-  undocumented key.
+The execution skills are `skills/implement` and `skills/revise`. Configure
+`skillPath: "builtin:"` and `revisionSkillPath: "builtin:"` to use them, or point
+those fields at your repo's own skills.
+
+## Maintaining the references
+
+Configuration, lifecycle, and Paperclip references are generated from source
+declarations and prose templates in `scripts/docs/`. Change their templates
+rather than editing the generated Markdown, including their navigation.
+
+```bash
+npm run build
+npm run docs:generate
+npm run docs:check
+```
+
+The code owns the contracts: named lifecycle moves in `src/lifecycle.ts`, retry
+policies in `src/backoff.ts`, GitHub names in `src/github/conventions.ts`, and
+settings in `src/config.ts`. Each setting's description lives with its declaration;
+the configuration generator rejects undocumented keys.

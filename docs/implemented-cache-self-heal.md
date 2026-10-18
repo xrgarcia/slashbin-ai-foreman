@@ -1,5 +1,18 @@
 # `implemented` cache self-heal — current-vs-correct model (Repeated-S1)
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [The recurring defect (the family)](#the-recurring-defect-the-family)
+- [Why it keeps happening (current model)](#why-it-keeps-happening-current-model)
+- [Correct model](#correct-model)
+- [Why this fix (not per-issue branches)](#why-this-fix-not-per-issue-branches)
+- [Scope / out of scope](#scope--out-of-scope)
+
+Historical design note. For current operation and state transitions, use
+[the lifecycle reference](lifecycle.md) and [daemon operations](running.md).
+
 **Status:** decision artifact for the fix in `src/orchestrator.ts` (the
 `tryBatchImplementation` `implemented`-filter region). Owner-approved
 2026-05-19 (Option A: fix the model, not another attribution patch).

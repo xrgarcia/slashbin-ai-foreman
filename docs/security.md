@@ -1,5 +1,14 @@
 # Session security
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [Two GitHub identities](#two-github-identities)
+- [Token isolation and redaction](#token-isolation-and-redaction)
+- [The secret gate (PreToolUse hook)](#the-secret-gate-pretooluse-hook)
+- [Claude Code workspace trust](#claude-code-workspace-trust)
+
 Every Claude session the Foreman starts runs unattended, with a GitHub token, in a
 checkout of your repo. This page is what limits what a session holds and what it can
 leak.

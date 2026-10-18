@@ -1,5 +1,14 @@
 # Review phase (opt-in)
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [When a PR is reviewed](#when-a-pr-is-reviewed)
+- [Outcome-label reconciliation](#outcome-label-reconciliation)
+- [Declaring a deliberate hold](#declaring-a-deliberate-hold)
+- [Review config](#review-config)
+
 The Review phase closes the loop between Implementation and Revision by handing
 open feature PRs awaiting review to the **Tech Lead** (`techLeadPath`) — automating the
 human or agent reviewer step. It is **disabled by default** (`reviewEnabled: false`); a
