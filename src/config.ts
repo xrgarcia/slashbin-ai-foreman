@@ -165,7 +165,7 @@ export const configSchema = z.object({
   // the repo until it succeeds; a failure is retried on the next pass. Set false
   // to manage the labels yourself.
   // Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
-  onboardRepos: z.preprocess(
+  onboarding: z.preprocess(
     (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
     z.boolean(),
   ).default(true),
@@ -445,7 +445,7 @@ export interface AgentConfig {
   /** Trust each managed checkout in Claude Code's global config (default true). */
   trustManagedRepos: boolean;
   /** Create a repo's missing labels before its first lane pass (onboarding.ts). */
-  onboardRepos: boolean;
+  onboarding: boolean;
   /** Most approved issues one build claims and hands its session (default 1). */
   buildBatchSize: number;
   /** Hold a repo's next build until its last merge passes dev verification (default true). */
@@ -516,6 +516,15 @@ function inferGithubRepo(repoPath: string): string | undefined {
 }
 
 /** True when the release stage can run: it needs both the Tech Lead and the SRE. */
+/**
+ * The labels a repo must carry: its trigger, every lifecycle label, the blocked
+ * label. The one selection rule — onboarding, `npm run labels:install` and
+ * `npm run doctor` all read it from here.
+ */
+export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github">): string[] {
+  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
+}
+
 export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLeadPath">): boolean {
   return Boolean(config.srePath && config.techLeadPath);
 }
@@ -572,7 +581,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
     maxConcurrentSessions: process.env.AI_AGENT_MAX_CONCURRENT_SESSIONS ?? fileConfig.maxConcurrentSessions,
     trustManagedRepos: process.env.AI_AGENT_TRUST_MANAGED_REPOS ?? fileConfig.trustManagedRepos,
-    onboardRepos: process.env.AI_AGENT_ONBOARD_REPOS ?? fileConfig.onboardRepos,
+    onboarding: process.env.AI_AGENT_ONBOARDING ?? fileConfig.onboarding,
     buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
     buildWaitsForDevVerify: process.env.AI_AGENT_BUILD_WAITS_FOR_DEV_VERIFY ?? fileConfig.buildWaitsForDevVerify,
     backoff: mergeBackoff(fileConfig.backoff, {
@@ -785,7 +794,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
     maxConcurrentSessions: parsed.maxConcurrentSessions,
     trustManagedRepos: parsed.trustManagedRepos,
-    onboardRepos: parsed.onboardRepos,
+    onboarding: parsed.onboarding,
     buildBatchSize: parsed.buildBatchSize,
     buildWaitsForDevVerify: parsed.buildWaitsForDevVerify,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>

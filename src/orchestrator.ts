@@ -165,7 +165,7 @@ export async function runLanePass(
   snapshot: SnapshotPolicy = "always",
 ): Promise<RepoCycleResult> {
   // No lane runs on a repo before it is onboarded: its labels exist (onboarding.ts).
-  if (config.onboardRepos && !(await onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
+  if (config.onboarding && !(await onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
   const key = `${repoConfig.name}/${lane.name}`;
   lanePassesInFlight.set(key, (lanePassesInFlight.get(key) ?? 0) + 1);
   try {

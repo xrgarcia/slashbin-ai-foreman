@@ -25,7 +25,7 @@ if (!existsSync(built)) {
   console.log(`FAIL  build — ${built} not found. Run \`npm install && npm run build\`.`);
   process.exit(1);
 }
-const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning } = await import(built);
+const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning, requiredLabels } = await import(built);
 const { claudeConfigPath, claudeTrustStatus } = await import(join(root, "dist", "claude-trust.js"));
 const { readGolden, skillsFor, driftAt, describeDrift } = await import(join(root, "dist", "skill-sync.js"));
 
@@ -212,11 +212,11 @@ for (const repo of config.repos) {
     }
   }
 
-  const wanted = [...new Set([repo.triggerLabel, ...Object.values(config.lifecycleLabels), config.github.blockedLabel])];
+  const wanted = requiredLabels(repo);
   try {
     const have = new Set(run("gh", ["api", `repos/${repo.githubRepo}/labels`, "--paginate", "--jq", ".[].name"]).split("\n"));
     const absent = wanted.filter((l) => !have.has(l));
-    if (absent.length) line("FAIL", `${at}: labels`, `missing ${absent.map((l) => `"${l}"`).join(", ")}. Run \`npm run labels:install\`, or start the daemon: with onboardRepos on it creates them before any work runs here.`);
+    if (absent.length) line("FAIL", `${at}: labels`, `missing ${absent.map((l) => `"${l}"`).join(", ")}. Run \`npm run labels:install\`, or start the daemon: with onboarding on it creates them before any work runs here.`);
     else line("PASS", `${at}: labels`, `all ${wanted.length} present`);
   } catch (err) {
     line("FAIL", `${at}: labels`, `could not read labels — ${reason(err)}`);

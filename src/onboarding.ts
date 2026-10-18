@@ -20,21 +20,16 @@
 
 import { formatGhError } from "./github/cache.js";
 import { gh } from "./github/gh.js";
-import type { RepoConfig } from "./config.js";
+import { requiredLabels, type RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 
 /** GitHub's own default label colour; colour is not configurable. */
 const COLOR = "ededed";
 
-/** A failed onboarding is retried no sooner than this, however often the lanes poll. */
-export const ONBOARD_RETRY_MS = 60_000;
+/** The labels a repo must carry — the shared rule in config.ts. */
+export const labelsFor = requiredLabels;
 
-/** The labels a repo must carry: its trigger, every lifecycle label, the blocked label. */
-export function labelsFor(repo: RepoConfig): string[] {
-  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
-}
-
-type Entry = { done: true } | { done: false; inFlight?: Promise<boolean>; retryAt: number };
+type Entry = { done: true } | { done: false; inFlight: Promise<boolean> };
 
 // Keyed by repo and label set, so renaming a label in the config onboards again.
 const onboarded = new Map<string, Entry>();
@@ -51,20 +46,20 @@ export function resetOnboarding(): void {
 /**
  * True once `repo` carries every label it needs. The first call does the work;
  * later calls answer from memory, and every lane of the repo shares one attempt.
- * After a failure, false until ONBOARD_RETRY_MS has passed, then one more try.
+ * A failure is forgotten, so the repo's next pass tries again.
  */
-export async function onboardRepo(repo: RepoConfig, logger: Logger, now = Date.now()): Promise<boolean> {
+export async function onboardRepo(repo: RepoConfig, logger: Logger): Promise<boolean> {
   const key = keyOf(repo);
   const entry = onboarded.get(key);
   if (entry?.done) return true;
-  if (entry?.inFlight) return entry.inFlight;
-  if (entry && now < entry.retryAt) return false;
+  if (entry) return entry.inFlight;
 
   const log = logger.child({ repo: repo.name, phase: "onboard" });
   const attempt = Promise.resolve().then(() => installLabels(repo, log));
-  onboarded.set(key, { done: false, inFlight: attempt, retryAt: 0 });
+  onboarded.set(key, { done: false, inFlight: attempt });
   const ok = await attempt;
-  onboarded.set(key, ok ? { done: true } : { done: false, retryAt: now + ONBOARD_RETRY_MS });
+  if (ok) onboarded.set(key, { done: true });
+  else onboarded.delete(key);
   return ok;
 }
 
