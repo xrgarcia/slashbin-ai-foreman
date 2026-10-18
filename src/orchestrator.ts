@@ -14,6 +14,7 @@ import { tryRelease } from "./phases/release.js";
 import { tryReview } from "./phases/review.js";
 import { tryRevision } from "./phases/revise.js";
 import { tryVerify } from "./phases/verify.js";
+import { onboardRepo } from "./onboarding.js";
 
 // The phases live in src/phases/; these are the parts of them the daemon, the
 // CLI and the tests reach through the orchestrator.
@@ -163,6 +164,8 @@ export async function runLanePass(
   logger: Logger,
   snapshot: SnapshotPolicy = "always",
 ): Promise<RepoCycleResult> {
+  // No lane runs on a repo before it is onboarded: its labels exist (onboarding.ts).
+  if (config.onboardRepos && !(await onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
   const key = `${repoConfig.name}/${lane.name}`;
   lanePassesInFlight.set(key, (lanePassesInFlight.get(key) ?? 0) + 1);
   try {
