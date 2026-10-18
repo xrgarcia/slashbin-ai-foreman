@@ -1,5 +1,6 @@
 // The revise phase: address review feedback on an open PR.
 
+import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
@@ -120,6 +121,7 @@ export async function tryRevision(
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
+  buildStarted(repoName);
   revLogger.info(`Triggering PR revision for ${repoName} — PR #${pending.pr.number}, issues: ${pending.issueNumbers.map(n => `#${n}`).join(", ")}`);
   const session: Omit<SessionEvent, "status"> = {
     phase: "revise", repo: repoConfig.githubRepo, pr: pending.pr.number,
@@ -237,6 +239,7 @@ export async function tryRevision(
     return null;
   } finally {
     activeRuns.delete(runAbort);
+    buildEnded(repoName);
     await emit({ kind: "session", session: { ...session, ...ended, ...(report ? { report } : {}) } }, null, revLogger);
   }
 }
