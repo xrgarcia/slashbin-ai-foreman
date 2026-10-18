@@ -307,7 +307,7 @@ out(
   "",
   "## Elsewhere",
   "",
-  "- `stages`: the stage list and custom stages, README \"Pipeline stages\" and `src/stages.ts`.",
+  "- `stages`: the stage list and custom stages, [pipeline.md](pipeline.md#pipeline-stages-stages) and `src/stages.ts`.",
   "- `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).",
   "- `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).",
   "- The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).",

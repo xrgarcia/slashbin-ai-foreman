@@ -119,7 +119,7 @@ export const configSchema = z.object({
   skillOverlayPath: z.string().optional(),
   // The same, for the revise prompt.
   revisionSkillOverlayPath: z.string().optional(),
-  // A full custom prompt template in place of the built-in one (README "Prompt
+  // A full custom prompt template in place of the built-in one (docs/skills.md "Prompt
   // template variables"). The Foreman adds nothing to it.
   prompt: z.string().optional(),
 
@@ -141,7 +141,7 @@ export const configSchema = z.object({
   // Optional fleet-wide ceiling on session stages running at once (review,
   // verify, revise, implement, release, custom). 0 = no ceiling, the default:
   // the lanes already bound the work at one item per repo per lane (see
-  // [README → What the Foreman does](../README.md#what-the-foreman-does)). Set it
+  // [pipeline.md → Lanes](pipeline.md#lanes-stages-run-side-by-side)). Set it
   // only if the host cannot carry every busy lane's session at once. A stage
   // takes its repo's checkout lock first and a slot second, so a stage queued on
   // a checkout never sits on a slot, and a slot holder never waits on anything —
