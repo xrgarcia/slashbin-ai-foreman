@@ -4,6 +4,12 @@ Open-source daemon that drives GitHub work through Claude Code CLI: it implement
 approved issues, reviews the resulting PRs, revises them on feedback, and promotes
 merged work — across many repos from a single process.
 
+## Changing this repo
+
+Commit straight to `features` in this checkout; it accumulates the changes we want. When they
+are ready, `features` merges to `develop` as the pre-release. No branch per change and no PR
+into `features` (Ray, 2026-10-18).
+
 ## Cycle
 
 Each poll cycle runs the configured `stages` across every configured repo
