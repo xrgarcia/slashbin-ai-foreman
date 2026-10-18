@@ -1,6 +1,10 @@
 # Slashbin AI Foreman
 
-**Turn approved GitHub issues into pull requests, and keep review feedback moving.**
+**A software engineering team orchestrator for GitHub.**
+
+Coordinate approved work through implementation, review, revision, dev verification,
+and an authorized production release. Start with pull requests and connect the
+stages your team needs.
 
 Getting an AI to write code is only part of the job. You still have to start the next
 session, pass it the issue, bring back review feedback, and check what happened across
@@ -15,22 +19,69 @@ dev verification, and an authorized production release.
 Claude Code access and GitHub credentials. Start with one repo. Paperclip is optional;
 Discord is not required.
 
-[Get started](#start-with-one-repo) · [Paperclip integration](#see-the-work-in-paperclip) ·
+[Get started](#start-with-one-repo) · [All features](#feature-inventory) ·
+[Paperclip integration](#see-the-work-in-paperclip) ·
 [Documentation](docs/README.md)
 
 ## Contents
 
+- [Feature inventory](#feature-inventory)
 - [Who this is for](#who-this-is-for)
 - [What happens after you approve an issue](#what-happens-after-you-approve-an-issue)
 - [See the work in Paperclip](#see-the-work-in-paperclip)
 - [Start with one repo](#start-with-one-repo)
 - [Give it its first issue](#give-it-its-first-issue)
 - [Extend the loop through review and release](#extend-the-loop-through-review-and-release)
-- [Make it fit your repos](#make-it-fit-your-repos)
 - [Why we built it](#why-we-built-it)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Feature inventory
+
+The full feature map, with a link to each guide or reference. Choose your stages;
+automated review needs a Tech Lead, dev verification needs an SRE, and automated
+release needs both. The [starter setup](#start-with-one-repo) begins with PRs.
+
+| Feature | What it does for you | Details |
+|---|---|---|
+| Pipeline of stages | Select from the built-in stages for reconcile, review, verify, promote, release, revise, implement, branch sync, and dependency batches; add or reorder stages for your workflow. | [Pipeline stages](docs/pipeline.md#the-stages) |
+| Lanes in parallel | Run independent repo lanes alongside one another, with checkout locks and a configurable fleet session limit. A build need not hold up a review or release. | [Lanes](docs/pipeline.md#lanes-stages-run-side-by-side) |
+| Implement | Select approved issues by priority and age, run Claude Code with the repo's skill and limits, and open a PR into the base branch. | [Implementation](docs/pipeline.md#the-stages), [skills](docs/skills.md) |
+| Review *(opt-in)* | Hand PRs to a separate Tech Lead program that reviews and merges under its own GitHub account. | [Automated review](docs/review.md) |
+| Revise loop | Address requested changes before starting new builds; pause a PR that keeps bouncing for a scope ruling. | [Revision](docs/pipeline.md#the-stages) |
+| Outcome-label repair and declared holds | Repair a missing outcome label from the reviewer's report after a merge, while respecting deliberate holds. | [Outcome reconciliation](docs/review.md#outcome-label-reconciliation) |
+| Orphan recovery (reconcile) | Find commits on the feature branch that no PR carries and open a PR for them. | [Reconciliation](docs/pipeline.md#the-stages) |
+| Dev verification (SRE) | Ask the configured SRE to check merged work in dev, retry failed checks, and optionally hold the next build until verification passes. | [Verification](docs/pipeline.md#the-stages) |
+| Promotion and release to production | Open a promotion PR for authorized work. With the release stage configured, coordinate approval, deployment, production verification, tagging, and issue closure. | [Release contract](docs/lifecycle.md#the-release-stage) |
+| Branch sync | Open a PR to merge the production branch back into the base branch after promotion; merge it automatically when the reviewer token is supplied. | [Branch sync](docs/pipeline.md#the-stages) |
+| Dependency batches | Gather Dependabot or Renovate PRs into an issue for the normal implementation flow, with optional preapproval per repo. | [Dependency batches](docs/pipeline.md#the-stages) |
+| Custom stages | Run your own skill against an open feature PR and gate the next stage in its lane on the result. | [Custom stages](docs/pipeline.md#custom-stages) |
+| One state machine | Track work through named states and moves, with a lifecycle reference generated from source. | [Lifecycle](docs/lifecycle.md) |
+| Multi-repo or single-repo | Manage one repo or many from one daemon, with per-repo branches, skills, models, and run budgets. | [Repo configuration](docs/config-guide.md#multi-repo-mode) |
+| Repo onboarding | Automatically create missing trigger, lifecycle, and blocked labels before a repo's first work, leaving existing labels unchanged. Pick up newly configured repos without a restart. | [Automatic label setup](docs/onboarding.md) |
+| Your own labels and GitHub names | Configure trigger, lifecycle, blocked, and priority labels, plus PR titles, tag names, and signatures. | [Labels](docs/config-guide.md#lifecycle-labels), [GitHub conventions](docs/configuration.md#github-conventions-github) |
+| Retry back-offs | Tune retry waits and attempt limits for declined work, failed verification, unavailable agents, and upstream limits. | [Retry policies](docs/running.md#back-offs) |
+| GitHub API budget | Share issue snapshots across discovery phases and log the estimated discovery request rate so you can size repo polling intervals. | [API budget](docs/running.md#github-api-budget) |
+| Full configuration reference | Look up every setting, its default, and its environment override in a reference generated from source. | [Configuration](docs/configuration.md) |
+| Guided setup | Ask Claude Code to gather your repo configuration, or run setup by hand to install, build, create missing labels, and check readiness. | [Setup](docs/setup.md) |
+| Doctor | Run a read-only readiness check that names what is ready and what to fix, including tools, credentials, checkouts, branches, skills, and labels. | [Readiness check](docs/setup.md#3-run-setup) |
+| Label install | Create missing configured labels across repos on demand with `npm run labels:install`. | [Label installation](docs/config-guide.md#lifecycle-labels) |
+| Daemon management | Start, stop, restart, and inspect logs; reload config live, prevent duplicate instances, drain running work on stop, and persist state across restarts. | [Operations](docs/running.md#daemon-management) |
+| Built-in skills | Use the included implement and revise instructions, add repo rules through overlays, or supply your own skills. | [Built-in skills](docs/skills.md#built-in-skills) |
+| Skill sync | Update repo copies from a shared skill source as approved work arrives, carrying the update in that issue's PR. | [Skill sync](docs/skill-sync.md) |
+| Image handling | Include mockups and screenshots from issues and review comments in default and skill-driven prompts; custom prompts supply their own image guidance. | [Images](docs/skills.md#image-handling-in-issue-bodies) |
+| Session security | Limit the session environment, separate builder and reviewer credentials, block common secret-printing operations, and redact Foreman's own logs. | [Session access and limits](docs/security.md) |
+| Workspace trust | Mark configured checkouts trusted in Claude Code so sessions load repo settings, tools, and hooks; disable automatic trust if you manage it yourself. | [Workspace trust](docs/security.md#claude-code-workspace-trust) |
+| Paperclip board *(optional, off by default)* | Mirror GitHub work onto a board with stage owners, handoffs, session summaries, PR links, and hold reasons. GitHub remains the work source. | [Paperclip](docs/paperclip.md) |
+| Discord *(not used by the daemon)* | Follow work through GitHub, logs, and the optional board without Discord. An exported bridge client is available for other agents. | [Discord client](docs/config-guide.md#discord-notifications) |
+| Programmatic usage | Start the daemon or run a pass from your own Node code through the package exports. | [Programmatic usage](docs/architecture.md#programmatic-usage) |
+| Architecture | Extend the work-source and observer interfaces, or follow the source layout to the component that owns a behavior. | [Architecture](docs/architecture.md) |
+
+Sessions run unattended with Claude Code permission prompts disabled. Foreman limits
+the session environment, blocks common secret-printing operations, and redacts its
+own logs. Sessions still have the filesystem access of the user running them. Read
+[session security](docs/security.md) when choosing the account and environment.
 
 ## Who this is for
 
@@ -196,24 +247,6 @@ your branch protection; an `approved` build label alone does not authorize produ
 Add the stages you need to the starter config, or use the default pipeline.
 Read [automated review](docs/review.md), [pipeline stages](docs/pipeline.md#the-stages),
 and the [release contract](docs/lifecycle.md#the-release-stage) before enabling them.
-
-## Make it fit your repos
-
-| Your situation | Foreman's support | Details |
-|---|---|---|
-| Several repos or clients | One daemon, per-repo branches, skills, models, and run budgets; live config reload. | [Repos and labels](docs/config-guide.md) |
-| Existing conventions | Configurable trigger, lifecycle, blocked, and priority labels, PR titles, tag names, and signatures. | [Configuration reference](docs/configuration.md) |
-| Repo-specific instructions | Built-in skills, overlays, or your own implement and revise skills; images in issues and review comments are included in the default prompts. | [Skills](docs/skills.md) |
-| Shared skills across repos | Optional skill sync updates copies as approved work reaches each repo. | [Skill sync](docs/skill-sync.md) |
-| More parallel work | Independent repo lanes, checkout locks, and a configurable fleet session limit. | [Stages and lanes](docs/pipeline.md#lanes-stages-run-side-by-side) |
-| Interrupted or failed work | Persistent state, retry back-offs, orphan-PR recovery, and holds with reasons. | [Operations](docs/running.md) |
-| Extra checks | Custom skill stages that gate the next stage in their lane. | [Custom stages](docs/pipeline.md#custom-stages) |
-| Dependency updates | Batch Dependabot or Renovate PRs into an issue for the normal implementation flow. | [Pipeline](docs/pipeline.md#the-stages) |
-
-Sessions run unattended with Claude Code permission prompts disabled. Foreman limits
-the session environment, blocks common secret-printing operations, and redacts its
-own logs. Sessions still have the filesystem access of the user running them. Read
-[session security](docs/security.md) when choosing the account and environment.
 
 ## Why we built it
 
