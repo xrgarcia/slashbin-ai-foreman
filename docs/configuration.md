@@ -82,7 +82,7 @@ The same, for the revise prompt.
 
 Type: string · Default: none · Env: `AI_AGENT_PROMPT` · Per repo: yes
 
-A full custom prompt template in place of the built-in one (README "Prompt template variables"). The Foreman adds nothing to it.
+A full custom prompt template in place of the built-in one (docs/skills.md "Prompt template variables"). The Foreman adds nothing to it.
 
 ## Multi-repo
 
@@ -110,7 +110,7 @@ RETIRED, ignored. It capped how many repos ran their serial pass at once; concur
 
 Type: integer · Default: `0` · Env: `AI_AGENT_MAX_CONCURRENT_SESSIONS`
 
-Optional fleet-wide ceiling on session stages running at once (review, verify, revise, implement, release, custom). 0 = no ceiling, the default: the lanes already bound the work at one item per repo per lane (see [README → What the Foreman does](../README.md#what-the-foreman-does)). Set it only if the host cannot carry every busy lane's session at once. A stage takes its repo's checkout lock first and a slot second, so a stage queued on a checkout never sits on a slot, and a slot holder never waits on anything — a capped fleet cannot deadlock. Reloaded live.
+Optional fleet-wide ceiling on session stages running at once (review, verify, revise, implement, release, custom). 0 = no ceiling, the default: the lanes already bound the work at one item per repo per lane (see [pipeline.md → Lanes](pipeline.md#lanes-stages-run-side-by-side)). Set it only if the host cannot carry every busy lane's session at once. A stage takes its repo's checkout lock first and a slot second, so a stage queued on a checkout never sits on a slot, and a slot holder never waits on anything — a capped fleet cannot deadlock. Reloaded live.
 
 ### `trustManagedRepos`
 
@@ -559,7 +559,7 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 
 ## Elsewhere
 
-- `stages`: the stage list and custom stages, README "Pipeline stages" and `src/stages.ts`.
+- `stages`: the stage list and custom stages, [pipeline.md](pipeline.md#pipeline-stages-stages) and `src/stages.ts`.
 - `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).
 - `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).
 - The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).

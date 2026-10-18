@@ -7,7 +7,7 @@ merged work — across many repos from a single process.
 ## Cycle
 
 Each poll cycle runs the configured `stages` across every configured repo
-(`src/stages.ts`; README "Pipeline stages"). Omitted, they are the nine built-ins
+(`src/stages.ts`; `docs/pipeline.md`). Omitted, they are the nine built-ins
 in this order, so labels set in one phase are consumed by the right phase next cycle:
 
 ```
@@ -81,7 +81,7 @@ written to `logs/review/<repo>-cycle<N>-<ts>.log` for debugging.
 
 Disabled by default; opt in per repo with `reviewEnabled`, which needs `techLeadPath`
 (startup fails without it). `reviewerLogin` cascades per repo like `model`. See
-README "Review phase (opt-in)" for the full config table.
+`docs/review.md` for the full config table.
 
 ## State (persisted to disk)
 

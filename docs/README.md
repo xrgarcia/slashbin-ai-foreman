@@ -7,17 +7,23 @@ stale), so they describe what runs, not what was meant to.
 
 | You want to… | Read |
 |---|---|
+| Know what the Foreman does, feature by feature | [../README.md](../README.md) — the feature map |
 | Set up a new install: what you need, the smallest config, `npm run setup` | [setup.md](setup.md) — or ask Claude to "set up the Foreman" |
-| Know what the Foreman does and run it | [../README.md](../README.md) — Quick start, Daemon management |
+| Add a repo, and know what happens before its first piece of work | [onboarding.md](onboarding.md) |
+| Start, stop and watch the daemon; tune retries; stay inside GitHub's API budget | [running.md](running.md) |
+| Configure repos, branches and labels: single-repo and multi-repo mode, lifecycle labels | [config-guide.md](config-guide.md) |
 | Change any setting: what it does, its default, its env var | [configuration.md](configuration.md) *(generated)* |
-| Make it retry sooner or later, or give up after more tries | [configuration.md#back-offs](configuration.md#back-offs) — the `backoff` block |
+| Make it retry sooner or later, or give up after more tries | [running.md#back-offs](running.md#back-offs); every key in [configuration.md#back-offs](configuration.md#back-offs) |
 | Rename the blocked or priority labels, or change the PR titles and signature the Foreman writes | [configuration.md#github-conventions-github](configuration.md#github-conventions-github) — the `github` block |
+| Know what each stage does, how lanes run side by side, reorder the pipeline or add a stage that runs your own skill | [pipeline.md](pipeline.md); `src/stages.ts` |
+| Turn on review (the Tech Lead), outcome-label reconciliation, declared holds | [review.md](review.md); [configuration.md#review-phase](configuration.md#review-phase) |
+| Turn on dev verification (the SRE) and the release stage | [pipeline.md#the-stages](pipeline.md#the-stages); [lifecycle.md#the-release-stage](lifecycle.md#the-release-stage) |
 | Know which state an issue is in, what moves it, what each event means | [lifecycle.md](lifecycle.md) *(generated)* |
-| Turn the Paperclip board mirror on, map its columns, check it | [paperclip.md](paperclip.md) *(generated)* |
+| Know what a session is told: skill paths, built-in skills, overlays, prompt variables, images | [skills.md](skills.md) |
 | Keep each repo's skill copies on a golden source, one approved issue at a time | [skill-sync.md](skill-sync.md) |
-| Reorder the pipeline or add a stage that runs your own skill | README "Pipeline stages" and "Custom stages"; `src/stages.ts` |
-| Turn on review, the Tech Lead or the SRE | README "Review phase (opt-in)"; [configuration.md#review-phase](configuration.md#review-phase) |
-| Understand the code: one file per concern | [../CLAUDE.md](../CLAUDE.md) "Architecture" and "Key design decisions" |
+| Know what a session can see and leak: tokens, the secret gate, redaction, workspace trust | [security.md](security.md) |
+| Turn the Paperclip board mirror on (optional), map its columns, check it | [paperclip.md](paperclip.md) *(generated)* |
+| Understand the code, or run the Foreman from your own code | [architecture.md](architecture.md); [../CLAUDE.md](../CLAUDE.md) "Architecture" and "Key design decisions" |
 | Know why an issue is tracked as implemented when it is not | [implemented-cache-self-heal.md](implemented-cache-self-heal.md) |
 
 ## Commands
