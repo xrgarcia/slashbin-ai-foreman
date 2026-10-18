@@ -1,81 +1,98 @@
-# slashbin-ai-foreman
+# Foreman
 
-**The autonomous engineering delegator behind [slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-foreman) — the webhook ETL gateway for engineers and AI agents. [Try slashbin.io free →](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-foreman)**
+**A software engineering team orchestrator for GitHub.** The Foreman runs a team of AI
+agents — a builder, a reviewer (the Tech Lead), a verifier (the SRE) and a release
+step — through your normal GitHub workflow: approved issue → pull request → review →
+revision → merge → verification in dev → release to production. One process runs it
+across every repo you own.
 
-**Turn approved GitHub issues into shipped pull requests — autonomously, across every repo you own.**
-
-- **Cost:** $0 marginal under your Claude Max plan. Runs through the Claude Code CLI — no API charges, no SaaS subscription, no per-run fees.
-- **Safety:** Can't merge to `main` without approval. Every PR goes through branch protection; a reviewer — human, or an EM bot from [slashbin-ai-team](https://github.com/xrgarcia/slashbin-ai-team) — signs off before promotion.
-- **Scale:** One daemon manages many repos. Point it at your fleet, let it work overnight.
-
-The Foreman is an AI engineering agent that polls your repos for approved work, invokes a Claude Code skill (e.g. `/implement-approved-issues`) on each service repo, opens PRs, and revises based on reviewer feedback. Reviewers — human or AI — stay in the loop via PR reviews.
-
-**Docs:** [docs/README.md](docs/README.md) maps every question (configure it, tune its retries, read its state machine, extend its pipeline) to the page that answers it.
+- **You approve, it delivers.** Label an issue `approved`; the Foreman builds it, opens
+  the PR, answers review, and carries it to production. A person still authorizes each
+  production release with one label.
+- **No self-approval.** The builder and the reviewer act under separate GitHub accounts,
+  and every PR goes through your branch protection.
+- **No per-run fees.** Sessions run through the Claude Code CLI under your own Claude
+  plan — no API charges, no SaaS subscription.
+- **Many repos, one daemon.** Point it at your fleet and let it work overnight; each
+  repo keeps its own branches, labels, skills and limits.
 
 ## Who this is for
 
-The Foreman shines when you have **more approved work than time to implement**. Three patterns:
+The Foreman pays off when you have **more approved work than time to implement it**.
 
-**1. Consulting / agency operators** — you maintain service repos for multiple clients. One daemon polls every client's repo with its own trigger label, base branch, and skill paths. Billable hours stay on strategy and review; implementation ships overnight.
+- **Consultancies and agencies** maintaining repos for several clients: one daemon
+  polls every client's repo, each with its own trigger label, branches and skills.
+  Your hours go to strategy and review; implementation ships overnight.
+- **Operators of several businesses**, each with its own backlog: each business is an
+  entry in the `repos` list, with its own review flow, skills and branch protection.
+- **One business, many repos** — microservices, internal tools, a monolith with
+  satellites: the Foreman picks up an approved issue in whichever repo it is labeled
+  on and ships a PR there.
+- **Solo developers** who want the backlog to shrink while they sleep, and anyone whose
+  AI already does the planning and needs the execution done.
 
-**2. Multi-business operators** — you run several companies, each with its own engineering backlog. Each business is an entry in the `repos` array; review flows, skills, and branch protection stay per-business.
+## What it does
 
-**3. Single business, many service repos** — microservices, internal tool sprawl, or a monolith plus satellites. The Foreman picks up an approved issue in whichever repo it's labeled on and ships a PR there.
+Every feature, one line each. The link has the detail.
 
-**Also useful for:**
+### The delivery pipeline
 
-- **Solo developers** who want their backlog to shrink while they sleep
-- **Vibe coders** whose AI handles the planning — the Foreman handles the execution
-- **Teams running AI employees** via [slashbin-ai-team](https://github.com/xrgarcia/slashbin-ai-team) who need autonomous implementation behind the coordination layer
+| Feature | What it does for you | Details |
+|---|---|---|
+| Pipeline of stages | Runs nine stages on every repo — reconcile, review, verify, promote, release, revise, implement, branch sync, dependency batches — in an order you can change. | [pipeline.md](docs/pipeline.md#the-stages) |
+| Lanes in parallel | Stages are grouped into lanes that run side by side, so a 30-minute build never holds up a review or a release on the same repo. | [pipeline.md](docs/pipeline.md#lanes-stages-run-side-by-side) |
+| Implement | Picks up approved issues by priority, then age, and has Claude Code build them on the feature branch and open a PR. | [pipeline.md](docs/pipeline.md#the-stages), [skills.md](docs/skills.md) |
+| Review *(opt-in)* | Hands each open PR to a separate reviewer program, the Tech Lead, which reviews and merges under its own account. | [review.md](docs/review.md) |
+| Revise loop | Answers review feedback on the PR, ahead of new work; a PR that keeps bouncing is held for a person's ruling. | [pipeline.md](docs/pipeline.md#the-stages) |
+| Outcome-label repair and declared holds | If the reviewer merged but forgot the label, the Foreman sets it from the review's own report; a reviewer can declare a deliberate hold instead. | [review.md](docs/review.md#outcome-label-reconciliation) |
+| Orphan recovery (reconcile) | Finds commits on the feature branch that no PR carries and opens one, so finished work is never stranded. | [pipeline.md](docs/pipeline.md#the-stages) |
+| Dev verification (SRE) | Has a verifier check each merged change in the dev environment, retries a failure, and can hold the next build until the last one passes. | [pipeline.md](docs/pipeline.md#the-stages) |
+| Promotion and release to production | Opens the promotion PR for authorized work; with the release stage, has it approved, deployed, verified in production, tagged and closed. | [lifecycle.md](docs/lifecycle.md#the-release-stage) |
+| Branch sync | Merges the production branch back into the base branch after each release, so the two never drift. | [pipeline.md](docs/pipeline.md#the-stages) |
+| Dependency batches | Gathers open Dependabot (or Renovate) PRs into one issue that goes through the normal build. | [pipeline.md](docs/pipeline.md#the-stages) |
+| Custom stages | Adds a stage that runs your own skill, such as a security scan, and can block the rest of its lane until it passes. | [pipeline.md](docs/pipeline.md#custom-stages) |
+| One state machine | Every issue is in one named state, moved only by named steps; the table of both is generated from the code. | [lifecycle.md](docs/lifecycle.md) |
 
-## What the Foreman does
+### Repos, labels and configuration
 
-The Foreman runs these stages on every configured repo (the list is configurable — see [Pipeline stages](#pipeline-stages)):
+| Feature | What it does for you | Details |
+|---|---|---|
+| Multi-repo or single-repo | One daemon manages one repo or many, each with its own branches, skills, model and time limits. | [config-guide.md](docs/config-guide.md#multi-repo-mode) |
+| Repo onboarding | Before a repo's first piece of work, creates the labels the Foreman runs on that it is missing — never changing existing ones. Add a repo to the config and the running daemon picks it up. | [onboarding.md](docs/onboarding.md) |
+| Your own labels and GitHub names | Every label, PR title, tag name and signature the Foreman writes is a setting, so it fits your conventions. | [config-guide.md](docs/config-guide.md#lifecycle-labels), [configuration.md](docs/configuration.md#github-conventions-github) |
+| Retry back-offs | Every wait before a retry grows the same predictable way and is tunable, so a blip costs a short wait and only lasting trouble gets long ones. | [running.md](docs/running.md#back-offs) |
+| GitHub API budget | Shares one issue snapshot per repo per cycle and logs its expected request rate, so a large fleet stays under GitHub's limits. | [running.md](docs/running.md#github-api-budget) |
+| Full configuration reference | Every setting, its default and its environment variable, generated from the code. | [configuration.md](docs/configuration.md) |
 
-```
-Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot
-```
+### Setup and operation
 
-The stages do not wait on each other. They are grouped into **lanes**, and every
-(repo, lane) pair runs its own loop at `pollIntervalMs`: one item per repo per lane at
-a time, every lane of a repo side by side, every repo at once. Two lanes join stages
-that must stay in order: **build** = revise then implement, and **release** = promote
-then release. The rest are a lane each. So a 30-minute build on a repo no longer holds
-that repo's release, verify or review. Stages that change the repo's working clone
-(reconcile, revise, implement, custom stages) take turns on a per-repo checkout lock;
-review works in its own clone, and the others only call GitHub or hand off to the
-Tech Lead and SRE, so they never wait on a build. Work moves between lanes by label,
-so one lane picks up what another just finished on its next pass.
+| Feature | What it does for you | Details |
+|---|---|---|
+| Guided setup | `npm run setup` installs, builds, creates the labels and checks everything; or ask Claude Code to "set up the Foreman". | [setup.md](docs/setup.md) |
+| Doctor | `npm run doctor` says, line by line and read-only, whether the Foreman is ready and what to fix. | [setup.md](docs/setup.md#3-run-setup) |
+| Label install | `npm run labels:install` creates any missing label on every configured repo. | [config-guide.md](docs/config-guide.md#lifecycle-labels) |
+| Daemon management | Start, stop, restart, status and logs, a single-instance guard, live config reload and a graceful stop that lets running work finish. | [running.md](docs/running.md#daemon-management) |
 
-1. **Reconcile** — detects orphaned commits on the features branch with no PR and creates one
-2. **Review** *(opt-in)* — when `reviewEnabled` is set, hands each open feature PR awaiting review to the **Tech Lead** (`techLeadPath`), which reviews under its own GitHub token and owns its own merge + label decisions; its label side effects (approve → `pr approved`; request-changes → `pr pending actions`) feed the Promote and Revise phases, and the Foreman reconciles the outcome label from the run's trailer if the skill merged without setting it. Disabled by default — see [Review phase](#review-phase-opt-in)
-3. **Promote** — creates promotion PRs (develop → main) for issues labeled `ready for prod release`, moving them to `release pending`
-4. **Release** *(on when both `srePath` and `techLeadPath` are set)* — no Claude session: the Tech Lead approves the promotion PR at its head, the SRE merges, deploys and verifies it in production, the Foreman tags the merge commit (an annotated tag, never a GitHub Release) and closes each issue on a passed prod verification, or labels it `prod verification held` and re-verifies. It also adopts promotion PRs merged by anyone else in the last 48 hours. Full flow: [docs/lifecycle.md](docs/lifecycle.md#the-release-stage). The SRE's promotion-verify-sweep (a systemd timer on the owner's desktop) is retired once this ships
-5. **Revise** — finds PRs with pending review feedback and revises them (prioritized over new work)
-6. **Implement** — picks up approved issues and invokes the repo's implementation skill via Claude Code (up to 3 issues per cycle; 1 in greenfield repos)
-7. **Branch Sync** — merges main → develop to keep branches aligned after promotions
-8. **Dependabot** — files one issue covering the open Dependabot PRs on the working branches, so they go through the implement session (filed with the trigger label when the repo sets `dependencyPreApproved`)
+### Skills and sessions
 
-- **Poll interval is configurable** — default 5 minutes (`pollIntervalMs` in config)
-- **Multi-repo** — manages multiple repos in a single daemon, each with its own skill paths and config
-- **Persists state across restarts** — picks up where it left off
-- **Failure cooldown** — after 2 consecutive failures on a repo, skips it for 3 cycles before retrying
-- **Graceful shutdown** — waits for in-progress work before stopping (60-second timeout)
-- **No Discord** — what needs a person is a label and a comment on the GitHub issue, which also moves its Paperclip card; everything else is the daemon log. `bridge-client.ts` is still exported for other agents; the daemon does not use it
+| Feature | What it does for you | Details |
+|---|---|---|
+| Built-in skills | Ships generic implement and revise instructions, so a repo needs no skill files of its own; add repo rules with an overlay file. | [skills.md](docs/skills.md#built-in-skills) |
+| Skill sync | Keeps each repo's copy of its skills on one golden source, updated one repo at a time as approved work comes through. | [skill-sync.md](docs/skill-sync.md) |
+| Image handling | Images in an issue or review comment — mockups, screenshots — are fetched and read as part of the spec. | [skills.md](docs/skills.md#image-handling-in-issue-bodies) |
+| Session security | Each session gets one token and an allowlisted environment, a hook blocks commands that would print a secret, and tokens are redacted from logs. | [security.md](docs/security.md) |
+| Workspace trust | Marks every repo checkout trusted in Claude Code, so sessions get the repo's own settings, tools and hooks. | [security.md](docs/security.md#claude-code-workspace-trust) |
 
-## How it fits together
+### Optional integrations and extending it
 
-The Foreman is one layer in an AI engineering pipeline:
+| Feature | What it does for you | Details |
+|---|---|---|
+| Paperclip board *(optional, off by default)* | Mirrors every issue as a card on a [Paperclip](https://github.com/paperclipai/paperclip) board — who holds it, which column, what happened. The Foreman runs fully without it. | [paperclip.md](docs/paperclip.md) |
+| Discord *(not used by the daemon)* | The daemon sends no chat messages: what needs a person is a label and a comment on the issue. A Discord bridge client is exported for other agents. | [config-guide.md](docs/config-guide.md#discord-notifications) |
+| Programmatic usage | Start the daemon, or one pass, from your own Node code. | [architecture.md](docs/architecture.md#programmatic-usage) |
+| Architecture | How the Foreman fits a team of agents, and one source file per concern. | [architecture.md](docs/architecture.md) |
 
-1. **Product Owner** defines what to build (issues in GitHub)
-2. **Engineering Manager** decomposes epics into implementation tasks, approves them with the trigger label
-3. **Foreman** picks up approved issues, invokes the implementation skill on each service repo, and opens PRs
-4. **Reviewers** (human or AI) provide feedback on PRs — Foreman revises automatically
-5. **Foreman** promotes merged work from develop → main via promotion PRs, and (with the release stage) has it approved, deployed, verified in production and closed
-
-The Foreman uses a **dual-token model**: one GitHub token for its own operations (creating PRs, managing labels) and a second token for the reviewer, the Tech Lead (approving and merging PRs that require branch protection). This prevents the Foreman from self-approving its own work.
-
-This is the pattern behind [www.slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-foreman_body) — structured context in, autonomous execution out. The Foreman doesn't need to understand your business. It reads the issue, reads the repo's CLAUDE.md, and invokes the skill.
+Every doc, by question: [docs/README.md](docs/README.md).
 
 ## Quick start
 
@@ -96,485 +113,11 @@ npm start                                  # once the doctor says Ready
 
 **[docs/setup.md](docs/setup.md)** lists what you need first (Node 22.12+, the `claude`
 and `gh` CLIs, a checkout of each repo, three branches, the GitHub tokens) and the
-smallest working config. `npm run doctor` re-checks everything at any time, read-only.
-
-## Daemon management
-
-```bash
-npm start          # Start daemon in background
-npm stop           # Graceful stop (waits for in-progress work)
-npm restart        # Stop + start
-npm run status     # Show running state, uptime, recent logs
-npm run logs       # Show last 30 lines of agent.log
-npm run logs -- 100 # Show last 100 lines
-
-# Foreground / debugging
-npm run start:fg   # Run in foreground (ctrl+c to stop)
-npm run once       # Run one poll cycle and exit
-npm run dev        # Watch mode (auto-reload on source changes)
-```
-
-The daemon writes `.agent[-<repo>].pid` itself at startup, before it does any
-work — not just when launched via `npm start`. A daemon started any other way
-(`doppler run -- node dist/cli.js`, a detached shell, a supervisor) is therefore
-still visible to `status`, `stop` and `restart`.
-
-It also refuses to start when that PID file names a live process, so a second
-daemon cannot end up reviewing and merging the same PRs as the first. A stale
-file left by a killed daemon is taken over automatically.
-
-## Configuration
-
-Copy `.ai-agent.example.json` to `.ai-agent.json` and customize. Env vars override file values. The daemon re-reads the file every cycle, so most edits apply without a restart.
-
-**[docs/configuration.md](docs/configuration.md) is the complete reference**: every key, its default, its env override and what it does, generated from the code (`npm run docs:generate`) so it cannot fall behind. The tables below cover the common keys.
-
-```bash
-cp .ai-agent.example.json .ai-agent.json
-# Edit .ai-agent.json with your repo paths, GitHub org, and any per-repo overrides
-```
-
-`.ai-agent.json` is gitignored — your runtime config stays local and never enters version control. Use the example file as a template; commit changes to it (not to your real `.ai-agent.json`) when you want to update the documented shape.
-
-### Single-repo mode
-
-For a single repo, set fields at the root level:
-
-| Config Field | Env Var | Default | Description |
-|---|---|---|---|
-| `repoPath` | `AI_AGENT_REPO_PATH` | `.` | Path to local repo clone |
-| `githubRepo` | `AI_AGENT_GITHUB_REPO` | *(from git remote)* | GitHub `owner/repo` |
-| `triggerLabel` | `AI_AGENT_TRIGGER_LABEL` | `approved` | Label that triggers implementation |
-| `pollIntervalMs` | `AI_AGENT_POLL_INTERVAL_MS` | `300000` (5 min) | Poll interval in milliseconds |
-| `issueCacheTtlMs` | `AI_AGENT_ISSUE_CACHE_TTL_MS` | `30000` (30 s) | How long a repo's open-issue snapshot stays warm. Keep it **below** `pollIntervalMs`. `0` disables caching. See [GitHub API budget](#github-api-budget) |
-| `backoff` | `AI_AGENT_BACKOFF_<GROUP>_<FIELD>` | see [Back-offs](#back-offs) | Every wait before the Foreman retries something, each exponential and tunable |
-| `issueSnapshotLimit` | `AI_AGENT_ISSUE_SNAPSHOT_LIMIT` | `500` | Max open issues fetched per snapshot. Must exceed a repo's open-issue count; truncation is logged |
-| `skillPath` | `AI_AGENT_SKILL_PATH` | — | Claude Code skill for implementation: a repo-relative path, or `builtin:` for the skill shipped in `skills/implement/` |
-| `revisionSkillPath` | — | — | Claude Code skill for PR revision: a repo-relative path, or `builtin:` for `skills/revise/` |
-| `skillOverlayPath` | — | — | Optional repo-relative file appended to the implement prompt after the skill. Configured but unreadable → the run is not started |
-| `revisionSkillOverlayPath` | — | — | Same, for the revise prompt |
-| `prompt` | `AI_AGENT_PROMPT` | *(built-in)* | Custom prompt template |
-| `baseBranch` | `AI_AGENT_BASE_BRANCH` | `develop` | PR target branch |
-| `productionBranch` | `AI_AGENT_PRODUCTION_BRANCH` | `main` | Branch promotion PRs target; sync PRs merge it back into `baseBranch` |
-| `featureBranch` | `AI_AGENT_FEATURE_BRANCH` | `features` | Branch to commit to |
-| `maxTurns` | `AI_AGENT_MAX_TURNS` | `30` | Max agent turns per issue |
-| `maxDurationMs` | `AI_AGENT_MAX_DURATION_MS` | `1800000` (30 min) | Max implementation time |
-| `model` | `AI_AGENT_MODEL` | CLI default | Model for implement/revise. Cascades to every repo that sets no `model` of its own |
-| `allowedTools` | — | `["Read","Write","Edit","Bash","Glob","Grep"]` | Tools the CLI can use |
-| `sessionEnv` | — | `[]` | Daemon env var names every Claude session inherits, on top of the essentials. Top-level only. May not name a GitHub token. See [Session security](#session-security) |
-| `logFormat` | `AI_AGENT_LOG_FORMAT` | `text` | `json` or `text` |
-| `logLevel` | `AI_AGENT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `lifecycleLabels` | — | see below | Names of the labels that move a PR through its lifecycle. Top-level only — every repo shares one set |
-| `github` | — | today's names (see [docs/configuration.md](docs/configuration.md#github-conventions-github)) | Every other GitHub name the Foreman reads or writes: `blockedLabel`, `priorityLabels` (the tiers the implement skill picks by), `dependencyBranchPrefixes` (`["renovate/"]` for Renovate), the promotion, sync, dependency-batch and reconcile titles, and the PR-body `signature`. Set any subset; the rest keep their defaults. Sessions get `FOREMAN_BLOCKED_LABEL` and `FOREMAN_PRIORITY_LABELS`. Top-level only |
-| `paperclip` | `AI_AGENT_PAPERCLIP_ENABLED`, `_URL`, `_COMPANY_ID`, `_AGENT_NAME`, `_AGENT_ID`, `_API_KEY`, `_IDENTITY_KEY_FORMAT`, `_TASK_TITLE_FORMAT`, `_PROJECT_ID` | `enabled: false`, `url: "http://127.0.0.1:3100"`, `agentName: "Foreman"`, `identityKeyFormat: "source: {repo}#{N}"`, `taskTitleFormat: "{repo}#{N}"`, `projects: false` | Optional [Paperclip](https://github.com/paperclipai/paperclip) mirror. Off unless `enabled`; `companyId` is required once enabled. `{repo}` is the full `owner/name`. `projectId` files every new task in one project; `repos` limits the mirror to some repos; `board`, `roles`, `stageLabels` and `comments` set who holds each card, its column and label, and what its thread says — every key in [docs/paperclip.md](docs/paperclip.md). `statusMap` (no env var) renames any of the buckets `todo`, `in_progress`, `in_review`, `done`, `cancelled`. Top-level only. `npm run build && npm run paperclip:register [-- config-path]` registers the agent with every wake path off and writes `agentId` back into the file; `npm run paperclip:doctor [-- --config config-path]` then checks the integration read-only (health, company, agent-registered, wake-on-demand, heartbeat-enabled, config-complete) and exits non-zero on any FAIL |
-
-#### Lifecycle labels
-
-Set any subset; the rest keep their defaults. The names must be distinct, and none may equal a repo's `triggerLabel` — the config fails to load otherwise.
-
-```json
-{
-  "lifecycleLabels": {
-    "prUnderReview": "pr under review",
-    "prMerged": "pr merged",
-    "prPendingActions": "pr pending actions",
-    "prApproved": "pr approved",
-    "readyForProd": "ready for prod release",
-    "releasePending": "release pending",
-    "prodVerifyHeld": "prod verification held",
-    "readyToClose": "ready to close"
-  }
-}
-```
-
-Every Claude session the daemon spawns (implement, revise, review) gets the names in its environment, so a skill can use the configured names in place of its own literals:
-
-- `FOREMAN_TRIGGER_LABEL`: the repo's `triggerLabel`, e.g. for `gh issue list --label "$FOREMAN_TRIGGER_LABEL"`
-- `FOREMAN_LIFECYCLE_LABELS`: the names as a JSON object with the keys above
-
-To create the labels on your repos, run `npm run build && npm run labels:install` (or ask Claude Code in this repo to "install the labels" — the `install-labels` skill runs the same thing). Per repo it creates whichever of the `triggerLabel` and lifecycle names are missing, prints `<repo>: created N, present M`, and never changes or deletes an existing label. A failed repo is listed at the end and the exit code is 1.
-
-### Back-offs
-
-Every wait before the Foreman tries something again lives in one `backoff` block. Each
-condition has its own group, and every wait grows the same way: the Nth wait in a row is
-`min(baseMs × factor^(N−1), capMs)`. A success resets it, so a blip costs one short wait
-and only trouble that lasts gets the long ones.
-
-| Group | When it waits | Default waits |
-|---|---|---|
-| `skip` | The implement session declined an issue on purpose | 5 min, doubling to 4 h |
-| `verifyRetry` | A dev verification failed (`maxAttempts` 3, then a person) | 10 min, then 20 min |
-| `agentUnavailable` | The Tech Lead or the SRE could not run at all | 2 min, doubling to 30 min |
-| `repoFailure` | A repo's sessions failed `maxFailures` (2) times in a row | 5 min, doubling to 1 h |
-| `upstream` | GitHub's rate limit or Claude's session limit refused work | 2 min, doubling to 1 h |
-| `gh` | One `gh` call failed on a network error or 5xx (`maxAttempts` 3) | 1 s, then 3 s |
-
-Override only what you need; the rest keep their defaults. Every field also has an env
-override, e.g. `AI_AGENT_BACKOFF_SKIP_BASE_MS`.
-
-```json
-{
-  "backoff": {
-    "skip": { "baseMs": 120000, "capMs": 3600000 },
-    "verifyRetry": { "maxAttempts": 5 },
-    "upstream": { "factor": 3 }
-  }
-}
-```
-
-The older top-level `skipBackoffMs`, `upstreamBackoffBaseMs` and `upstreamBackoffCapMs`
-still work. Every group, field and env name: [docs/configuration.md](docs/configuration.md#back-offs).
-
-### GitHub API budget
-
-Each poll cycle spends **one GraphQL request per repo** for issue discovery. GitHub's GraphQL limit is **5,000 requests/hour per token**, so the discovery floor is:
-
-```
-repos × (3600000 / pollIntervalMs)   requests/hour
-```
-
-The daemon logs this as `estDiscoveryGraphQlPerHour` on startup — check it against 5,000 after adding repos or lowering the poll interval. 20 repos at a 60 s interval is 1,200/hour; the same 20 repos would need an interval under ~15 s before discovery alone threatened the ceiling. Merges, reviews, and promotions spend additional requests on top, but only when there is work.
-
-This budget is why the discovery phases share **one open-issue snapshot per repo per cycle** rather than issuing a query per label. Before that change, six lookups each ran their own `gh issue list` — 20 repos on a 60 s interval came to ~7,200 requests/hour, which permanently exhausted the token and made roughly one lookup in six fail. A failed lookup silently skips that phase for that repo that cycle, so `approved` issues sat unimplemented with nothing but generic errors in the log.
-
-Two consequences worth knowing:
-
-- **Keep `issueCacheTtlMs` below `pollIntervalMs`**, or a cycle can be served entirely from the previous cycle's snapshot and an externally-applied `approved` label waits an extra cycle. The daemon warns at startup if you cross that line.
-- **Rate-limit rejections are logged as `[gh] RATE LIMIT EXHAUSTED`** and are deliberately not retried — the budget is already spent. If you see them, raise `pollIntervalMs` or reduce the repo count.
-
-### Multi-repo mode
-
-Use the `repos` array to manage multiple repos in a single daemon. Each repo entry may override any of: `triggerLabel`, `baseBranch`, `featureBranch`, `productionBranch`, `skillPath`, `revisionSkillPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs`. Anything not specified on the entry falls back to the top-level value (or its default).
-
-```json
-{
-  "repos": [
-    {
-      "name": "console",
-      "repoPath": "../my-console",
-      "githubRepo": "org/my-console",
-      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
-      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md"
-    },
-    {
-      "name": "api",
-      "repoPath": "../my-api",
-      "githubRepo": "org/my-api",
-      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
-      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md"
-    },
-    {
-      "name": "big-feature-repo",
-      "repoPath": "../my-monolith",
-      "githubRepo": "org/my-monolith",
-      "skillPath": ".claude/skills/implement-approved-issues/SKILL.md",
-      "revisionSkillPath": ".claude/skills/revise-pr-feedback/SKILL.md",
-      "maxTurns": 60,
-      "maxDurationMs": 3000000
-    }
-  ],
-  "triggerLabel": "approved",
-  "pollIntervalMs": 120000,
-  "maxTurns": 30,
-  "maxDurationMs": 1800000
-}
-```
-
-In the example above, `console` and `api` get the top-level `maxTurns: 30` and `maxDurationMs: 1800000`. `big-feature-repo` overrides both to allow longer Claude sessions for larger features in that repo only.
-
-**Resolution order** for `maxTurns` / `maxDurationMs` (and `triggerLabel`, `baseBranch`, `featureBranch`, `productionBranch`):
-
-1. Per-repo entry value (most specific)
-2. Top-level `.ai-agent.json` value (or `AI_AGENT_*` env var, which overrides the file value)
-3. Built-in default
-
-Existing configs that don't specify per-repo overrides continue to behave identically — the top-level values still apply to every repo. Per-repo overrides are additive and optional.
-
-### Discord notifications (optional)
-
-Set these environment variables to enable status updates in Discord. The Foreman runs without them.
-
-| Env Var | Description |
-|---|---|
-
-### GitHub tokens
-
-| Env Var | Description |
-|---|---|
-| `FOREMAN_GITHUB_TOKEN` | The Foreman's own account: opens PRs, moves labels. Unset, gh's logged-in account is used |
-| `TECHLEAD_GITHUB_KEY` | The reviewer's account: reviews and merges PRs, and merges sync PRs. Required when review is on |
-| `SRE_GITHUB_KEY` | The verifier's account. Required when `srePath` is set |
-
-### Prompt template variables
-
-The prompt supports these placeholders:
-
-- `{{issue_number}}` — GitHub issue number
-- `{{issue_title}}` — Issue title
-- `{{issue_body}}` — Issue body (markdown)
-
-## Session security
-
-Sessions run with `--dangerously-skip-permissions`. Each receives one GitHub token as `GH_TOKEN` — the Foreman token for implement, revise and custom stages, the Tech Lead its own `TECHLEAD_GITHUB_KEY` — plus `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TERM`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK` when set, `FOREMAN_TRIGGER_LABEL`, `FOREMAN_LIFECYCLE_LABELS`, a custom stage's `FOREMAN_STAGE_*`, and the names in the top-level `sessionEnv` list. `sessionEnv` may not name a GitHub token. Values of `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY` and `sessionEnv` names (8+ characters) are replaced by `[REDACTED:<NAME>]` in the Foreman's own transcripts under `logs/`, its log lines and the errors it returns. The Claude CLI's own session log under `~/.claude/projects/` is not touched — that is where the 2026-10-01 leak landed, and the allowlist is what keeps a token out of it. This narrows what a session holds in its environment; it does not stop a session reading what `HOME` grants (`~/.ssh`, the Doppler CLI login, `~/.claude`).
-
-The Tech Lead hand-off gets the same essentials and `sessionEnv` names, `TECHLEAD_GITHUB_KEY`, its own `TECH_LEAD_*` settings and the two label vars — never `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
-
-### Claude Code workspace trust
-
-A headless Claude session in a directory Claude Code has never trusted ignores that repo's `.claude/settings.json` and `.mcp.json` — no error, just a stderr warning and a session without the repo's own tools and hooks. The Foreman marks every configured checkout trusted in Claude Code's global config (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`) on start, on each config reload and before every session, writing only when the flag is missing and never touching a file it cannot parse. Listing a repo is the consent; set `trustManagedRepos: false` to manage trust yourself.
-
-**Troubleshooting:** a log line `Claude Code reports <path> is not trusted` means a session ran without the repo's settings; the Foreman has trusted it for the next one. If it repeats, the config the session reads is not the one being written — check `HOME` and whether `CLAUDE_CONFIG_DIR` is in `sessionEnv`.
-
-## Using with skills
-
-The Foreman delegates work by invoking Claude Code skills on each service repo. Two skill paths per repo:
-
-- **`skillPath`** — invoked during the Implementation phase (e.g. `.claude/skills/implement-approved-issues/SKILL.md`)
-- **`revisionSkillPath`** — invoked during the Revision phase when a PR has review feedback (e.g. `.claude/skills/revise-pr-feedback/SKILL.md`)
-
-The Foreman passes the issue context to Claude and instructs it to read and follow the skill. The skill defines the repo-specific implementation workflow — how to branch, test, and structure the PR.
-
-The Foreman, not the skill, decides what to build. Its work source (`WorkSourceAdapter`
-in `src/adapters.ts`; GitHub issues via `GitHubIssueConnector`) offers every eligible item,
-and the implement prompt names all of them, less any the Foreman is backing off, as
-`Implement exactly these work items, and no others: #<n>, …`. The skill picks among them by
-priority. A repo-local skill that runs its own `gh issue list` gets the same issues back; the
-built-in skill takes its list from the prompt alone.
-
-### Built-in skills
-
-Set either field to `builtin:` to use the generic skills that ship with the Foreman
-(`skills/implement/SKILL.md`, `skills/revise/SKILL.md`) instead of keeping a copy in
-every repo. The built-in text is inlined into the prompt together with the repo's
-feature and base branch. It never names a label: it reads the configured names from
-`FOREMAN_TRIGGER_LABEL` and `FOREMAN_LIFECYCLE_LABELS`, which the Foreman sets on every
-session.
-
-To add repo-specific rules without forking the skill, point `skillOverlayPath` /
-`revisionSkillOverlayPath` at a file in the repo; its contents are appended after the
-skill. A configured overlay that cannot be read fails that run before Claude starts —
-the skill is never run without it.
-
-```json
-{ "name": "api", "repoPath": "../my-api", "skillPath": "builtin:", "revisionSkillPath": "builtin:",
-  "skillOverlayPath": "docs/foreman-overlay.md" }
-```
-
-## Pipeline stages
-
-`stages` sets which stages a repo pass runs and in what order. Omitted, it is the
-built-ins in the order above (verify only with `srePath`; release only with both
-`srePath` and `techLeadPath`, otherwise skipped with a startup warning):
-
-```json
-{ "stages": [
-  { "type": "reconcile" }, { "type": "review" }, { "type": "verify" }, { "type": "promote" },
-  { "type": "release" }, { "type": "revise" }, { "type": "implement" }, { "type": "branch-sync" },
-  { "type": "dependabot" }
-] }
-```
-
-Leave a built-in out and it never runs. Order matters only inside a lane: revise
-runs before implement in the build lane, promote before release in the release lane
-(so release acts on the PR promote just opened or updated), and a custom stage runs
-in front of the built-in after it. Across lanes, order sets nothing — each lane polls
-on its own. Lanes are listed in the order their first stage appears; the daemon logs
-them at startup (`lanes`), and every log line from a pass carries `lane=`.
-Each stage may appear once. A `reviewEnabled` repo needs `techLeadPath` only when
-`review` is in `stages`. An explicit `release` needs both `srePath` and `techLeadPath`;
-the config is refused at startup otherwise.
-
-### Custom stages
-
-A custom stage is `{ "id": "<name>", "skillPath": "<SKILL.md>" }`. It is kept
-deliberately small:
-
-- **When it runs.** When the pass reaches it and the repo has an open
-  `featureBranch → baseBranch` PR. No open PR: no session, and the pass continues.
-- **What it gets.** One Claude session per repo, in the managed repo, under
-  `FOREMAN_GITHUB_TOKEN`, with the implement session's model, tools, MCP config
-  and budget. The prompt names the skill, the PR, its head and the issues it
-  implements; the same facts arrive as env — `FOREMAN_STAGE_ID`,
-  `FOREMAN_STAGE_REPO`, `FOREMAN_STAGE_BASE_BRANCH`, `FOREMAN_STAGE_FEATURE_BRANCH`,
-  `FOREMAN_STAGE_PR`, `FOREMAN_STAGE_ISSUES` (JSON array), `FOREMAN_STAGE_HEAD_SHA` —
-  next to `FOREMAN_TRIGGER_LABEL` / `FOREMAN_LIFECYCLE_LABELS`. A relative
-  `skillPath` resolves against the repo. Anything the stage should change
-  (comments, labels) its skill does; the Foreman does nothing with the work items.
-- **What its outcome means.** The session ends with `FOREMAN_STAGE pass` or
-  `FOREMAN_STAGE blocked reason="…"`. `pass` lets the rest of its lane run.
-  `blocked`, or a run with no verdict line (timed out, crashed, forgot), stops the
-  rest of **its lane** for that repo — other lanes carry on. The verdict holds until
-  the feature branch head moves, so the same code is not re-checked every poll; a
-  restart re-runs it once. A run refused by an upstream limit gives no verdict and
-  is retried next pass, with the rest of its lane held meanwhile.
-- **Which lane it joins.** The lane of the built-in listed right after it, so it
-  gates exactly that stage. With nothing after it, it is a lane of its own, named
-  by its `id`. It takes the repo's checkout lock: its session runs in the clone.
-
-A blocking stage belongs **after** `revise` and `implement` and **in front of** the
-stage it gates: a fix pushed by revise is what moves the head and re-runs the check.
-In the example it sits in front of `promote`, so it joins the release lane and a
-blocked scan holds promotion and release — builds, review and branch sync go on.
-(Before lanes, a custom stage held every stage after it; a config that relied on that
-must now put the gate in front of the stage it means to hold.)
-
-```json
-{ "stages": [
-  { "type": "reconcile" }, { "type": "review" }, { "type": "revise" }, { "type": "implement" },
-  { "id": "security", "skillPath": ".claude/skills/security-scan/SKILL.md" },
-  { "type": "promote" }, { "type": "branch-sync" }, { "type": "dependabot" }
-] }
-```
-
-## Review phase (opt-in)
-
-The Review phase closes the loop between Implementation and Revision by handing
-open feature PRs awaiting review to the **Tech Lead** (`techLeadPath`) — automating the human/agent
-reviewer step. It is **disabled by default** (`reviewEnabled: false`); a vanilla
-config keeps the original five-phase behavior unchanged.
-
-It differs from Implementation/Revision in three ways, because review is a
-decision-layer workflow rather than an in-repo edit:
-
-- **Runs as a separate program.** The Foreman runs `bin/tech-lead.mjs review-pr` in
-  the Tech Lead's checkout, which carries its own review procedure. When it cannot
-  take a review (its model is unavailable), the PR waits and is offered again after
-  a `backoff.agentUnavailable` wait.
-- **Runs under a separate token.** Reviews and merges are attributed to the account
-  behind `TECHLEAD_GITHUB_KEY` (distinct from `FOREMAN_GITHUB_TOKEN`), keeping the
-  reviewer identity separate from the implementer identity.
-- **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
-  transitions issue labels itself. The label side effects feed the other phases:
-  approve → `pr approved` (awaiting the human release gate); request-changes →
-  `pr pending actions` (Revise). The Foreman reconciles the label as a backstop
-  when the skill merged without setting it — see below.
-
-### Outcome-label reconciliation
-
-The merge is performed by code, but the *record* of what the merge meant used to be
-left entirely to the review agent to remember to write. When a session ended after
-merging but before labeling, the issue stayed at `pr under review` with its PR
-already closed — invisible to every phase, since the review gate only matches OPEN
-PRs. Measured over one week on a 20-repo fleet: **12 of 53 merges (~23%) stranded
-their issue this way.**
-
-The outcome was never actually unknown — it arrives in the `FOREMAN_REVIEW` trailer
-the Foreman already parses. `reviewLabelReconcile` (default `true`) spends it: after
-a run reports a merge, any linked issue still sitting at `pr under review` is moved
-to the label its own trailer implies.
-
-Four conditions gate every write, so the reconciler can only ever repair a missing
-write — never invent one, never overrule anyone:
-
-1. the issue is still at `pr under review` with no outcome label (a skill that
-   labels correctly never reaches this code, so a healthy pipeline is unchanged);
-2. a **merged** PR provably closed that issue, under the strict closing-keyword
-   predicate (a bare "related to #N" never counts);
-3. that PR emitted a trailer this run whose fields are unambiguous;
-4. the reviewer did not declare a hold (below).
-
-It never applies `ready for prod release`. That label authorizes production and
-remains a human act.
-
-Set `reviewLabelReconcile: false` (or `AI_AGENT_REVIEW_LABEL_RECONCILE=false`) to
-keep labeling strictly agent-owned.
-
-### Declaring a deliberate hold
-
-A reviewer that merges but *intentionally* leaves the label unset — typically an
-acceptance criterion that cannot be observed yet — appends an optional `hold=` field
-to that PR's trailer:
-
-```
-FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-not-observable-until-0300z
-```
-
-The Foreman then neither sets the label nor re-verifies behind it, and surfaces the
-issue as *held* rather than failed. The hold is persisted in `.agent-state.json`, so
-it survives restarts, and clears automatically once the issue leaves the dead zone.
-
-Without this, a deliberate hold and a dropped label are the same observation, and
-automation has to guess — which means overwriting a correct judgment with a rubber
-stamp.
-
-The four-field trailer remains the contract: `hold=` is optional and trails the
-original fields, so trailers written before it existed parse identically.
-
-Every review run's full turn-by-turn interaction (`--output-format stream-json`) is
-written verbatim to `logs/review/<repo>-cycle<N>-<timestamp>.log` for debugging.
-
-A PR is gated into review only when its linked issue is labeled `pr under review`,
-it has an open `featureBranch → baseBranch` PR, and there is no review by
-`reviewerLogin` newer than the PR's latest commit (a freshness guard against
-re-review loops).
-
-Review config keys (global; `reviewEnabled` and `reviewerLogin` can also be set per
-repo, and a per-repo value wins):
-
-| Key | Default | Description |
-|---|---|---|
-| `reviewEnabled` | `false` | Enable the Review phase (per-repo override supported) |
-| `techLeadPath` | — | The Tech Lead's checkout. **Required when any repo has review on** (startup fails otherwise) |
-| `reviewModel` | — | Model override for review runs (independent of `model`) |
-| `reviewMaxTurns` | `200` | Max turns (review + verify is long-running) |
-| `reviewMaxDurationMs` | `3600000` (60 min) | Max review duration |
-| `reviewAllowedTools` | broad MCP + shell set | Tool surface for the review skill |
-| `reviewerLogin` | — | GitHub login the review runs as (freshness guard). Unset = a verdict by any reviewer counts as current |
-| `reviewLabelReconcile` | `true` | Set the outcome label from the run's own trailer when the skill merged without labeling. Env: `AI_AGENT_REVIEW_LABEL_RECONCILE` |
-
-Requires `techLeadPath` and `TECHLEAD_GITHUB_KEY` in the environment when enabled.
-
-## Image handling in issue bodies
-
-Claude is multimodal — when an issue body or PR review comment contains markdown image references like `![alt](https://...)`, those images are part of the spec (mockups, screenshots, walkthrough frames). The Foreman appends instructions to its default and skill-driven prompts telling the agent to fetch each image to a temp file and `Read` it, so the model can see image content.
-
-For private-repo image URLs (e.g. `github.com/<owner>/<repo>/raw/<branch>/<path>`) the fetch uses `GH_TOKEN`-authed `curl`. For public CDN URLs (e.g. `github.com/user-attachments/...`) no auth is required.
-
-This is automatic for the built-in prompts (`skillPath` and the default implement/revise prompts). If you supply a fully custom `prompt` in config, include your own image-handling guidance — the Foreman does not modify custom prompts.
-
-## Programmatic usage
-
-```typescript
-import { startDaemon, loadConfig, createLogger } from "slashbin-ai-foreman";
-
-const config = loadConfig();
-const logger = createLogger({ format: "json", level: "info" });
-const daemon = startDaemon(config, logger);
-
-// Graceful shutdown
-process.on("SIGINT", () => daemon.stop());
-```
-
-## Architecture
-
-```
-src/
-├── cli.ts             # CLI entry point
-├── config.ts          # Configuration loading + Zod validation
-├── logger.ts          # Structured logging (JSON/text)
-├── lifecycle.ts       # The state machine: stages and named moves (docs/lifecycle.md)
-├── adapters.ts        # Data contract: WorkEvent, WorkSourceAdapter, WorkObserver
-├── work-source.ts     # emit()/advance(): one event → work source + observers
-├── github.ts          # GitHub API surface (polling, PRs, labels, dual-token ops); code in github/
-├── github-work-source.ts # GitHub issues as the work source: a move → its labels
-├── agent.ts           # Claude Code CLI spawner
-├── reviewer.ts        # PR review feedback handler
-├── stages.ts          # Stage schema, default order, dispatch loop
-├── lanes.ts           # Stages grouped into lanes; checkout, lane and session locks
-├── backoff.ts         # Every retry wait: the `backoff` config block and the one formula
-├── orchestrator.ts    # Lane pass per (repo, lane), failure cooldowns, shutdown drain
-├── phases/            # One file per stage (reconcile, implement, revise, verify, review, promote, custom)
-├── paperclip/         # Optional Paperclip board plugin (a WorkObserver)
-├── state.ts           # Persistent state management
-├── daemon.ts          # One poll loop per (repo, lane), graceful shutdown
-├── bridge-client.ts   # WebSocket Discord client (exported; unused by the daemon)
-└── index.ts           # Public API exports
-```
+smallest working config. Then label an issue `approved` and watch `npm run logs`.
 
 ## Built with
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — AI implementation engine
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — the AI implementation engine
 - [GitHub CLI (gh)](https://cli.github.com/) — issue polling and PR management
 - TypeScript + Zod — type-safe configuration
 

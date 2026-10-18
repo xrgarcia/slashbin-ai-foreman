@@ -76,7 +76,7 @@ Add only what differs from the defaults:
 | Your "on hold" label or your priority labels differ | the `github` block: `blockedLabel`, `priorityLabels` |
 | Dependency PRs come from Renovate, not Dependabot | `github.dependencyBranchPrefixes: ["renovate/"]` |
 | Each repo needs a different model or longer runs | `model`, `maxTurns`, `maxDurationMs` per repo |
-| PRs should be reviewed before merge | `reviewEnabled: true` and `techLeadPath` — README "Review phase" |
+| PRs should be reviewed before merge | `reviewEnabled: true` and `techLeadPath` — [review.md](review.md) |
 
 `.ai-agent.example.json` shows a fuller config with comments.
 
