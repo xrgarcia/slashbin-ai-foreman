@@ -1,6 +1,7 @@
 // What is waiting for revise and for review, including orphaned PR adoption.
 
 import type { RepoConfig } from "../config.js";
+import { isBuildInFlight } from "../build-in-flight.js";
 import type { Logger } from "../logger.js";
 import { isGitHubStateEnabled, stateOpenIssues } from "../github-state.js";
 import { findOpenPrs, getOpenIssues, hasLabel, issueCacheTtlMs } from "./cache.js";
@@ -270,6 +271,12 @@ export function adoptOrphanedReviewCandidate(
   );
   if (prs.length === 0) return null;
   const pr = prs[0];
+  // Mid-build the PR has no review label yet by design; adopting it now reviews
+  // a branch still being pushed. The build labels it when it ends.
+  if (isBuildInFlight(config.name)) {
+    logger.debug(`${config.name}: PR #${pr.number} has no review label while a build is in flight — leaving it to the build`);
+    return null;
+  }
 
   if (hasFreshReview(config, pr.number, reviewerLogin, logger)
     && !approvedUnmergedDue(config, pr.number, reviewerLogin, logger)) return null;

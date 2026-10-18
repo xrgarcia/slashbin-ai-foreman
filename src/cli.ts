@@ -218,7 +218,10 @@ async function main(): Promise<void> {
     const refusal = buildRefusal(__dirname);
     if (refusal) {
       logger.error(`Refusing to start: ${refusal}`);
-      process.exit(1);
+      // 78 (EX_CONFIG): a restart cannot fix an uncommitted build, so the unit's
+      // RestartPreventExitStatus=78 stops on it instead of retrying every 30s
+      // (45 refused starts in a row, 2026-10-14 5:43-6:12 pm CT).
+      process.exit(78);
     }
 
     // Register the PID before starting any work. This is what makes `status`,

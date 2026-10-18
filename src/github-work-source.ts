@@ -12,6 +12,7 @@ import type { Move, StageOrDone } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
+import { laterStageLabels } from "./github/lifecycle-scan.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
 import { holdReasons, issueStates, recentlyClosed } from "./github/cards.js";
 
@@ -365,6 +366,16 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         .find((i) => i.number === issueNumber);
       if (!issue) {
         logger.debug(`Dead-zone resolve skipped for #${issueNumber} — no longer open`);
+        return false;
+      }
+      // Re-checked here, not only in the scan: the issue can move on between the
+      // scan and this write, and recovery must never move it backwards. A
+      // verdict leaves `pr merged` (the verify stage's own recovery); anything
+      // later than the step this write takes is never touched.
+      const ahead = laterStageLabels(config).filter((l) => verdict === "merged" || l !== config.lifecycleLabels.prMerged);
+      const past = ahead.find((l) => hasLabel(issue, l));
+      if (past) {
+        logger.info(`Dead-zone resolve skipped for #${issueNumber} — it is already at "${past}"`);
         return false;
       }
 

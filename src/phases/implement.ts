@@ -1,6 +1,7 @@
 // The implement phase: select approved work, gate on an open feature PR, run
 // the implement session, and report what it opened or why it stopped.
 
+import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
@@ -451,6 +452,7 @@ export async function tryBatchImplementation(
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
+  buildStarted(repoName);
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
   const session: Omit<SessionEvent, "status"> = {
     phase: "implement", repo: repoConfig.githubRepo, items: actionableIssues.map((n) => itemOf(repoConfig, n)),
@@ -717,6 +719,7 @@ export async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(runAbort);
+    buildEnded(repoName);
     if (skillSync) settleSkillSync(repoConfig, skillSync, repoLogger);
     await emit({ kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }

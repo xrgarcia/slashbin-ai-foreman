@@ -22,6 +22,9 @@ WorkingDirectory=/path/to/slashbin-ai-foreman
 ExecStartPre=-/usr/bin/doppler run --project <project> --config <config> -- /path/to/node scripts/install-labels.mjs
 ExecStart=/usr/bin/doppler run --project <project> --config <config> -- /path/to/node dist/cli.js
 Restart=on-failure
+# 78 is the daemon refusing an uncommitted dist/ (src/cli.ts). A restart cannot
+# fix that, so stop on it rather than retry every RestartSec forever.
+RestartPreventExitStatus=78
 
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/<user>

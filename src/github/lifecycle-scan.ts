@@ -3,7 +3,7 @@
 
 import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { closedPrVersion, dropIssueSnapshot, findOpenPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel } from "./cache.js";
+import { closedPrVersion, dropIssueSnapshot, findOpenPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel, type IssueSnapshot } from "./cache.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { gh } from "./gh.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
@@ -139,13 +139,23 @@ export type StuckMergedIssue = MergedIssueRef;
  * nowhere. It is the same dead zone as `pr under review`, one label over, and it
  * is now included.
  */
+/** The stages after review. An issue carrying any of them is past every dead zone. */
+export function laterStageLabels(config: RepoConfig): string[] {
+  const l = config.lifecycleLabels;
+  return [l.prMerged, l.prApproved, l.readyForProd, l.releasePending, l.prodVerifyHeld, l.readyToClose];
+}
+
+export function isPastReview(config: RepoConfig, issue: IssueSnapshot): boolean {
+  return laterStageLabels(config).some((l) => hasLabel(issue, l));
+}
+
 export function findStuckMergedIssues(
   config: RepoConfig,
   logger: Logger,
 ): StuckMergedIssue[] {
   if (config.baseBranch === config.featureBranch) return [];
   try {
-    const { prUnderReview, prPendingActions, prMerged, prApproved, readyForProd } = config.lifecycleLabels;
+    const { prUnderReview, prPendingActions } = config.lifecycleLabels;
     const lifecycle = Object.values(config.lifecycleLabels);
     const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
       .filter((i) =>
@@ -154,12 +164,12 @@ export function findStuckMergedIssues(
         // once its PR merged, and before slashbin-ai-foreman#73 nothing else
         // looked at it — the third door into the same dead zone.
         (hasLabel(i, config.triggerLabel) && !hasLabel(i, config.github.blockedLabel) && !lifecycle.some((l) => hasLabel(i, l))));
-    const candidates = issues.filter(
-      // `pr merged` belongs to the verify stage, which owns its retries.
-      (i) => !(
-        hasLabel(i, prMerged) || hasLabel(i, prApproved) || hasLabel(i, readyForProd)
-      ),
-    );
+    // Any stage past review means the issue already moved on: `pr merged`
+    // belongs to the verify stage, which owns its retries, and the rest are
+    // later still. Listing only three of them let a released issue that still
+    // carried a stale `pr pending actions` be "recovered" back to `pr merged`
+    // (jerky_ops#15, 2026-10-15, 28s after it reached `release pending`).
+    const candidates = issues.filter((i) => !isPastReview(config, i));
     if (candidates.length === 0) return [];
 
     // An open feature PR means the issues THAT PR COVERS are normal

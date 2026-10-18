@@ -185,6 +185,22 @@ test("dead-zone recovery writes configured names and never the production gate",
   }
 });
 
+test("dead-zone recovery never moves an issue backwards from a later stage", async () => {
+  // jerky_ops#15, 2026-10-15: a stale `pr pending actions` beside `release
+  // pending` was "recovered" to `pr merged`, 28s after the release stage moved it.
+  const c = load();
+  const L = c.lifecycleLabels;
+  for (const later of [L.prApproved, L.readyForProd, L.releasePending, L.prodVerifyHeld, L.readyToClose]) {
+    for (const move of ["recoverMerged", "recoverPassed", "recoverFailed"]) {
+      resetGh([issue(15, "approved", L.prPendingActions, later)]);
+      assert.equal(await new GitHubIssueConnector().record(
+        { kind: "transition", item: { issueNumber: 15, repo: "example/acceptance" }, observed: false, ...transition(move) },
+        c.repos[0], logger), false, `${move} from ${later}`);
+      assert.equal(ghCalls().some((a) => a[0] === "issue" && a[1] === "edit"), false, `${move} from ${later} wrote`);
+    }
+  }
+});
+
 // --- The spawned session is told the names ----------------------------------------
 
 test("every claude session receives FOREMAN_TRIGGER_LABEL and FOREMAN_LIFECYCLE_LABELS", async () => {

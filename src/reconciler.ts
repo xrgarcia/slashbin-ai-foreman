@@ -323,7 +323,7 @@ function hasOpenPR(
   featureBranch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string } | null {
+): { number: number; url: string } | null | "unknown" {
   try {
     // Every cycle, for every branch with commits waiting on review, this asks
     // whether the PR is still open — and almost always it is. The fleet state
@@ -342,7 +342,11 @@ function hasOpenPR(
     const prs: { number: number; url: string }[] = JSON.parse(json || "[]");
     return prs.length > 0 ? prs[0] : null;
   } catch {
-    return null;
+    // Unknown, never "no open PR". Read as null, a failed lookup made the
+    // reconciler open a second PR for a branch that already had one: 10 refused
+    // `gh pr create` calls on jerky_service (PR #144) during the 2026-10-14
+    // ENOBUFS outage. The caller skips the branch until a pass can read it.
+    return "unknown";
   }
 }
 
@@ -364,7 +368,7 @@ function findLastClosedUnmergedPR(
   featureBranch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string; headSha: string } | null {
+): { number: number; url: string; headSha: string } | null | "unknown" {
   try {
     const json = gh([
       "pr", "list",
@@ -386,9 +390,9 @@ function findLastClosedUnmergedPR(
     const latest = unmerged[0];
     return { number: latest.number, url: latest.url, headSha: latest.headRefOid };
   } catch {
-    // Unknown, not "no rejection" — the caller treats null as "no guard available"
-    // and proceeds, which preserves the pre-guard behaviour on a gh failure.
-    return null;
+    // Unknown, not "no rejection": proceeding on a failed read would re-propose
+    // a diff a person may have just refused. The caller skips the branch.
+    return "unknown";
   }
 }
 
@@ -500,6 +504,10 @@ export function reconcileRepo(
 
     // Check if PR already exists for this specific branch
     const existingPR = hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    if (existingPR === "unknown") {
+      logger.warn(`Could not read the open PRs for ${branch} — skipping reconciliation this pass rather than risk a duplicate PR`);
+      continue;
+    }
     if (existingPR) {
       logger.debug(`PR already exists for ${branch}: #${existingPR.number} — no reconciliation needed`);
       continue;
@@ -511,6 +519,10 @@ export function reconcileRepo(
     const lastRejected = findLastClosedUnmergedPR(
       config.githubRepo, branch, config.baseBranch, config.repoPath,
     );
+    if (lastRejected === "unknown") {
+      logger.warn(`Could not read the closed PRs for ${branch} — skipping reconciliation this pass rather than re-propose refused work`);
+      continue;
+    }
     if (lastRejected) {
       const headSha = commits[0].hash; // git log lists newest first
       if (headSha === lastRejected.headSha) {
