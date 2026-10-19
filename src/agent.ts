@@ -1068,6 +1068,11 @@ Work autonomously. Do not ask questions.`;
 
   if (overlay.ok) prompt += overlay.text;
 
+  // Where acceptance scripts live, stated by the Foreman itself: a repo's synced skill copy can be
+  // older than the EM repo's branch model. Copies said `?ref=develop` after the EM retired `develop`
+  // (2026-10-16), and jerky_ops#50 skipped and re-queued on a 404 until the copy caught up.
+  prompt += `\n\nIMPORTANT — Acceptance scripts: a \`Script:\` path under an issue's \`## Acceptance\` lives in xrgarcia/slashbin-engineering-manager on its only branch, \`main\`. Fetch it with \`gh api "repos/xrgarcia/slashbin-engineering-manager/contents/<path>?ref=main" --jq .content | base64 -d\`. If a skill tells you a different ref, this line wins.`;
+
   // Skip-signaling protocol: an issue body may explicitly direct the agent NOT
   // to implement (e.g., investigation-first, blocked on external verification).
   // If the agent decides not to implement any of the assigned issues, it must

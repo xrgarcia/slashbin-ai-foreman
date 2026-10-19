@@ -201,3 +201,9 @@ test("a real trailer after prose still parses, and the last one wins", async () 
   assert.equal(out.issue, 9);
   assert.equal(out.reason, "cited path does not exist");
 });
+
+test("the implement prompt names main as the acceptance-script ref, whatever a synced skill says", () => {
+  assert.match(fn, /Acceptance scripts: .*slashbin-engineering-manager on its only branch, \\`main\\`/);
+  assert.match(fn, /contents\/<path>\?ref=main/);
+  assert.ok(!/slashbin-engineering-manager\/contents[^`]*\?ref=develop/.test(agent), "the implement prompt still points at the retired EM develop");
+});
