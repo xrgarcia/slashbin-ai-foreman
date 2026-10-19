@@ -196,6 +196,15 @@ const INDEX_TTL_MS = 10 * 60_000;
 const LABEL_BLOCK_ACTION = `${FOREMAN_BLOCKED_PREFIX}needs attention`;
 
 /**
+ * The unblock action the shared escalation (`process.escalate`, slashbin_mcp_services
+ * #308) writes when a seat hands a card up, back or down the chain. That block is
+ * a hop between seats, not the Foreman's and not GitHub's: SLA-1873 (jerky_ops#45)
+ * was put back with the EM two minutes after the hop gave it to the PO, before
+ * the PO's run started (Foreman #98, 2026-10-18).
+ */
+export const ESCALATION_ACTION_PREFIX = "Escalation in progress (process.escalate ";
+
+/**
  * A lookup that misses rescans once the last scan is this old, so a row
  * another writer (a periodic sync) added since is found within a minute, not
  * at the next ten-minute refresh.
@@ -340,6 +349,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly labelBlocked = new Set<string>();
   /** Task id → a blocked card's unblock-descriptor action, as the last scan read it. */
   private readonly blockAction = new Map<string, string>();
+  /** A card a seat's escalation blocked, and the GitHub stage it was first seen at. */
+  private readonly escalatedAt = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
@@ -587,6 +598,15 @@ export class PaperclipMirror implements WorkObserver {
       // A block GitHub's label made ends when the label goes, at any stage:
       // read as a Foreman block from before a restart, jerky_service #132/#133
       // sat Blocked for hours after the EM lifted the label (2026-10-14).
+      // A seat's escalation hop holds the card until the hop is resolved, or until
+      // GitHub moves the issue to another stage (Foreman #98).
+      if (state === blocked && this.blockAction.get(id)?.startsWith(ESCALATION_ACTION_PREFIX)) {
+        if (!this.escalatedAt.has(id) || this.escalatedAt.get(id) === stage) {
+          this.escalatedAt.set(id, stage);
+          continue;
+        }
+      }
+      this.escalatedAt.delete(id);
       if ((state === blocked || this.blockedAt.has(id)) && stage !== "blocked" && !(await this.blockedByLabel(id))) {
         if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && verifyHeld === true)) {
           this.blockedAt.set(id, stage);
