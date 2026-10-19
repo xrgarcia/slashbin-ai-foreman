@@ -14,6 +14,7 @@ import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
 import { laterStageLabels } from "./github/lifecycle-scan.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
+import { announceReadinessHold, parseReadiness, readIssueBody, unmetReadiness } from "./github/readiness.js";
 import { holdReasons, issueStates, recentlyClosed } from "./github/cards.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
@@ -86,12 +87,15 @@ const coveredSkipAnnounced = new Map<string, string>();
 /** `repo#issue` → the hold last logged for it, so a held issue is announced once, not every cycle. */
 const blockerHoldAnnounced = new Map<string, string>();
 
+/** `repo#issue` → the readiness reason already on the issue as a comment, so GitHub is read for it once per run, not every cycle. */
+const readinessCommented = new Map<string, string>();
+
 /**
  * GitHub issues as a work source — the first `WorkSourceAdapter` connector.
  *
  * `selectWork` is everything this source offers the implement stage: open
  * issues carrying the trigger label, not `blocked`, in no lifecycle state,
- * with every GitHub "blocked by" issue merged,
+ * with every GitHub "blocked by" issue merged and its Pre-Flight readiness block met,
  * implemented by no open or merged PR — uncapped, in `gh issue list` order.
  * The orchestrator cuts its own capped `discoveryBatch` from it, and hands the
  * whole offer (less backed-off issues) to a skill.
@@ -600,6 +604,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   private waitsOnBlocker(config: RepoConfig, num: number, logger: Logger): boolean {
     const key = `${config.githubRepo}#${num}`;
     let hold: string | null;
+    let readinessUnmet: string[] = [];
     try {
       const unmet = unmetBlockers(blockersOf(config.githubRepo, num, config.repoPath), config.lifecycleLabels);
       hold = unmet.length ? `blocked by ${unmet.map((b) => blockerRef(b, config.githubRepo)).join(", ")} until it merges` : null;
@@ -607,8 +612,20 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       hold = `its blockers could not be read (${err instanceof Error ? err.message : String(err)})`;
     }
     if (hold === null) {
+      try {
+        readinessUnmet = unmetReadiness(parseReadiness(readIssueBody(config, num)), (args) => gh(args, config.repoPath));
+        hold = readinessUnmet.length ? `Pre-Flight readiness not met: ${readinessUnmet.join("; ")}` : null;
+      } catch (err) {
+        hold = `its Pre-Flight could not be read (${err instanceof Error ? err.message : String(err)})`;
+      }
+    }
+    if (hold === null) {
       blockerHoldAnnounced.delete(key);
+      readinessCommented.delete(key);
       return false;
+    }
+    if (readinessUnmet.length && readinessCommented.get(key) !== hold && announceReadinessHold(config, num, readinessUnmet)) {
+      readinessCommented.set(key, hold);
     }
     if (blockerHoldAnnounced.get(key) !== hold) {
       blockerHoldAnnounced.set(key, hold);
