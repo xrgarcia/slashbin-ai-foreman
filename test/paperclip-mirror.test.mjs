@@ -755,6 +755,22 @@ test("snapshot: after a restart, a label-made block is released though a later r
   assert.equal(fake.rows[1].status, "blocked", "a Foreman block names its reason and stays");
 });
 
+test("snapshot: a seat's escalation hop holds the card across cycles, then GitHub moving on releases it (Foreman #98, SLA-1873)", async () => {
+  const PO = "agent-po";
+  const hop = { owner: { agentId: PO }, action: "Escalation in progress (process.escalate hand_up): Product Owner holds this card until it is resolved or returned down the chain." };
+  const fake = fakePaperclip([row7("blocked", { assigneeAgentId: PO, unblockDescriptor: hop })]);
+  fake.comments.r7 = ["<!-- process.escalate:eyJ9 -->"];
+  const { mirror } = mirrorOn(fake);
+  for (let i = 0; i < 3; i++) {
+    await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr approved"] }]), logger());
+    assert.equal(fake.rows[0].status, "blocked", `cycle ${i + 1}: the hop was undone`);
+    assert.equal(fake.rows[0].assigneeAgentId, PO, `cycle ${i + 1}: the resolver lost the card`);
+  }
+  assert.equal(statusPatches(fake).length, 0);
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["pr merged"] }]), logger());
+  assert.notEqual(fake.rows[0].status, "blocked", "GitHub moved to another stage: the card follows it");
+});
+
 test("snapshot: a card blocked at pr merged stays Blocked while its dev verification is held", async () => {
   const fake = fakePaperclip([row7("blocked", { unblockDescriptor: { action: "blocked: dev verification did not pass" } })]);
   const { mirror } = mirrorOn(fake);
