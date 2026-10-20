@@ -64,7 +64,7 @@ import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./c
 import { STATE_STAGE } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {
-  BACKLOG_STATUS, CONFIG_KEY, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withStage,
+  BACKLOG_STATUS, CONFIG_KEY, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withIssueLabel, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFacts, type HandoffLabels } from "./handoff.js";
@@ -269,7 +269,7 @@ function outcomeOf(e: SessionEvent): string {
 const EVIDENCE_CAP = 240;
 
 /** What a card shows that the Foreman writes with `ownsCards`, as the last scan (or write) left it. */
-type RowContent = { title: string; description: string; assigneeAgentId: string | null; assigneeUserId: string | null };
+type RowContent = { title: string; description: string; assigneeAgentId: string | null; assigneeUserId: string | null; labelIds?: string[] };
 
 /** A second card for an issue that already has one: retired by housekeeping when the Foreman owns the cards. */
 type Duplicate = { readonly id: string; readonly key: string; readonly repo: string; readonly winner: string; readonly title: string; readonly status: string };
@@ -353,6 +353,10 @@ export class PaperclipMirror implements WorkObserver {
   private readonly escalatedAt = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
+  /** The company's `issue` label id, once ensured (undefined until a label write needed it). */
+  private issueLabelId: string | undefined;
+  /** Cards confirmed to carry the issue label, so a sync reads and writes each once. */
+  private readonly issueLabelled = new Set<string>();
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
   private agentMetadata: Record<string, unknown> | null = null;
   /** Task id → its latest comment body, read once per process and kept as notes are posted. */
@@ -785,6 +789,11 @@ export class PaperclipMirror implements WorkObserver {
         body.status ??= status;
       }
     }
+    // Backfill: a card that predates the issue label gets it once, whatever its stage.
+    if (!("labelIds" in body) && have && (await this.needsIssueLabel(id, have))) {
+      const labelIds = await this.labelIdsFor(id, undefined);
+      if (labelIds) body.labelIds = labelIds;
+    }
     if (!Object.keys(body).length || budget.left <= 0) return;
     budget.left--;
     const holderAgent = body.comment && hold?.author ? await this.agentForLogin(hold.author) : null;
@@ -804,6 +813,7 @@ export class PaperclipMirror implements WorkObserver {
       description: want.description,
       assigneeAgentId: "assigneeAgentId" in body ? null : have?.assigneeAgentId ?? null,
       assigneeUserId: "assigneeUserId" in body ? null : have?.assigneeUserId ?? null,
+      ...(Array.isArray(body.labelIds) ? { labelIds: body.labelIds as string[] } : have?.labelIds ? { labelIds: have.labelIds } : {}),
     });
   }
 
@@ -938,6 +948,7 @@ export class PaperclipMirror implements WorkObserver {
     this.cfg = next;
     this.comments = commentsOf(next);
     this.stageLabelIds = null;
+    this.issueLabelId = undefined;
     return true;
   }
 
@@ -1312,6 +1323,7 @@ export class PaperclipMirror implements WorkObserver {
         content.set(row.id, {
           title: String(row.title ?? ""), description: String(row.description ?? ""),
           assigneeAgentId: row.assigneeAgentId ?? null, assigneeUserId: row.assigneeUserId ?? null,
+          ...(Array.isArray(row.labelIds) ? { labelIds: row.labelIds } : {}),
         });
         const action = row.unblockDescriptor?.action;
         // A Foreman-held blocked row is a waiting hold, unless the Foreman blocked it for good.
@@ -1412,8 +1424,12 @@ export class PaperclipMirror implements WorkObserver {
     return ok;
   }
 
-  /** The card's label ids with `key`'s stage label as its only one; null when the labels cannot be read. */
-  private async labelIdsFor(id: string, key: string | null): Promise<string[] | null> {
+  /**
+   * The card's label ids with `key`'s stage label as its only one (`key`
+   * undefined: the stage labels as they are) and the issue label present
+   * once; null when nothing changes or the labels cannot be read.
+   */
+  private async labelIdsFor(id: string, key: string | null | undefined): Promise<string[] | null> {
     this.stageLabelIds ??= (async () => {
       const r = await this.safeCall("ensure stage labels", () => ensureStageLabels(this.client, this.cfg));
       if (!r.ok) this.stageLabelIds = null;
@@ -1421,11 +1437,32 @@ export class PaperclipMirror implements WorkObserver {
     })();
     const ids = await this.stageLabelIds;
     if (!ids) return null;
+    if (!this.issueLabelId) {
+      const f = await this.safeCall("ensure issue label", () => ensureIssueLabel(this.client));
+      if (f.ok) this.issueLabelId = f.value;
+    }
     const row = await this.safeCall("read task", () => this.client.getIssue(id), id);
     if (!row.ok) return null;
     const current = Array.isArray(row.value?.labelIds) ? row.value.labelIds : [];
-    const next = withStage(current, ids, key);
+    let next = key === undefined ? [...current] : withStage(current, ids, key);
+    if (this.issueLabelId) next = withIssueLabel(next, this.issueLabelId);
+    if (this.issueLabelId && current.includes(this.issueLabelId)) this.issueLabelled.add(id);
     return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
+  }
+
+  /** True when the card is not yet known to carry the issue label (so a sync should write it). */
+  private async needsIssueLabel(id: string, have: RowContent | undefined): Promise<boolean> {
+    if (this.issueLabelled.has(id)) return false;
+    if (!this.issueLabelId) {
+      const f = await this.safeCall("ensure issue label", () => ensureIssueLabel(this.client));
+      if (!f.ok || !f.value) return false;
+      this.issueLabelId = f.value;
+    }
+    if (have?.labelIds?.includes(this.issueLabelId)) {
+      this.issueLabelled.add(id);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -1434,6 +1471,7 @@ export class PaperclipMirror implements WorkObserver {
    */
   private async patch(id: string, body: Record<string, unknown>, commentAuthor?: string | null): Promise<boolean> {
     const r = await this.safeCall("update task", () => this.client.updateIssue(id, body, { commentAuthor }), id);
+    if (r.ok && this.issueLabelId && Array.isArray(body.labelIds) && body.labelIds.includes(this.issueLabelId)) this.issueLabelled.add(id);
     return r.ok;
   }
 
