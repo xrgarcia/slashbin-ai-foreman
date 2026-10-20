@@ -357,6 +357,8 @@ export class PaperclipMirror implements WorkObserver {
   private issueLabelId: string | undefined;
   /** Cards confirmed to carry the issue label, so a sync reads and writes each once. */
   private readonly issueLabelled = new Set<string>();
+  /** The repos a snapshot has named: the ones the Foreman serves, so the only ones housekeeping may label. */
+  private readonly snapshotRepos = new Set<string>();
   /** The Foreman agent's metadata minus the lease, so a lease write keeps every other key. */
   private agentMetadata: Record<string, unknown> | null = null;
   /** Task id → its latest comment body, read once per process and kept as notes are posted. */
@@ -558,6 +560,7 @@ export class PaperclipMirror implements WorkObserver {
    * SRE had given up on it (2026-10-05).
    */
   async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
+    this.snapshotRepos.add(_repo);
     if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
     const cards = read.cards;
@@ -992,9 +995,34 @@ export class PaperclipMirror implements WorkObserver {
     try {
       if (!(await this.ensureIndex(true))) return;
       await this.retireLiveTask();
-      if (this.cfg.ownsCards === true) await this.retireDuplicates();
+      if (this.cfg.ownsCards === true) {
+        await this.retireDuplicates();
+        await this.backfillIssueLabels();
+      }
     } finally {
       this.housekeeping = false;
+    }
+  }
+
+  /**
+   * The issue label onto every card of a served repo the last scan found without
+   * it (`ownsCards`), whatever its issue's state or age: a closed issue the
+   * snapshot no longer carries, or cards beyond a snapshot's write cap, still
+   * get it. Only the label changes; at most CARD_WRITES_PER_SNAPSHOT a pass.
+   */
+  private async backfillIssueLabels(): Promise<void> {
+    const dup = new Set(this.duplicates.map((d) => d.id));
+    let left = CARD_WRITES_PER_SNAPSHOT;
+    for (const [id, have] of this.rowContent) {
+      if (left <= 0) return;
+      const repo = this.rowRepo.get(id);
+      if (!repo || !this.snapshotRepos.has(repo) || dup.has(id)) continue;
+      if (this.cfg.repos && !this.cfg.repos.includes(repo)) continue;
+      if (!(await this.needsIssueLabel(id, have))) continue;
+      const labelIds = await this.labelIdsFor(id, undefined);
+      if (!labelIds) continue;
+      left--;
+      await this.patch(id, { labelIds });
     }
   }
 

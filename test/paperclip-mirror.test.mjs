@@ -1103,6 +1103,22 @@ test("ownsCards: the issue label backfills onto cards whose content and stage di
   assert.equal(fake.rows[0].labelIds.filter((id) => fake.labels.find((l) => l.id === id)?.name === "issue").length, 1);
 });
 
+test("ownsCards: housekeeping labels cards the snapshot no longer carries (old closed) and those past its write cap; unserved repos' cards untouched", async () => {
+  const old = { id: "old", title: "r#99 old", status: "done", assigneeAgentId: AGENT, description: "source: example/r#99\nGitHub: closed completed\n\nhttps://github.com/example/r/issues/99" };
+  const other = { id: "other", title: "x#1", status: "todo", description: "source: example/other#1\n\nhttps://github.com/example/other/issues/1" };
+  const fake = fakePaperclip([ownedRow("backlog"), old, other]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  // example/r is served (a snapshot named it); example/other never is.
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [] }, logger());
+  await mirror.housekeep();
+  assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "old")), true, "older closed card labelled by housekeeping");
+  assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "other")), false, "an unserved repo's card is not ours");
+  assert.equal(fake.rows.find((r) => r.id === "old").status, "done", "status kept");
+  const writes = fake.calls.filter((c) => c.method !== "GET").length;
+  await mirror.housekeep();
+  assert.equal(fake.calls.filter((c) => c.method !== "GET").length, writes, "once");
+});
+
 test("ownsCards off: no issue label is created or written", async () => {
   const fake = fakePaperclip([ownedRow("backlog")]);
   const { mirror } = mirrorOn(fake);
