@@ -474,7 +474,8 @@ const TEAM = {
     awaitingRelease: { owner: "lead", status: "in_review", label: "awaitingRelease" },
   },
 };
-const labelName = (fake, r) => (r.labelIds ?? []).map((id) => fake.labels.find((l) => l.id === id)?.name);
+const labelName = (fake, r) => (r.labelIds ?? []).map((id) => fake.labels.find((l) => l.id === id)?.name).filter((n) => n !== "issue");
+const hasIssue = (fake, r) => (r.labelIds ?? []).some((id) => fake.labels.find((l) => l.id === id)?.name === "issue");
 
 test("each step hands the card to its configured agent with exactly one stage label; other labels kept", async () => {
   const fake = fakePaperclip([row("r7", 7, { status: "todo", labelIds: ["keep-me"] })], [], [{ id: "keep-me", name: "bug" }]);
@@ -491,7 +492,9 @@ test("each step hands the card to its configured agent with exactly one stage la
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
-  assert.equal(fake.labels.length, 11, "the ten stage labels created once");
+  assert.equal(fake.labels.length, 12, "the ten stage labels and the issue label created once");
+  assert.equal(hasIssue(fake, r), true, "the issue label stays through done");
+  assert.equal(r.labelIds.filter((id) => fake.labels.find((l) => l.id === id)?.name === "issue").length, 1, "never twice");
 });
 
 test("a review session holds the card in progress under the reviewer, noted by name, and returns it when it ends", async () => {
@@ -1081,6 +1084,46 @@ test("ownsCards: an approved issue's new card is placed by the lifecycle pass in
   assert.equal(fake.rows.length, 1);
   assert.equal(fake.rows[0].status, "in_review");
   assert.equal(fake.rows[0].description.split("\n")[1], "GitHub: open · stage inReview");
+});
+
+test("ownsCards: the issue label backfills onto cards whose content and stage did not change, once, keeping other labels", async () => {
+  const fake = fakePaperclip([
+    ownedRow("backlog", { labelIds: ["keep-me"] }),
+    { id: "r8", title: "r#8 issue 8", status: "done", assigneeAgentId: AGENT, description: "source: example/r#8\nGitHub: closed completed\n\nhttps://github.com/example/r/issues/8" },
+  ], [], [{ id: "keep-me", name: "bug" }]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  const cards = [card(7), card(8, { state: "completed" })];
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
+  assert.deepEqual(fake.rows.map((r) => labelName(fake, r)), [["bug"], []]);
+  assert.deepEqual(fake.rows.map((r) => hasIssue(fake, r)), [true, true]);
+  assert.equal(fake.rows[0].status, "backlog", "nothing else changed");
+  const writes = fake.calls.filter((c) => c.method !== "GET").length;
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
+  assert.equal(fake.calls.filter((c) => c.method !== "GET").length, writes, "written once, never again");
+  assert.equal(fake.rows[0].labelIds.filter((id) => fake.labels.find((l) => l.id === id)?.name === "issue").length, 1);
+});
+
+test("ownsCards: housekeeping labels cards the snapshot no longer carries (old closed) and those past its write cap; unserved repos' cards untouched", async () => {
+  const old = { id: "old", title: "r#99 old", status: "done", assigneeAgentId: AGENT, description: "source: example/r#99\nGitHub: closed completed\n\nhttps://github.com/example/r/issues/99" };
+  const other = { id: "other", title: "x#1", status: "todo", description: "source: example/other#1\n\nhttps://github.com/example/other/issues/1" };
+  const fake = fakePaperclip([ownedRow("backlog"), old, other]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  // example/r is served (a snapshot named it); example/other never is.
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [] }, logger());
+  await mirror.housekeep();
+  assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "old")), true, "older closed card labelled by housekeeping");
+  assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "other")), false, "an unserved repo's card is not ours");
+  assert.equal(fake.rows.find((r) => r.id === "old").status, "done", "status kept");
+  const writes = fake.calls.filter((c) => c.method !== "GET").length;
+  await mirror.housekeep();
+  assert.equal(fake.calls.filter((c) => c.method !== "GET").length, writes, "once");
+});
+
+test("ownsCards off: no issue label is created or written", async () => {
+  const fake = fakePaperclip([ownedRow("backlog")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
+  assert.equal(fake.labels.some((l) => l.name === "issue"), false);
 });
 
 test("ownsCards: title and description follow the issue; an unapproved card held by an agent goes to backlog, nobody's", async () => {

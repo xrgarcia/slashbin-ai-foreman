@@ -161,6 +161,18 @@ export function liveRows(metadata: unknown, now: number, leaseMinutes = 15): Set
 }
 
 /**
+ * The constant `issue` label (counterpart of the receiver sync's `epic`) every card the Foreman owns carries for its whole life, so
+ * the board can be filtered to "what the Foreman is building" whoever holds the
+ * card. It is not a stage label: `withStage` never strips it.
+ */
+export const ISSUE_LABEL = { name: "issue", color: "#0d9488" } as const;
+
+/** `labelIds` with the issue label id present exactly once; the same array contents when it already is. */
+export function withIssueLabel(labelIds: readonly string[], issueLabelId: string): string[] {
+  return labelIds.includes(issueLabelId) ? [...labelIds] : [...labelIds, issueLabelId];
+}
+
+/**
  * A card's label ids with exactly one stage label: `key`'s, or none when `key`
  * is null. Every other label the card carries is kept, in order.
  */
@@ -171,16 +183,13 @@ export function withStage(labelIds: readonly string[], stageLabelIds: ReadonlyMa
   return want ? [...kept, want] : kept;
 }
 
-/**
- * Stage label key → the company's label id, creating each configured label
- * that is missing (by name). A create that loses a race to another writer
- * (409) is resolved by listing again. Throws on any other failure.
- */
-export async function ensureStageLabels(client: Pick<PaperclipClient, "listLabels" | "createLabel">, cfg: BoardConfig): Promise<Map<string, string>> {
-  const want = Object.entries(filled(cfg).stageLabels);
+type LabelClient = Pick<PaperclipClient, "listLabels" | "createLabel">;
+
+/** Each wanted label's id by name, creating the missing ones; a create that loses a race (409) lists again. */
+async function ensureNamed(client: LabelClient, want: ReadonlyArray<{ name: string; color: string }>): Promise<Map<string, string>> {
   const byName = async () => new Map((await client.listLabels()).map((l) => [l.name, l.id]));
   let have = await byName();
-  for (const [, l] of want) {
+  for (const l of want) {
     if (have.has(l.name)) continue;
     try {
       const made = await client.createLabel({ name: l.name, color: l.color });
@@ -190,10 +199,26 @@ export async function ensureStageLabels(client: Pick<PaperclipClient, "listLabel
       have = await byName();
     }
   }
+  return have;
+}
+
+/**
+ * Stage label key → the company's label id, creating each configured label
+ * that is missing (by name). A create that loses a race to another writer
+ * (409) is resolved by listing again. Throws on any other failure.
+ */
+export async function ensureStageLabels(client: LabelClient, cfg: BoardConfig): Promise<Map<string, string>> {
+  const want = Object.entries(filled(cfg).stageLabels);
+  const have = await ensureNamed(client, want.map(([, l]) => l));
   const out = new Map<string, string>();
   for (const [key, l] of want) {
     const id = have.get(l.name);
     if (id) out.set(key, id);
   }
   return out;
+}
+
+/** The id of the company's `issue` label, created when missing (same 409 handling). Throws on failure. */
+export async function ensureIssueLabel(client: LabelClient): Promise<string | undefined> {
+  return (await ensureNamed(client, [ISSUE_LABEL])).get(ISSUE_LABEL.name);
 }
