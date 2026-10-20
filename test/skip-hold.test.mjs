@@ -169,7 +169,7 @@ test("cap: out of attempts, it is escalated once and stays held, with no session
   assert.equal(g.run, false);
   assert.equal(g.escalate, true);
   assert.equal(g.reason, escalatedReason("refund_policy.md not on main", 3));
-  assert.match(g.reason, /skipped 3 times in a row; held for the EM until this issue changes$/);
+  assert.match(g.reason, /skipped 3 times in a row; held for the EM until a person changes this issue \(an agent's edit or label buys one session; its comment releases nothing\)$/);
   assert.deepEqual(r.calls, { ref: 0, activity: 1 }, "a merged reference or a cleared transient no longer releases it");
   const again = gate({ ...entry("#166"), skipCount: 3, escalatedAt: "2026-10-14T13:13:00Z" }, reads(), true);
   assert.deepEqual([again.run, again.escalate], [false, false], "escalated once, not every cycle");
