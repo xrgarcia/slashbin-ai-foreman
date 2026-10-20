@@ -77,6 +77,16 @@ export function devVerifyHolding(
   return null;
 }
 
+/**
+ * The issues in `batch` filed as the follow-up to `holder` — the fix its dev
+ * verification is waiting on — by the title's "follow-up to #N". Pure,
+ * exported for tests.
+ */
+export function followUpsOf(holder: number, batch: readonly number[], titles: ReadonlyMap<number, string>): number[] {
+  const marker = new RegExp(`follow-up to #${holder}(?!\\d)`, "i");
+  return batch.filter((n) => marker.test(titles.get(n) ?? ""));
+}
+
 /** Per repo: the verify stage waiting after the SRE could not run at all (backoff.agentUnavailable). */
 export const verifyDefer = new BackoffTracker();
 
