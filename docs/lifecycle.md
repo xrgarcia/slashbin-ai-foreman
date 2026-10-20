@@ -11,6 +11,7 @@
 - [Sessions](#sessions)
 - [Releases](#releases)
   - [The release stage](#the-release-stage)
+- [Unblocking a card](#unblocking-a-card)
 - [Events](#events)
 
 Every work item moves through one state machine, `src/lifecycle.ts`. The orchestrator never names
@@ -53,7 +54,7 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
 | `releasing` | `release pending` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
 | `prodVerifyHeld` | `prod verification held` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
-| `needsRuling` | — (a session holds it) | Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue. |
+| `needsRuling` | — (a session holds it) | Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue (an agent's edit or label buys one session; its comment releases nothing). |
 | `blocked` | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
 | `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed. |
 
@@ -164,6 +165,42 @@ desktop) is retired once this ships.
 The promote and release path sends nothing to Discord: what needs a person is a comment and a label
 on the issue, which also moves its Paperclip card.
 
+## Unblocking a card
+
+**Unblock on GitHub, never on the board.** The Foreman reads GitHub, not Paperclip: a Blocked card
+only mirrors a hold the Foreman keeps on the issue. Moving the card to To Do, or handing it to the
+Foreman's agent, releases nothing. That agent never wakes from Paperclip, and the next move or sync puts
+the card back. Do the act that releases the hold, below. The Foreman checks every held item each pass
+(`src/unblock.ts`), and when a check passes it clears its own state, moves the card back to the
+column its GitHub labels call for, and notes which check released it.
+
+**Which block is it?** The card's unblock note and the Foreman's last comment on the issue or PR
+give the reason. A skip's comment names what it waits on.
+
+| Block | Why the Foreman stopped | Released by (any one, checked in this order) |
+|---|---|---|
+| `skip` | The implement session declined the issue: a precondition outside the repo, investigation only, or already done. Its comment on the issue says what it waits on. | Clear the condition the skip named (reconcile the branch, close the blocking PR).<br>Close or merge the issue or PR the skip named in `waiting_on`.<br>Edit, comment on or label the issue (anyone but the Foreman). Escalated: see below. |
+| `divergence` | The feature branch diverged from its base. | Reconcile the feature branch with its base. |
+| `verify-no-pr` | The issue is labelled merged, but no merged PR closes it. | Merge a PR into the base branch that closes the issue. |
+| `verify-held` | Dev verification failed and is waiting out its back-off; it retries by itself. | Edit the issue's body (the spec the SRE verifies against). |
+| `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch. |
+| `revision-exhausted` | Revision of the issue's PR failed its retries. | Push a commit to the PR. |
+| `revision-stalemate` | The reviser and the reviewer disagree, and the reviser pushed nothing. | Push a commit to the PR. |
+| the `blocked` label | A person or tool labelled the issue `blocked`: the Foreman never picks it up. | Remove the label. |
+| `needsRuling`: PR not converging | The PR was sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question. | Post a comment on the PR whose first line opens `**EM scope ruling`. |
+| `needsRuling`: skip escalated | A skip used up `backoff.skip.maxAttempts` sessions in a row. | See below. |
+
+**An escalated skip** stops reading the condition and the waited-on reference: only a change to the
+issue counts, and who made it matters. A person's edit, comment or label releases it and resets the
+attempt count. An account in `backoff.skip.agentLogins` (another agent: the EM, the SRE, a reviewer) is
+not a person: its edit or label buys one session and keeps the count, so a second skip escalates again;
+its comment releases nothing. So an agent that has cleared the precondition records that in the
+issue body (an edit), not in a comment. Don't touch an issue whose precondition is still unmet: every
+release spends a session.
+
+The card notes for each release are in `CHECK_WORDS`. A wait the Foreman clears by itself (an occupied
+branch, a dev verification waiting on a deploy, a prod verification held on a back-off) needs nothing.
+
 ## Events
 
 The full `WorkEvent` contract (`src/adapters.ts`). Only `transition` writes to the work source.
@@ -175,7 +212,7 @@ The full `WorkEvent` contract (`src/adapters.ts`). Only `transition` writes to t
 | `prLink` | The item's PR was opened. |
 | `blocked` | The Foreman stopped and needs a person (the reason says why). |
 | `verifyWaiting` | Dev verification waits on something that clears by itself and resumes on its own; no person is needed. |
-| `escalated` | Work stopped for the EM's ruling: the PR is not converging under review (a scope ruling on the PR resumes it), or a skipped issue used up `backoff.skip.maxAttempts` sessions (a person changing the issue resumes it). |
+| `escalated` | Work stopped for the EM's ruling: the PR is not converging under review (a scope ruling on the PR resumes it), or a skipped issue used up `backoff.skip.maxAttempts` sessions (a person changing the issue resumes it; an agent's edit or label buys one session, its comment nothing). See [Unblocking a card](#unblocking-a-card). |
 | `unblocked` | A check resolved an earlier block. |
 | `merged` | The item's PR merged to the base branch. |
 | `promoted` | A promotion PR to the production branch now carries the item. |

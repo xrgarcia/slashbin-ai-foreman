@@ -215,7 +215,7 @@ knows of are redacted from every note before it is sent.
 | `awaitingVerify` | The Tech Lead approved and merged the pull request; the issue waits for dev verification. | `merged` | `merged; awaiting dev verification` |
 | `verifyWaiting` | Dev verification waits on something that clears by itself (the deploy is still building, or the SRE could not run) and resumes on its own. The card stays in review; Blocked is for holds a person must clear. | `merged` | `merged; dev verification waiting: {reason}` |
 | `blocked` | The Foreman declines the issue or runs out of revision retries (with its reason): it needs a person. | `blocked` | `blocked: {reason}` |
-| `escalated` | Revise found the PR not converging (sent back `REVIEW_ROUNDS_ALERT` times since the last EM scope ruling, or the Tech Lead's review carries its escalate marker): revision stops until a PR comment opening `**EM scope ruling` is posted. Or a held skip used up `backoff.skip.maxAttempts` sessions: no session runs until a person changes the issue. | `needsRuling` | `blocked: needs an EM scope ruling: {reason}` |
+| `escalated` | Revise found the PR not converging (sent back `REVIEW_ROUNDS_ALERT` times since the last EM scope ruling, or the Tech Lead's review carries its escalate marker): revision stops until a PR comment opening `**EM scope ruling` is posted. Or a held skip used up `backoff.skip.maxAttempts` sessions: no session runs until a person changes the issue (an agent's edit or label buys one session; its comment releases nothing). How to release each kind of block: [Unblocking a card](lifecycle.md#unblocking-a-card). | `needsRuling` | `blocked: needs an EM scope ruling: {reason}` |
 | `merged` | The pull request is merged to the base branch. | unchanged | `merged` |
 | `releaseWaiting` | The issue is in an open release pull request (base branch → production branch). Written once per release pull request. | `awaitingRelease` | `waiting on release PR #{pr} to merge to {branch}` |
 | `released` | That release pull request merges to the production branch. | `done` | `release PR #{pr} merged to {branch}` |
@@ -307,7 +307,7 @@ the ruling unmade.
 | `awaitingRelease` | In an open release pull request a person merges (the release stage is off); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
 | `releasing` | In the release pull request the Foreman owns (`release pending`): Tech Lead approval, SRE deploy and prod verification. | `foreman` | `in_progress` | `releasing` |
 | `prodVerifyHeld` | Merged to production, but prod verification held (`prod verification held`); the SRE re-verifies it on a back-off. | `foreman` | `in_review` | `prodVerifyHeld` |
-| `needsRuling` | Paused for the EM's ruling: a revision (the ruling comment on the PR resumes it), or a skip out of attempts (a person changing the issue resumes it). | `foreman` | `blocked` | `needsRuling` |
+| `needsRuling` | Paused for the EM's ruling: a revision (the ruling comment on the PR resumes it), or a skip out of attempts (a person changing the issue resumes it; an agent's edit or label buys one session). | `foreman` | `blocked` | `needsRuling` |
 | `blocked` | Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries. | `foreman` | `blocked` | `blocked` |
 
 The defaults suit a Foreman that is the only agent: it holds every task. A task carries at most
@@ -419,6 +419,11 @@ Every move to a lifecycle stage assigns the task to that stage's owner (see abov
 steps leave the assignee alone; a task reassigned by hand in Paperclip goes back at its next
 move. The Foreman's agent is registered with every wake path off (no heartbeat, no
 wake-on-demand), so assigning a task to it never makes Paperclip start a run.
+
+So a Blocked card is never unblocked on the board. Moving it to To Do or handing it to the
+Foreman's agent changes nothing the Foreman reads, and the next move or sync puts it back.
+Release the block on GitHub, where the Foreman looks, and the card follows on its next pass:
+[Unblocking a card](lifecycle.md#unblocking-a-card) lists what releases each kind.
 
 ### Cards held by a person
 

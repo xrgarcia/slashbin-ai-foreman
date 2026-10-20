@@ -23,6 +23,7 @@ review, verification, release, or a Paperclip board when you need them.
 | Already using Paperclip | [Paperclip setup](paperclip.md#set-up). GitHub remains the work source; the board mirrors it. |
 | Ready to automate PR review | [Review](review.md). You supply a compatible Tech Lead program and a separate GitHub identity. |
 | Ready to automate verification or release | [Pipeline stages](pipeline.md#the-stages), then the [release contract](lifecycle.md#the-release-stage). You supply the verifier and environment-specific procedures. |
+| A card is Blocked and you want it moving | [Unblocking a card](lifecycle.md#unblocking-a-card). Release it on GitHub; moving the card does nothing. |
 | Giving these docs to an LLM | Read [setup](setup.md), resolve exact keys in [configuration](configuration.md), and check stage requirements in [pipeline](pipeline.md). Keep credentials in the environment. |
 
 ## All pages
@@ -39,7 +40,7 @@ its own section contents and links back here.
 | [Configuration reference](configuration.md) *(generated)* | What does each setting mean, what is its default, and which environment variable overrides it? |
 | [Pipeline](pipeline.md) | Which stages run, what do they require, and how do lanes and custom gates work? |
 | [Review](review.md) | How does the Tech Lead review and merge? How are missing outcome labels and deliberate holds handled? |
-| [Lifecycle reference](lifecycle.md) *(generated)* | What state is an issue in, what moves it, and what constitutes a verified release? |
+| [Lifecycle reference](lifecycle.md) *(generated)* | What state is an issue in, what moves it, how is a Blocked card released, and what constitutes a verified release? |
 | [Paperclip](paperclip.md) *(generated)* | How do I enable the board mirror, map roles and stages, verify it, or remove it? |
 | [Skills](skills.md) | What instructions does a session receive? How do built-ins, overlays, prompt variables, and images work? |
 | [Skill sync](skill-sync.md) | How do repo skill copies pick up a shared version as approved work arrives? |

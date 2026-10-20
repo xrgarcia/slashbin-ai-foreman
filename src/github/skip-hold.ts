@@ -198,7 +198,7 @@ export function holdStatus(
  * took, and the one thing that releases it now.
  */
 export function escalatedReason(reason: string, attempts: number): string {
-  return `${reason.split("\n")[0]} — skipped ${attempts} times in a row; held for the EM until this issue changes`;
+  return `${reason.split("\n")[0]} — skipped ${attempts} times in a row; held for the EM until a person changes this issue (an agent's edit or label buys one session; its comment releases nothing)`;
 }
 
 /** What a held skip entry carries into the decision. */
