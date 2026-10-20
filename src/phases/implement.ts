@@ -9,7 +9,7 @@ import { selectWork, emit, advance, hasObservers } from "../work-source.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import {
   discoveryBatch,
-  openIssueLabels,
+  getOpenIssues,
   hasPendingRevisions,
   getReferencedIssuesFromOpenPR,
   isPrOpen,
@@ -26,7 +26,7 @@ import {
 import { findIssuesMergedToBase } from "../github.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
-import { devVerifyHolding } from "./verify.js";
+import { devVerifyHolding, followUpsOf } from "./verify.js";
 import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import {
   escalatedReason,
@@ -362,8 +362,11 @@ export async function tryBatchImplementation(
   // Labels rank the batch by priority. Unreadable, every issue ranks the
   // same and the oldest goes first.
   let labels = new Map<number, string[]>();
+  let titles = new Map<number, string>();
   try {
-    labels = new Map(openIssueLabels(repoConfig, repoLogger).map((i) => [i.number, i.labels]));
+    const open = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger);
+    labels = new Map(open.map((i) => [i.number, i.labels.map((l) => l.name)]));
+    titles = new Map(open.map((i) => [i.number, i.title]));
   } catch (err) {
     repoLogger.debug(`Issue labels unreadable — ranking the build by age only: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -426,7 +429,16 @@ export async function tryBatchImplementation(
     ? [...labels].filter(([, names]) => names.includes(repoConfig.lifecycleLabels.prMerged)).map(([n]) => n)
     : [];
   const verifying = devVerifyHolding(merged, loadRepoState(repoName).verifyHeld ?? {}, config.backoff.verifyRetry.maxAttempts);
-  const holder = featurePr ? `open feature PR #${featurePr.number}` : verifying !== null ? `#${verifying}'s dev verification` : null;
+  // The fix a failed verification asks for is filed as a follow-up to it.
+  // Queued behind that verification, it waited out every retry, each bound to
+  // fail without it (Slashbin-console#1340 behind #1338, 32 min, 2026-10-20).
+  // It builds now, alone.
+  const fixes = !featurePr && verifying !== null ? followUpsOf(verifying, actionableIssues, titles) : [];
+  if (fixes.length > 0) {
+    actionableIssues.splice(0, actionableIssues.length, ...fixes);
+    repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the follow-up to #${verifying}, whose dev verification is waiting on it`);
+  }
+  const holder = featurePr ? `open feature PR #${featurePr.number}` : verifying !== null && fixes.length === 0 ? `#${verifying}'s dev verification` : null;
   const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : holder ? actionableIssues : [];
   for (const n of [...repoQueue.keys()]) if (!queued.includes(n)) repoQueue.delete(n);
   if (holder && queued.length > 0) {

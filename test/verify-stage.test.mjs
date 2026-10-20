@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding } from "../dist/orchestrator.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf } from "../dist/orchestrator.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
 const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
@@ -114,4 +114,16 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged
     assert.doesNotMatch(b, /kind: "blocked"/, name);
   }
   assert.match(charge, /kind: "blocked"/);
+});
+
+test("followUpsOf: the fix a held verification asks for builds instead of queueing behind it", () => {
+  // Slashbin-console#1340 waited 32 min behind #1338's verification, which needed it.
+  const titles = new Map([
+    [1340, "Follow-up to #1338: fix the pick view"],
+    [1341, "Unrelated work"],
+    [1342, "follow-up to #13380: a different issue"],
+  ]);
+  assert.deepEqual(followUpsOf(1338, [1340, 1341, 1342], titles), [1340]);
+  assert.deepEqual(followUpsOf(1338, [1341], titles), [], "no follow-up, the hold stands");
+  assert.deepEqual(followUpsOf(1338, [9999], titles), [], "an issue with no cached title is not a follow-up");
 });
