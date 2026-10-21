@@ -161,6 +161,22 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
   },
 } satisfies Record<Stage, StageHandoff>);
 
+/**
+ * A handoff that replaces its stage's text when the hold belongs to someone other
+ * than the stage's owner. `deployFailed`: dev verification failed because the dev
+ * deploy did, which is infrastructure (the SRE's), not something the EM can clear.
+ */
+export const HANDOFF_VARIANTS = Object.freeze({
+  deployFailed: {
+    act: true,
+    todo: "The deploy to dev failed (infrastructure, not the code): get the merge deployed to dev, re-verify, then release the hold on {issue}.",
+    next: "get the merge deployed to dev, re-verify, release the hold on {issue}",
+    why: "dev verification failed because the deploy to dev did (the reason is above)",
+    done: "the merge is deployed to dev and the hold lifts (the card returns to its stage)",
+  },
+} satisfies Record<string, StageHandoff>);
+export type HandoffVariant = keyof typeof HANDOFF_VARIANTS;
+
 /** What a handoff names beyond its stage: the card's issue, its PR, and the fact that moved it. */
 export interface HandoffFacts {
   readonly repo: string;
@@ -197,8 +213,8 @@ function when(at: string): string {
  * The handoff block a note carries when its move hands the card to `f.seat`:
  * who, what to do, why, the links, and when it is done.
  */
-export function handoffComment(stage: Stage, f: HandoffFacts, labels: HandoffLabels = DEFAULT_HANDOFF_LABELS): string {
-  const h = STAGE_HANDOFF[stage];
+export function handoffComment(stage: Stage, f: HandoffFacts, labels: HandoffLabels = DEFAULT_HANDOFF_LABELS, variant?: HandoffVariant): string {
+  const h = variant ? HANDOFF_VARIANTS[variant] : STAGE_HANDOFF[stage];
   const v = varsOf(f, labels);
   const ev = f.evidence;
   const why = fill(h.why, v) + (ev?.text ? ` — ${ev.text}` : "") + (ev?.at ? ` (${when(ev.at)})` : "");
@@ -216,6 +232,6 @@ export function handoffComment(stage: Stage, f: HandoffFacts, labels: HandoffLab
 }
 
 /** The card description's line under `stage <stage>`: `Next: <seat> — <the action in a few words>`. */
-export function handoffNextLine(stage: Stage, f: HandoffFacts, labels: HandoffLabels = DEFAULT_HANDOFF_LABELS): string {
-  return `Next: ${f.seat} — ${fill(STAGE_HANDOFF[stage].next, varsOf(f, labels))}`;
+export function handoffNextLine(stage: Stage, f: HandoffFacts, labels: HandoffLabels = DEFAULT_HANDOFF_LABELS, variant?: HandoffVariant): string {
+  return `Next: ${f.seat} — ${fill((variant ? HANDOFF_VARIANTS[variant] : STAGE_HANDOFF[stage]).next, varsOf(f, labels))}`;
 }

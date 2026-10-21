@@ -152,7 +152,8 @@ export type WorkEvent =
   | { readonly kind: "claim"; readonly item: WorkItem }
   | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
-  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string }
+  /** `owner`: who the hold belongs to when not the stage's owner (the EM): `sre` for a failed dev deploy, which is infrastructure. */
+  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre" }
   /**
    * Dev verification of `item` waits on something that clears by itself (the deploy
    * is still building, or the SRE could not run) and resumes on its own. Not a

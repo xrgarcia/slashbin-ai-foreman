@@ -67,7 +67,7 @@ import {
   BACKLOG_STATUS, CONFIG_KEY, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withIssueLabel, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
-import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFacts, type HandoffLabels } from "./handoff.js";
+import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFacts, type HandoffLabels, type HandoffVariant } from "./handoff.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment, type PaperclipIssue } from "./client.js";
 import { commentsOf, finishComment, redactComment, reviewProgressComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
 import type { ReviewMilestone } from "../review-progress.js";
@@ -247,7 +247,7 @@ type SessionPhase = keyof typeof SESSION_STAGE;
 type NoteOpts = {
   readonly event: PaperclipCommentEvent;
   readonly tag?: "prLink" | "merged" | "session";
-  readonly handoff?: { readonly stage: PaperclipStage; readonly item: WorkItem };
+  readonly handoff?: { readonly stage: PaperclipStage; readonly item: WorkItem; readonly owner?: string; readonly variant?: HandoffVariant };
 };
 
 /** The handoff option for a move to `to`: only a lifecycle stage can hand a card to a seat. */
@@ -335,6 +335,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rowStage = new Map<string, PaperclipStage>();
   /** Task id → why the Foreman blocked it, the unblock descriptor's action when it moves to `blocked`. */
   private readonly blockedReason = new Map<string, string>();
+  /** Task id → the role key that holds its Blocked card when it is not the stage's owner (`sre`: a failed dev deploy). */
+  private readonly blockedOwner = new Map<string, string>();
   /** The last dev-verification wait note per row, so a repeated wait writes nothing. */
   private readonly verifyWaitNote = new Map<string, string>();
   /** Task id → the GitHub stage last seen for its issue, from the cycle snapshot. */
@@ -418,7 +420,7 @@ export class PaperclipMirror implements WorkObserver {
       case "claim": return this.onClaim(event.item);
       case "transition": return this.onState(event.item, event.from, event.to);
       case "prLink": return this.onPrLink(event.item, event.prUrl);
-      case "blocked": return this.onBlocked(event.item, event.reason);
+      case "blocked": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.blocked, "changesRequested", event.owner);
       case "escalated": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.escalated, event.at);
       case "verifyWaiting": return this.onVerifyWaiting(event.item, event.reason);
       case "unblocked": return this.onUnblocked(event.item, event.reason);
@@ -490,13 +492,17 @@ export class PaperclipMirror implements WorkObserver {
   /** Blocked, or (`step` escalated) parked for the EM's ruling in the stage that holder owns. */
   async onBlocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger,
     step: typeof PAPERCLIP_STEPS.blocked | typeof PAPERCLIP_STEPS.escalated = PAPERCLIP_STEPS.blocked,
-    at: PaperclipStage = "changesRequested"): Promise<void> {
+    at: PaperclipStage = "changesRequested", owner?: "sre"): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
     const text = fill(step.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
+    // A hold that is not the stage owner's (a failed dev deploy is the SRE's) goes to that
+    // role's seat; a role not configured with an agent id leaves the hold with the default.
+    const role = owner && this.cfg.roles?.[owner]?.id ? owner : undefined;
+    if (role) this.blockedOwner.set(id, role); else this.blockedOwner.delete(id);
     // An escalation names the stage its hold belongs to (`at`): revise's, the
     // default, only runs at changesRequested; a skip escalation sits at approved.
     // Anchored on the last snapshot instead, it could be stale:
@@ -507,7 +513,7 @@ export class PaperclipMirror implements WorkObserver {
     // Foreman for ten hours with nobody told).
     this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : this.ghStage.get(id));
     await this.move(id, step.stage);
-    await this.note(id, text, { event: "blocked", handoff: handoffTo(step.stage, item) });
+    await this.note(id, text, { event: "blocked", handoff: role ? { stage: step.stage, item, owner: role, variant: "deployFailed" } : handoffTo(step.stage, item) });
   }
 
   /**
@@ -525,6 +531,7 @@ export class PaperclipMirror implements WorkObserver {
     this.verifyWaitNote.set(id, text);
     this.blockedAt.delete(id);
     this.blockedReason.delete(id);
+    this.blockedOwner.delete(id);
     await this.move(id, step.stage);
     await this.note(id, text, { event: "progress" });
   }
@@ -541,6 +548,7 @@ export class PaperclipMirror implements WorkObserver {
     if (this.rowState.get(id) !== `status:${this.statusName("blocked")}`) return;
     this.blockedAt.delete(id);
     this.blockedReason.delete(id);
+    this.blockedOwner.delete(id);
     const stage = this.ghStage.get(id) ?? "approved";
     if (!(await this.move(id, stage))) return;
     await this.note(id, this.clean(reason), { event: "progress", handoff: handoffTo(stage, item) });
@@ -707,6 +715,7 @@ export class PaperclipMirror implements WorkObserver {
     this.blockedAt.delete(id);
     this.labelBlocked.delete(id);
     this.blockedReason.delete(id);
+    this.blockedOwner.delete(id);
     logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
   }
 
@@ -772,7 +781,7 @@ export class PaperclipMirror implements WorkObserver {
     } else if ((free || entry) && c.hold && status === this.statusName("blocked")) {
       const action = this.blockAction.get(id) ?? null;
       if (action !== c.hold.action && (action === null || action === LABEL_BLOCK_ACTION || action.startsWith(HOLD_PREFIX) || RECEIVER_HOLD_ENTRY.test(action))) {
-        const t = stageTarget(this.cfg, "blocked");
+        const t = stageTarget(this.cfg, "blocked", this.blockedOwner.get(id));
         body.unblockDescriptor = { owner: t.agentId ? { agentId: t.agentId } : "board", action: c.hold.action };
         body.status = status;
       }
@@ -1131,6 +1140,7 @@ export class PaperclipMirror implements WorkObserver {
         if (this.rowState.get(id) === `status:${this.statusName("blocked")}`) continue;
         const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: w.reason });
         this.blockedReason.set(id, text);
+        this.blockedOwner.delete(id);
         if (await this.move(id, PAPERCLIP_STEPS.blocked.stage)) await this.note(id, text, { event: "blocked" });
         continue;
       }
@@ -1429,7 +1439,7 @@ export class PaperclipMirror implements WorkObserver {
     let label: string | null = null;
     if (to === "done") bucket = "done";
     else {
-      const t = stageTarget(this.cfg, to);
+      const t = stageTarget(this.cfg, to, to === "blocked" ? this.blockedOwner.get(id) : undefined);
       bucket = t.bucket;
       label = t.label;
       if (t.agentId) holder = { assigneeAgentId: t.agentId, assigneeUserId: null };
@@ -1447,7 +1457,10 @@ export class PaperclipMirror implements WorkObserver {
       const unblock = holder.unblockDescriptor as { action: string } | undefined;
       if (unblock) this.blockAction.set(id, unblock.action);
       if (to !== "done") this.rowStage.set(id, to);
-      if (bucket !== "blocked") this.blockedReason.delete(id);
+      if (bucket !== "blocked") {
+        this.blockedReason.delete(id);
+        this.blockedOwner.delete(id);
+      }
     }
     return ok;
   }
@@ -1540,7 +1553,7 @@ export class PaperclipMirror implements WorkObserver {
       this.deferred.set(id, q);
       return;
     }
-    const handoff = opts.handoff ? this.handoffFor(id, opts.handoff.stage, opts.handoff.item) : null;
+    const handoff = opts.handoff ? this.handoffFor(id, opts.handoff.stage, opts.handoff.item, opts.handoff.owner, opts.handoff.variant) : null;
     const body = finishComment(handoff ? `${text}\n\n${handoff}` : text, this.comments, this.secrets);
     if (!body) return;
     // Never the same note twice in a row (SLA-514 got one four times).
@@ -1559,16 +1572,16 @@ export class PaperclipMirror implements WorkObserver {
    * Foreman holds that stage. Cites the last session's outcome once, so a later
    * handoff never offers it as its reason.
    */
-  private handoffFor(id: string, stage: PaperclipStage, item: WorkItem): string | null {
+  private handoffFor(id: string, stage: PaperclipStage, item: WorkItem, owner?: string, variant?: HandoffVariant): string | null {
     const evidence = this.evidence.get(id);
     this.evidence.delete(id);
-    const facts = this.handoffFacts(id, stage, item, evidence);
-    return facts ? handoffComment(stage, facts, this.labels) : null;
+    const facts = this.handoffFacts(id, stage, item, evidence, owner);
+    return facts ? handoffComment(stage, facts, this.labels, variant) : null;
   }
 
   /** What a handoff to `stage` names, or null when the Foreman holds that stage. */
-  private handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"]): HandoffFacts | null {
-    const seat = stageSeat(this.cfg, stage);
+  private handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"], owner?: string): HandoffFacts | null {
+    const seat = stageSeat(this.cfg, stage, owner);
     if (!seat) return null;
     const pr = id ? this.prOf.get(id) : undefined;
     return { repo: item.repo, issueNumber: item.issueNumber, seat, ...(pr ? { pr } : {}), ...(evidence ? { evidence } : {}) };

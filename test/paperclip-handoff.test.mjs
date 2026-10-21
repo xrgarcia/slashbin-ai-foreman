@@ -42,3 +42,13 @@ test("needsRuling names /rule-on-scope with the PR; prodVerifyHeld says to sort 
   assert.match(handoffComment("needsRuling", { ...facts, pr: undefined }), /`\/rule-on-scope example\/r <PR>`/);
   assert.equal(handoffNextLine("prodVerifyHeld", facts), "Next: Engineering Manager — sort the prod-verification hold on example/r#7");
 });
+
+test("deployFailed variant: the SRE is told to get the merge deployed, re-verify and release the hold", () => {
+  const sre = { ...facts, seat: "SRE" };
+  const text = handoffComment("blocked", sre, DEFAULT_HANDOFF_LABELS, "deployFailed");
+  assert.match(text, /^\*\*Next: SRE — action needed\*\*/);
+  assert.match(text, /The deploy to dev failed \(infrastructure, not the code\): get the merge deployed to dev, re-verify, then release the hold on example\/r#7\./);
+  assert.doesNotMatch(text, /\{\w+\}/);
+  assert.match(handoffNextLine("blocked", sre, DEFAULT_HANDOFF_LABELS, "deployFailed"), /^Next: SRE — get the merge deployed to dev/);
+  assert.match(handoffComment("blocked", facts), /Clear the hold on example\/r#7/, "no variant: the stage's own text");
+});
