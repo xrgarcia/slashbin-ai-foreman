@@ -30,6 +30,15 @@ import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, re
  * instrument it lacks, so each reopen buys three more runs of the same hold.
  * Only an edited spec (an acceptance script, an offline-instrument exception) can.
  */
+/**
+ * True when a verify hold's reason says the deploy itself failed (`dev-verify-failed`:
+ * trailer deploy=FAILURE; `deploy=<state>`: any other deploy state). Infrastructure,
+ * so the SRE owns the hold, not the EM (jerky_ops#97, 2026-10-21: Railway paused deploys).
+ */
+export function isDeployFailureHold(reason: string): boolean {
+  return reason === "dev-verify-failed" || reason.startsWith("deploy=");
+}
+
 export function reopensOnBaseAdvance(reason: string): boolean {
   return reason !== "acceptance-not-verified";
 }
@@ -257,7 +266,7 @@ export async function tryVerify(
     const final = attempts >= verifyRetry.maxAttempts;
     const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${verifyRetry.maxAttempts}` +
       (final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
-    for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
+    for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, ...(isDeployFailureHold(reason) ? { owner: "sre" as const } : {}) }, repoConfig, vlog);
     ended = { status: "failed", detail: why };
     vlog.warn(`${repoName}: ${why}`);
     events?.push({ message: `⏸️ ${repoConfig.githubRepo} ${issues}: ${why}`, level: final ? "error" : "warn" });

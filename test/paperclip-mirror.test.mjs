@@ -1358,3 +1358,28 @@ test("a card a wait finds in Blocked comes back to review", async () => {
   await mirror.onEvent({ kind: "verifyWaiting", item, reason: "deploy building" }, logger());
   assert.equal(fake.rows[0].status, "in_review");
 });
+
+test("a blocked event owned by the sre goes to the SRE seat with the deploy-failed handoff; unowned keeps the stage owner", async () => {
+  const roles = { sre: { name: "SRE", id: "sre-agent" }, em: { name: "Engineering Manager", id: "em-agent" } };
+  const board = { ...paperclipBoardDefaults().board, blocked: { ...paperclipBoardDefaults().board.blocked, owner: "em" } };
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles, board, comments: { enabled: true } });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onEvent({ kind: "blocked", item, reason: "dev verification of PR #98 did not pass (dev-verify-failed) — attempt 3/3", owner: "sre" }, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, "sre-agent");
+  assert.deepEqual(fake.rows[0].unblockDescriptor.owner, { agentId: "sre-agent" });
+  const last = fake.comments["row-1"].at(-1);
+  assert.match(last, /Next: SRE — action needed/);
+  assert.match(last, /The deploy to dev failed \(infrastructure, not the code\)/);
+  // Any other block goes back to the stage's owner, the EM.
+  await mirror.onEvent({ kind: "blocked", item, reason: "no merged PR closes it" }, logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+  assert.match(fake.comments["row-1"].at(-1), /Next: Engineering Manager/);
+  // An sre role with no agent id leaves the hold with the stage owner.
+  const fake2 = fakePaperclip();
+  const m2 = mirrorOn(fake2, { agentStatus: false, roles: { em: roles.em }, board, comments: { enabled: true } }).mirror;
+  await m2.onClaim(item, repoConfig, logger());
+  await m2.onEvent({ kind: "blocked", item, reason: "x", owner: "sre" }, logger());
+  assert.equal(fake2.rows[0].assigneeAgentId, "em-agent");
+});

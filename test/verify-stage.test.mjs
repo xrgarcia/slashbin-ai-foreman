@@ -127,3 +127,17 @@ test("followUpsOf: the fix a held verification asks for builds instead of queuei
   assert.deepEqual(followUpsOf(1338, [1341], titles), [], "no follow-up, the hold stands");
   assert.deepEqual(followUpsOf(1338, [9999], titles), [], "an issue with no cached title is not a follow-up");
 });
+
+test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state> reasons, nothing else", async () => {
+  const { isDeployFailureHold } = await import("../dist/phases/verify.js");
+  assert.equal(isDeployFailureHold("dev-verify-failed"), true);
+  assert.equal(isDeployFailureHold("deploy=CRASHED"), true);
+  assert.equal(isDeployFailureHold("no-merged-pr"), false);
+  assert.equal(isDeployFailureHold("unexpected trailer verdict=REJECT merged=false"), false);
+  // The charged-hold emit carries the owner (jerky_ops#97, 2026-10-21).
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf8");
+  assert.match(src.slice(src.indexOf("let attempts = 0;")), /isDeployFailureHold\(reason\) \? \{ owner: "sre" as const \}/);
+  // verifyVerdict yields exactly those reasons for a failed deploy.
+  assert.equal(isDeployFailureHold(verifyVerdict({ verdict: "APPROVE", merged: "yes", deploy: "FAILURE" }).reason), true);
+});

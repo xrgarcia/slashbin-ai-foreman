@@ -103,9 +103,9 @@ export function statusName(cfg: BoardConfig, bucket: PaperclipBucket): string {
  * (`userId`), never both. A lifecycle stage is always held by a role's agent,
  * so `userId` is absent here; it is in the type for readers of either kind.
  */
-export function stageTarget(cfg: BoardConfig, stage: PaperclipStage): { bucket: PaperclipBucket; agentId: string | undefined; label: string | null; userId?: string | undefined } {
+export function stageTarget(cfg: BoardConfig, stage: PaperclipStage, owner?: string): { bucket: PaperclipBucket; agentId: string | undefined; label: string | null; userId?: string | undefined } {
   const s = filled(cfg).board[stage];
-  return { bucket: s.status, agentId: agentFor(cfg, s.owner), label: s.label };
+  return { bucket: s.status, agentId: agentFor(cfg, owner ?? s.owner), label: s.label };
 }
 
 /**
@@ -114,8 +114,8 @@ export function stageTarget(cfg: BoardConfig, stage: PaperclipStage): { bucket: 
  * "foreman" role, or a role with no id yet). A stage with a seat gets a
  * handoff (handoff.ts): the holder is told what to do.
  */
-export function stageSeat(cfg: BoardConfig, stage: PaperclipStage): string | null {
-  const owner = filled(cfg).board[stage]?.owner;
+export function stageSeat(cfg: BoardConfig, stage: PaperclipStage, ownerRole?: string): string | null {
+  const owner = ownerRole ?? filled(cfg).board[stage]?.owner;
   if (!owner || owner === PAPERCLIP_FOREMAN_ROLE) return null;
   const id = agentFor(cfg, owner);
   if (!id || id === cfg.agentId) return null;
