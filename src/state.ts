@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { SavedRelease } from "./release-tracker.js";
+import type { UnstickEntry } from "./unstick.js";
 
 interface FailedIssue {
   count: number;
@@ -157,6 +158,10 @@ export interface RepoState {
   // e.g. "1283"), so a release stopped for a person is WARNed once per change
   // rather than every stall check while it waits.
   promotionHeldNoted?: string;
+  // Stuck work the unstick stage has taken to the EM, keyed `<issue>:<kind>`
+  // (src/unstick.ts). Persisted so a restart does not call the EM again for the
+  // same reason, and so a failed call is retried to its cap across restarts.
+  unstick?: Record<string, UnstickEntry>;
 }
 
 /**
@@ -283,6 +288,7 @@ function loadRepoStateCopy(repoName: string): RepoState {
       prodVerified: { ...(repo.prodVerified ?? {}) },
       ...(repo.promotionStallNoted ? { promotionStallNoted: [...repo.promotionStallNoted] } : {}),
       ...(repo.promotionHeldNoted ? { promotionHeldNoted: repo.promotionHeldNoted } : {}),
+      ...(repo.unstick ? { unstick: Object.fromEntries(Object.entries(repo.unstick).map(([k, v]) => [k, { ...v }])) } : {}),
     };
   }
 

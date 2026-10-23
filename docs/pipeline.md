@@ -15,11 +15,11 @@ move between states, is in [lifecycle.md](lifecycle.md) *(generated)*.
 
 ## The stages
 
-The Foreman runs these stages on every configured repo. Omitted, `stages` is the nine
+The Foreman runs these stages on every configured repo. Omitted, `stages` is the ten
 built-ins in this order (`src/stages.ts`):
 
 ```
-Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot
+Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot → Unstick
 ```
 
 1. **Reconcile** — finds commits on the feature branch that no PR carries (orphaned
@@ -69,6 +69,19 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    branches, so the updates go through the implement session like any other work. It is
    filed with the trigger label when the repo sets `dependencyPreApproved`. Renovate
    instead of Dependabot: `github.dependencyBranchPrefixes: ["renovate/"]`.
+10. **Unstick** *(on when `emRepoPath` is set; independent of `paperclip.enabled`)* — no
+    Claude session. For each stuck issue it runs `node <emRepoPath>/bin/em.mjs unstick
+    --repo <owner/name> --issue <N> --kind <kind> --reason <text>` (cwd `emRepoPath`,
+    `EM_GITHUB_TOKEN`, killed after 20 minutes). Kinds: skip, divergence, verify-held,
+    verify-exhausted, verify-no-pr, revision-exhausted, revision-stalemate,
+    needs-ruling, dead-zone, deploy-failed, release-gate (`src/unstick.ts`). A hold with
+    retries left is not called for. Divergence is repo-level, so it is called once per
+    issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes
+    are kept in `RepoState.unstick`, keyed `<issue>:<kind>`: exit 0 `invoked`, 2
+    `escalated` (no retry until the reason changes), 3 `declined`, anything else
+    `failed` (retried to 3 attempts). The Foreman never clears a block on exit 0 and
+    never writes Paperclip; the EM releases the hold on GitHub and the unblock checks
+    see it. A comment opening `**EM unstick` does not count as the issue changing.
 
 Other behaviour of the loop:
 

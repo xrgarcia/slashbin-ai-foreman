@@ -227,7 +227,7 @@ The review phase hands each PR to the Tech Lead (techLeadPath), which runs under
 
 Type: string · Default: none · Env: `AI_AGENT_EM_REPO_PATH`
 
-No longer read: review runs through the Tech Lead, never a Claude session in this directory. Accepted so an older config still loads.
+The EM checkout. The unstick stage runs `bin/em.mjs unstick` here (cwd) for stuck work, whether or not Paperclip is on; unset, that stage does nothing. The handoff-contract reader (bin/read-handoff-contract.mjs) and the SRE's spec mirror also read from it. Review no longer does: it runs through the Tech Lead, never a Claude session in this directory.
 
 ### `techLeadPath`
 
@@ -319,9 +319,9 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 ### `stages`
 
-Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot`
+Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick`
 
-The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the nine built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the ten built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 

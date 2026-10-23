@@ -14,7 +14,8 @@ import { isCustomStage, stageName, type StageEntry, type StageType } from "./sta
 //                built at a time, and a revision always goes before new work.
 //  - `release` = promote, then release — release acts on the release PR that
 //                promote just opened or updated.
-// Every other built-in is a lane of its own.
+// Every other built-in is a lane of its own (`unstick` too: a 20-minute EM call
+// must not hold a verify or a release).
 
 /** The lane a built-in stage belongs to. */
 const LANE_OF: Record<StageType, string> = {
@@ -27,6 +28,7 @@ const LANE_OF: Record<StageType, string> = {
   implement: "build",
   "branch-sync": "branch-sync",
   dependabot: "dependabot",
+  unstick: "unstick",
 };
 
 export interface Lane {
@@ -89,7 +91,7 @@ export function stageNeedsCheckout(s: StageEntry): boolean {
  */
 export function stageSpawnsSession(s: StageEntry): boolean {
   if (isCustomStage(s)) return true;
-  return s.type === "review" || s.type === "verify" || s.type === "revise" || s.type === "implement" || s.type === "release";
+  return s.type === "review" || s.type === "verify" || s.type === "revise" || s.type === "implement" || s.type === "release" || s.type === "unstick";
 }
 
 // --- Per-repo checkout lock --------------------------------------------------

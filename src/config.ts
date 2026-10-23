@@ -243,8 +243,11 @@ export const configSchema = z.object({
   // The review phase hands each PR to the Tech Lead (techLeadPath), which runs
   // under TECHLEAD_GITHUB_KEY (reviewer attribution).
 
-  // No longer read: review runs through the Tech Lead, never a Claude session
-  // in this directory. Accepted so an older config still loads.
+  // The EM checkout. The unstick stage runs `bin/em.mjs unstick` here (cwd) for
+  // stuck work, whether or not Paperclip is on; unset, that stage does nothing.
+  // The handoff-contract reader (bin/read-handoff-contract.mjs) and the SRE's
+  // spec mirror also read from it. Review no longer does: it runs through the
+  // Tech Lead, never a Claude session in this directory.
   emRepoPath: z.string().optional(),
   // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
   // review is offered to it FIRST — Codex judges, its code posts and merges.
@@ -342,7 +345,7 @@ export const configSchema = z.object({
   // (src/lanes.ts): revise+implement form the `build` lane, promote+release the
   // `release` lane, every other built-in a lane of its own, and each (repo, lane)
   // pair polls on its own loop. Order matters only inside a lane. Omitted, it is
-  // the nine built-ins in order; `release` runs only when both srePath and
+  // the ten built-ins in order; `release` runs only when both srePath and
   // techLeadPath are set and is skipped with a startup warning otherwise. Listing
   // `release` explicitly without both is refused at startup. A custom stage is
   // `{ id, skillPath }`: one Claude session on that skill, in the lane of the
@@ -462,8 +465,7 @@ export interface AgentConfig {
   sessionEnv: string[];
 
   // --- Review phase settings (shared across repos) ---
-  // emRepoPath is the absolute path to the review repo used as the review
-  // session's cwd. Optional even with review enabled — see reviewSessionCwd.
+  // emRepoPath is the absolute path to the EM checkout (unstick stage's cwd).
   emRepoPath?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
@@ -482,7 +484,7 @@ export interface AgentConfig {
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
   github: GithubConventions;
-  /** The stages each repo pass runs, in order. Defaults to the nine built-ins. */
+  /** The stages each repo pass runs, in order. Defaults to the ten built-ins. */
   stages: readonly StageEntry[];
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
@@ -523,6 +525,11 @@ function inferGithubRepo(repoPath: string): string | undefined {
  */
 export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github">): string[] {
   return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
+}
+
+/** True when the unstick stage can run: it calls the EM checkout's `bin/em.mjs`. Independent of `paperclip.enabled`. */
+export function unstickStageReady(config: Pick<AgentConfig, "emRepoPath">): boolean {
+  return Boolean(config.emRepoPath);
 }
 
 export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLeadPath">): boolean {

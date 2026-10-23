@@ -1,0 +1,163 @@
+// The unstick stage's data: what "stuck" means, and the table that remembers
+// what was asked of the EM (foreman#103).
+//
+// The Foreman calls the Tech Lead and the SRE directly, but used to show stuck
+// work to the EM only as a Paperclip card, so with Paperclip off a stuck issue
+// reached no one. The unstick stage (src/phases/unstick.ts) runs
+// `<emRepoPath>/bin/em.mjs unstick --repo <owner/name> --issue <N> --kind <kind>
+// --reason <text>` for each stuck issue and records the outcome here.
+//
+// Two sources feed one table, `RepoState.unstick`, keyed `<issue>:<kind>`:
+//  - DERIVED kinds are read off persisted state every pass (`derivedCandidates`):
+//    nothing relies on an event having fired, so a hold whose event came and
+//    went before a restart (cmneb_hr#38, 2026-10-20) is still found. Their
+//    entries live while the condition does.
+//  - EVENT kinds have no persisted condition to read (revision and ruling
+//    stops are in memory), so the `blocked` / `escalated` event carries a
+//    `stuck` kind and `noteStuck` records it. Those entries live until an
+//    `unblocked` event, the issue closing, or a new reason replaces them.
+
+import { loadRepoState, saveRepoState, type BranchBlock, type RepoState } from "./state.js";
+import { escalatedReason } from "./github/skip-hold.js";
+
+/**
+ * Every `--kind` the EM's `unstick` command accepts. Shared verbatim with the
+ * EM side (slashbin-engineering-manager#737): change both or neither.
+ */
+export const UNSTICK_KINDS = [
+  "skip",
+  "divergence",
+  "verify-held",
+  "verify-exhausted",
+  "verify-no-pr",
+  "revision-exhausted",
+  "revision-stalemate",
+  "needs-ruling",
+  "dead-zone",
+  "deploy-failed",
+  "release-gate",
+] as const;
+export type UnstickKind = (typeof UNSTICK_KINDS)[number];
+
+/** `pending` not yet called · `invoked` EM exit 0 · `escalated` exit 2 · `declined` exit 3 · `failed` anything else. */
+export type UnstickStatus = "pending" | "invoked" | "escalated" | "declined" | "failed";
+
+/** Calls spent on one reason before a failing call stops being retried. */
+export const UNSTICK_MAX_ATTEMPTS = 3;
+
+export interface UnstickEntry {
+  issue: number;
+  kind: UnstickKind;
+  /** What the EM was (or will be) told. A different reason is a new question and is called again. */
+  reason: string;
+  status: UnstickStatus;
+  /** Calls made for this reason. */
+  attempts: number;
+  /** ISO time this reason first appeared. */
+  since: string;
+  /** ISO time of the last call. */
+  lastCallAt?: string;
+  /** The tail of the last failure, for the log and for a person reading the state. */
+  detail?: string;
+}
+
+/** Something stuck right now, as read this pass. */
+export interface UnstickCandidate {
+  issue: number;
+  kind: UnstickKind;
+  reason: string;
+}
+
+export const unstickKey = (issue: number, kind: UnstickKind): string => `${issue}:${kind}`;
+
+/** The kinds only an event can report: there is no persisted condition to read them from. */
+export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held",
+]);
+
+/** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
+export const RELEASE_GATE_REASON = "at `pr approved` — dev verification passed, awaiting the EM outcome gate (`ready for prod release`)";
+
+/**
+ * The stuck work persisted state shows. Pure.
+ *
+ * A verify hold is stuck only once its attempts are spent: until then the stage
+ * retries it itself, and calling the EM would race that. A deploy-failure hold
+ * (`owner: "sre"`) is included — the EM hands it to the SRE and rules.
+ *
+ * Divergence is repo-level (`state.branchBlock`), not per issue. It is called
+ * once for each issue the Foreman announced it on, so the EM sees a real issue;
+ * with none announced, once for issue 0 (the repo). The kind and reason are
+ * identical either way, so one episode is one question per issue.
+ */
+export function derivedCandidates(
+  state: Pick<RepoState, "verifyHeld" | "skipped" | "branchBlock">,
+  opts: {
+    verifyMaxAttempts: number;
+    isDeployFailureHold: (reason: string) => boolean;
+    /** Worded by the caller (phases/common.ts), which this module may not import: it would be a cycle through work-source. */
+    divergenceReason: (block: BranchBlock) => string;
+  },
+): UnstickCandidate[] {
+  const out: UnstickCandidate[] = [];
+  for (const [key, h] of Object.entries(state.verifyHeld ?? {})) {
+    const issue = Number(key);
+    if (h.reason === "no-merged-pr") {
+      out.push({ issue, kind: "verify-no-pr", reason: "labelled merged, but no merged PR into the base branch closes it" });
+    } else if (h.attempts >= opts.verifyMaxAttempts) {
+      const pr = h.prNumber ? ` (PR #${h.prNumber})` : "";
+      out.push({
+        issue,
+        kind: opts.isDeployFailureHold(h.reason) ? "deploy-failed" : "verify-exhausted",
+        reason: `dev verification held: ${h.reason}${pr}, ${h.attempts} attempts spent`,
+      });
+    }
+  }
+  for (const [key, s] of Object.entries(state.skipped ?? {})) {
+    if (s.escalatedAt) out.push({ issue: Number(key), kind: "skip", reason: escalatedReason(s.reason, s.skipCount ?? 0) });
+  }
+  const b = state.branchBlock;
+  if (b) {
+    const reason = opts.divergenceReason(b);
+    const issues = b.announced.length > 0 ? b.announced : [0];
+    for (const issue of issues) out.push({ issue, kind: "divergence", reason });
+  }
+  return out;
+}
+
+/** Whether a candidate needs an EM call now, given what the table holds for it. Pure. */
+export function needsCall(entry: UnstickEntry | undefined, c: UnstickCandidate, maxAttempts = UNSTICK_MAX_ATTEMPTS): boolean {
+  if (!entry || entry.reason !== c.reason) return true;
+  switch (entry.status) {
+    case "pending": return true;
+    case "failed": return entry.attempts < maxAttempts;
+    default: return false; // invoked / escalated / declined: wait for the reason to change
+  }
+}
+
+/** Record a fresh question (or keep the standing one if the reason is unchanged). */
+export function openEntry(prior: UnstickEntry | undefined, c: UnstickCandidate, now: string): UnstickEntry {
+  if (prior && prior.reason === c.reason) return prior;
+  return { issue: c.issue, kind: c.kind, reason: c.reason, status: "pending", attempts: 0, since: now };
+}
+
+/** An event reported work stuck: remember it for the stage's next pass. */
+export function noteStuck(repoName: string, issue: number, kind: UnstickKind, reason: string): void {
+  const state = loadRepoState(repoName);
+  const table = { ...(state.unstick ?? {}) };
+  const key = unstickKey(issue, kind);
+  const next = openEntry(table[key], { issue, kind, reason }, new Date().toISOString());
+  if (next === table[key]) return;
+  table[key] = next;
+  saveRepoState(repoName, { ...state, unstick: table });
+}
+
+/** The block on `issue` was released (`unblocked`): its questions are over. */
+export function clearUnstick(repoName: string, issue: number): void {
+  const state = loadRepoState(repoName);
+  const table = state.unstick;
+  if (!table) return;
+  const keep = Object.fromEntries(Object.entries(table).filter(([, e]) => e.issue !== issue));
+  if (Object.keys(keep).length === Object.keys(table).length) return;
+  saveRepoState(repoName, { ...state, unstick: keep });
+}

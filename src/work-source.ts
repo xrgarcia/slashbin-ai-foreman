@@ -4,6 +4,7 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { loadRepoState } from "./state.js";
+import { clearUnstick, noteStuck } from "./unstick.js";
 
 /**
  * The work source each repo selects from and reports to. GitHub issues unless
@@ -149,6 +150,16 @@ export async function selectWork(
  * the source returned: `true` when it recorded a change.
  */
 export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logger: Logger): Promise<boolean> {
+  // Stuck work the unstick stage should take to the EM (src/unstick.ts), and the
+  // end of it. State only; the stage reads it on its next pass.
+  if (repoConfig) {
+    try {
+      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) noteStuck(repoConfig.name, event.item.issueNumber, event.stuck, event.reason);
+      else if (event.kind === "unblocked") clearUnstick(repoConfig.name, event.item.issueNumber);
+    } catch (err) {
+      logger.debug(`unstick record skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   const recorded = repoConfig && !(event.kind === "transition" && event.observed)
     ? await workSourceFor(repoConfig).record(event, repoConfig, logger)
     : false;

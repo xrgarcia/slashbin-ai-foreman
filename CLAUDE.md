@@ -13,11 +13,11 @@ into `features` (Ray, 2026-10-18).
 ## Cycle
 
 Each poll cycle runs the configured `stages` across every configured repo
-(`src/stages.ts`; `docs/pipeline.md`). Omitted, they are the nine built-ins
+(`src/stages.ts`; `docs/pipeline.md`). Omitted, they are the ten built-ins
 in this order, so labels set in one phase are consumed by the right phase next cycle:
 
 ```
-Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release
+Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release → Unstick
 ```
 
 Verify runs only when `srePath` is set: the SRE checks each merged PR in dev. Release runs
@@ -52,6 +52,9 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
    verification, or `prod verification held` and re-verify on a back-off; then a 30-minute
    soak. Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
    Discord. See docs/lifecycle.md.
+9. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
+   `emRepoPath`, Paperclip or not) — calls `bin/em.mjs unstick` in the EM checkout for each stuck
+   issue; the outcome is `RepoState.unstick`. See docs/pipeline.md.
 
 Priority within a cycle is encoded by stage order. Only one Claude session runs at a
 time (`implementing` mutex) for git-state safety.
@@ -64,7 +67,7 @@ decision-layer workflow rather than an in-repo edit:
 - **Runs as the Tech Lead, only.** `reviewViaTechLead` runs `bin/tech-lead.mjs
   review-pr` in `techLeadPath`; when it cannot take a review the PR waits a
   `backoff.agentUnavailable` window — there is no Claude review session.
-  `reviewSkillPath` and `emRepoPath` are accepted but no longer read.
+  `reviewSkillPath` is accepted but no longer read; `emRepoPath` is (the Unstick stage and the contract reader).
 - **Runs under a separate token.** Reviews/merges are attributed to `TECHLEAD_GITHUB_KEY`
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
 - **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and

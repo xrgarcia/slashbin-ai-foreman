@@ -16,7 +16,7 @@ import { detectDeclaredSkip } from "../dist/agent.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { loadConfig } from "../dist/config.js";
 import { UNBLOCK_CHECKS, passingCheck } from "../dist/unblock.js";
-import { changedSince, escalatedReason, heldReason, holdStatus, parseWaitingOn, skipGate } from "../dist/github/skip-hold.js";
+import { changedSince, escalatedReason, heldReason, holdStatus, isEmUnstickComment, parseWaitingOn, skipGate } from "../dist/github/skip-hold.js";
 import { orchestratorSource } from "./source-text.mjs";
 
 const REPO = "xrgarcia/jerky_service";
@@ -243,4 +243,14 @@ test("config: agentLogins defaults to none, from the file as a list or the env c
   } finally {
     delete process.env.AI_AGENT_BACKOFF_SKIP_AGENT_LOGINS;
   }
+});
+
+test("release: the EM's own `**EM unstick` comment never counts as the issue changing (foreman#103)", () => {
+  const em = { at: "2026-10-14T15:00:00Z", login: "xrgarcia", kind: "comment", emUnstick: true };
+  const person = { at: "2026-10-14T15:05:00Z", login: "xrgarcia", kind: "comment" };
+  assert.equal(changedSince([em], SKIPPED, "slashbin-foreman"), false);
+  assert.equal(changedSince([em, person], SKIPPED, "slashbin-foreman"), true, "a person's comment still releases");
+  assert.equal(isEmUnstickComment("  **EM unstick** — ruled"), true);
+  assert.equal(isEmUnstickComment("I think the **EM unstick** is wrong"), false);
+  assert.equal(isEmUnstickComment(undefined), false);
 });

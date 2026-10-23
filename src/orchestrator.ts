@@ -11,6 +11,7 @@ import { tryBatchImplementation } from "./phases/implement.js";
 import { tryFileDependencyBatchIssue, tryPromotion, trySyncDrift } from "./phases/promote.js";
 import { runReconcileStage } from "./phases/reconcile.js";
 import { tryRelease } from "./phases/release.js";
+import { tryUnstick } from "./phases/unstick.js";
 import { tryReview } from "./phases/review.js";
 import { tryRevision } from "./phases/revise.js";
 import { tryVerify } from "./phases/verify.js";
@@ -391,6 +392,13 @@ async function runStage(
     //    any outcome; a no-op without srePath and techLeadPath. ---
     case "release":
       if (await tryRelease(repoConfig, config, base, cycleNumber)) processed++;
+      break;
+
+    // --- Ask the EM to unstick stuck work (foreman#103): holds, escalations,
+    //    divergence and the release gate. Needs emRepoPath; independent of
+    //    Paperclip. Never clears a block. ---
+    case "unstick":
+      processed += await tryUnstick(repoConfig, config, base, cycleNumber);
       break;
   }
   return { result: { outcome: "ok" }, processed, lastImplementation };

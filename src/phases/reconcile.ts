@@ -1,7 +1,6 @@
 // The reconcile phase: orphaned commits, rejected branches, the dead zones,
 // and label reconciliation from review trailers.
 
-import { spawnSync } from "node:child_process";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
@@ -12,7 +11,6 @@ import type { ReviewTrailer } from "../agent.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import {
   CycleEvent,
-  RECOVERY_VERIFY_TIMEOUT_MS,
   deadZoneAlerted,
   deadZoneRecoveryAttempted,
   itemOf,
@@ -20,80 +18,6 @@ import {
   notifyOnce,
   workStateOf,
 } from "./common.js";
-
-/**
- * Repair one dead-zoned issue by re-running the post-merge verification the
- * failed review never completed, then labeling from ITS verdict.
- *
- * This is not a rubber stamp, which is the objection that kept the dead zone
- * detection-only. The verdict comes from the verifier — a real deploy poll and
- * healthcheck against the merged commit — not from the agent that dropped the
- * ball, and not from the mere fact that a merge happened. `pr approved` on PASS
- * is precisely the state a healthy review would have left behind; `pr pending
- * actions` on FAIL routes it to the revise phase, which is what a post-merge
- * FAIL is supposed to do. A FAIL is still a HOLD — it just becomes a hold the
- * pipeline knows about instead of an issue nobody is looking at.
- *
- * `ready for prod release` is never applied here: that label is the EM outcome
- * gate's signature and stays a human act.
- *
- * Returns the verdict, or "indeterminate" when we could not get a trustworthy
- * answer — an unmapped repo (the verifier exits 2 for a service it has no
- * Railway mapping for), a verifier crash, or a timeout. Indeterminate changes
- * NOTHING: the issue stays dead-zoned and alerted, which is strictly better
- * than guessing at a lifecycle from a verification that never ran.
- */
-export function recoverDeadZonedIssue(
-  repoConfig: RepoConfig,
-  config: AgentConfig,
-  issueNumber: number,
-  prNumber: number,
-  logger: Logger,
-): "pass" | "fail" | "indeterminate" {
-  if (!config.emRepoPath) {
-    logger.debug("Dead-zone recovery skipped — emRepoPath not configured");
-    return "indeterminate";
-  }
-
-  logger.info(
-    `Dead-zone recovery: re-running post-merge verification for #${issueNumber} (PR #${prNumber})`,
-  );
-
-  const run = spawnSync(
-    "npm",
-    [
-      "run", "verify", "--",
-      "--repo", repoConfig.name,
-      "--pr", String(prNumber),
-      "--issue", String(issueNumber),
-      "--env", "development",
-    ],
-    {
-      cwd: config.emRepoPath,
-      encoding: "utf-8",
-      timeout: RECOVERY_VERIFY_TIMEOUT_MS,
-      env: process.env,
-    },
-  );
-
-  if (run.error || run.signal) {
-    logger.warn(
-      `Dead-zone recovery INDETERMINATE for #${issueNumber} — verifier did not complete (${run.signal ? `signal ${run.signal}` : run.error?.message}); leaving the issue as-is`,
-    );
-    return "indeterminate";
-  }
-
-  // The verifier's contract: 0 = all checks pass, 1 = a check failed,
-  // 2 = crash or invalid arguments (including a repo it has no service mapping
-  // for). Only 0 and 1 are verdicts; 2 is an absence of one.
-  if (run.status === 0) return "pass";
-  if (run.status === 1) return "fail";
-
-  logger.warn(
-    `Dead-zone recovery INDETERMINATE for #${issueNumber} — verifier exited ${run.status} (no verdict; repo may have no service mapping): ${(run.stderr || "").split("\n")[0]}`,
-  );
-  return "indeterminate";
-}
 
 /**
  * Set the outcome label the review run reported, for issues it merged but left at
@@ -332,31 +256,6 @@ export async function runReconcileStage(
           continue;
         }
       }
-      if (!tried.has(s.issueNumber)) {
-        tried.add(s.issueNumber);
-        const verdict = recoverDeadZonedIssue(
-          repoConfig,
-          config,
-          s.issueNumber,
-          s.prNumber,
-          reconLogger,
-        );
-        if (verdict !== "indeterminate" && await advance(
-          itemOf(repoConfig, s.issueNumber), verdict === "pass" ? "recoverPassed" : "recoverFailed",
-          repoConfig, reconLogger,
-        )) {
-          const label = labels[verdict === "pass" ? "prApproved" : "prPendingActions"];
-          events.push({
-            message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone auto-recovered: re-verification ${verdict.toUpperCase()} → labeled "${label}" (PR #${s.prNumber} was merged with the issue left unadvanced)`,
-            level: verdict === "pass" ? "info" : "warn",
-          });
-          seen.delete(s.issueNumber);
-          current.delete(s.issueNumber);
-          processed++;
-          continue; // repaired — no dead-zone alert needed
-        }
-      }
-
       if (seen.has(s.issueNumber)) continue; // already alerted; still stuck
       seen.add(s.issueNumber);
       reconLogger.warn(
@@ -371,6 +270,7 @@ export async function runReconcileStage(
         kind: "blocked",
         item: itemOf(repoConfig, s.issueNumber),
         reason: `PR #${s.prNumber} merged but the issue never advanced and recovery could not move it; restarting the Foreman retries recovery, which hands it to the SRE's dev verification`,
+        stuck: "dead-zone",
       }, repoConfig, reconLogger);
     }
     // Drop cleared issues so a real re-entry alerts again — and so a repaired
