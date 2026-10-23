@@ -2,6 +2,7 @@ import type { RepoConfig, AgentConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { Stage, StageOrDone, Transition } from "./lifecycle.js";
 import type { ReviewMilestone } from "./review-progress.js";
+import type { UnstickKind } from "./unstick.js";
 
 /**
  * One unit of work a source hands to the pipeline. Deliberately minimal: the
@@ -153,7 +154,7 @@ export type WorkEvent =
   | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
   /** `owner`: who the hold belongs to when not the stage's owner (the EM): `sre` for a failed dev deploy, which is infrastructure. */
-  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre" }
+  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre"; readonly stuck?: UnstickKind }
   /**
    * Dev verification of `item` waits on something that clears by itself (the deploy
    * is still building, or the SRE could not run) and resumes on its own. Not a
@@ -166,7 +167,7 @@ export type WorkEvent =
    * once the issue changes). `at` is the GitHub stage the hold belongs to.
    * absent, `changesRequested`, where revise escalates.
    */
-  | { readonly kind: "escalated"; readonly item: WorkItem; readonly reason: string; readonly at?: Stage }
+  | { readonly kind: "escalated"; readonly item: WorkItem; readonly reason: string; readonly at?: Stage; readonly stuck?: UnstickKind }
   /** A block on `item` was resolved by one of the Foreman's unblock checks (src/unblock.ts). */
   | { readonly kind: "unblocked"; readonly item: WorkItem; readonly reason: string }
   /** The feature PR delivering `item` merged to the base branch. */

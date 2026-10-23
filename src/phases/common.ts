@@ -301,10 +301,6 @@ export const deadZoneAlerted = new Map<string, Set<number>>();
  *  does not re-spend a multi-minute deploy poll on every cycle, forever. */
 export const deadZoneRecoveryAttempted = new Map<string, Set<number>>();
 
-/** Ceiling on one dead-zone re-verification. The verifier polls a Railway
- *  deployment, so minutes are normal and hanging forever is not. */
-export const RECOVERY_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
-
 export const lastFailureReason = new Map<string, string>(); // per-repo last failure for retry context
 
 /**

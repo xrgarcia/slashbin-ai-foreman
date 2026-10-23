@@ -551,6 +551,17 @@ export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfi
   return env;
 }
 
+/**
+ * The EM unstick call's environment (#103). The EM acts as itself: it receives
+ * the existing EM_GITHUB_TOKEN by name (never the Foreman's, the Tech Lead's or
+ * the SRE's) plus the session essentials and any configured sessionEnv.
+ */
+export function buildEmEnv(agentConfig: AgentConfig): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  pickEnv(["EM_GITHUB_TOKEN"], env);
+  return env;
+}
+
 /** A value shorter than this is not redacted: too likely to match ordinary text. */
 const MIN_SECRET_LENGTH = 8;
 
@@ -1732,6 +1743,49 @@ export async function approvePromotionViaTechLead(
   const last = r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
   if (r.code === 4) return { kind: "refused", reason: last || "refused" };
   return { kind: "retry", reason: `exit ${r.code}: ${tail(r)}` };
+}
+
+/** How long one `em.mjs unstick` call may run before it is killed (#103). */
+export const EM_UNSTICK_MAX_DURATION_MS = 20 * 60_000;
+
+/** How the EM answered an unstick call. The Foreman never clears a block on any of them. */
+export type UnstickOutcome =
+  /** Exit 0: the EM acted; the block is released by the normal unblock checks, not by this. */
+  | { kind: "invoked"; detail: string }
+  /** Exit 2: the EM escalated to a person; no retry until the reason changes. */
+  | { kind: "escalated"; detail: string }
+  /** Exit 3: the EM declined. */
+  | { kind: "declined"; detail: string }
+  /** Anything else (error, timeout, not configured): retried up to the attempt cap. */
+  | { kind: "failed"; detail: string };
+
+/**
+ * Ask the EM to unstick `issue` (`em.mjs unstick --repo --issue --kind --reason`),
+ * cwd the EM checkout. Exit 0 invoked, 2 escalated, 3 declined, else failed.
+ */
+export async function unstickViaEm(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  issue: number,
+  kind: string,
+  reason: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<UnstickOutcome> {
+  const em = agentConfig.emRepoPath;
+  if (!em) return { kind: "failed", detail: "emRepoPath not configured" };
+  if (!process.env.EM_GITHUB_TOKEN) return { kind: "failed", detail: "EM_GITHUB_TOKEN not set" };
+  logger.info(`Asking the EM to unstick ${repoConfig.githubRepo}#${issue} (${kind})`);
+  const r = await runAgentCli(em, "bin/em.mjs",
+    ["unstick", "--repo", repoConfig.githubRepo, "--issue", String(issue), "--kind", kind, "--reason", reason],
+    buildEmEnv(agentConfig), agentConfig, EM_UNSTICK_MAX_DURATION_MS, abortSignal, transcriptPath);
+  if (r.timedOut) return { kind: "failed", detail: "EM unstick timed out" };
+  const last = r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
+  if (r.code === 0) return { kind: "invoked", detail: last };
+  if (r.code === 2) return { kind: "escalated", detail: last };
+  if (r.code === 3) return { kind: "declined", detail: last };
+  return { kind: "failed", detail: `exit ${r.code}: ${tail(r)}` };
 }
 
 /** The SRE deploy trailer: the last line of `sre.mjs deploy` (exit 0, and exit 3 too). */

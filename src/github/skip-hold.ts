@@ -63,19 +63,30 @@ export interface IssueActivity {
   at: string;
   login?: string;
   kind?: "edit" | "comment" | "event";
+  /** A comment opening `**EM unstick`: the EM's note from an unstick call. It is talk about the hold, never a change to the issue. */
+  emUnstick?: boolean;
+}
+
+/** The opening of the one comment every `bin/em.mjs unstick` call leaves (foreman#103). */
+export const EM_UNSTICK_MARKER = "**EM unstick";
+
+/** True when `body` is the EM's unstick comment. */
+export function isEmUnstickComment(body: string | null | undefined): boolean {
+  return typeof body === "string" && body.trimStart().startsWith(EM_UNSTICK_MARKER);
 }
 
 /**
  * Whether anyone but `self` changed the issue after `since`: an edit to its
  * body or title, a comment, a label added or removed, a reopen. The Foreman's
  * own writes (its skip comment, its labels) never count, or a hold would
- * release itself.
+ * release itself. Nor does the EM's `**EM unstick` comment: it answers the
+ * hold, and counting it would release a skip and loop the build.
  */
 export function changedSince(activity: IssueActivity[], since: string, self: string | undefined): boolean {
   const t = new Date(since).getTime();
   if (Number.isNaN(t)) return true;
   const me = self?.toLowerCase();
-  return activity.some((a) => new Date(a.at).getTime() > t && (!me || a.login?.toLowerCase() !== me));
+  return activity.some((a) => !a.emUnstick && new Date(a.at).getTime() > t && (!me || a.login?.toLowerCase() !== me));
 }
 
 /**
@@ -93,7 +104,7 @@ export function escalatedChangeBy(activity: IssueActivity[], since: string, self
   let by: "agent" | undefined;
   for (const a of activity) {
     const login = a.login?.toLowerCase();
-    if (new Date(a.at).getTime() <= t || (me && login === me)) continue;
+    if (a.emUnstick || new Date(a.at).getTime() <= t || (me && login === me)) continue;
     if (!login || !bots.has(login)) return "person";
     if (a.kind !== "comment") by = "agent";
   }
@@ -103,14 +114,14 @@ export function escalatedChangeBy(activity: IssueActivity[], since: string, self
 const ACTIVITY_QUERY = `query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){
 updatedAt
 userContentEdits(last:10){nodes{editedAt editor{login}}}
-comments(last:20){nodes{createdAt author{login}}}
+comments(last:20){nodes{createdAt author{login} body}}
 timelineItems(last:20,itemTypes:[LABELED_EVENT,UNLABELED_EVENT,RENAMED_TITLE_EVENT,REOPENED_EVENT]){nodes{
 ... on LabeledEvent{createdAt actor{login}}
 ... on UnlabeledEvent{createdAt actor{login}}
 ... on RenamedTitleEvent{createdAt actor{login}}
 ... on ReopenedEvent{createdAt actor{login}}}}}}}`;
 
-type Node = { createdAt?: string; editedAt?: string; author?: { login?: string } | null; editor?: { login?: string } | null; actor?: { login?: string } | null };
+type Node = { body?: string; createdAt?: string; editedAt?: string; author?: { login?: string } | null; editor?: { login?: string } | null; actor?: { login?: string } | null };
 
 /**
  * The issue's recent changes, newest window only. One read, plus none at all
@@ -126,7 +137,7 @@ export function issueActivitySince(repo: string, issue: number, since: string, c
   const nodes = (x: { nodes?: Node[] } | undefined) => x?.nodes ?? [];
   return [
     ...nodes(i.userContentEdits).map((e) => ({ at: e.editedAt ?? "", login: e.editor?.login, kind: "edit" as const })),
-    ...nodes(i.comments).map((c) => ({ at: c.createdAt ?? "", login: c.author?.login, kind: "comment" as const })),
+    ...nodes(i.comments).map((c) => ({ at: c.createdAt ?? "", login: c.author?.login, kind: "comment" as const, ...(isEmUnstickComment(c.body) ? { emUnstick: true } : {}) })),
     ...nodes(i.timelineItems).filter((e) => e.createdAt).map((e) => ({ at: e.createdAt!, login: e.actor?.login, kind: "event" as const })),
   ];
 }

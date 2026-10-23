@@ -110,7 +110,7 @@ export async function tryRevision(
         `(issues ${pending.issueNumbers.map((n) => `#${n}`).join(", ")}); a PR comment opening "**EM scope ruling" resumes it.`;
       revLogger.warn(`${why} — revision paused for an EM scope ruling`);
       events.push({ message: `⚠️ ${repoConfig.githubRepo} — ${ask}`, level: "warn" });
-      for (const n of pending.issueNumbers) await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason: ask }, repoConfig, revLogger);
+      for (const n of pending.issueNumbers) await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason: ask, stuck: "needs-ruling" }, repoConfig, revLogger);
     } else {
       revLogger.debug(`Skipping ${repoName} revision — PR #${pending.pr.number} awaits an EM scope ruling`);
     }
@@ -174,7 +174,7 @@ export async function tryRevision(
           // Stopped for a person: the board must say so, not leave it "in review".
           if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
           const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule, or push to the PR and the Foreman resumes. Last reason: ${result.noCommitReason ?? "not given"}`;
-          for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
+          for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, stuck: "revision-stalemate" }, repoConfig, revLogger);
           return null;
         }
 
@@ -231,7 +231,7 @@ export async function tryRevision(
         if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
         const blocked = `Revision retries exhausted on PR #${pending.pr.number}: ${result.error ?? "unknown"} — push to the PR and the Foreman resumes`;
         for (const n of pending.issueNumbers) {
-          await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blocked }, repoConfig, revLogger);
+          await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blocked, stuck: "revision-exhausted" }, repoConfig, revLogger);
         }
       }
     }

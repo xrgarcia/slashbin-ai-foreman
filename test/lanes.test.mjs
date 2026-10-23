@@ -129,7 +129,7 @@ function intervals() {
 
 // --- Lane grouping ----------------------------------------------------------
 
-test("default stages form seven lanes: build = revise→implement, release = promote→release", () => {
+test("default stages form eight lanes: build = revise→implement, release = promote→release", () => {
   const lanes = lanesFor(load({}, [{ name: "defaults" }]).stages);
   assert.deepEqual(lanes.map((l) => [l.name, l.stages.map((s) => s.type)]), [
     ["reconcile", ["reconcile"]],
@@ -139,6 +139,7 @@ test("default stages form seven lanes: build = revise→implement, release = pro
     ["build", ["revise", "implement"]],
     ["branch-sync", ["branch-sync"]],
     ["dependabot", ["dependabot"]],
+    ["unstick", ["unstick"]],
   ]);
 });
 

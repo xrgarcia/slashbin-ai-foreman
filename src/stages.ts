@@ -22,7 +22,9 @@ import { z } from "zod";
  * `ready for prod release`. A config that reorders them accepts the
  * consequence; nothing here forbids it. `release` runs only when both
  * `srePath` and `techLeadPath` are set (config.ts refuses an explicit one
- * without them; the default skips it with a startup warning).
+ * without them; the default skips it with a startup warning). `unstick` is
+ * last and runs only when `emRepoPath` is set: it calls the EM for work that
+ * is stuck (src/unstick.ts), whether or not Paperclip is on.
  */
 export const BUILTIN_STAGES = [
   "reconcile",
@@ -34,6 +36,7 @@ export const BUILTIN_STAGES = [
   "implement",
   "branch-sync",
   "dependabot",
+  "unstick",
 ] as const;
 
 export const stageTypeSchema = z.enum(BUILTIN_STAGES);
@@ -54,7 +57,7 @@ export const stageEntrySchema = z.union([builtinStageSchema, customStageSchema])
 export type StageEntry = z.infer<typeof stageEntrySchema>;
 export type CustomStage = z.infer<typeof customStageSchema>;
 
-/** A fresh copy of the default sequence — the nine built-ins, in order. */
+/** A fresh copy of the default sequence — the ten built-ins, in order. */
 export function defaultStages(): StageEntry[] {
   return BUILTIN_STAGES.map((type) => ({ type }));
 }
