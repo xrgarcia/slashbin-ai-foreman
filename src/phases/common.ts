@@ -89,7 +89,7 @@ export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boo
 /** The work item a repo-scoped issue number names. */
 /** One line: why a diverged feature branch holds an item back. */
 export function divergenceReason(block: BranchBlock): string {
-  return `${block.featureBranch} diverged from ${block.baseBranch} (${block.ahead} ahead, ${block.behind} behind) — a person must reconcile it`;
+  return `${block.featureBranch} diverged from ${block.baseBranch} (${block.ahead} ahead, ${block.behind} behind), merge base ${block.mergeBase} — the EM rules which side wins and the Foreman carries it out`;
 }
 
 /** The comment each held-back issue gets, once per divergence episode. */
@@ -99,9 +99,9 @@ export function divergenceNotice(repoConfig: RepoConfig, block: BranchBlock): st
     "<!-- foreman:branch-diverged -->",
     `**The Foreman has stopped implementing on \`${repoConfig.githubRepo}\`: \`${f}\` has diverged from \`${b}\` (${block.ahead} ahead, ${block.behind} behind).**`,
     "",
-    "This issue is approved and waiting. Building on a diverged branch would build an unknown tree, and the Foreman does not resolve divergence itself. It resumes on the first cycle after the branch is reconciled. This is the only notice for this episode.",
+    "This issue is approved and waiting. Building on a diverged branch would build an unknown tree, so which side wins is not the Foreman's call. The EM is asked for a ruling; the Foreman carries it out (resets or merges `" + f + "`, after saving the old head to a `backup/` ref) and resumes on the first cycle after the branch is reconciled. This is the only notice for this episode.",
     "",
-    "To reconcile, a person decides how — for example:",
+    `Merge base: \`${block.mergeBase}\`. To reconcile by hand instead, for example:`,
     "",
     "```",
     `git fetch origin && git checkout ${f} && git merge origin/${b} && git push origin ${f}`,
