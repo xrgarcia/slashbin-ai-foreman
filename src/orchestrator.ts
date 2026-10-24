@@ -21,7 +21,7 @@ import { onboardRepo } from "./onboarding.js";
 // CLI and the tests reach through the orchestrator.
 export { stoppedReason, divergenceNotice, labelFromTrailer, workStateOf, type CycleEvent } from "./phases/common.js";
 export { prBlockingSkip } from "./phases/implement.js";
-export { verifyHoldPlan, pickVerifyTarget, devVerifyHolding, followUpsOf } from "./phases/verify.js";
+export { verifyHoldPlan, pickVerifyTarget, devVerifyHolding, followUpsOf, reworkIssueTitle, reworkIssueBody, reworkIssueArgs } from "./phases/verify.js";
 
 export interface OrchestratorState {
   implementing: string | null;

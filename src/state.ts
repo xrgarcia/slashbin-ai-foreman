@@ -52,6 +52,8 @@ export interface VerifyHold {
   attempts: number;
   /** ISO time the SRE said the criterion becomes observable (`hold=wait-until-…`); not retried before it. */
   retryAt?: string;
+  /** Set when a visual QA FAIL sent the issue back to the Foreman: the follow-up fix issue, and whether it has merged. */
+  rework?: { issue: number | null; landed: boolean };
 }
 
 /**
