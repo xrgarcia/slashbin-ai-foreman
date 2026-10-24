@@ -141,3 +141,45 @@ test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state
   // verifyVerdict yields exactly those reasons for a failed deploy.
   assert.equal(isDeployFailureHold(verifyVerdict({ verdict: "APPROVE", merged: "yes", deploy: "FAILURE" }).reason), true);
 });
+
+// EM#485 (PO, 2026-10-24): a visual QA FAIL goes back to the Foreman as a rework issue.
+import { reworkIssueTitle, reworkIssueBody, reworkIssueArgs } from "../dist/orchestrator.js";
+
+test("verifyHoldPlan: visual-qa-failed is a rework; infrastructure and sign-in holds still charge", () => {
+  assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "rework" });
+  for (const r of ["sign-in-failed", "dev-unreachable", "dev-verify-failed"]) assert.deepEqual(verifyHoldPlan(r), { kind: "charge" });
+});
+
+test("pickVerifyTarget: a rework waits for its fix, then re-verifies at once", () => {
+  const refs = [{ issueNumber: 5, prNumber: 50 }];
+  const heldAt = "2026-10-24T00:00:00.000Z";
+  const t0 = Date.parse(heldAt);
+  const hold = (rework, attempts = 1) => ({ 5: { heldAt, prNumber: 50, reason: "visual-qa-failed", attempts, rework } });
+  const retry = DEFAULT_BACKOFF.verifyRetry;
+  assert.equal(pickVerifyTarget(refs, hold({ issue: 9, landed: false }), t0 + 365 * 86_400_000, retry), null);
+  assert.equal(pickVerifyTarget(refs, hold({ issue: 9, landed: true }), t0 + 1, retry)?.prNumber, 50);
+  assert.equal(pickVerifyTarget(refs, hold({ issue: 9, landed: true }, VERIFY_MAX_ATTEMPTS), t0 + 1, retry), null);
+});
+
+test("devVerifyHolding: a rework hold below max keeps the repo held", () => {
+  const h = { 5: { heldAt: "2026-10-24T00:00:00.000Z", prNumber: 50, reason: "visual-qa-failed", attempts: 1, rework: { issue: 9, landed: false } } };
+  assert.equal(devVerifyHolding([5, 6], h, VERIFY_MAX_ATTEMPTS), 5);
+});
+
+test("followUpsOf matches the rework title for its parent only", () => {
+  const titles = new Map([[20, reworkIssueTitle(1, 12)], [21, reworkIssueTitle(1, 123)]]);
+  assert.deepEqual(followUpsOf(12, [20, 21], titles), [20]);
+  assert.deepEqual(followUpsOf(123, [20, 21], titles), [21]);
+});
+
+test("the rework issue: title, label, and the sections the flight gate needs", () => {
+  assert.equal(reworkIssueTitle(2, 7), "Visual QA rework 2 for #7 — follow-up to #7");
+  const body = reworkIssueBody(7, 70, "x".repeat(3000) + "TAIL");
+  assert.match(body, /## Pre-Flight/);
+  assert.match(body, /## Acceptance/);
+  assert.match(body, /PR #70 failed for #7/);
+  assert.ok(body.endsWith("TAIL\n```\n") && !body.includes("x".repeat(1600)));
+  const args = reworkIssueArgs("o/r", "T", body, "approved");
+  assert.deepEqual(args.slice(0, 6), ["issue", "create", "--repo", "o/r", "--title", "T"]);
+  assert.deepEqual(args.slice(-2), ["--label", "approved"]);
+});
