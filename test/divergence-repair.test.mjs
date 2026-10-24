@@ -180,3 +180,11 @@ test("the notice and the unstick reason name the ruling flow and the full merge 
   assert.match(notice, /EM is asked for a ruling/);
   assert.match(divergenceReason(block), new RegExp(`merge base ${"b".repeat(40)}`));
 });
+
+test("the divergence reason the EM is asked on stays the same as commits pile up (no re-ask per commit)", async () => {
+  const { divergenceReason } = await import("../dist/phases/common.js");
+  const block = { featureBranch: "features", baseBranch: "develop", mergeBase: "a".repeat(40), ahead: 1, behind: 2 };
+  const first = divergenceReason(block);
+  assert.equal(divergenceReason({ ...block, ahead: 5, behind: 9 }), first);
+  assert.match(first, /merge base a{40}/);
+});
