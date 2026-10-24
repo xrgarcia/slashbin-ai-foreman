@@ -182,6 +182,8 @@ export interface BranchBlock {
   since: string;
   /** Work items already told about this episode. */
   announced: number[];
+  /** Ids of EM rulings already carried out or failed (foreman#104): a ruling is acted on once, never retried. */
+  ruled?: string[];
 }
 
 interface PersistedState {

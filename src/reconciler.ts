@@ -40,7 +40,7 @@ interface OrphanedCommit {
 
 const GIT_TIMEOUT_MS = 30_000;
 
-function git(args: string[], cwd: string): string {
+export function git(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
@@ -68,7 +68,7 @@ function git(args: string[], cwd: string): string {
  * Reading every SIGTERM as a shutdown logged 693 "interrupted by shutdown" lines
  * across at most 16 real shutdowns (foreman#61) — a slow fetch hidden as a non-event.
  */
-interface GitFailure {
+export interface GitFailure {
   error: string;
   stderr?: string;
   signal?: string;
@@ -78,7 +78,7 @@ interface GitFailure {
   timedOut?: boolean;
 }
 
-function formatGitError(err: unknown): GitFailure {
+export function formatGitError(err: unknown): GitFailure {
   const e = err as { message?: string; stderr?: unknown; signal?: string | null; code?: string };
   const stderr = typeof e?.stderr === "string"
     ? e.stderr.trim()

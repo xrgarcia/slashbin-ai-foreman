@@ -1,6 +1,7 @@
 // The implement phase: select approved work, gate on an open feature PR, run
 // the implement session, and report what it opened or why it stopped.
 
+import { repairDivergence } from "../divergence-repair.js";
 import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -352,6 +353,9 @@ export async function tryBatchImplementation(
   ];
   // A recorded block is re-checked read-only every pass: the fast-forward
   // below sits behind the pending-revision gate and may not run for hours.
+  // The EM's ruling on a recorded divergence is carried out first (foreman#104);
+  // the release check below then sees the repaired branch.
+  if (repoState.branchBlock) await repairDivergence(repoConfig, repoLogger);
   if (repoState.branchBlock && await releaseIfResolved("divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, repoState.branchBlock.announced, repoConfig, repoLogger)) {
     const cleared = loadRepoState(repoName);
     delete cleared.branchBlock;
