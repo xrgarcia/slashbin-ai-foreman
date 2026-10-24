@@ -89,7 +89,7 @@ export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boo
 /** The work item a repo-scoped issue number names. */
 /** One line: why a diverged feature branch holds an item back. */
 export function divergenceReason(block: BranchBlock): string {
-  return `${block.featureBranch} diverged from ${block.baseBranch} (${block.ahead} ahead, ${block.behind} behind), merge base ${block.mergeBase} — the EM rules which side wins and the Foreman carries it out`;
+  return `${block.featureBranch} diverged from ${block.baseBranch}, merge base ${block.mergeBase} — the EM rules which side wins and the Foreman carries it out`;
 }
 
 /** The comment each held-back issue gets, once per divergence episode. */
@@ -135,7 +135,7 @@ export async function announceDivergence(
   const fresh = waiting.filter((n) => !block.announced.includes(n));
   if (!same) {
     logger.warn(
-      `Implementation on ${repoConfig.name} stopped — ${divergenceReason(block)}. Announcing on ${fresh.map((n) => `#${n}`).join(", ") || "no waiting issue"}; this is the only warning for this episode`,
+      `Implementation on ${repoConfig.name} stopped — ${divergenceReason(block)} (${block.ahead} ahead, ${block.behind} behind). Announcing on ${fresh.map((n) => `#${n}`).join(", ") || "no waiting issue"}; this is the only warning for this episode`,
     );
   } else {
     logger.debug(`Implementation on ${repoConfig.name} still stopped — ${divergenceReason(block)}`);
