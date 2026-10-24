@@ -15,11 +15,11 @@ import { resolve } from "node:path";
 import { unstickStageReady, type AgentConfig, type RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { unstickViaEm, type UnstickOutcome } from "../agent.js";
-import { getOpenIssues, hasLabel } from "../github.js";
+import { commentOnIssue, getOpenIssues, hasLabel } from "../github.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
-  EVENT_KINDS, RELEASE_GATE_REASON, derivedCandidates, needsCall, openEntry, unstickKey,
+  EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_ESCALATION_OWNER, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
   type UnstickCandidate, type UnstickEntry,
 } from "../unstick.js";
 import { activeRuns, divergenceReason } from "./common.js";
@@ -46,6 +46,7 @@ export async function tryUnstick(
   config: AgentConfig,
   base: Logger,
   cycleNumber: number,
+  deps: { comment?: typeof commentOnIssue } = {},
 ): Promise<number> {
   if (!unstickStageReady(config)) return 0;
   const repoName = repoConfig.name;
@@ -115,6 +116,7 @@ export async function tryUnstick(
       }
       calls++;
       log.info(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): ${outcome.kind}${outcome.detail ? ` — ${outcome.detail.slice(0, 200)}` : ""}`);
+      let spent: UnstickEntry | undefined;
       mutate(repoName, (table) => {
         const cur = table[key];
         // The reason changed while the call ran: it is a new question, answered next pass.
@@ -126,7 +128,25 @@ export async function tryUnstick(
           lastCallAt: new Date().toISOString(),
           ...(outcome.detail ? { detail: outcome.detail.slice(0, 500) } : {}),
         };
+        if (outcome.kind === "failed" && table[key]!.attempts >= UNSTICK_MAX_ATTEMPTS) spent = table[key];
       });
+      // The attempt that spends the last call: say so once, on the issue. Stored
+      // `escalated`, an unchanged reason never comments again; if the post
+      // fails the entry stays `failed` at the cap (no retry, no throw).
+      // Issue 0 is a repo-level hold with no issue to comment on.
+      if (spent && c.issue > 0) {
+        const owner = config.unstickEscalationOwner ?? UNSTICK_ESCALATION_OWNER;
+        try {
+          (deps.comment ?? commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
+          mutate(repoName, (table) => {
+            const cur = table[key];
+            if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
+          });
+          log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — escalated to @${owner}`);
+        } catch (err) {
+          log.warn(`Could not post the unstick give-up comment on #${c.issue}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        }
+      }
     }
     return calls;
   } catch (err) {

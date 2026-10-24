@@ -249,6 +249,8 @@ export const configSchema = z.object({
   // spec mirror also read from it. Review no longer does: it runs through the
   // Tech Lead, never a Claude session in this directory.
   emRepoPath: z.string().optional(),
+  // GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
+  unstickEscalationOwner: z.string().min(1).optional(),
   // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
   // review is offered to it FIRST — Codex judges, its code posts and merges.
   // It exits 3 when Codex cannot take the review and nothing was written; the
@@ -467,6 +469,8 @@ export interface AgentConfig {
   // --- Review phase settings (shared across repos) ---
   // emRepoPath is the absolute path to the EM checkout (unstick stage's cwd).
   emRepoPath?: string;
+  /** Login @-mentioned when the unstick stage gives up on a hold; default UNSTICK_ESCALATION_OWNER. */
+  unstickEscalationOwner?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
@@ -621,6 +625,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     repos: fileConfig.repos,
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
+    unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
@@ -812,6 +817,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     logLevel: parsed.logLevel,
     sessionEnv: [...parsed.sessionEnv],
     emRepoPath,
+    unstickEscalationOwner: parsed.unstickEscalationOwner,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,

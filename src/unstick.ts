@@ -45,6 +45,27 @@ export type UnstickStatus = "pending" | "invoked" | "escalated" | "declined" | "
 /** Calls spent on one reason before a failing call stops being retried. */
 export const UNSTICK_MAX_ATTEMPTS = 3;
 
+/** Who the give-up comment @-mentions. The same default the EM wrapper escalates to; config `unstickEscalationOwner` overrides it. */
+export const UNSTICK_ESCALATION_OWNER = "xrgarcia";
+
+/** The comment posted once when every EM call for a hold has failed (foreman#105). */
+export function unstickGiveUpComment(owner: string, entry: Pick<UnstickEntry, "kind" | "reason" | "attempts" | "detail">): string {
+  return [
+    "**Foreman: the EM could not be reached for this hold**",
+    "",
+    `@${owner} — ${entry.attempts} calls to the EM all failed, so nobody has ruled on this. The Foreman will not call again unless the reason changes.`,
+    "",
+    `- Kind: \`${entry.kind}\``,
+    `- Reason: ${entry.reason}`,
+    "",
+    "Last failure:",
+    "",
+    "```",
+    (entry.detail ?? "(no detail)").slice(0, 800),
+    "```",
+  ].join("\n");
+}
+
 export interface UnstickEntry {
   issue: number;
   kind: UnstickKind;
