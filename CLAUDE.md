@@ -48,7 +48,8 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
    (`discoveryBatch`); on success label the issue `pr under review`.
 5. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
 6. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
-   with `dependencyPreApproved`: slashbin.io 2026-09-29, jerky.com 2026-10-24, cmneb off).
+   with `dependencyPreApproved`: owner authorization covers every Foreman-managed repo for
+   slashbin.io, jerky.com and cmneb as of 2026-10-24; opt-in per repo, default off).
 7. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues
    and move them to `release pending`.
 8. **Release** (`src/phases/release.ts`, no Claude session) — Tech Lead `approve-promotion`
