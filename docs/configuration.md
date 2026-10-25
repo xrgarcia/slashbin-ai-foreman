@@ -346,7 +346,7 @@ Keep each repo's skill copies on a golden source, one approved issue at a time, 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
 
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
-- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
+- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner authorization covers slashbin.io repos (2026-09-29) and jerky.com repos (2026-10-24); cmneb repos stay off. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
 - `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
 
 ```json
