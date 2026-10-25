@@ -67,8 +67,9 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    merge.
 9. **Dependabot** — files one issue covering the open Dependabot PRs on the working
    branches, so the updates go through the implement session like any other work. It is
-   filed with the trigger label when the repo sets `dependencyPreApproved` (owner-authorized for slashbin.io since
-   2026-09-29 and jerky.com since 2026-10-24; cmneb stays off). Renovate
+   filed with the trigger label when the repo sets `dependencyPreApproved` (the owner's standing authorization, 2026-10-24,
+   covers every Foreman-managed repo for slashbin.io, jerky.com and cmneb; the flag stays
+   opt-in per repo and default off, so a newly onboarded repo needs a deliberate edit). Renovate
    instead of Dependabot: `github.dependencyBranchPrefixes: ["renovate/"]`.
 10. **Unstick** *(on when `emRepoPath` is set; independent of `paperclip.enabled`)* — no
     Claude session. For each stuck issue it runs `node <emRepoPath>/bin/em.mjs unstick
