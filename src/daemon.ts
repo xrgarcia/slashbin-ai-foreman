@@ -150,7 +150,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       if (options?.repoFilter) {
         const match = fresh.repos.find((r) => r.name === options.repoFilter);
         if (match) {
-          fresh = { ...fresh, repos: [match] };
+          // allRepos keeps every managed repo so a dependent in another repo still resolves.
+          fresh = { ...fresh, repos: [match], allRepos: fresh.repos };
         }
       }
 

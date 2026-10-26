@@ -199,6 +199,30 @@ async function tellDependents(issues: number[], reason: string, repoName: string
   }
 }
 
+/**
+ * Deliver EM handoffs a dead-blocker pass could not: a dependent told (comment +
+ * label) while its repo was not in the config, or whose escalation failed, is
+ * escalated here once its repo is managed. Runs before the eligibility gate:
+ * a held blocker is never offered again, so the skip path that told its
+ * dependents never runs a second time. Best effort.
+ */
+export async function deliverPendingHandoffs(repoConfig: RepoConfig, config: AgentConfig, repoLogger: Logger): Promise<void> {
+  const managed = config.allRepos ?? config.repos;
+  try {
+    const skipped = loadRepoState(repoConfig.name).skipped ?? {};
+    for (const [key, entry] of Object.entries(skipped)) {
+      const pending = (entry.deadBlockerTold ?? []).filter((ref) => {
+        if ((entry.deadBlockerEscalated ?? []).includes(ref)) return false;
+        const repo = ref.includes("#") && !ref.startsWith("#") ? ref.slice(0, ref.indexOf("#")) : repoConfig.githubRepo;
+        return managed.some((r) => r.githubRepo === repo);
+      });
+      if (pending.length > 0) await tellDependents([Number(key)], entry.reason, repoConfig.name, repoConfig, managed, repoLogger);
+    }
+  } catch (err) {
+    repoLogger.warn(`Could not deliver pending EM handoffs: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function tryBatchImplementation(
   repoConfig: RepoConfig,
   config: AgentConfig,
@@ -209,6 +233,8 @@ export async function tryBatchImplementation(
   const repoName = repoConfig.name;
   const { skip, repoFailure } = config.backoff;
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
+
+  await deliverPendingHandoffs(repoConfig, config, repoLogger);
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
