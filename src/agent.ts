@@ -116,6 +116,14 @@ export interface RevisionResult {
   noCommit?: boolean;
   /** The reason given on the trailer. Present only when `noCommit` is true. */
   noCommitReason?: string;
+  /**
+   * The agent found the issue's work already present on the feature branch and
+   * produced no PR because there is nothing to land (`FOREMAN_RESULT: landed`).
+   * `landedIssue` is the issue it named; the Foreman closes it as completed.
+   */
+  landed?: boolean;
+  landedIssue?: number;
+  landedReason?: string;
   /** The session's own final message, for observers (unredacted, uncapped). */
   summary?: string;
   /**
@@ -246,6 +254,14 @@ export interface ImplementationResult {
   waitingOn?: string;
   // Issues the agent decided to skip. Empty/undefined when no skip was detected.
   skippedIssues?: number[];
+  /**
+   * The agent found the issue's work already present on the feature branch and
+   * produced no PR because there is nothing to land (`FOREMAN_RESULT: landed`).
+   * `landedIssue` is the issue it named; the Foreman closes it as completed.
+   */
+  landed?: boolean;
+  landedIssue?: number;
+  landedReason?: string;
   /** The session's own final message, for observers (unredacted, uncapped). */
   summary?: string;
   /**
@@ -309,6 +325,23 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
     issue: scoped ? Number(scoped[1]) : undefined,
     waitingOn: waiting ? waiting[1] : undefined,
   };
+}
+
+/**
+ * `FOREMAN_RESULT: landed issue=<N> reason="<evidence>"` — the work is already
+ * on the feature branch, so there is nothing to build (Slashbin-Ingest-Gateway#222
+ * and jerky_skuvault_service#478, 2026-10-26). Anchored to a line start like the
+ * skip trailer, and `issue=` is REQUIRED: this closes an issue, so it never
+ * applies to a batch. The last trailer line wins. Exported for tests.
+ */
+export function detectDeclaredLanded(stdout: string): { landed: boolean; issue?: number; reason?: string } {
+  const lines = stdout.match(/^[ \t]*FOREMAN_RESULT:\s*landed[^\n]*/gim);
+  if (!lines) return { landed: false };
+  const trailer = lines[lines.length - 1].trim();
+  const issue = trailer.match(/\bissue="?#?(\d+)"?/i);
+  if (!issue) return { landed: false };
+  const reason = trailer.match(/\breason="([^"]*)"/i);
+  return { landed: true, issue: Number(issue[1]), reason: reason ? reason[1] : "no evidence given" };
 }
 
 function detectSkipSignal(stdout: string): { skipped: boolean; reason?: string } {
@@ -1125,6 +1158,30 @@ Work autonomously. Do not ask questions.`;
   // agent not to emit the trailer when it created a PR, but "the agent followed
   // the prompt" is exactly the assumption that should not be load-bearing — so
   // a declaration is only honoured when the branch demonstrably did not move.
+  // A declared LANDED is the same kind of declaration, with the same SHA guard:
+  // "nothing to land" is only believable when the branch did not move. It names
+  // its issue and the orchestrator closes only an issue in the batch.
+  const declaredLanded = detectDeclaredLanded(result.stdout);
+  if (declaredLanded.landed) {
+    const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+    if (beforeSha && afterSha && beforeSha !== afterSha) {
+      logger.warn(
+        `Agent emitted a landed trailer but ${config.featureBranch} advanced ` +
+        `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
+      );
+    } else {
+      logger.info(`Implementation found #${declaredLanded.issue} already landed — ${declaredLanded.reason}`);
+      return {
+        success: false,
+        landed: true,
+        landedIssue: declaredLanded.issue,
+        landedReason: declaredLanded.reason,
+        summary: extractStreamResult(result.stdout),
+        error: `already landed: ${declaredLanded.reason}`,
+      };
+    }
+  }
+
   const declaredSkip = detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
     const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
