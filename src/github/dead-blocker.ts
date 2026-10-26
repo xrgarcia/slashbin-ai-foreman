@@ -94,7 +94,8 @@ export interface Announced {
 /**
  * Tell every open dependent of `blocker` that it is dead: comment, add the
  * blocked label, and return the ones told so the caller can escalate them and
- * remember them. `already` (refs told before) are not told again. A failed write
+ * remember them. `already` (refs told before) are not told again; `open` is
+ * every open dependent, told now or before, so the caller can retry an escalation that did not land. A failed write
  * on one dependent never stops the next; the failures are returned, never lost.
  * Throws only when the dependents cannot be read at all.
  */
@@ -103,9 +104,10 @@ export function announceDeadBlocker(
   blocker: number,
   reason: string,
   already: readonly string[] = [],
-): { told: Announced[]; failed: { ref: string; error: string }[]; open: number } {
+): { told: Announced[]; failed: { ref: string; error: string }[]; open: Announced[] } {
   const open = dependentsOf(config.githubRepo, blocker, config.repoPath).filter((d) => d.state !== "closed");
   const told: Announced[] = [];
+  const everyOpen: Announced[] = open.map((d) => ({ ref: dependentRef(d, config.githubRepo), repo: dependentRepo(d, config.githubRepo), number: d.number }));
   const failed: { ref: string; error: string }[] = [];
   for (const d of open) {
     const ref = dependentRef(d, config.githubRepo);
@@ -121,7 +123,7 @@ export function announceDeadBlocker(
       failed.push({ ref, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return { told, failed, open: open.length };
+  return { told, failed, open: everyOpen };
 }
 
 /** Add the blocked label to the blocker itself, so the Foreman never re-picks a build it cannot finish. Throws on a failed write. */

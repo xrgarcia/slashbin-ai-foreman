@@ -442,6 +442,12 @@ export interface RepoConfig {
  */
 export interface AgentConfig {
   repos: readonly RepoConfig[];
+  /**
+   * Every configured repo, even when `--repo` narrowed `repos` to one. Set only
+   * by the CLI's narrowing; absent means `repos` is the whole list. A hold on
+   * another repo's issue is recorded under that repo's state, which needs its name.
+   */
+  allRepos?: readonly RepoConfig[];
   pollIntervalMs: number;
   /** Retired (lanes replaced it); kept only so the startup warning can name it. */
   maxConcurrentRepos?: number;

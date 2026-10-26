@@ -57,7 +57,7 @@ test("every open dependent is commented on and labelled blocked, naming the dead
   reset([dep(227), dep(300, "closed"), dep(9, "open", "o/other")]);
   const r = announceDeadBlocker(cfg, 222, "all 11 PRs fail npm ci");
   assert.deepEqual(r.told.map((t) => t.ref), ["#227", "o/other#9"]);
-  assert.equal(r.open, 2);
+  assert.deepEqual(r.open.map((o) => o.ref), ["#227", "o/other#9"]);
   const c = made().filter((x) => x[0] === "issue");
   const comment = c.find((x) => x[1] === "comment" && x[2] === "227");
   assert.ok(comment, "the S1 dependent was not commented on");
@@ -145,7 +145,7 @@ test("a dependent is escalated under ITS repo's config, with a stuck kind the un
   assert.match(body, /managed\.find\(\(r\) => r\.githubRepo === t\.repo\)/, "cross-repo dependents need their own repo config");
   assert.match(body, /stuck: "needs-ruling"/, "without a stuck kind no EM handoff is recorded (Paperclip off = nobody hears it)");
   assert.match(body, /itemOf\(home, t\.number\)/);
-  assert.match(impl, /tellDependents\(skippedSet, reason, repoName, repoConfig, config\.repos, repoLogger\)/);
+  assert.match(impl, /tellDependents\(skippedSet, reason, repoName, repoConfig, config\.allRepos \?\? config\.repos, repoLogger\)/);
 });
 
 test("the landed protocol is in the COMMON prompt, so a repo-local skill hears it", () => {
@@ -155,4 +155,13 @@ test("the landed protocol is in the COMMON prompt, so a repo-local skill hears i
   assert.ok(at > 0, "the prompt no longer teaches landed");
   assert.ok(at > fn.indexOf("Skip protocol") && at < fn.indexOf("PRIOR ATTEMPT FAILED"));
   assert.match(fn.slice(at, at + 900), /FOREMAN_RESULT: landed issue=/);
+});
+
+test("a dependent told but not yet escalated is retried; --repo keeps the full repo list", () => {
+  const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
+  const body = impl.slice(impl.indexOf("async function tellDependents"), impl.indexOf("export async function tryBatchImplementation"));
+  assert.match(body, /escalated\.includes\(t\.ref\)/, "escalation must be deduped on its own list, not on 'told'");
+  assert.match(body, /deadBlockerEscalated: escalated/);
+  const cli = readFileSync(join(root, "src/cli.ts"), "utf-8");
+  assert.match(cli, /repos: \[match\], allRepos: config\.repos/);
 });

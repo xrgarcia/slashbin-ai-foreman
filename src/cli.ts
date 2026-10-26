@@ -150,7 +150,7 @@ async function main(): Promise<void> {
       console.error(`No repo named "${repoFilter}". Available: ${available}`);
       process.exit(1);
     }
-    config = { ...config, repos: [match] };
+    config = { ...config, repos: [match], allRepos: config.repos };
   }
 
   const logger = createLogger({
