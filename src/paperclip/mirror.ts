@@ -578,8 +578,7 @@ export class PaperclipMirror implements WorkObserver {
    */
   async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
     this.snapshotRepos.add(_repo);
-    logger.info(`Paperclip: ${_repo} snapshot in (${items.length} items, ${read.cards?.length ?? "no"} cards)`); // DIAG
-    if (!(await this.ensureIndex())) { logger.info(`Paperclip: ${_repo} snapshot dropped: no index`); return; } // DIAG
+    if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
     const cards = read.cards;
     // With `ownsCards`, every issue has a card before the lifecycle pass places

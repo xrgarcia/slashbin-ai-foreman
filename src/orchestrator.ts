@@ -210,11 +210,11 @@ async function publishBoard(repoConfig: RepoConfig, log: Logger): Promise<void> 
   } catch (err) {
     log.debug(`Closed-issue holds not cleared: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (!hasObservers()) { log.info("Board snapshot skipped: no observers"); return; } // DIAG
+  if (!hasObservers()) return;
   try {
     await publishSnapshot(repoConfig, log);
   } catch (err) {
-    log.info(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
+    log.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
