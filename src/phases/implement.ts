@@ -151,8 +151,8 @@ async function escalateSkips(items: { n: number; reason: string }[], repoName: s
  * A build stopped on these issues and will not land by itself. Every open issue
  * that GitHub records as blocked by one of them would otherwise wait on it
  * silently (gateway#222 held #227, an S1 fix, for 13h): tell each dependent once
- * (comment + blocked label, dead-blocker.ts) and escalate it to the EM, and hold
- * the stopped issue itself with the blocked label so it is not re-picked.
+ * (comment + blocked label, dead-blocker.ts) and escalate it to the EM. The stopped
+ * issue itself is held with the blocked label, dependents or none, so it is not re-picked.
  * Best effort: a failed read or write is logged, never thrown, and the next skip retries.
  */
 async function tellDependents(issues: number[], reason: string, repoName: string, repoConfig: RepoConfig, managed: readonly RepoConfig[], repoLogger: Logger): Promise<void> {
@@ -160,8 +160,11 @@ async function tellDependents(issues: number[], reason: string, repoName: string
     try {
       const entry = loadRepoState(repoName).skipped?.[n];
       const { told, failed, open } = announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
-      if (open.length === 0) continue;
+      // The stopped issue is held visibly whether or not anything waits on it: with no
+      // dependents it was held only by the Foreman's state, `approved` and unlabelled, and
+      // showed Blocked on the board alone (jerky_data_receiver#553, 2026-10-26).
       holdBlocker(repoConfig, n);
+      if (open.length === 0) continue;
       for (const f of failed) repoLogger.warn(`Could not tell dependent ${f.ref} that #${n} is dead: ${f.error}`);
       // "Told" (comment + label) and "escalated" (an EM handoff on record) are kept
       // apart: a dependent told but not escalated, because its repo was not in the

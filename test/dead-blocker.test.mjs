@@ -178,3 +178,11 @@ test("pending EM handoffs are delivered before the eligibility gate; a daemon re
   const daemon = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src/daemon.ts"), "utf8");
   assert.match(daemon, /repos: \[match\], allRepos: fresh\.repos/);
 });
+
+test("a skip with no dependents still labels the stopped issue blocked (jerky_data_receiver#553)", () => {
+  const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
+  const body = impl.slice(impl.indexOf("async function tellDependents"), impl.indexOf("export async function deliverPendingHandoffs"));
+  const hold = body.indexOf("holdBlocker(repoConfig, n)");
+  assert.ok(hold > 0, "the stopped issue is held");
+  assert.ok(hold < body.indexOf("if (open.length === 0) continue"), "held before the no-dependents early exit");
+});
