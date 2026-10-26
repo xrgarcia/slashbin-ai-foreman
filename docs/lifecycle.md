@@ -190,6 +190,15 @@ give the reason. A skip's comment names what it waits on.
 | `needsRuling`: PR not converging | The PR was sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question. | Post a comment on the PR whose first line opens `**EM scope ruling`. |
 | `needsRuling`: skip escalated | A skip used up `backoff.skip.maxAttempts` sessions in a row. | See below. |
 
+**A stop that holds other issues up** tells them. When a skip's cause will not clear by itself (not a
+diverged or occupied feature branch) and GitHub records open issues as blocked by the skipped issue
+(`/dependencies/blocking`), the Foreman comments on each dependent naming the dead blocker, labels it
+`blocked`, and escalates it for the EM; the skipped issue is labelled `blocked` too. Each dependent is told
+once (`deadBlockerTold` in the skip's state). Remove the `blocked` label on a dependent to release it.
+The opposite outcome, the work **already on the feature branch**, ends `FOREMAN_RESULT: landed issue=N`:
+the Foreman closes the issue as completed with the evidence, which releases its dependents
+(`src/github/dead-blocker.ts`; gateway#222 / skuvault#478, 2026-10-26).
+
 **An escalated skip** stops reading the condition and the waited-on reference: only a change to the
 issue counts, and who made it matters. A person's edit, comment or label releases it and resets the
 attempt count. An account in `backoff.skip.agentLogins` (another agent: the EM, the SRE, a reviewer) is

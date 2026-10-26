@@ -116,6 +116,14 @@ export interface RevisionResult {
   noCommit?: boolean;
   /** The reason given on the trailer. Present only when `noCommit` is true. */
   noCommitReason?: string;
+  /**
+   * The agent found the issue's work already present on the feature branch and
+   * produced no PR because there is nothing to land (`FOREMAN_RESULT: landed`).
+   * `landedIssue` is the issue it named; the Foreman closes it as completed.
+   */
+  landed?: boolean;
+  landedIssue?: number;
+  landedReason?: string;
   /** The session's own final message, for observers (unredacted, uncapped). */
   summary?: string;
   /**
@@ -246,6 +254,14 @@ export interface ImplementationResult {
   waitingOn?: string;
   // Issues the agent decided to skip. Empty/undefined when no skip was detected.
   skippedIssues?: number[];
+  /**
+   * The agent found the issue's work already present on the feature branch and
+   * produced no PR because there is nothing to land (`FOREMAN_RESULT: landed`).
+   * `landedIssue` is the issue it named; the Foreman closes it as completed.
+   */
+  landed?: boolean;
+  landedIssue?: number;
+  landedReason?: string;
   /** The session's own final message, for observers (unredacted, uncapped). */
   summary?: string;
   /**
@@ -309,6 +325,23 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
     issue: scoped ? Number(scoped[1]) : undefined,
     waitingOn: waiting ? waiting[1] : undefined,
   };
+}
+
+/**
+ * `FOREMAN_RESULT: landed issue=<N> reason="<evidence>"` — the work is already
+ * on the feature branch, so there is nothing to build (Slashbin-Ingest-Gateway#222
+ * and jerky_skuvault_service#478, 2026-10-26). Anchored to a line start like the
+ * skip trailer, and `issue=` is REQUIRED: this closes an issue, so it never
+ * applies to a batch. The last trailer line wins. Exported for tests.
+ */
+export function detectDeclaredLanded(stdout: string): { landed: boolean; issue?: number; reason?: string } {
+  const lines = stdout.match(/^[ \t]*FOREMAN_RESULT:\s*landed[^\n]*/gim);
+  if (!lines) return { landed: false };
+  const trailer = lines[lines.length - 1].trim();
+  const issue = trailer.match(/\bissue="?#?(\d+)"?/i);
+  if (!issue) return { landed: false };
+  const reason = trailer.match(/\breason="([^"]*)"/i);
+  return { landed: true, issue: Number(issue[1]), reason: reason ? reason[1] : "no evidence given" };
 }
 
 function detectSkipSignal(stdout: string): { skipped: boolean; reason?: string } {
@@ -1087,6 +1120,12 @@ Work autonomously. Do not ask questions.`;
   // implementation attempt and back off accordingly.
   prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nIf the issue is waiting on another issue or PR (a dependency not merged yet, a precondition another issue delivers), add \` waiting_on="<owner/repo#N>"\` (or \`#N\` in this repo) to that line, e.g. \`FOREMAN_RESULT: skipped issue=127 waiting_on="acme/site#166" reason="refund_policy.md is on unmerged PR #166"\`.\n\nThis tells the Foreman to hold THAT issue in Blocked rather than re-queue it every cycle: it runs again only when the issue changes (a comment, an edit, a label) or the \`waiting_on\` issue closes or PR merges. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
 
+  // Landed protocol, in the common prompt so a repo-local skill hears it too
+  // (the built-in skill carries it as well). Without it "all 16 already on
+  // features" ended as prose, no trailer, and the issue stayed open and approved
+  // while the issues blocked by it waited (jerky_skuvault_service#478, 2026-10-26).
+  prompt += `\n\nIMPORTANT — Nothing-to-land protocol: if the work an issue asks for is ALREADY on ${config.featureBranch} (for example every dependency PR is already merged there), there is nothing to build and no PR to open. Comment the evidence on the issue (what you checked: PR numbers, SHAs), push nothing, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: landed issue=<the issue number> reason="<one-line evidence>"\n\nThe Foreman then closes the issue as completed, which releases every issue blocked by it. Never end with prose such as "No PR produced" or "No code change to land" alone: it is not heard, and the issue stays open. If the work cannot land and a person must act, use the skip protocol above instead.`;
+
   // Third Way: if a prior attempt failed, include context so Claude can adapt
   if (priorFailureReason) {
     prompt += `\n\nIMPORTANT — PRIOR ATTEMPT FAILED: "${priorFailureReason}". Ensure you: (1) commit changes to the ${config.featureBranch} branch, (2) push to origin, (3) create a PR targeting ${config.baseBranch} using \`gh pr create\`. If a PR already exists, push new commits to it.`;
@@ -1125,6 +1164,30 @@ Work autonomously. Do not ask questions.`;
   // agent not to emit the trailer when it created a PR, but "the agent followed
   // the prompt" is exactly the assumption that should not be load-bearing — so
   // a declaration is only honoured when the branch demonstrably did not move.
+  // A declared LANDED is the same kind of declaration, with the same SHA guard:
+  // "nothing to land" is only believable when the branch did not move. It names
+  // its issue and the orchestrator closes only an issue in the batch.
+  const declaredLanded = detectDeclaredLanded(result.stdout);
+  if (declaredLanded.landed) {
+    const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+    if (beforeSha && afterSha && beforeSha !== afterSha) {
+      logger.warn(
+        `Agent emitted a landed trailer but ${config.featureBranch} advanced ` +
+        `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
+      );
+    } else {
+      logger.info(`Implementation found #${declaredLanded.issue} already landed — ${declaredLanded.reason}`);
+      return {
+        success: false,
+        landed: true,
+        landedIssue: declaredLanded.issue,
+        landedReason: declaredLanded.reason,
+        summary: extractStreamResult(result.stdout),
+        error: `already landed: ${declaredLanded.reason}`,
+      };
+    }
+  }
+
   const declaredSkip = detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
     const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);

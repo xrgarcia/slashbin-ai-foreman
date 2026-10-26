@@ -25,6 +25,7 @@ import {
   type BranchDivergence,
 } from "../reconciler.js";
 import { findIssuesMergedToBase } from "../github.js";
+import { announceDeadBlocker, closeAlreadyLanded, holdBlocker, isDeadBlockerReason } from "../github/dead-blocker.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import { devVerifyHolding, followUpsOf } from "./verify.js";
@@ -146,6 +147,82 @@ async function escalateSkips(items: { n: number; reason: string }[], repoName: s
   }
 }
 
+/**
+ * A build stopped on these issues and will not land by itself. Every open issue
+ * that GitHub records as blocked by one of them would otherwise wait on it
+ * silently (gateway#222 held #227, an S1 fix, for 13h): tell each dependent once
+ * (comment + blocked label, dead-blocker.ts) and escalate it to the EM, and hold
+ * the stopped issue itself with the blocked label so it is not re-picked.
+ * Best effort: a failed read or write is logged, never thrown, and the next skip retries.
+ */
+async function tellDependents(issues: number[], reason: string, repoName: string, repoConfig: RepoConfig, managed: readonly RepoConfig[], repoLogger: Logger): Promise<void> {
+  for (const n of issues) {
+    try {
+      const entry = loadRepoState(repoName).skipped?.[n];
+      const { told, failed, open } = announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
+      if (open.length === 0) continue;
+      holdBlocker(repoConfig, n);
+      for (const f of failed) repoLogger.warn(`Could not tell dependent ${f.ref} that #${n} is dead: ${f.error}`);
+      // "Told" (comment + label) and "escalated" (an EM handoff on record) are kept
+      // apart: a dependent told but not escalated, because its repo was not in the
+      // config then, is escalated on a later pass instead of staying silent.
+      const toldRefs = [...new Set([...(entry?.deadBlockerTold ?? []), ...told.map((t) => t.ref)])];
+      const escalated = [...(entry?.deadBlockerEscalated ?? [])];
+      for (const t of open) {
+        if (!toldRefs.includes(t.ref) || escalated.includes(t.ref)) continue;
+        // The EM's handoff is recorded under the DEPENDENT's own repo (the unstick
+        // stage reads each repo's state), so a dependent in another managed repo is
+        // escalated through that repo's config. A repo the Foreman does not manage
+        // has no such state: its comment and blocked label are all that can be said,
+        // and the escalation is retried while it stays out of the config.
+        const home = t.repo === repoConfig.githubRepo ? repoConfig : managed.find((r) => r.githubRepo === t.repo);
+        if (!home) {
+          repoLogger.warn(`${t.ref} is in a repo the Foreman does not manage — told by comment and label only; no EM handoff can be recorded yet`);
+          continue;
+        }
+        await emit({
+          kind: "escalated",
+          item: itemOf(home, t.number),
+          reason: `blocked by ${repoConfig.githubRepo}#${n}, which the Foreman could not land: ${reason}`,
+          at: "approved",
+          stuck: "needs-ruling",
+        }, home, repoLogger);
+        escalated.push(t.ref);
+        repoLogger.warn(`Told ${t.ref} its blocker #${n} is dead and escalated it: ${reason}`);
+      }
+      const state = loadRepoState(repoName);
+      if (state.skipped?.[n]) state.skipped[n] = { ...state.skipped[n], deadBlockerTold: toldRefs, deadBlockerEscalated: escalated };
+      saveRepoState(repoName, state);
+    } catch (err) {
+      repoLogger.warn(`Could not check what #${n} blocks: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+/**
+ * Deliver EM handoffs a dead-blocker pass could not: a dependent told (comment +
+ * label) while its repo was not in the config, or whose escalation failed, is
+ * escalated here once its repo is managed. Runs before the eligibility gate:
+ * a held blocker is never offered again, so the skip path that told its
+ * dependents never runs a second time. Best effort.
+ */
+export async function deliverPendingHandoffs(repoConfig: RepoConfig, config: AgentConfig, repoLogger: Logger): Promise<void> {
+  const managed = config.allRepos ?? config.repos;
+  try {
+    const skipped = loadRepoState(repoConfig.name).skipped ?? {};
+    for (const [key, entry] of Object.entries(skipped)) {
+      const pending = (entry.deadBlockerTold ?? []).filter((ref) => {
+        if ((entry.deadBlockerEscalated ?? []).includes(ref)) return false;
+        const repo = ref.includes("#") && !ref.startsWith("#") ? ref.slice(0, ref.indexOf("#")) : repoConfig.githubRepo;
+        return managed.some((r) => r.githubRepo === repo);
+      });
+      if (pending.length > 0) await tellDependents([Number(key)], entry.reason, repoConfig.name, repoConfig, managed, repoLogger);
+    }
+  } catch (err) {
+    repoLogger.warn(`Could not deliver pending EM handoffs: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function tryBatchImplementation(
   repoConfig: RepoConfig,
   config: AgentConfig,
@@ -156,6 +233,8 @@ export async function tryBatchImplementation(
   const repoName = repoConfig.name;
   const { skip, repoFailure } = config.backoff;
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
+
+  await deliverPendingHandoffs(repoConfig, config, repoLogger);
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
@@ -499,6 +578,8 @@ export async function tryBatchImplementation(
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
       ? { status: "finished", detail: result.prUrl ? `PR ${result.prUrl}` : "commits added to the open PR" }
+      : result.landed
+        ? { status: "finished", detail: `#${result.landedIssue} already landed: ${result.landedReason ?? "no evidence given"}` }
       : result.skipped
         ? { status: "finished", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
         : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
@@ -606,6 +687,31 @@ export async function tryBatchImplementation(
 
       repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")} in state`, { prUrl: result.prUrl });
       events?.push({ message: `Feature PR on ${repoConfig.githubRepo}: ${result.prUrl || "(commits added to existing PR)"}`, level: "info" });
+    } else if (result.landed && result.landedIssue !== undefined && actionableIssues.includes(result.landedIssue)) {
+      // Nothing to land: the issue's work is already on the feature branch. That
+      // is DONE, not stalled — close it as completed with the evidence, which also
+      // releases every issue GitHub records as blocked by it (blockers.ts treats a
+      // closed blocker as met). Left open and `approved` it held its dependents
+      // for 13h (gateway#222 -> #227, 2026-10-26).
+      const n = result.landedIssue;
+      worked = [n];
+      const reason = result.landedReason ?? "no evidence given";
+      try {
+        closeAlreadyLanded(repoConfig, n, reason);
+        const landedState = loadRepoState(repoName);
+        if (!landedState.implemented.includes(n)) landedState.implemented.push(n);
+        if (landedState.skipped) delete landedState.skipped[n];
+        saveRepoState(repoName, landedState);
+        failureCount.set(repoName, 0);
+        lastFailureReason.delete(repoName);
+        failurePause.clear(repoName);
+        repoLogger.info(`Closed #${n} as completed: already landed on ${repoConfig.featureBranch} — ${reason}`);
+        events?.push({ message: `Closed #${n} on ${repoConfig.githubRepo}: already landed (${reason})`, level: "info" });
+      } catch (err) {
+        const why = `#${n} is already landed (${reason}) but the Foreman could not close it: ${err instanceof Error ? err.message : String(err)}`;
+        repoLogger.warn(why);
+        await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
+      }
     } else if (result.skipped) {
       // Deliberate no-op by the agent (e.g., issue body says "investigate first").
       // Record per-issue skip timestamps so the back-off filter at the top of
@@ -680,6 +786,8 @@ export async function tryBatchImplementation(
           reason,
           skipCount: priorCount + 1,
           ...(waitingOn ? { waitingOn: `${waitingOn.repo}#${waitingOn.number}` } : {}),
+          ...(updatedState.skipped[issueNum]?.deadBlockerTold ? { deadBlockerTold: updatedState.skipped[issueNum].deadBlockerTold } : {}),
+          ...(updatedState.skipped[issueNum]?.deadBlockerEscalated ? { deadBlockerEscalated: updatedState.skipped[issueNum].deadBlockerEscalated } : {}),
         };
       }
       saveRepoState(repoName, updatedState);
@@ -695,6 +803,9 @@ export async function tryBatchImplementation(
       if (outOfAttempts.length > 0) {
         await escalateSkips(outOfAttempts.map((n) => ({ n, reason: escalatedReason(reason, updatedState.skipped![n].skipCount ?? 0) })), repoName, repoConfig, repoLogger);
       }
+      // A stop that holds other issues up says so to them (dead-blocker.ts).
+      // A skip naming an open PR on the branch clears when that PR leaves (isResolvedTransientSkip): never a dead blocker.
+      if (isDeadBlockerReason(reason) && prBlockingSkip(reason) === null) await tellDependents(skippedSet, reason, repoName, repoConfig, config.allRepos ?? config.repos, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);
