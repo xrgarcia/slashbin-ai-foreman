@@ -30,6 +30,10 @@ interface SkippedIssue {
   // EM's ruling. From then on only a person changing the issue releases it,
   // and that release clears the entry, count included.
   escalatedAt?: string;
+  // The issues blocked by this one (`owner/repo#N`) that were told, once, that
+  // this build ended with no PR and will not land by itself (dead-blocker.ts).
+  // Carried across repeat skips so a dependent hears it once, not per attempt.
+  deadBlockerTold?: string[];
 }
 
 interface HeldIssue {
