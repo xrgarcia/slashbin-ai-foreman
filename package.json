@@ -45,7 +45,7 @@
     "access": "public"
   },
   "dependencies": {
-    "ws": "^8.20.0",
+    "ws": "^8.22.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
