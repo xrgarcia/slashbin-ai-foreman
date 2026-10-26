@@ -224,6 +224,9 @@ const GITHUB_LOGINS_TTL_MS = 10 * 60_000;
  * write.
  */
 const CARD_WRITES_PER_SNAPSHOT = 20;
+/** Cards with no open issue behind them that are read live per cycle, and how long a card waits between reads. */
+const STALE_CHECKS_PER_SNAPSHOT = 50;
+const STALE_CHECK_MS = 10 * 60_000;
 /** With `ownsCards`, the most second cards one housekeeping pass retires. */
 const RETIRES_PER_PASS = 25;
 /** The title of a card the Foreman owns: the issue's repo name, number and title, as the receiver wrote it. */
@@ -302,6 +305,12 @@ export class PaperclipMirror implements WorkObserver {
   private readonly rowState = new Map<string, string>();
   /** Task id → the repo its identity key names, for rows that key an issue. */
   private readonly rowRepo = new Map<string, string>();
+  /** Task id → its issue number, from the identity line. */
+  private readonly rowNumber = new Map<string, number>();
+  /** Cards whose issue GitHub reads closed: a hold the Foreman reports later never reopens them. */
+  private readonly closedCards = new Set<string>();
+  /** Task id → when a card with no open issue was last read live. */
+  private readonly staleCheckedAt = new Map<string, number>();
   /** The Unplaced project's id, or the lookup in flight; cleared when it finds none or an ambiguous set. */
   private unplacedLookup: Promise<string | null> | null = null;
   /** True while a housekeeping pass runs, so a slow one is never overlapped. */
@@ -496,7 +505,7 @@ export class PaperclipMirror implements WorkObserver {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
-    if (!id) return;
+    if (!id || this.closedCards.has(id)) return;
     const text = fill(step.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
     // A hold that is not the stage owner's (a failed dev deploy is the SRE's) goes to that
@@ -593,7 +602,7 @@ export class PaperclipMirror implements WorkObserver {
     const closed = new Map<number, "completed" | "not_planned">();
     for (const c of cards ?? read.closed ?? []) if (c.state !== "open") closed.set(c.item.issueNumber, c.state);
     const movers: Array<{ item: WorkItem; id: string; stage: SnapshotItem["stage"]; detail: string; state: string; want: string }> = [];
-    for (const { item, stage, detail, verifyHeld } of items) {
+    for (const { item, stage, detail, verifyHeld, foremanHeld } of items) {
       if (closed.has(item.issueNumber)) continue;
       const id = await this.resolve(item, false);
       if (!id) continue;
@@ -623,7 +632,9 @@ export class PaperclipMirror implements WorkObserver {
       }
       this.escalatedAt.delete(id);
       if ((state === blocked || this.blockedAt.has(id)) && stage !== "blocked" && !(await this.blockedByLabel(id))) {
-        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : stage === "approved" || (stage === "merged" && verifyHeld === true)) {
+        // A block from before this process started stands only while the Foreman's state still holds the issue:
+        // jerky_security_testing#398 sat Blocked at `release pending` after every hold was gone (2026-10-26).
+        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : foremanHeld !== false && (stage === "approved" || (stage === "merged" && verifyHeld === true))) {
           this.blockedAt.set(id, stage);
           continue;
         }
@@ -670,6 +681,11 @@ export class PaperclipMirror implements WorkObserver {
         if (id) await this.closeCard(id, how, { issueNumber: n, repo: _repo }, logger);
       }
     }
+    // The closed read is one-shot per window, and a close it missed (Paperclip
+    // down for that write, a hold that put the card back) is never offered
+    // again: a card of this repo with no open issue behind it is asked about
+    // live, so every closed issue's card reaches done or cancelled.
+    if (owned && read.states) await this.closeStale(_repo, owned, closed, read.states, logger);
     const backlogged = new Set(toBacklog.map(([, id]) => id));
     for (const [c, id] of ids) {
       if (budget.left <= 0) {
@@ -680,6 +696,44 @@ export class PaperclipMirror implements WorkObserver {
       // An issue the open view carries but GitHub reads closed is synced as closed.
       const card: SnapshotCard = c.state === "open" && now !== undefined && now !== "open" ? { ...c, state: now, stage: null } : c;
       await this.syncCard(id, card, budget, backlogged.has(id) && now !== "open");
+    }
+  }
+
+  /**
+   * Close the cards of `repo` that show neither done nor cancelled while no
+   * open issue stands behind them and this cycle's closed read did not name
+   * them. Each is read live (`states`), at most STALE_CHECK_MS apart and
+   * STALE_CHECKS_PER_SNAPSHOT a cycle; an issue that cannot be read is left.
+   */
+  private async closeStale(
+    repo: string,
+    cards: ReadonlyArray<SnapshotCard>,
+    closed: ReadonlyMap<number, "completed" | "not_planned">,
+    states: (issueNumbers: readonly number[]) => Promise<ReadonlyMap<number, ItemState>>,
+    logger: Logger,
+  ): Promise<void> {
+    const open = new Set(cards.filter((c) => c.state === "open").map((c) => c.item.issueNumber));
+    const now = Date.now();
+    const due: Array<[string, number]> = [];
+    for (const [id, n] of this.rowNumber) {
+      if (due.length >= STALE_CHECKS_PER_SNAPSHOT) break;
+      if (this.rowRepo.get(id) !== repo || open.has(n) || closed.has(n) || this.holds.has(id) || !this.rowState.has(id) || this.isClosedCard(id)) continue;
+      if (now - (this.staleCheckedAt.get(id) ?? 0) < STALE_CHECK_MS) continue;
+      due.push([id, n]);
+    }
+    if (!due.length) return;
+    let live: ReadonlyMap<number, ItemState>;
+    try {
+      live = await states(due.map(([, n]) => n));
+    } catch (err) {
+      logger.warn(`Paperclip: ${repo} stale card states not read: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    for (const [id, n] of due) {
+      const s = live.get(n);
+      if (s === undefined) continue;
+      this.staleCheckedAt.set(id, now);
+      if (s !== "open") await this.closeCard(id, s, { issueNumber: n, repo }, logger);
     }
   }
 
@@ -700,14 +754,17 @@ export class PaperclipMirror implements WorkObserver {
 
   /**
    * A card whose issue is closed: done, or cancelled when not planned, with no
-   * stage label. A card a session holds, a waiting hold, and one already
-   * there are left alone. With `ownsCards` the card sync does this instead.
+   * stage label. A card a session holds and one already there are left alone;
+   * a hold of the Foreman's (waiting, or Blocked) never keeps a closed issue's
+   * card open (jerky_ops#138 and nine more, 2026-10-26). With `ownsCards` the
+   * card sync does this instead.
    */
   private async closeCard(id: string, how: "completed" | "not_planned", item: WorkItem, logger: Logger): Promise<void> {
     if (this.holds.has(id)) return;
     const state = this.rowState.get(id);
-    if (!state || state.startsWith("waiting\n")) return;
+    if (!state) return;
     const target = this.statusName(how === "not_planned" ? "cancelled" : "done");
+    this.closedCards.add(id);
     if (state === `status:${target}`) return;
     const labelIds = await this.labelIdsFor(id, null);
     if (!(await this.patch(id, { status: target, ...(labelIds ? { labelIds } : {}) }))) return;
@@ -716,7 +773,7 @@ export class PaperclipMirror implements WorkObserver {
     this.labelBlocked.delete(id);
     this.blockedReason.delete(id);
     this.blockedOwner.delete(id);
-    logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
+    logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.startsWith("waiting\n") ? "waiting" : state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
   }
 
   /**
@@ -756,6 +813,7 @@ export class PaperclipMirror implements WorkObserver {
    */
   private async syncCard(id: string, c: SnapshotCard, budget: { left: number }, unconfirmed = false): Promise<void> {
     const want = this.cardContent(c, id);
+    if (c.state === "open") this.closedCards.delete(id);
     const have = this.rowContent.get(id);
     const state = this.rowState.get(id) ?? "";
     const body: Record<string, unknown> = {};
@@ -764,8 +822,10 @@ export class PaperclipMirror implements WorkObserver {
     const free = !this.holds.has(id) && !state.startsWith("waiting\n");
     // The receiver's entry text on a Foreman-held card reads as a waiting hold; it is GitHub's hold, unread.
     const entry = !this.holds.has(id) && state.startsWith("waiting\n") && RECEIVER_HOLD_ENTRY.test(state.slice(8));
-    let status = state.startsWith("status:") ? state.slice(7) : entry ? this.statusName("blocked") : null;
-    if (free && c.state !== "open") {
+    let status = state.startsWith("status:") ? state.slice(7) : entry || state.startsWith("waiting\n") ? this.statusName("blocked") : null;
+    // A closed issue closes its card whatever the Foreman holds on it; only a live session defers.
+    if (!this.holds.has(id) && c.state !== "open") {
+      this.closedCards.add(id);
       const target = this.statusName(c.state === "not_planned" ? "cancelled" : "done");
       if (status !== target) {
         body.status = target;
@@ -1133,6 +1193,8 @@ export class PaperclipMirror implements WorkObserver {
       keep.add(id);
       // A card a session holds is not waiting, whatever this cycle's plan says.
       if (this.holds.has(id)) continue;
+      // Nor is one whose issue GitHub reads closed: the Foreman's own state can lag the close.
+      if (this.closedCards.has(id)) continue;
       // A skip in its back-off needs a person: it is in (or goes to) the
       // blocked stage, held by that stage's owner. Re-blocking it as a
       // Foreman-held wait took it from that owner every cycle (EM #417).
@@ -1321,6 +1383,7 @@ export class PaperclipMirror implements WorkObserver {
     this.taskUuidCache.set(key, id);
     this.index?.set(key, id);
     this.rowRepo.set(id, item.repo);
+    this.rowNumber.set(id, item.issueNumber);
     this.rowState.set(id, `status:${content.status}`);
     this.rowContent.set(id, { title: content.title, description: content.description, assigneeAgentId: null, assigneeUserId: null });
     return id;
@@ -1340,6 +1403,7 @@ export class PaperclipMirror implements WorkObserver {
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
+      const numberOf = new Map<string, number>();
       const actions = new Map<string, string>();
       const content = new Map<string, RowContent>();
       const duplicates: Duplicate[] = [];
@@ -1358,6 +1422,7 @@ export class PaperclipMirror implements WorkObserver {
           if (r !== row) duplicates.push({ id: r.id, key: line, repo: m.groups.repo, winner: row.identifier || row.id, title: String(r.title ?? ""), status: r.status });
         }
         repoOf.set(row.id, m.groups.repo);
+        numberOf.set(row.id, Number(m.groups.N));
         content.set(row.id, {
           title: String(row.title ?? ""), description: String(row.description ?? ""),
           assigneeAgentId: row.assigneeAgentId ?? null, assigneeUserId: row.assigneeUserId ?? null,
@@ -1370,7 +1435,7 @@ export class PaperclipMirror implements WorkObserver {
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
         if (row.status === this.statusName("blocked") && action) actions.set(row.id, String(action));
       }
-      return { idx, state, repoOf, actions, content, duplicates };
+      return { idx, state, repoOf, numberOf, actions, content, duplicates };
     });
     if (!scanned.ok) return !!this.index;
     this.index = scanned.value.idx;
@@ -1379,6 +1444,8 @@ export class PaperclipMirror implements WorkObserver {
     for (const [k, v] of scanned.value.state) this.rowState.set(k, v);
     this.rowRepo.clear();
     for (const [k, v] of scanned.value.repoOf) this.rowRepo.set(k, v);
+    this.rowNumber.clear();
+    for (const [k, v] of scanned.value.numberOf) this.rowNumber.set(k, v);
     this.blockAction.clear();
     for (const [k, v] of scanned.value.actions) this.blockAction.set(k, v);
     this.rowContent.clear();

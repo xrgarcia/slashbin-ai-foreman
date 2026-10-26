@@ -3,7 +3,7 @@ import type { WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./ada
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
-import { loadRepoState } from "./state.js";
+import { loadRepoState, type RepoState } from "./state.js";
 import { clearUnstick, noteStuck } from "./unstick.js";
 
 /**
@@ -183,6 +183,19 @@ export function advance(
 }
 
 /**
+ * Whether the Foreman's own state holds issue `n` back. A recorded branch
+ * divergence holds every issue.
+ */
+export function foremanHolds(state: RepoState): (n: number) => boolean {
+  if (state.branchBlock) return () => true;
+  const out = new Set<number>();
+  for (const table of [state.skipped, state.held, state.verifyHeld, state.failed]) for (const k of Object.keys(table ?? {})) out.add(Number(k));
+  for (const e of Object.values(state.unstick ?? {})) out.add(e.issue);
+  for (const r of Object.values(state.prodReleases ?? {})) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
+  return (n) => out.has(n);
+}
+
+/**
  * Tell observers where every open item stands on the source, so a card the
  * Foreman stopped acting on is put back where it belongs. Reads the source
  * only when someone is listening.
@@ -195,12 +208,14 @@ export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): P
   const cards = source.cards && wantsCards() ? await source.cards(repoConfig, logger) : undefined;
   // Otherwise the closed items alone: a card the Foreman moved follows its issue to done.
   const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
-  const held = loadRepoState(repoConfig.name).verifyHeld ?? {};
+  const repoState = loadRepoState(repoConfig.name);
+  const held = repoState.verifyHeld ?? {};
+  const holds = foremanHolds(repoState);
   const read = source.states?.bind(source);
   await emit({
     kind: "snapshot",
     repo: repoConfig.githubRepo,
-    items: items.map((i) => (held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i)),
+    items: items.map((i) => ({ ...(held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i), foremanHeld: holds(i.item.issueNumber) })),
     ...(cards ? { cards } : {}),
     ...(closed ? { closed } : {}),
     ...(read ? { states: (ns: readonly number[]) => read(repoConfig, ns, logger) } : {}),

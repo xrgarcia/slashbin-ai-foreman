@@ -139,6 +139,13 @@ export interface SnapshotItem {
   readonly detail: string;
   /** A verify session gave up on it and holds it: the block stands at `merged`. */
   readonly verifyHeld?: boolean;
+  /**
+   * Whether the Foreman's own state still holds this item (a skip, a review or
+   * verify hold, a failed revision, an unstick entry, a branch block, a release
+   * in flight). `false`: it holds nothing, so a Blocked card with no GitHub hold
+   * behind it is stale. Absent: not read; nothing is inferred.
+   */
+  readonly foremanHeld?: boolean;
 }
 
 /**

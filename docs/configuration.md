@@ -229,6 +229,12 @@ Type: string · Default: none · Env: `AI_AGENT_EM_REPO_PATH`
 
 The EM checkout. The unstick stage runs `bin/em.mjs unstick` here (cwd) for stuck work, whether or not Paperclip is on; unset, that stage does nothing. The handoff-contract reader (bin/read-handoff-contract.mjs) and the SRE's spec mirror also read from it. Review no longer does: it runs through the Tech Lead, never a Claude session in this directory.
 
+### `unstickEscalationOwner`
+
+Type: string · Default: none · Env: `AI_AGENT_UNSTICK_ESCALATION_OWNER`
+
+GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
+
 ### `techLeadPath`
 
 Type: string · Default: none · Env: `AI_AGENT_TECH_LEAD_PATH`
@@ -346,7 +352,7 @@ Keep each repo's skill copies on a golden source, one approved issue at a time, 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
 
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
-- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — the owner's standing authorization (2026-10-24) covers every Foreman-managed repo for slashbin.io, jerky.com and cmneb, but a newly onboarded repo still needs a deliberate edit to turn it on. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
+- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
 - `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
 
 ```json

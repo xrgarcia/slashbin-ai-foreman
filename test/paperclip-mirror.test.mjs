@@ -1383,3 +1383,64 @@ test("a blocked event owned by the sre goes to the SRE seat with the deploy-fail
   await m2.onEvent({ kind: "blocked", item, reason: "x", owner: "sre" }, logger());
   assert.equal(fake2.rows[0].assigneeAgentId, "em-agent");
 });
+
+// --- A closed issue closes its card, held or not (2026-10-26) -----------------------
+
+const heldRow = (n, action, extra = {}) => ({ id: `r${n}`, title: `r#${n} issue ${n}`, status: "blocked", assigneeAgentId: AGENT,
+  description: `source: example/r#${n}\nGitHub: open · stage inReview\n\nhttps://github.com/example/r/issues/${n}`, unblockDescriptor: { owner: { agentId: AGENT }, action }, ...extra });
+
+test("ownsCards: a closed issue's Blocked card goes to done or cancelled, whatever hold it shows", async () => {
+  const fake = fakePaperclip([
+    heldRow(7, "blocked: review of PR #8 failed 4× — paused 1 h"),
+    heldRow(8, "waiting on branch features to free up"),
+    heldRow(9, "blocked: on GitHub — waiting on legal (ray, 2026-10-14) https://github.com/example/r/issues/9#c2"),
+  ]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8, { state: "not_planned" }), card(9, { state: "completed" })] }, logger());
+  assert.deepEqual(fake.rows.map((r) => r.status), ["done", "cancelled", "done"]);
+  assert.equal(fake.rows[0].description.split("\n")[1], "GitHub: closed completed");
+});
+
+test("ownsCards off: a closed issue's held card still goes to done", async () => {
+  const fake = fakePaperclip([heldRow(7, "waiting on branch features to free up")]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], closed: [{ item: { issueNumber: 7, repo: "example/r" }, state: "completed" }] }, logger());
+  assert.equal(fake.rows[0].status, "done");
+});
+
+test("a card the closed read missed is closed from a live read of the issue behind it", async () => {
+  const fake = fakePaperclip([heldRow(7, "blocked: review of PR #8 failed 4× — paused 1 h"), heldRow(8, "blocked: x"), heldRow(9, "blocked: y")]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  const asked = [];
+  const states = async (ns) => { asked.push(...ns); return new Map([[7, "completed"], [8, "not_planned"], [9, "open"], [10, "completed"]]); };
+  // #9 is open and has its card in this snapshot; #7 and #8 appear nowhere, and the closed read did not name them.
+  await mirror.onEvent({ kind: "snapshot", states, repo: "example/r", items: [], cards: [card(9, { stage: "approved" })] }, logger());
+  assert.deepEqual(fake.rows.map((r) => r.status).slice(0, 2), ["done", "cancelled"]);
+  assert.ok(!asked.includes(9), "an open issue's card is not asked about");
+  assert.notEqual(fake.rows[2].status, "done");
+});
+
+test("a closed issue's card is not put back in Blocked by the Foreman's lagging hold", async () => {
+  const fake = fakePaperclip([heldRow(7, "x")]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" })] }, logger());
+  assert.equal(fake.rows[0].status, "done");
+  await mirror.onWaiting("example/r", [{ item, reason: "held until this issue changes", skipped: true }], logger());
+  await mirror.onBlocked(item, "review failed 4×", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "done");
+  // Reopened: the snapshot reads it open, and the Foreman's holds apply again.
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { stage: "approved" })] }, logger());
+  await mirror.onBlocked(item, "review failed 4×", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+});
+
+test("a Blocked card that predates this process is released once the Foreman's state holds nothing; held, it stands", async () => {
+  for (const [foremanHeld, want] of [[false, "todo"], [true, "blocked"], [undefined, "blocked"]]) {
+    const fake = fakePaperclip([heldRow(7, "blocked: on GitHub — Release stopped: needs a person")]);
+    fake.rows[0].unblockDescriptor.action = "blocked: all bumps already landed";
+    const { mirror } = mirrorOn(fake, OWNED);
+    const it = { item, stage: "approved", detail: "approved, release pending", ...(foremanHeld === undefined ? {} : { foremanHeld }) };
+    await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [it], cards: [card(7, { stage: "approved" })] }, logger());
+    assert.equal(fake.rows[0].status, want, `foremanHeld ${foremanHeld}`);
+  }
+});

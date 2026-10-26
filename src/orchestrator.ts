@@ -1,7 +1,8 @@
 import { releaseStageReady, type AgentConfig, type RepoConfig } from "./config.js";
 import { configureBackoff } from "./backoff.js";
 import type { Logger } from "./logger.js";
-import { publishSnapshot, hasObservers } from "./work-source.js";
+import { publishSnapshot, hasObservers, workSourceFor } from "./work-source.js";
+import { pruneClosedHolds } from "./closed-holds.js";
 import { type ImplementationResult } from "./agent.js";
 import { dispatchStages, hasStage, isCustomStage, type StageEntry, type StageResult } from "./stages.js";
 import { getQueuedSessionCount, lanesFor, setSessionLimit, stageNeedsCheckout, stageSpawnsSession, withCheckoutLock, withLaneLock, withSessionSlot, type Lane } from "./lanes.js";
@@ -203,6 +204,12 @@ export async function runRepoPass(
 // again (blocked by an old skip, then advanced by a label heal) stayed wrong
 // for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
 async function publishBoard(repoConfig: RepoConfig, log: Logger): Promise<void> {
+  // A closed issue holds nothing: its skip, hold and failure entries go, observers or not.
+  try {
+    await pruneClosedHolds(repoConfig, workSourceFor(repoConfig), log);
+  } catch (err) {
+    log.debug(`Closed-issue holds not cleared: ${err instanceof Error ? err.message : String(err)}`);
+  }
   if (!hasObservers()) return;
   try {
     await publishSnapshot(repoConfig, log);
