@@ -122,6 +122,26 @@ Never resolve a stop by building something
 anyway — if the next cycle hands you the same issue with a prior-failure note, the
 right answer is the same stop and the same trailer.
 
+### Ending with no PR: say which of two things happened
+
+A build that opens no PR is never "nothing happened" — others may be waiting on the issue
+(GitHub "blocked by"). End on exactly one of:
+
+- **Everything the issue asks for is already on the feature branch** (a dependency-landing chore
+  whose PRs are all present, say). The issue is done. Comment the evidence (what you checked, the
+  SHAs/PRs), then end with this line. The Foreman closes the issue as completed, which releases
+  everything blocked by it. `issue=` is required; the branch must not have moved:
+
+  ```
+  FOREMAN_RESULT: landed issue=<N> reason="<one line of evidence: e.g. all 16 PRs already on features>"
+  ```
+
+- **It cannot land and a person must act** (every PR fails `npm ci`, a prerequisite is missing).
+  Use the `skipped` trailer above. The Foreman keeps the issue open, labels it blocked, and tells
+  every issue it blocks. Say what is wrong in the `reason`, not just "no PR produced".
+
+Never end with prose like "No PR produced" or "No code change to land" alone: neither is heard.
+
 ## Phase 2.5: Plan before you edit
 
 Do not open an editor on your first turn.
