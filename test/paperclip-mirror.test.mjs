@@ -1420,6 +1420,24 @@ test("a card the closed read missed is closed from a live read of the issue behi
   assert.notEqual(fake.rows[2].status, "done");
 });
 
+test("a stale card whose close failed is retried on the next snapshot, not after the 10-minute check interval", async () => {
+  const fake = fakePaperclip([heldRow(7, "blocked: review of PR #8 failed 4× — paused 1 h")]);
+  let outage = true;
+  const realFetch = fake.fetch;
+  fake.fetch = async (url, init = {}) => {
+    if (outage && init.method === "PATCH" && init.body?.includes('"status"')) throw new TypeError("fetch failed");
+    return realFetch(url, init);
+  };
+  const { mirror } = mirrorOn(fake, OWNED);
+  const states = async () => new Map([[7, "not_planned"]]);
+  const snap = () => mirror.onEvent({ kind: "snapshot", states, repo: "example/r", items: [], cards: [] }, logger());
+  await snap();
+  assert.equal(fake.rows[0].status, "blocked", "the write failed, so the card is still blocked");
+  outage = false;
+  await snap();
+  assert.equal(fake.rows[0].status, "cancelled", "the next snapshot retries; the failed attempt did not rate-limit it");
+});
+
 test("a closed issue's card is not put back in Blocked by the Foreman's lagging hold", async () => {
   const fake = fakePaperclip([heldRow(7, "x")]);
   const { mirror } = mirrorOn(fake, OWNED);

@@ -732,8 +732,9 @@ export class PaperclipMirror implements WorkObserver {
     for (const [id, n] of due) {
       const s = live.get(n);
       if (s === undefined) continue;
-      this.staleCheckedAt.set(id, now);
-      if (s !== "open") await this.closeCard(id, s, { issueNumber: n, repo }, logger);
+      // Stamp only a settled check: a close whose write failed (Paperclip down)
+      // must be retried next snapshot, not wait out STALE_CHECK_MS.
+      if (s === "open" || (await this.closeCard(id, s, { issueNumber: n, repo }, logger))) this.staleCheckedAt.set(id, now);
     }
   }
 
@@ -759,21 +760,22 @@ export class PaperclipMirror implements WorkObserver {
    * card open (jerky_ops#138 and nine more, 2026-10-26). With `ownsCards` the
    * card sync does this instead.
    */
-  private async closeCard(id: string, how: "completed" | "not_planned", item: WorkItem, logger: Logger): Promise<void> {
-    if (this.holds.has(id)) return;
+  private async closeCard(id: string, how: "completed" | "not_planned", item: WorkItem, logger: Logger): Promise<boolean> {
+    if (this.holds.has(id)) return true;
     const state = this.rowState.get(id);
-    if (!state) return;
+    if (!state) return true;
     const target = this.statusName(how === "not_planned" ? "cancelled" : "done");
     this.closedCards.add(id);
-    if (state === `status:${target}`) return;
+    if (state === `status:${target}`) return true;
     const labelIds = await this.labelIdsFor(id, null);
-    if (!(await this.patch(id, { status: target, ...(labelIds ? { labelIds } : {}) }))) return;
+    if (!(await this.patch(id, { status: target, ...(labelIds ? { labelIds } : {}) }))) return false;
     this.rowState.set(id, `status:${target}`);
     this.blockedAt.delete(id);
     this.labelBlocked.delete(id);
     this.blockedReason.delete(id);
     this.blockedOwner.delete(id);
     logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.startsWith("waiting\n") ? "waiting" : state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
+    return true;
   }
 
   /**
