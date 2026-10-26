@@ -17,6 +17,7 @@ import {
   announceDeadBlocker, closeAlreadyLanded, isDeadBlockerReason, deadBlockerComment, dependentRef,
 } from "../dist/github/dead-blocker.js";
 import { detectDeclaredLanded } from "../dist/agent.js";
+import { prBlockingSkip } from "../dist/phases/implement.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 let tmp, calls, dependents, savedPath, savedToken;
@@ -104,7 +105,11 @@ test("closing an already-landed issue comments the evidence, then closes as comp
 test("only a cause that will not clear by itself counts as a dead blocker", () => {
   assert.equal(isDeadBlockerReason("all 11 dependency PRs fail npm ci"), true);
   assert.equal(isDeadBlockerReason("diverged from origin/features — not a fast-forward"), false);
-  assert.equal(isDeadBlockerReason("features occupied by open PR #843"), false);
+  // The other transient wait (an open PR on the branch) is the caller's, through prBlockingSkip:
+  for (const r of ["PR #88 is still open on features", "features occupied by open PR #843"]) {
+    assert.notEqual(prBlockingSkip(r), null, r);
+  }
+  assert.equal(prBlockingSkip("all 11 dependency PRs fail npm ci"), null);
   assert.match(deadBlockerComment("o/gw#222", "r", "blocked"), /remove the `blocked` label/);
   assert.equal(dependentRef(dep(5, "open", "o/x"), "o/gw"), "o/x#5");
 });
@@ -126,5 +131,28 @@ test("wiring: landed is checked before PR attribution and behind the SHA guard; 
   assert.match(fn.slice(landedAt, fn.indexOf("const declaredSkip")), /beforeSha !== afterSha/);
   const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
   assert.match(impl, /actionableIssues\.includes\(result\.landedIssue\)/, "only an issue in the batch may be closed");
-  assert.match(impl, /if \(isDeadBlockerReason\(reason\)\) await tellDependents/);
+  assert.match(impl, /await tellDependents\(/);
+});
+
+test("a wait on an open PR is never told to dependents or labelled blocked", () => {
+  const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
+  assert.match(impl, /isDeadBlockerReason\(reason\) && prBlockingSkip\(reason\) === null/);
+});
+
+test("a dependent is escalated under ITS repo's config, with a stuck kind the unstick stage reads", () => {
+  const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
+  const body = impl.slice(impl.indexOf("async function tellDependents"), impl.indexOf("export async function tryBatchImplementation"));
+  assert.match(body, /managed\.find\(\(r\) => r\.githubRepo === t\.repo\)/, "cross-repo dependents need their own repo config");
+  assert.match(body, /stuck: "needs-ruling"/, "without a stuck kind no EM handoff is recorded (Paperclip off = nobody hears it)");
+  assert.match(body, /itemOf\(home, t\.number\)/);
+  assert.match(impl, /tellDependents\(skippedSet, reason, repoName, repoConfig, config\.repos, repoLogger\)/);
+});
+
+test("the landed protocol is in the COMMON prompt, so a repo-local skill hears it", () => {
+  const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
+  const fn = agent.slice(agent.indexOf("export async function implementApprovedIssues"), agent.indexOf("export async function revisePRFeedback"));
+  const at = fn.indexOf("Nothing-to-land protocol");
+  assert.ok(at > 0, "the prompt no longer teaches landed");
+  assert.ok(at > fn.indexOf("Skip protocol") && at < fn.indexOf("PRIOR ATTEMPT FAILED"));
+  assert.match(fn.slice(at, at + 900), /FOREMAN_RESULT: landed issue=/);
 });
