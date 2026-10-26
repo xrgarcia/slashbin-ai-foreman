@@ -160,22 +160,24 @@ async function tellDependents(issues: number[], reason: string, repoName: string
     try {
       const entry = loadRepoState(repoName).skipped?.[n];
       const { told, failed, open } = announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
-      if (open === 0) continue;
+      if (open.length === 0) continue;
       holdBlocker(repoConfig, n);
       for (const f of failed) repoLogger.warn(`Could not tell dependent ${f.ref} that #${n} is dead: ${f.error}`);
-      if (told.length === 0) continue;
-      const state = loadRepoState(repoName);
-      if (state.skipped?.[n]) state.skipped[n] = { ...state.skipped[n], deadBlockerTold: [...(entry?.deadBlockerTold ?? []), ...told.map((t) => t.ref)] };
-      saveRepoState(repoName, state);
-      for (const t of told) {
-        repoLogger.warn(`Told ${t.ref} its blocker #${n} is dead: ${reason}`);
+      // "Told" (comment + label) and "escalated" (an EM handoff on record) are kept
+      // apart: a dependent told but not escalated, because its repo was not in the
+      // config then, is escalated on a later pass instead of staying silent.
+      const toldRefs = [...new Set([...(entry?.deadBlockerTold ?? []), ...told.map((t) => t.ref)])];
+      const escalated = [...(entry?.deadBlockerEscalated ?? [])];
+      for (const t of open) {
+        if (!toldRefs.includes(t.ref) || escalated.includes(t.ref)) continue;
         // The EM's handoff is recorded under the DEPENDENT's own repo (the unstick
         // stage reads each repo's state), so a dependent in another managed repo is
         // escalated through that repo's config. A repo the Foreman does not manage
-        // has no such state: its comment and blocked label are all that can be said.
+        // has no such state: its comment and blocked label are all that can be said,
+        // and the escalation is retried while it stays out of the config.
         const home = t.repo === repoConfig.githubRepo ? repoConfig : managed.find((r) => r.githubRepo === t.repo);
         if (!home) {
-          repoLogger.warn(`${t.ref} is in a repo the Foreman does not manage — told by comment and label only, no EM handoff can be recorded`);
+          repoLogger.warn(`${t.ref} is in a repo the Foreman does not manage — told by comment and label only; no EM handoff can be recorded yet`);
           continue;
         }
         await emit({
@@ -185,7 +187,12 @@ async function tellDependents(issues: number[], reason: string, repoName: string
           at: "approved",
           stuck: "needs-ruling",
         }, home, repoLogger);
+        escalated.push(t.ref);
+        repoLogger.warn(`Told ${t.ref} its blocker #${n} is dead and escalated it: ${reason}`);
       }
+      const state = loadRepoState(repoName);
+      if (state.skipped?.[n]) state.skipped[n] = { ...state.skipped[n], deadBlockerTold: toldRefs, deadBlockerEscalated: escalated };
+      saveRepoState(repoName, state);
     } catch (err) {
       repoLogger.warn(`Could not check what #${n} blocks: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -754,6 +761,7 @@ export async function tryBatchImplementation(
           skipCount: priorCount + 1,
           ...(waitingOn ? { waitingOn: `${waitingOn.repo}#${waitingOn.number}` } : {}),
           ...(updatedState.skipped[issueNum]?.deadBlockerTold ? { deadBlockerTold: updatedState.skipped[issueNum].deadBlockerTold } : {}),
+          ...(updatedState.skipped[issueNum]?.deadBlockerEscalated ? { deadBlockerEscalated: updatedState.skipped[issueNum].deadBlockerEscalated } : {}),
         };
       }
       saveRepoState(repoName, updatedState);
@@ -771,7 +779,7 @@ export async function tryBatchImplementation(
       }
       // A stop that holds other issues up says so to them (dead-blocker.ts).
       // A skip naming an open PR on the branch clears when that PR leaves (isResolvedTransientSkip): never a dead blocker.
-      if (isDeadBlockerReason(reason) && prBlockingSkip(reason) === null) await tellDependents(skippedSet, reason, repoName, repoConfig, config.repos, repoLogger);
+      if (isDeadBlockerReason(reason) && prBlockingSkip(reason) === null) await tellDependents(skippedSet, reason, repoName, repoConfig, config.allRepos ?? config.repos, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
       failureCount.set(repoName, 0);
       lastFailureReason.delete(repoName);

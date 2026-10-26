@@ -34,6 +34,9 @@ interface SkippedIssue {
   // this build ended with no PR and will not land by itself (dead-blocker.ts).
   // Carried across repeat skips so a dependent hears it once, not per attempt.
   deadBlockerTold?: string[];
+  // The subset of those with an EM handoff on record. Kept apart so a dependent
+  // told while its repo was outside the config is escalated on a later pass.
+  deadBlockerEscalated?: string[];
 }
 
 interface HeldIssue {
