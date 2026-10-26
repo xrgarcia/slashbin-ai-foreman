@@ -165,3 +165,16 @@ test("a dependent told but not yet escalated is retried; --repo keeps the full r
   const cli = readFileSync(join(root, "src/cli.ts"), "utf-8");
   assert.match(cli, /repos: \[match\], allRepos: config\.repos/);
 });
+
+test("pending EM handoffs are delivered before the eligibility gate; a daemon reload keeps allRepos", () => {
+  const impl = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src/phases/implement.ts"), "utf8");
+  const gate = impl.slice(impl.indexOf("export async function tryBatchImplementation"));
+  assert.ok(gate.indexOf("await deliverPendingHandoffs(") > 0, "pass is called");
+  assert.ok(gate.indexOf("await deliverPendingHandoffs(") < gate.indexOf("await selectWork("), "runs before the eligibility early-return");
+  const fn = impl.slice(impl.indexOf("export async function deliverPendingHandoffs"), impl.indexOf("export async function tryBatchImplementation"));
+  assert.match(fn, /deadBlockerTold/);
+  assert.match(fn, /deadBlockerEscalated/);
+  assert.match(fn, /managed\.some\(/, "only dependents whose repo is managed are retried");
+  const daemon = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src/daemon.ts"), "utf8");
+  assert.match(daemon, /repos: \[match\], allRepos: fresh\.repos/);
+});
