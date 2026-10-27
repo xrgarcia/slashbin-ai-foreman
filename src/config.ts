@@ -372,9 +372,27 @@ export const configSchema = z.object({
   // time, off unless `enabled` (docs/skill-sync.md). prefault for the same
   // reason as above.
   skillSync: skillSyncConfigSchema.prefault({}),
+
+  // --- Dependabot ---
+  // The Dependabot stage's selection. Global, like `github`. `securityOnly` (default
+  // true) batches and lands only security updates: a Dependabot PR is one iff a
+  // package it bumps has an OPEN Dependabot alert on the repo. Other version-update PRs
+  // are left alone (not batched, merged or closed). When the alerts API cannot be read
+  // (404 with alerts disabled, a network error) the cycle batches nothing. Set
+  // `{ "securityOnly": false }` to batch every Dependabot PR.
+  dependabot: z.object({
+    // Batch and land only security updates: a Dependabot PR is one iff a package it
+    // bumps has an OPEN Dependabot alert on the repo. Other version-update PRs are
+    // left alone (not batched, merged or closed). When the alerts API cannot be read
+    // (404 with alerts disabled, a network error) the cycle batches nothing. Set false
+    // to batch every Dependabot PR, as before.
+    securityOnly: z.boolean().default(true),
+  }).prefault({}),
 });
 
 // --- Types ---
+
+export interface DependabotConfig { readonly securityOnly: boolean }
 
 
 /** Configured names of the lifecycle labels. See `lifecycleLabelsSchema`. */
@@ -428,6 +446,8 @@ export interface RepoConfig {
   reviewerLogin?: string;
   // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
   dependencyPreApproved: boolean;
+  /** The fleet-wide Dependabot selection — the global value. */
+  dependabot: DependabotConfig;
   /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
   skillSyncSkills?: readonly string[];
   /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
@@ -500,6 +520,8 @@ export interface AgentConfig {
   paperclip: PaperclipConfig;
   /** Skill sync settings. Always present; `enabled` is false unless opted in. */
   skillSync: SkillSyncConfig;
+  /** The Dependabot stage's selection (`dependabot` block). */
+  dependabot: DependabotConfig;
 }
 
 // --- Helpers ---
@@ -649,6 +671,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     github: fileConfig.github,
     paperclip: mergePaperclip(fileConfig.paperclip),
     skillSync: mergeSkillSync(fileConfig.skillSync),
+    dependabot: fileConfig.dependabot,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -677,6 +700,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     sessionEnv: [...parsed.sessionEnv],
     lifecycleLabels,
     github,
+    dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
   };
 
   let repos: RepoConfig[];
@@ -840,5 +864,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     stages,
     paperclip,
     skillSync: resolveSkillSync(parsed.skillSync),
+    dependabot: globals.dependabot,
   });
 }
