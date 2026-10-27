@@ -3,13 +3,34 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
+import { findConfigFile, loadConfig, type AgentConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
+import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
+import { buildRefusal } from "./build-info.js";
+import { addObserver } from "./work-source.js";
+import { secretValues } from "./agent.js";
+import { PaperclipClient } from "./paperclip/client.js";
+import { PaperclipMirror } from "./paperclip/mirror.js";
+import { runDoctor } from "./paperclip/doctor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The session secrets plus the Paperclip key, so a refused response that echoes
+ * the key is logged redacted. The key is kept out of `sessionEnv`, which would
+ * hand it to agent sessions. Same 8-character floor and longest-first order as
+ * secretValues.
+ */
+function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | undefined): Array<{ name: string; value: string }> {
+  const out = secretValues(sessionEnv);
+  if (apiKey && apiKey.length >= 8 && !out.some((s) => s.value === apiKey)) {
+    out.push({ name: "AI_AGENT_PAPERCLIP_API_KEY", value: apiKey });
+  }
+  return out.sort((a, b) => b.value.length - a.value.length);
+}
 
 function getVersion(): string {
   try {
@@ -25,6 +46,7 @@ function printHelp(): void {
 slashbin-ai-agent v${getVersion()}
 
 Usage: slashbin-ai-agent [options]
+       slashbin-ai-agent paperclip:doctor [--config <path>]
 
 Options:
   --config <path>  Path to .ai-agent.json config file
@@ -32,6 +54,13 @@ Options:
   --once           Run a single poll cycle and exit
   --version        Print version and exit
   --help           Show this help message
+
+Commands:
+  npm run setup     Install, build, install the labels, then run the doctor (needs a config)
+  npm run doctor    Is the Foreman ready to run? Tools, tokens, config, and per repo the
+                    checkout, branches, skills and labels (read-only; exits non-zero on any FAIL)
+  paperclip:doctor  Check Paperclip reachability, company, agent registration, and config
+                    (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
 repoPath, githubRepo, baseBranch, featureBranch, triggerLabel, skillPath, prompt.
@@ -49,6 +78,7 @@ Environment variables:
   AI_AGENT_SKILL_PATH       Path to skill file
   AI_AGENT_BASE_BRANCH      PR target branch (default: develop)
   AI_AGENT_FEATURE_BRANCH   Commit branch (default: features)
+  AI_AGENT_PRODUCTION_BRANCH  Production branch for sync/promotion (default: main)
   AI_AGENT_MAX_TURNS        Max agent turns (default: 30)
   AI_AGENT_LOG_FORMAT       json or text (default: text)
   AI_AGENT_LOG_LEVEL        debug, info, warn, error (default: info)
@@ -77,6 +107,33 @@ async function main(): Promise<void> {
   const repoFilter = getArg(args, "--repo");
   const once = args.includes("--once");
 
+  // Read-only Paperclip check. Handled here, before anything that needs a GitHub
+  // token, a logger or the PID file: the doctor needs only the config.
+  if (args[0] === "paperclip:doctor") {
+    let doctorConfig;
+    try {
+      doctorConfig = loadConfig(configPath);
+    } catch (err) {
+      console.log(`FAIL: config-complete — the config does not load: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    }
+    const allPassed = await runDoctor(doctorConfig);
+    process.exit(allPassed ? 0 : 1);
+  }
+
+  // No config file and no repo in the env: loadConfig would default repoPath to
+  // "." and infer githubRepo from this checkout's remote — the Foreman would
+  // build issues on its own repo. Refuse, and say how to set it up.
+  if (!findConfigFile(configPath) && !process.env.AI_AGENT_REPO_PATH) {
+    console.error(
+      configPath
+        ? `Configuration error: ${configPath} not found.`
+        : "Configuration error: no .ai-agent.json (or ai-agent.config.json) in this directory, and AI_AGENT_REPO_PATH is unset.\n" +
+          "Set the Foreman up first: see docs/setup.md, or ask Claude to \"set up the Foreman\". Then run `npm run setup`.",
+    );
+    process.exit(1);
+  }
+
   let config;
   try {
     config = loadConfig(configPath);
@@ -93,7 +150,7 @@ async function main(): Promise<void> {
       console.error(`No repo named "${repoFilter}". Available: ${available}`);
       process.exit(1);
     }
-    config = { ...config, repos: [match] };
+    config = { ...config, repos: [match], allRepos: config.repos };
   }
 
   const logger = createLogger({
@@ -103,8 +160,48 @@ async function main(): Promise<void> {
 
   logger.info(`slashbin-ai-agent v${getVersion()}`);
 
+  // Paperclip mirror (EM#417): an observer of the Foreman's steps, never a work
+  // source. Read once at startup; a config reload does not add or drop it, but
+  // its board mapping follows the reload, and the file it runs is published on
+  // its agent for anything else that places the same cards.
+  let mirror: PaperclipMirror | null = null;
+  let mirroredText: string | null = null;
+  const configText = (): string | null => {
+    const p = findConfigFile(configPath);
+    return p ? readFileSync(p, "utf-8") : null;
+  };
+  if (config.paperclip.enabled) {
+    if (config.paperclip.agentId && config.paperclip.companyId) {
+      mirror = new PaperclipMirror(
+        new PaperclipClient({
+          url: config.paperclip.url,
+          companyId: config.paperclip.companyId,
+          apiKey: config.paperclip.apiKey,
+          warn: (m) => logger.warn(m),
+          // The activity feed names the Foreman for its own writes, not the key's user.
+          actingAs: config.paperclip.agentId ? `agent:${config.paperclip.agentId}` : undefined,
+        }),
+        config.paperclip,
+        mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
+        logger,
+        config.lifecycleLabels,
+      );
+      addObserver(mirror);
+      // Housekeeping off the observer queue: project backfill, retiring the old live task.
+      mirror.start();
+      mirroredText = configText();
+      if (mirroredText !== null) void mirror.publishConfig(mirroredText);
+      logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
+    } else {
+      logger.info("paperclip mirror enabled but no agentId configured; run npm run paperclip:register");
+    }
+  }
+
   if (once) {
-    // Single cycle mode
+    // Single cycle mode. The daemon does this on start and reload; --once must
+    // too, or trustManagedRepos: false would be ignored here.
+    configureClaudeTrust({ enabled: config.trustManagedRepos });
+    trustManagedRepos(config.repos, logger);
     try {
       const { lastImplementation } = await runCycle(config, logger, 1);
       process.exit(lastImplementation?.success === false ? 1 : 0);
@@ -117,6 +214,16 @@ async function main(): Promise<void> {
   } else {
     // Daemon mode.
     //
+    // Only a committed build runs as the daemon (src/build-info.ts).
+    const refusal = buildRefusal(__dirname);
+    if (refusal) {
+      logger.error(`Refusing to start: ${refusal}`);
+      // 78 (EX_CONFIG): a restart cannot fix an uncommitted build, so the unit's
+      // RestartPreventExitStatus=78 stops on it instead of retrying every 30s
+      // (45 refused starts in a row, 2026-10-14 5:43-6:12 pm CT).
+      process.exit(78);
+    }
+
     // Register the PID before starting any work. This is what makes `status`,
     // `stop` and `restart` see a daemon no matter how it was launched, and it
     // is the guard against a second daemon reviewing and merging the same PRs.
@@ -129,7 +236,15 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
-    const daemon = startDaemon(config, logger, { configPath, repoFilter });
+    // A reload whose file changed hands the mirror the new mapping, then publishes it.
+    const onReload = (fresh: AgentConfig): void => {
+      if (!mirror) return;
+      const text = configText();
+      if (text === null || text === mirroredText) return;
+      mirroredText = text;
+      if (mirror.reconfigure(fresh.paperclip)) void mirror.publishConfig(text);
+    };
+    const daemon = startDaemon(config, logger, { configPath, repoFilter, onReload });
 
     const shutdown = async () => {
       await daemon.stop();

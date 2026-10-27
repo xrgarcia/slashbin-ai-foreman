@@ -15,46 +15,62 @@
 // Run with `npm test` (node:test, no dependencies) after `npm run build`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { planEmGateRestore, EM_GATE_LABEL } from "../dist/github.js";
+import { planEmGateRestore } from "../dist/github.js";
+import { defaultLifecycleLabels } from "../dist/config.js";
+
+const LABELS = defaultLifecycleLabels();
+const EM_GATE_LABEL = LABELS.readyForProd;
+const plan = (hadGate, open, labels = LABELS) => planEmGateRestore(hadGate, open, labels);
 
 const issue = (number, ...labels) => ({ number, labels: labels.map((name) => ({ name })) });
 
-test("the label constant is the exact string the promotion query filters on", () => {
-  // findReadyForProdIssues filters on this literal; a typo here is a silent stall.
+test("the default gate label is the exact string the promotion query filtered on before it was configurable", () => {
+  // findReadyForProdIssues filters on this name; a drift here is a silent stall.
   assert.equal(EM_GATE_LABEL, "ready for prod release");
 });
 
+test("renamed labels are the ones the guard reads — the defaults mean nothing then", () => {
+  const custom = { ...LABELS, readyForProd: "ship-it", prApproved: "dev-verified" };
+  assert.deepEqual(plan([225], [issue(225, "dev-verified")], custom), [{ number: 225, dropPrApproved: true }]);
+  assert.deepEqual(plan([225], [issue(225, "ship-it")], custom), [], "the renamed gate is intact");
+  assert.deepEqual(
+    plan([225], [issue(225, "ready for prod release", "pr approved")], custom),
+    [{ number: 225, dropPrApproved: false }],
+    "the default names are just other labels under a custom config",
+  );
+});
+
 test("a gate replaced by 'pr approved' is restored, and the replacement stripped", () => {
-  const steps = planEmGateRestore([225], [issue(225, "feature", "S3", "pr approved")]);
+  const steps = plan([225], [issue(225, "feature", "S3", "pr approved")]);
   assert.deepEqual(steps, [{ number: 225, dropPrApproved: true }]);
 });
 
 test("a gate removed outright is restored without touching anything else", () => {
-  const steps = planEmGateRestore([225], [issue(225, "feature", "S3")]);
+  const steps = plan([225], [issue(225, "feature", "S3")]);
   assert.deepEqual(steps, [{ number: 225, dropPrApproved: false }]);
 });
 
 test("an intact gate is left alone — the healthy path writes nothing", () => {
-  const steps = planEmGateRestore([225], [issue(225, "feature", EM_GATE_LABEL)]);
+  const steps = plan([225], [issue(225, "feature", EM_GATE_LABEL)]);
   assert.deepEqual(steps, [], "a run that behaved must be bit-for-bit unchanged");
 });
 
 test("a gate alongside 'pr approved' is still intact — no write", () => {
   // Both labels present is untidy but not a revocation; promotion still finds it.
-  const steps = planEmGateRestore([225], [issue(225, EM_GATE_LABEL, "pr approved")]);
+  const steps = plan([225], [issue(225, EM_GATE_LABEL, "pr approved")]);
   assert.deepEqual(steps, []);
 });
 
 test("a closed issue is never re-labeled", () => {
   // Absent from the OPEN set = closed. Re-labeling would put a finished issue
   // back in the Foreman's pickup list, which is the no-op-cycle bug in reverse.
-  const steps = planEmGateRestore([225], []);
+  const steps = plan([225], []);
   assert.deepEqual(steps, [], "closed issues must not be resurrected by the guard");
 });
 
 test("only issues that carried the gate BEFORE the run are candidates", () => {
   // #300 has no gate and never had one. The guard must not invent authorization.
-  const steps = planEmGateRestore([225], [issue(225, "pr approved"), issue(300, "pr approved")]);
+  const steps = plan([225], [issue(225, "pr approved"), issue(300, "pr approved")]);
   assert.deepEqual(steps, [{ number: 225, dropPrApproved: true }]);
 });
 
@@ -62,12 +78,12 @@ test("an empty before-snapshot can never produce a write", () => {
   // snapshotEmGate returns [] on any lookup failure. That must mean "restore
   // nothing", never "restore everything" — a failed read must not manufacture
   // production authorization.
-  const steps = planEmGateRestore([], [issue(225, "pr approved"), issue(300)]);
+  const steps = plan([], [issue(225, "pr approved"), issue(300)]);
   assert.deepEqual(steps, []);
 });
 
 test("multiple revoked gates in one run are all restored", () => {
-  const steps = planEmGateRestore(
+  const steps = plan(
     [225, 226, 227],
     [issue(225, "pr approved"), issue(226, EM_GATE_LABEL), issue(227, "pr pending actions")],
   );
@@ -90,7 +106,9 @@ test("multiple revoked gates in one run are all restored", () => {
 //
 // The rule below is time-symmetric: it asks whether the label was taken away
 // during the window, never whether it existed before the window.
-import { wasGateRevokedSince } from "../dist/github.js";
+import { wasGateRevokedSince as wasGateRevokedSinceWith } from "../dist/github.js";
+
+const wasGateRevokedSince = (events, sinceMs, labels = LABELS) => wasGateRevokedSinceWith(events, sinceMs, labels);
 
 const RUN_START = Date.parse("2026-08-06T13:52:25Z");
 const ev = (event, name, at) => ({ event, label: { name }, created_at: at });
@@ -144,4 +162,13 @@ test("an empty or unparseable timeline restores nothing", () => {
 test("a removal exactly at the run start counts — the boundary is inclusive", () => {
   const events = [ev("unlabeled", EM_GATE_LABEL, "2026-08-06T13:52:25Z")];
   assert.equal(wasGateRevokedSince(events, RUN_START), true);
+});
+
+test("a renamed gate's removal is detected, and the default name's is not", () => {
+  const custom = { ...LABELS, readyForProd: "ship-it" };
+  assert.equal(wasGateRevokedSince([ev("unlabeled", "ship-it", "2026-08-06T13:58:20Z")], RUN_START, custom), true);
+  assert.equal(
+    wasGateRevokedSince([ev("unlabeled", "ready for prod release", "2026-08-06T13:58:20Z")], RUN_START, custom),
+    false,
+  );
 });
