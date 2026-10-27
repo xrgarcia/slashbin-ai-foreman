@@ -89,6 +89,61 @@ export function findDependencyPRs(
 }
 
 // ---------------------------------------------------------------------------
+// Security-only selection
+// ---------------------------------------------------------------------------
+
+/**
+ * The package names with an OPEN Dependabot alert on `repo`.
+ *
+ * **Throws on any failure** (alerts disabled answers 404, a network or token
+ * error, a bad body). The caller treats a throw as "batch nothing this cycle":
+ * an unreadable alert list must never degrade to "everything is a security
+ * update", which is the behaviour this exists to remove.
+ */
+export function fetchOpenAlertPackages(repo: string, cwd: string): Set<string> {
+  const out = gh([
+    "api", "--paginate", `repos/${repo}/dependabot/alerts?state=open&per_page=100`,
+    "--jq", ".[].dependency.package.name",
+  ], cwd);
+  return new Set(out.split("\n").map((l) => l.trim().toLowerCase()).filter(Boolean));
+}
+
+/**
+ * Every package a Dependabot PR bumps, from its title and its body.
+ *
+ * A single-package title names it. A grouped PR's title usually names none
+ * (`bump the npm_and_yarn group across 1 directory with 2 updates`), so the body
+ * is read too: Dependabot lists `Updates \`pkg\` from X to Y`, `Bumps [pkg](url)
+ * from`, and `Updates the requirements on [a](url) and [b](url)`. The title's
+ * phrase for a group matches no alert, so unioning the two sources is safe. A PR
+ * from which nothing can be read yields an empty list and is therefore not a
+ * security update.
+ */
+export function dependencyPackagesOf(pr: Pick<PrSnapshot, "title" | "body">): string[] {
+  const names = new Set<string>();
+  for (const p of describeDependencyPR(0, pr.title).packages) names.add(p.toLowerCase());
+  const body = pr.body ?? "";
+  for (const m of body.matchAll(/Updates `([^`]+)` from/g)) names.add(m[1].toLowerCase());
+  for (const m of body.matchAll(/Bumps \[([^\]]+)\]\(/g)) names.add(m[1].toLowerCase());
+  for (const line of body.split("\n")) {
+    if (!/Updates the requirements on/i.test(line)) continue;
+    for (const m of line.matchAll(/\[([^\]]+)\]\(/g)) names.add(m[1].toLowerCase());
+  }
+  return [...names];
+}
+
+/**
+ * A dependency PR is a security update iff a package it bumps has an open
+ * Dependabot alert. Pure; the red-before-green test for the selection.
+ */
+export function selectSecurityPRs<T extends Pick<PrSnapshot, "title" | "body">>(
+  prs: readonly T[],
+  alertPackages: ReadonlySet<string>,
+): T[] {
+  return prs.filter((pr) => dependencyPackagesOf(pr).some((p) => alertPackages.has(p)));
+}
+
+// ---------------------------------------------------------------------------
 // Dependency BATCH issues — the path for bumps aimed at the feature branch
 // ---------------------------------------------------------------------------
 

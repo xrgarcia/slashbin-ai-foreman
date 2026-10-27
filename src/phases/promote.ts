@@ -8,6 +8,7 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
+import { formatGhError } from "../github/cache.js";
 import { trackRelease } from "../release-tracker.js";
 import {
   findReadyForProdIssues,
@@ -23,6 +24,8 @@ import {
   dependencyBatchBases,
   describeDependencyPR,
   findDependencyPRs,
+  fetchOpenAlertPackages,
+  selectSecurityPRs,
   findOpenDependencyBatchIssue,
   tryMergeSyncPR,
   countBranchDiffFiles,
@@ -106,8 +109,30 @@ export function tryFileDependencyBatchIssue(
   if (bases.length === 0) return null;
   const featureBranch = repoConfig.featureBranch || bases[0];
 
-  const prs = findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger, repoConfig.github);
+  let prs = findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger, repoConfig.github);
   if (prs.length === 0) return null;
+
+  // Security updates only (dependabot.securityOnly, default on; Ray, 2026-10-26).
+  // A version-update PR is left alone: not batched, merged or closed. If the alert
+  // list cannot be read the cycle batches NOTHING — never everything.
+  if (repoConfig.dependabot.securityOnly) {
+    let alerts: Set<string>;
+    try {
+      alerts = fetchOpenAlertPackages(repoConfig.githubRepo, repoConfig.repoPath);
+    } catch (err) {
+      depLogger.warn("dependabot: could not read open Dependabot alerts — batching nothing this cycle", {
+        ...formatGhError(err), repo: repoConfig.githubRepo, dependencyPRs: prs.length,
+      });
+      return null;
+    }
+    const before = prs.length;
+    prs = selectSecurityPRs(prs, alerts);
+    if (prs.length === 0) {
+      depLogger.debug(`${before} dependency PR(s) open, none a security update (${alerts.size} open alert package(s)); left alone`);
+      return null;
+    }
+    if (prs.length < before) depLogger.info(`${before - prs.length} of ${before} dependency PR(s) are not security updates; left alone`);
+  }
 
   const existing = findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, depLogger, repoConfig.github);
   if (existing) {
