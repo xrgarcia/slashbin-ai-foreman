@@ -43,6 +43,9 @@ fs.appendFileSync(${JSON.stringify(F.ghLog)}, JSON.stringify(args) + "\\n");
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(F.ghState)}, "utf8"));
 if (args[0] === "pr" && args[1] === "list") {
   process.stdout.write(JSON.stringify(args.includes("--head") ? st.featurePrs : st.openPrs));
+} else if (args[0] === "api" && args.join(" ").includes("dependabot/alerts")) {
+  if (st.alertsFail) { process.stderr.write("gh: Dependabot alerts are disabled for this repository. (HTTP 404)"); process.exit(1); }
+  process.stdout.write((st.alerts || []).join("\\n") + ((st.alerts || []).length ? "\\n" : ""));
 } else if (args[0] === "issue" && args[1] === "create") {
   process.stdout.write("https://github.com/example/repo/issues/42\\n");
 } else {
@@ -86,10 +89,10 @@ function load(cfg, repo = {}) {
 }
 
 /** Reset the fakes for one pass. */
-function arrange({ featurePrs = [], openPrs = [], claudeOut = "" } = {}) {
+function arrange({ featurePrs = [], openPrs = [], claudeOut = "", alerts = [], alertsFail = false } = {}) {
   writeFileSync(F.ghLog, "");
   writeFileSync(F.claudeLog, "");
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs }));
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs, alerts, alertsFail }));
   writeFileSync(F.claudeOut, claudeOut);
 }
 const lines = (f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -239,7 +242,7 @@ test("a stage left out of `stages` never runs", async () => {
 
 for (const pre of [true, false]) {
   test(`dependabot stage: dependencyPreApproved=${pre} ${pre ? "files the batch with" : "files the batch without"} the trigger label`, async () => {
-    arrange({ openPrs: [{ number: 11, url: "u", title: "Bump lodash from 4.17.20 to 4.17.21", body: "", headRefName: "dependabot/npm/lodash", baseRefName: "features" }] });
+    arrange({ alerts: ["lodash"], openPrs: [{ number: 11, url: "u", title: "Bump lodash from 4.17.20 to 4.17.21", body: "", headRefName: "dependabot/npm/lodash", baseRefName: "features" }] });
     const config = load({ stages: [{ type: "dependabot" }] }, { name: `dep-${pre}`, dependencyPreApproved: pre });
     await runRepoPass(config.repos[0], config, logger);
     const create = ghCalls().find((a) => a[0] === "issue" && a[1] === "create");
@@ -249,3 +252,66 @@ for (const pre of [true, false]) {
     else assert.equal(i, -1);
   });
 }
+
+// --- Dependabot: security updates only -----------------------------------------
+
+const depPr = (number, title, body = "") => ({ number, url: "u", title, body, headRefName: `dependabot/npm/p${number}`, baseRefName: "features" });
+const issueCreates = () => ghCalls().filter((a) => a[0] === "issue" && a[1] === "create");
+
+test("dependabot.securityOnly defaults to true and can be turned off", () => {
+  assert.equal(load({}).repos[0].dependabot.securityOnly, true);
+  assert.equal(load({ dependabot: { securityOnly: false } }).repos[0].dependabot.securityOnly, false);
+});
+
+test("securityOnly: only the PR whose package has an open alert is batched", async () => {
+  arrange({
+    alerts: ["ws"],
+    openPrs: [depPr(1, "Bump ws from 8.0.0 to 8.22.0"), depPr(2, "Bump lodash from 4.17.20 to 4.17.21"), depPr(3, "Bump typescript from 5.0.0 to 5.9.0")],
+  });
+  const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-one" });
+  await runRepoPass(config.repos[0], config, logger);
+  const [create] = issueCreates();
+  assert.ok(create, "a batch is filed for the security update");
+  const body = create[create.indexOf("--body") + 1];
+  assert.match(body, /#1\b/);
+  assert.doesNotMatch(body, /#2\b|#3\b/, "version-update PRs are not in the batch");
+  assert.ok(!ghCalls().some((a) => a[0] === "pr" && ["merge", "close"].includes(a[1])), "nothing merged or closed");
+});
+
+test("securityOnly: red before green — with it off the same PRs are all batched", async () => {
+  arrange({ alerts: ["ws"], openPrs: [depPr(1, "Bump ws from 8.0.0 to 8.22.0"), depPr(2, "Bump lodash from 4.17.20 to 4.17.21")] });
+  const config = load({ dependabot: { securityOnly: false }, stages: [{ type: "dependabot" }] }, { name: "sec-off" });
+  await runRepoPass(config.repos[0], config, logger);
+  const body = issueCreates()[0][issueCreates()[0].indexOf("--body") + 1];
+  assert.match(body, /#1\b/);
+  assert.match(body, /#2\b/);
+});
+
+test("securityOnly: no open alerts means no batch, and the PRs are left alone", async () => {
+  arrange({ alerts: [], openPrs: [depPr(2, "Bump lodash from 4.17.20 to 4.17.21")] });
+  const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-none" });
+  await runRepoPass(config.repos[0], config, logger);
+  assert.equal(issueCreates().length, 0);
+});
+
+test("securityOnly: a grouped PR with no packages in its title is read from its body", async () => {
+  arrange({
+    alerts: ["qs"],
+    openPrs: [
+      depPr(5, "chore(deps): bump the npm_and_yarn group across 1 directory with 2 updates", "Bumps the npm_and_yarn group with 2 updates in the / directory: [qs](https://github.com/ljharb/qs) and [express](https://github.com/expressjs/express).\n\nUpdates `qs` from 6.1.0 to 6.2.0\nUpdates `express` from 4.0.0 to 4.1.0"),
+      depPr(6, "chore(deps): bump the dev-deps group with 3 updates", "no package list here"),
+    ],
+  });
+  const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-group" });
+  await runRepoPass(config.repos[0], config, logger);
+  const body = issueCreates()[0][issueCreates()[0].indexOf("--body") + 1];
+  assert.match(body, /#5\b/);
+  assert.doesNotMatch(body, /#6\b/, "an unreadable group is treated as non-security");
+});
+
+test("securityOnly: an alerts-API failure batches nothing — it never falls back to everything", async () => {
+  arrange({ alertsFail: true, openPrs: [depPr(1, "Bump ws from 8.0.0 to 8.22.0"), depPr(2, "Bump lodash from 4.17.20 to 4.17.21")] });
+  const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-fail" });
+  await runRepoPass(config.repos[0], config, logger);
+  assert.equal(issueCreates().length, 0);
+});

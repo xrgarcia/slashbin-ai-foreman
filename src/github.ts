@@ -81,6 +81,9 @@ export {
 export {
   dependencyBatchBases,
   findDependencyPRs,
+  fetchOpenAlertPackages,
+  dependencyPackagesOf,
+  selectSecurityPRs,
   DEPENDENCY_BATCH_TITLE_PREFIX,
   type DependencyChange,
   describeDependencyPR,
