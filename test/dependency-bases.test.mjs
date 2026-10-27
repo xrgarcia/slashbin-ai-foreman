@@ -25,36 +25,41 @@ test("the normal repo covers BOTH working branches", () => {
   // Both, because nothing merges a dependency PR mechanically any more. Covering
   // only `features` would have left the 24 PRs already sitting on `develop`
   // (measured 2026-09-07) with no route to a session at all.
-  assert.deepEqual(dependencyBatchBases("features", "develop"), ["features", "develop"]);
+  assert.deepEqual(dependencyBatchBases("features", "develop", "main"), ["features", "develop"]);
 });
 
 test("main is never an acceptable base, from either field", () => {
-  assert.deepEqual(dependencyBatchBases("features", "main"), ["features"]);
-  assert.deepEqual(dependencyBatchBases("main", "develop"), ["develop"]);
+  assert.deepEqual(dependencyBatchBases("features", "main", "main"), ["features"]);
+  assert.deepEqual(dependencyBatchBases("main", "develop", "main"), ["develop"]);
 });
 
 test("a main-only repo yields no acceptable base at all", () => {
   // featureBranch === baseBranch === "main". The caller already skips these;
   // this asserts the phase is safe even if that guard is ever removed.
-  assert.deepEqual(dependencyBatchBases("main", "main"), []);
+  assert.deepEqual(dependencyBatchBases("main", "main", "main"), []);
 });
 
 test("identical feature and base branches dedupe to one entry", () => {
-  assert.deepEqual(dependencyBatchBases("develop", "develop"), ["develop"]);
+  assert.deepEqual(dependencyBatchBases("develop", "develop", "main"), ["develop"]);
 });
 
 test("missing config fields drop out rather than producing an empty-string base", () => {
   // An empty string would match no PR, but it would also read as a configured
   // branch in the refusal log. Filter it at the source.
-  assert.deepEqual(dependencyBatchBases(undefined, "develop"), ["develop"]);
-  assert.deepEqual(dependencyBatchBases("features", undefined), ["features"]);
-  assert.deepEqual(dependencyBatchBases("", ""), []);
-  assert.deepEqual(dependencyBatchBases(undefined, undefined), []);
+  assert.deepEqual(dependencyBatchBases(undefined, "develop", "main"), ["develop"]);
+  assert.deepEqual(dependencyBatchBases("features", undefined, "main"), ["features"]);
+  assert.deepEqual(dependencyBatchBases("", "", "main"), []);
+  assert.deepEqual(dependencyBatchBases(undefined, undefined, "main"), []);
 });
 
 test("a custom development branch name is honoured, not hardcoded to develop", () => {
   // baseBranch/featureBranch are per-repo config. Nothing here may assume the
   // house names — the guards are "not main" and "not the feature branch", never
   // "one of two known strings".
-  assert.deepEqual(dependencyBatchBases("wip", "staging"), ["wip", "staging"]);
+  assert.deepEqual(dependencyBatchBases("wip", "staging", "main"), ["wip", "staging"]);
+});
+
+test("the configured production branch is the one excluded, not the literal main", () => {
+  assert.deepEqual(dependencyBatchBases("features", "release", "release"), ["features"]);
+  assert.deepEqual(dependencyBatchBases("work", "main", "release"), ["work", "main"]);
 });

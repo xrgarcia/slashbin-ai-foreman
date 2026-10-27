@@ -39,7 +39,7 @@ test("trailer survives stream-JSON pollution immediately after it", () => {
     'FOREMAN_REVIEW pr=#585 verdict=APPROVE merged=yes deploy=SUCCESS"}],"STOP_REASON":NULL',
   );
   assert.equal(t.deploy, "SUCCESS");
-  assert.equal(labelFromTrailer(t), "pr approved");
+  assert.equal(labelFromTrailer(t), "prApproved");
 });
 
 test("optional hold= is captured as a reason", () => {
@@ -71,11 +71,11 @@ FOREMAN_REVIEW pr=#3 verdict=APPROVE merged=yes deploy=SUCCESS hold=waiting-on-w
   assert.equal(out[2].hold, "waiting-on-window");
 });
 
-test("label mapping: merged + APPROVE + deploy ok => pr approved", () => {
+test("label mapping: merged + APPROVE + deploy ok => prApproved", () => {
   for (const deploy of ["SUCCESS", "NA", "N/A", "NONE", "PASS"]) {
     assert.equal(
       labelFromTrailer({ pr: 1, verdict: "APPROVE", merged: true, deploy }),
-      "pr approved",
+      "prApproved",
       `deploy=${deploy}`,
     );
   }
@@ -84,7 +84,7 @@ test("label mapping: merged + APPROVE + deploy ok => pr approved", () => {
 test("label mapping: a failed deploy routes to revise, not approval", () => {
   assert.equal(
     labelFromTrailer({ pr: 1, verdict: "APPROVE", merged: true, deploy: "FAILURE" }),
-    "pr pending actions",
+    "prPendingActions",
   );
 });
 
@@ -114,8 +114,9 @@ test("label mapping: self-contradictory or unknown reports => no write", () => {
 });
 
 test("label mapping never yields the production authorization", () => {
-  // `ready for prod release` is the EM outcome-gate's signature. No trailer,
-  // however emphatic, may produce it (separation of duties, 2026-07-27).
+  // `readyForProd` is the EM outcome-gate's signature. No trailer, however
+  // emphatic, may produce it (separation of duties, 2026-07-27). The mapping
+  // returns lifecycle KEYS; the configured name is looked up at the write.
   const combos = ["SUCCESS", "FAILURE", "NA", "WEIRD"].flatMap((deploy) =>
     [true, false].flatMap((merged) =>
       ["APPROVE", "REQUEST_CHANGES", "NONSENSE"].map((verdict) =>
@@ -123,7 +124,7 @@ test("label mapping never yields the production authorization", () => {
       ),
     ),
   );
-  assert.equal(combos.includes("ready for prod release"), false);
+  assert.deepEqual([...new Set(combos)].sort(), [null, "prApproved", "prPendingActions"].sort());
 });
 
 // --- Result extraction --------------------------------------------------
@@ -174,4 +175,18 @@ test("extractStreamResult picks the LAST result event and tolerates non-JSON lin
 
 test("no result event => undefined, so the caller can fall back to stdout", () => {
   assert.equal(extractStreamResult("no json here\n{also not}"), undefined);
+});
+
+test("reviewOutcomesOf reads the outcome a review agent labelled itself", async () => {
+  const { reviewOutcomesOf } = await import("../dist/github.js");
+  const lifecycleLabels = { prApproved: "pr approved", prPendingActions: "pr pending actions", readyForProd: "ready for prod" };
+  const L = (...n) => n.map((name) => ({ name }));
+  const issues = [
+    { number: 1, labels: L("pr under review", "pr approved") },
+    { number: 2, labels: L("pr pending actions") },
+    { number: 3, labels: L("pr under review") },
+    { number: 4, labels: L("ready for prod", "pr approved") },
+  ];
+  const got = Object.fromEntries(reviewOutcomesOf({ lifecycleLabels }, issues, [1, 2, 3, 4, 9]));
+  assert.deepEqual(got, { 1: "prApproved", 2: "prPendingActions" });
 });

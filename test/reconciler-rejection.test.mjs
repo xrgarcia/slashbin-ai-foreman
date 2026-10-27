@@ -11,10 +11,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { orchestratorSource } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
-const orchestrator = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
+const orchestrator = orchestratorSource();
 const state = readFileSync(join(root, "src/state.ts"), "utf-8");
 
 test("the reconciler looks up closed-unmerged PRs, not only open ones", () => {
@@ -45,8 +46,10 @@ test("new commits on top of a rejection still reconcile, but say the bundle is d
 
 test("git failures carry stderr and distinguish a shutdown from a fault", () => {
   assert.match(reconciler, /function formatGitError/, "no git error formatter");
-  assert.match(reconciler, /cancelled: signal === "SIGTERM" \|\| signal === "SIGINT"/,
-    "a signal-killed fetch must be reported as cancelled, not failed");
+  assert.match(reconciler, /cancelled: !timedOut && \(signal === "SIGTERM" \|\| signal === "SIGINT"\)/,
+    "a signal-killed fetch must be reported as cancelled, not failed — unless our own timeout killed it");
+  assert.match(reconciler, /timedOut = e\?\.code === "ETIMEDOUT"/,
+    "Node's execFileSync timeout also sends SIGTERM; ETIMEDOUT is what tells it apart (foreman#61)");
   const fetchCatch = reconciler.slice(reconciler.indexOf('git(["fetch", "origin"]'));
   assert.match(fetchCatch.slice(0, 900), /if \(failure\.cancelled\)/,
     "the fetch catch must branch on cancellation");

@@ -1,0 +1,357 @@
+// The `paperclip` config block and the Paperclip HTTP client.
+//
+// Config: a config without the block runs exactly as before (mirror off), each
+// leaf has its default, each AI_AGENT_PAPERCLIP_* var overrides its leaf.
+// Client: an injected fake fetch records every call — no Paperclip, no network.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { loadConfig } from "../dist/config.js";
+import { PaperclipClient, PaperclipClientError, createPaperclipClient } from "../dist/paperclip/client.js";
+
+const tmp = mkdtempSync(join(tmpdir(), "foreman-paperclip-test-"));
+test.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+const ENV_KEYS = [
+  "AI_AGENT_PAPERCLIP_ENABLED", "AI_AGENT_PAPERCLIP_URL", "AI_AGENT_PAPERCLIP_COMPANY_ID",
+  "AI_AGENT_PAPERCLIP_AGENT_NAME", "AI_AGENT_PAPERCLIP_AGENT_ID", "AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT",
+  "AI_AGENT_PAPERCLIP_API_KEY", "AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT", "AI_AGENT_PAPERCLIP_PROJECT_ID",
+];
+for (const k of ENV_KEYS) delete process.env[k];
+
+let n = 0;
+function cfg(extra) {
+  const p = join(tmp, `cfg-${n++}.json`);
+  writeFileSync(p, JSON.stringify({ repos: [{ name: "r", repoPath: tmp, githubRepo: "example/r" }], ...extra }));
+  return p;
+}
+function withEnv(vars, fn) {
+  Object.assign(process.env, vars);
+  try { return fn(); } finally { for (const k of Object.keys(vars)) delete process.env[k]; }
+}
+
+const CID = "company-1";
+
+test("no paperclip block: mirror off, every default applied", () => {
+  const { paperclip } = loadConfig(cfg({}));
+  const { board, stageLabels, roles, ...rest } = paperclip;
+  assert.deepEqual(roles, {}, "no roles: the Foreman holds every card");
+  assert.ok(Object.values(board).every((s) => s.owner === "foreman"));
+  assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "blocked", "changesRequested", "inReview", "merged", "needsRuling", "pendingVerification", "prodVerifyHeld", "releaseAuthorized", "releasing"]);
+  assert.deepEqual({ ...rest }, {
+    liveLeaseMinutes: 15,
+    publishConfig: true,
+    enabled: false,
+    url: "http://127.0.0.1:3100",
+    agentName: "Foreman",
+    identityKeyFormat: "source: {repo}#{N}",
+    taskTitleFormat: "{repo}#{N}",
+    projects: false,
+    ownsCards: false,
+    agentStatus: true,
+    comments: {
+      enabled: true,
+      events: {
+        implementStart: true, implementEnd: true, reviewStart: true, reviewEnd: true,
+        reviseStart: true, reviseEnd: true, progress: true, release: true, blocked: true,
+      },
+      maxLength: 3000,
+      includeDiffStat: true,
+    },
+  });
+  assert.equal(paperclip.statusMap, undefined);
+  assert.equal(paperclip.companyId, undefined);
+  assert.equal(paperclip.agentId, undefined);
+});
+
+test("paperclip placement, title and scope: file and env set them; a bad value stops startup", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: { projectId: "p-1", taskTitleFormat: "{name} #{N}", repos: ["example/r"] } }));
+  assert.equal(paperclip.projectId, "p-1");
+  assert.equal(paperclip.taskTitleFormat, "{name} #{N}");
+  assert.deepEqual(paperclip.repos, ["example/r"]);
+  assert.ok(Object.isFrozen(paperclip.repos));
+  const env = withEnv({ AI_AGENT_PAPERCLIP_PROJECT_ID: "p-env", AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT: "#{N}" },
+    () => loadConfig(cfg({ paperclip: { projectId: "p-1" } })).paperclip);
+  assert.equal(env.projectId, "p-env");
+  assert.equal(env.taskTitleFormat, "#{N}");
+  assert.throws(() => loadConfig(cfg({ paperclip: { taskTitleFormat: "{repo}" } })), /must contain \{N\}/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["example/typo"] } })), /"example\/typo" is not a configured githubRepo/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["no-owner"] } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { repos: [] } })));
+});
+
+test("paperclip.comments: a partial block keeps the other defaults; a bad maxLength stops startup", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: { comments: { maxLength: 800, events: { progress: false } } } }));
+  assert.equal(paperclip.comments.enabled, true);
+  assert.equal(paperclip.comments.maxLength, 800);
+  assert.equal(paperclip.comments.events.progress, false);
+  assert.equal(paperclip.comments.events.reviewEnd, true);
+  assert.equal(paperclip.comments.includeDiffStat, true);
+  assert.throws(() => loadConfig(cfg({ paperclip: { comments: { maxLength: 10 } } })));
+});
+
+test("block with only companyId keeps the other defaults", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: { companyId: CID } }));
+  assert.equal(paperclip.companyId, CID);
+  assert.equal(paperclip.enabled, false);
+  assert.equal(paperclip.url, "http://127.0.0.1:3100");
+  assert.equal(paperclip.agentName, "Foreman");
+  assert.equal(paperclip.identityKeyFormat, "source: {repo}#{N}");
+  assert.equal(paperclip.statusMap, undefined);
+});
+
+test("each AI_AGENT_PAPERCLIP_* var overrides its own leaf over the file", () => {
+  const file = { paperclip: { companyId: "file-co", url: "http://file.test", agentName: "FileBot", agentId: "file-agent", identityKeyFormat: "f {repo} {N}" } };
+  const cases = [
+    ["AI_AGENT_PAPERCLIP_URL", "http://env.test:9", "url", "http://env.test:9"],
+    ["AI_AGENT_PAPERCLIP_COMPANY_ID", "env-co", "companyId", "env-co"],
+    ["AI_AGENT_PAPERCLIP_AGENT_NAME", "EnvBot", "agentName", "EnvBot"],
+    ["AI_AGENT_PAPERCLIP_AGENT_ID", "env-agent", "agentId", "env-agent"],
+    ["AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT", "gh: {repo}#{N}", "identityKeyFormat", "gh: {repo}#{N}"],
+    ["AI_AGENT_PAPERCLIP_API_KEY", "pcak_env_0123456789", "apiKey", "pcak_env_0123456789"],
+  ];
+  for (const [key, value, field, expected] of cases) {
+    const { paperclip } = withEnv({ [key]: value }, () => loadConfig(cfg(file)));
+    assert.equal(paperclip[field], expected, key);
+    // The others still come from the file.
+    if (field !== "companyId") assert.equal(paperclip.companyId, "file-co", key);
+  }
+});
+
+test("env overrides apply with no block in the file", () => {
+  const { paperclip } = withEnv(
+    { AI_AGENT_PAPERCLIP_ENABLED: "true", AI_AGENT_PAPERCLIP_COMPANY_ID: CID },
+    () => loadConfig(cfg({})),
+  );
+  assert.equal(paperclip.enabled, true);
+  assert.equal(paperclip.companyId, CID);
+  assert.equal(paperclip.agentName, "Foreman");
+});
+
+test("AI_AGENT_PAPERCLIP_ENABLED parses yes/no words, and rejects anything else", () => {
+  for (const v of ["true", "1", "yes", "on", "TRUE"]) {
+    const { paperclip } = withEnv({ AI_AGENT_PAPERCLIP_ENABLED: v }, () => loadConfig(cfg({ paperclip: { companyId: CID } })));
+    assert.equal(paperclip.enabled, true, v);
+  }
+  for (const v of ["false", "0", "no", "off", " False "]) {
+    const { paperclip } = withEnv({ AI_AGENT_PAPERCLIP_ENABLED: v }, () => loadConfig(cfg({ paperclip: { companyId: CID, enabled: true } })));
+    assert.equal(paperclip.enabled, false, v);
+  }
+  assert.throws(() => withEnv({ AI_AGENT_PAPERCLIP_ENABLED: "maybe" }, () => loadConfig(cfg({ paperclip: { companyId: CID } }))));
+});
+
+test("enabled without a companyId fails to load", () => {
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true } })), /companyId/);
+});
+
+test("identityKeyFormat must name both {repo} and {N}", () => {
+  assert.throws(() => loadConfig(cfg({ paperclip: { identityKeyFormat: "source: {repo}" } })), /identityKeyFormat/);
+});
+
+test("statusMap overrides only the buckets it names; unknown buckets are rejected", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: { statusMap: { in_review: "review", blocked: "on_hold" } } }));
+  assert.deepEqual({ ...paperclip.statusMap }, { in_review: "review", blocked: "on_hold" });
+  assert.throws(() => loadConfig(cfg({ paperclip: { statusMap: { paused: "x" } } })));
+});
+
+// --- client ---
+
+function fakeFetch(handler) {
+  const calls = [];
+  const fn = async (url, init = {}) => {
+    const u = new URL(url);
+    const call = { method: init.method ?? "GET", path: u.pathname, search: u.searchParams, body: init.body ? JSON.parse(init.body) : undefined };
+    calls.push(call);
+    const [status, payload] = handler(call);
+    return new Response(payload === undefined ? "" : JSON.stringify(payload), { status });
+  };
+  return { fn, calls };
+}
+
+const BASE = "http://paperclip.test/";
+const make = (fetch) => new PaperclipClient({ url: BASE, companyId: CID, fetch });
+
+test("listIssues fetches the next page only after a full 1000-row page", async () => {
+  const { fn, calls } = fakeFetch(({ search }) => {
+    const offset = Number(search.get("offset"));
+    return [200, Array.from({ length: offset === 0 ? 1000 : 2 }, (_, i) => ({ id: `i${offset + i}`, title: "t", status: "todo" }))];
+  });
+  const ids = [];
+  for await (const i of make(fn).listIssues()) ids.push(i.id);
+  assert.equal(ids.length, 1002);
+  assert.equal(ids[1001], "i1001");
+  assert.deepEqual(calls.map((c) => [c.path, c.search.get("limit"), c.search.get("offset")]), [
+    [`/api/companies/${CID}/issues`, "1000", "0"],
+    [`/api/companies/${CID}/issues`, "1000", "1000"],
+  ]);
+});
+
+test("listIssues stops after one request when the first page is short", async () => {
+  const { fn, calls } = fakeFetch(() => [200, [{ id: "a", title: "t", status: "todo" }]]);
+  const ids = [];
+  for await (const i of make(fn).listIssues()) ids.push(i.id);
+  assert.deepEqual(ids, ["a"]);
+  assert.equal(calls.length, 1);
+});
+
+test("each method hits its documented method, path and body", async () => {
+  const { fn, calls } = fakeFetch(({ body }) => [200, { id: "x", ...(body ?? {}) }]);
+  const c = createPaperclipClient({ url: BASE, companyId: CID, fetch: fn });
+  await c.createIssue({ title: "t", status: "todo", description: "source: o/r#1" });
+  await c.updateIssue("iss", { status: "in_progress" });
+  await c.getIssueComments("iss");
+  await c.createComment("iss", "note");
+  await c.listAgents();
+  await c.createAgent({ name: "Foreman", role: "engineer" });
+  await c.updateAgent("ag", { name: "Foreman 2" });
+  assert.deepEqual(calls.map((q) => `${q.method} ${q.path}${q.search.size ? `?${q.search}` : ""}`), [
+    `POST /api/companies/${CID}/issues`,
+    "PATCH /api/issues/iss",
+    "GET /api/issues/iss/comments",
+    "POST /api/issues/iss/comments",
+    `GET /api/companies/${CID}/agents`,
+    `POST /api/companies/${CID}/agents`,
+    "PATCH /api/agents/ag",
+  ]);
+  assert.deepEqual(calls[0].body, { title: "t", status: "todo", description: "source: o/r#1" });
+  assert.deepEqual(calls[3].body, { body: "note" });
+  assert.equal(calls[2].body, undefined);
+});
+
+test("returns the parsed body", async () => {
+  const { fn } = fakeFetch(() => [201, { id: "c2", body: "note", authorAgentId: null }]);
+  assert.deepEqual(await make(fn).createComment("iss", "note"), { id: "c2", body: "note", authorAgentId: null });
+});
+
+for (const status of [404, 500]) {
+  test(`a ${status} throws PaperclipClientError with that status and the body`, async () => {
+    const { fn } = fakeFetch(() => [status, { error: "nope" }]);
+    await assert.rejects(make(fn).updateIssue("iss", {}), (err) => {
+      assert.ok(err instanceof PaperclipClientError);
+      assert.equal(err.name, "PaperclipClientError");
+      assert.equal(err.status, status);
+      assert.equal(err.body, JSON.stringify({ error: "nope" }));
+      return true;
+    });
+  });
+}
+
+test("a network failure throws PaperclipClientError with status 0, no retry", async () => {
+  let calls = 0;
+  const fn = async () => { calls++; throw new TypeError("fetch failed"); };
+  await assert.rejects(make(fn).listAgents(), (err) => err instanceof PaperclipClientError && err.status === 0);
+  assert.equal(calls, 1);
+});
+
+test("a 2xx body that is not JSON throws PaperclipClientError", async () => {
+  const fn = async () => new Response("<html>", { status: 200 });
+  await assert.rejects(make(fn).listAgents(), PaperclipClientError);
+});
+
+test("board: a partial stage keeps its defaults; an unknown owner, label or reportsTo is refused", () => {
+  const { paperclip } = loadConfig(cfg({ paperclip: {
+    roles: { reviewer: { name: "Reviewer" } },
+    board: { inReview: { owner: "reviewer" } },
+  } }));
+  assert.deepEqual({ ...paperclip.board.inReview }, { owner: "reviewer", status: "in_review", label: "inReview" });
+  assert.equal(paperclip.board.approved.owner, "foreman");
+  assert.equal(paperclip.roles.reviewer.role, "engineer");
+  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { owner: "nobody" } } } })), /nobody/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { label: "nope" } } } })), /nope/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { agentReportsTo: "ghost" } })), /ghost/);
+});
+
+// EM#512: an instance that requires sign-in gets the key as a bearer on every request.
+function headerFetch() {
+  const seen = [];
+  const fn = async (_url, init = {}) => {
+    seen.push({ method: init.method ?? "GET", headers: { ...(init.headers ?? {}) } });
+    return new Response(JSON.stringify({ id: "x" }), { status: 200 });
+  };
+  return { fn, seen };
+}
+
+test("apiKey set: authorization Bearer on a GET and on a POST", async () => {
+  const { fn, seen } = headerFetch();
+  const c = new PaperclipClient({ url: BASE, companyId: CID, apiKey: "pcak_test_0123456789", fetch: fn });
+  await c.listAgents();
+  await c.createComment("iss", "note");
+  assert.deepEqual(seen.map((s) => [s.method, s.headers.authorization]), [
+    ["GET", "Bearer pcak_test_0123456789"],
+    ["POST", "Bearer pcak_test_0123456789"],
+  ]);
+});
+
+test("apiKey unset: headers are exactly what they were, no authorization", async () => {
+  const { fn, seen } = headerFetch();
+  const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: fn });
+  await c.listAgents();
+  await c.createComment("iss", "note");
+  assert.deepEqual(seen.map((s) => s.headers), [
+    { accept: "application/json" },
+    { accept: "application/json", "content-type": "application/json" },
+  ]);
+});
+
+test("a refused request's error names method, path and status, never the key", async () => {
+  const fn = async () => new Response("bad key pcak_test_0123456789", { status: 401 });
+  const c = new PaperclipClient({ url: BASE, companyId: CID, apiKey: "pcak_test_0123456789", fetch: fn });
+  await assert.rejects(c.listAgents(), (err) => {
+    assert.ok(err instanceof PaperclipClientError);
+    assert.equal(err.status, 401);
+    assert.ok(!err.message.includes("pcak_test_0123456789"), err.message);
+    return true;
+  });
+});
+
+test("client: a comment's credited author rides only on a write that posts one; a refusal posts it as the key's user", async () => {
+  const seen = [];
+  let refuse = null;
+  const fetch = async (url, init = {}) => {
+    const author = init.headers?.["x-slashbin-comment-author"] ?? null;
+    seen.push(`${init.method} ${author}`);
+    if (author && refuse) return new Response(JSON.stringify({ error: "no", code: refuse.code }), { status: refuse.status });
+    return new Response(JSON.stringify({ id: "x" }), { status: 200 });
+  };
+  const warned = [];
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, warn: (m) => warned.push(m) });
+  await c.updateIssue("i", { status: "blocked" }, { commentAuthor: "agent:a" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:a" });
+  await c.createComment("i", "hi", { commentAuthor: "agent:a" });
+  await c.createComment("i", "hi");
+  assert.deepEqual(seen, ["PATCH null", "PATCH agent:a", "POST agent:a", "POST null"]);
+
+  for (const r of [{ status: 403, code: "comment_author_override_denied" }, { status: 422, code: "comment_author_override_invalid" }]) {
+    refuse = r; seen.length = 0;
+    await c.createComment("i", "hi", { commentAuthor: "agent:a" });
+    assert.deepEqual(seen, ["POST agent:a", "POST null"], `${r.code}: retried once without the credit`);
+  }
+  assert.equal(warned.length, 2);
+
+  refuse = { status: 403, code: "forbidden" }; seen.length = 0;
+  await assert.rejects(c.createComment("i", "hi", { commentAuthor: "agent:a" }), (e) => e instanceof PaperclipClientError && e.status === 403);
+  assert.deepEqual(seen, ["POST agent:a"], "any other refusal is the caller's, not retried");
+});
+
+test("client: with actingAs, every write is credited to it unless the call names an author or null; reads never are", async () => {
+  const seen = [];
+  const fetch = async (url, init = {}) => {
+    seen.push(`${init.method} ${init.headers?.["x-slashbin-comment-author"] ?? null}`);
+    return new Response(JSON.stringify(init.method === "GET" ? [] : { id: "x" }), { status: 200 });
+  };
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman" });
+  await c.updateIssue("i", { status: "blocked" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:sre" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: null });
+  await c.createComment("i", "hi");
+  await c.createIssue({ title: "t", status: "todo" });
+  await c.updateAgent("a", { status: "idle" });
+  await c.getAgent("a");
+  assert.deepEqual(seen, [
+    "PATCH agent:foreman", "PATCH agent:foreman", "PATCH agent:sre", "PATCH null",
+    "POST agent:foreman", "POST agent:foreman", "PATCH agent:foreman", "GET null",
+  ]);
+});

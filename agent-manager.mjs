@@ -42,6 +42,33 @@ function isRunning(pid) {
   }
 }
 
+// A daemon installed as a systemd user unit gets its secrets from the unit
+// (`doppler run ... -- node dist/cli.js`). Stopping that process and starting
+// a fresh one here leaves systemd's copy dead and the new one without
+// FOREMAN_GITHUB_TOKEN — every phase then fails on every repo (2026-10-07).
+// So when the unit is enabled, start/stop/restart go through systemctl.
+const SYSTEMD_UNIT = process.env.FOREMAN_SYSTEMD_UNIT || "slashbin-foreman.service";
+
+function systemdUnit() {
+  if (repoName || isWindows) return null;
+  try {
+    const state = execSync(`systemctl --user is-enabled ${SYSTEMD_UNIT}`, {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return state === "enabled" ? SYSTEMD_UNIT : null;
+  } catch {
+    return null;
+  }
+}
+
+function viaSystemd(verb) {
+  const unit = systemdUnit();
+  if (!unit) return false;
+  console.log(`${unit} is installed — running: systemctl --user ${verb} ${unit}`);
+  execSync(`systemctl --user ${verb} ${unit}`, { stdio: "inherit" });
+  return true;
+}
+
 function cleanPid() {
   try { unlinkSync(PID_FILE); } catch { /* ignore */ }
 }
@@ -199,13 +226,13 @@ function logs() {
 
 switch (command) {
   case "start":
-    start();
+    if (!viaSystemd("start")) start();
     break;
   case "stop":
-    stop();
+    if (!viaSystemd("stop")) stop();
     break;
   case "restart":
-    restart();
+    if (!viaSystemd("restart")) restart();
     break;
   case "status":
     status();
