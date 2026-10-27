@@ -1,5 +1,18 @@
 # `implemented` cache self-heal — current-vs-correct model (Repeated-S1)
 
+[Project README](../README.md) · [All documentation](README.md)
+
+## Contents
+
+- [The recurring defect (the family)](#the-recurring-defect-the-family)
+- [Why it keeps happening (current model)](#why-it-keeps-happening-current-model)
+- [Correct model](#correct-model)
+- [Why this fix (not per-issue branches)](#why-this-fix-not-per-issue-branches)
+- [Scope / out of scope](#scope--out-of-scope)
+
+Historical design note. For current operation and state transitions, use
+[the lifecycle reference](lifecycle.md) and [daemon operations](running.md).
+
 **Status:** decision artifact for the fix in `src/orchestrator.ts` (the
 `tryBatchImplementation` `implemented`-filter region). Owner-approved
 2026-05-19 (Option A: fix the model, not another attribution patch).
@@ -33,12 +46,12 @@ implement cycle, forever ("self-locked", "manual EM cleanup every cycle").
 ## Correct model
 
 **Invariant:** `implemented[N]` ⟺ a PR that delivers N exists (open or
-merged). `findActionableIssues` already computes the authoritative negation
+merged). `GitHubIssueConnector.selectWork` already computes the authoritative negation
 of this (approved issues with **no** linked open/merged PR) — it is the same
 check the orchestrator trusts to decide what to implement.
 
 **Self-heal:** each cycle, reconcile the cache to the invariant. Any N that
-is BOTH still returned by `findActionableIssues` (no delivering PR per the
+is BOTH still returned by `GitHubIssueConnector.selectWork` (no delivering PR per the
 live check) AND present in `repoState.implemented` is provably stale → prune
 it, persist, log, let it re-implement. The dead-zone becomes
 unrepresentable: an issue cannot remain `implemented` while the live

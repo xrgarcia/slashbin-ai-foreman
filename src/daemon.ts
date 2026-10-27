@@ -1,13 +1,26 @@
 import type { AgentConfig } from "./config.js";
-import { loadConfig } from "./config.js";
+import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
+import { concurrencyWarning, loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
-import { runRepoPass, setConcurrencyLimit, getActiveRunCount, getActiveRunRepos, getQueuedRepoCount, abortAllRuns, requestShutdown } from "./orchestrator.js";
-import { BridgeClient, type BridgeConfig } from "./bridge-client.js";
-import { configureIssueCache } from "./github.js";
+import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
+import { lanesFor, setSessionLimit } from "./lanes.js";
+import { stageName } from "./stages.js";
+import { join } from "node:path";
+import { configureIssueCache, gh } from "./github.js";
+import {
+  clearActivity, configureGitHubState, recordActivity, setGitHubStateRepos, takeGitHubStateUsage,
+} from "./github-state.js";
+import { addObserver } from "./work-source.js";
+import { stateDir } from "./state.js";
+import { configureBackoff } from "./backoff.js";
+import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
+import { configureGhUsage } from "./gh-usage.js";
 
 export interface DaemonOptions {
   configPath?: string;
   repoFilter?: string;
+  /** Called with each config a reload loads; not called when the reload fails. */
+  onReload?: (config: AgentConfig) => void;
 }
 
 export interface DaemonHandle {
@@ -20,34 +33,65 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   let sleepResolve: (() => void) | null = null;
   let activeConfig = config;
 
-  // --- Discord Bridge ---
-  let bridge: BridgeClient | null = null;
-  const bridgeUrl = process.env.DISCORD_BRIDGE_URL || "ws://127.0.0.1:9800";
-  const discordBotId = process.env.DISCORD_BOT_ID;
-  const statusChannel = process.env.DISCORD_STATUS_CHANNEL;
-  if (discordBotId && statusChannel) {
-    const bridgeConfig: BridgeConfig = {
-      url: bridgeUrl,
-      agentId: "foreman",
-      discordBotId,
-      channels: {
-        status: statusChannel,
-        listen: [],  // Foreman is status-only — does not respond to commands
-      },
-    };
-    bridge = new BridgeClient(bridgeConfig, logger);
-    bridge.connect();
-    logger.info("Discord bridge client initialized", { url: bridgeUrl, statusChannel });
-  } else {
-    logger.debug("Discord bridge disabled — DISCORD_BOT_ID and DISCORD_STATUS_CHANNEL not set");
-  }
+  // No Discord (owner, 2026-10-11: "GitHub and Paperclip are where Foreman should be
+  // posting important messages"). What needs a person is a label and comment on the
+  // issue, which also moves its Paperclip card; everything else is this log.
 
   // One open-issue snapshot per repo per cycle, instead of one GraphQL request
   // per discovery lookup. See the block comment above `getOpenIssues`.
+  // Every back-off and retry limit, for the module-level code that takes no
+  // config (gh retries, CI gate, stuck-merge scan, upstream windows).
+  configureBackoff(config.backoff);
+
+  // Every managed checkout trusted before the first session (src/claude-trust.ts);
+  // again on each reload, and once more before every spawn.
+  configureClaudeTrust({ enabled: config.trustManagedRepos });
+  trustManagedRepos(config.repos, logger);
+
   configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
     snapshotLimit: config.issueSnapshotLimit,
   });
+
+  // Every repo's open issues and PRs from ONE bulk GraphQL query per refresh,
+  // and only what changed since the last one. See the header of github-state.ts.
+  configureGitHubState({
+    repos: config.repos.map((r) => r.githubRepo),
+    refreshMs: config.issueCacheTtlMs,
+    issueLimit: config.issueSnapshotLimit,
+    persistPath: join(stateDir(), ".github-state.json"),
+    run: (args) => gh(args, process.cwd()),
+    logger,
+  });
+
+  // The Foreman's own in-flight work, beside the GitHub view: every step the work
+  // source reports lands in the same state file, and each one re-syncs that repo.
+  addObserver({
+    onEvent: async (event) => {
+      switch (event.kind) {
+        case "claim": return recordActivity(event.item.repo, event.item.issueNumber, "claimed");
+        case "transition": return recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
+        case "prLink": return recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
+        case "blocked": return recordActivity(event.item.repo, event.item.issueNumber, "blocked");
+        case "escalated": return recordActivity(event.item.repo, event.item.issueNumber, "needs-ruling");
+        case "merged": return recordActivity(event.item.repo, event.item.issueNumber, "merged");
+        case "promoted": return clearActivity(event.item.repo, event.item.issueNumber);
+        default: return;
+      }
+    },
+  });
+
+  // One daemon-wide back-off per upstream (GitHub rate limit, Claude session
+  // limit). Every transition is logged once — never per repo — and the Paperclip
+  // mirror shows the pause from its `backoff` event.
+  configureUpstreamBackoff({
+    notify: (text) => logger.warn(text),
+    logger,
+  });
+
+  // One info line per hour: spawned gh calls by quota bucket and subcommand.
+  // statePoints: what the fleet state's bulk queries actually cost, as GitHub reported it.
+  configureGhUsage({ intervalMs: 3_600_000, logger, extra: takeGitHubStateUsage });
 
   // A TTL at or above the poll interval means a cycle can be served entirely
   // from the previous cycle's snapshot, so an externally-applied `approved`
@@ -59,12 +103,23 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     );
   }
 
+  // The default pipeline carries the release stage; without the Tech Lead and
+  // the SRE it cannot run, and a silent skip would read as releases stalling.
+  const releaseWarning = releaseStageWarning(config);
+  if (releaseWarning) logger.warn(releaseWarning);
+  const retired = concurrencyWarning(config);
+  if (retired) logger.warn(retired);
+
   const repoNames = config.repos.map((r) => r.name).join(", ");
+  const startLanes = lanesFor(config.stages);
   logger.info("Daemon starting", {
     repos: repoNames,
     repoCount: config.repos.length,
     pollInterval: `${config.pollIntervalMs / 1000}s`,
-    maxConcurrentRepos: config.maxConcurrentRepos,
+    // One loop per (repo, lane): each lane runs one item per repo at a time.
+    lanes: startLanes.map((l) => `${l.name}[${l.stages.map(stageName).join(">")}]`).join(" "),
+    laneLoops: startLanes.length * config.repos.length,
+    maxConcurrentSessions: config.maxConcurrentSessions || "unbounded",
     issueCacheTtlMs: config.issueCacheTtlMs,
     // Requests/hour the discovery phases will now spend, so the budget is
     // visible in the log rather than something you have to rediscover.
@@ -95,7 +150,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       if (options?.repoFilter) {
         const match = fresh.repos.find((r) => r.name === options.repoFilter);
         if (match) {
-          fresh = { ...fresh, repos: [match] };
+          // allRepos keeps every managed repo so a dependent in another repo still resolves.
+          fresh = { ...fresh, repos: [match], allRepos: fresh.repos };
         }
       }
 
@@ -114,6 +170,11 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         }
       }
 
+      setGitHubStateRepos(fresh.repos.map((r) => r.githubRepo));
+      configureBackoff(fresh.backoff);
+      configureClaudeTrust({ enabled: fresh.trustManagedRepos });
+      trustManagedRepos(fresh.repos, logger);
+      options?.onReload?.(fresh);
       return fresh;
     } catch (err) {
       logger.warn("Config reload failed, using previous config", {
@@ -123,56 +184,74 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     }
   }
 
-  // --- One independent loop per repo -------------------------------------
+  // --- One independent loop per (repo, lane) -----------------------------
   //
-  // Each repo polls, works and sleeps on its OWN schedule. There is no
-  // fleet-wide barrier, so a 40-minute review on one service no longer delays
-  // every other service's next turn — which was still true after repos were
-  // merely made concurrent WITHIN a shared cycle (2026-07-29: the fleet went
-  // quiet for 24 minutes behind a single slashbin-io-worker review).
+  // Each lane of each repo polls, works and sleeps on its OWN schedule (see
+  // src/lanes.ts). There is no barrier between repos — 2026-07-29 the fleet went
+  // quiet for 24 minutes behind one slashbin-io-worker review — and now none
+  // between the stages of one repo either: on 2026-10-14 jerky_service's
+  // release PR #146 waited behind a 30-minute revision on the same repo.
   //
-  // What still bounds the fleet is the concurrency slot limiter in the
-  // orchestrator: a repo acquires a slot for the duration of its pass. Twenty
-  // repos waking at once queue for slots instead of opening twenty Claude
-  // sessions.
-  const repoLoops = new Map<string, { stop: () => void }>();
+  // What bounds the work is the lane itself: one item per repo per lane. Stages
+  // that change the repo's working clone share the repo's checkout lock, and
+  // `maxConcurrentSessions` (off by default) can cap sessions fleet-wide.
+  const laneLoops = new Map<string, { stop: () => void }>();
+  const loopKey = (repoName: string, laneName: string): string => `${repoName}/${laneName}`;
 
-  const startRepoLoop = (repoName: string): void => {
+  const startLaneLoop = (repoName: string, laneName: string): void => {
     let loopStopping = false;
     let wake: (() => void) | null = null;
+    const key = loopKey(repoName, laneName);
 
     const run = async (): Promise<void> => {
-      const repoLogger = logger.child({ repo: repoName });
+      const repoLogger = logger.child({ repo: repoName, lane: laneName });
       while (!stopping && !loopStopping) {
+        // GitHub is backing off: wait for the module's probe to clear it rather
+        // than spin. Raced against `wake` so stop() still ends the loop at once.
+        if (isUpstreamBlocked("github")) {
+          await Promise.race([
+            whenUpstreamClear("github"),
+            new Promise<void>((resolve) => {
+              wake = resolve;
+            }),
+          ]);
+          wake = null;
+          continue;
+        }
+
         // Re-resolve from the live config each pass so a hot-reloaded setting
-        // (branches, budgets, reviewEnabled) applies without a restart. A repo
-        // dropped from the config ends its own loop.
+        // (branches, budgets, reviewEnabled, stages) applies without a restart.
+        // A repo dropped from the config, or a lane its stages no longer have,
+        // ends its own loop.
         const repoConfig = activeConfig.repos.find((r) => r.name === repoName);
-        if (!repoConfig) {
-          repoLogger.info("Repo no longer in config — stopping its loop");
-          repoLoops.delete(repoName);
+        const lanes = lanesFor(activeConfig.stages);
+        const lane = lanes.find((l) => l.name === laneName);
+        if (!repoConfig || !lane) {
+          repoLogger.info(repoConfig ? "Lane no longer in the configured stages — stopping its loop" : "Repo no longer in config — stopping its loop");
+          laneLoops.delete(key);
           return;
         }
 
         let didWork = false;
         try {
-          const result = await runRepoPass(repoConfig, activeConfig, logger);
+          // The first lane mirrors the board every pass, as the whole-repo pass
+          // did; the others only after they changed something, so splitting a
+          // repo into lanes does not multiply the idle snapshot rate.
+          const result = await runLanePass(repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work");
           didWork = result.processed > 0;
-          if (bridge) {
-            for (const event of result.events) {
-              bridge.sendStatus(`**FOREMAN:** ${event.message}`, event.level);
-            }
-          }
+          for (const event of result.events) logger[event.level](event.message);
         } catch (err) {
-          // Never let one repo's failure end its loop — that would take the
-          // service permanently off the fleet with no signal beyond silence.
-          repoLogger.error("Repo pass failed", {
+          // A pass cut short by the GitHub back-off is expected, and the back-off
+          // module has already announced it once — no per-repo message.
+          if (err instanceof UpstreamBackoffError) {
+            repoLogger.debug("Lane pass cut short by the GitHub back-off", { error: err.message });
+            continue;
+          }
+          // Never let one failure end the loop — that would take the lane off
+          // the fleet for this service with no signal beyond silence.
+          repoLogger.error("Lane pass failed", {
             error: err instanceof Error ? err.message : String(err),
           });
-          bridge?.sendStatus(
-            `**FOREMAN:** ${repoName} pass error — ${err instanceof Error ? err.message : String(err)}`,
-            "error",
-          );
         }
 
         // Stop BEFORE the fast re-loop: a pass that did work used to go straight
@@ -190,7 +269,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       }
     };
 
-    repoLoops.set(repoName, {
+    laneLoops.set(key, {
       stop: () => {
         loopStopping = true;
         if (wake) {
@@ -208,13 +287,19 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     while (!stopping) {
       cycleNumber++;
       activeConfig = reloadConfig();
-      setConcurrencyLimit(activeConfig.maxConcurrentRepos);
+      setSessionLimit(activeConfig.maxConcurrentSessions);
 
+      const lanes = lanesFor(activeConfig.stages);
+      const wanted = new Set<string>();
       for (const repo of activeConfig.repos) {
-        if (!repoLoops.has(repo.name)) startRepoLoop(repo.name);
+        for (const lane of lanes) {
+          const key = loopKey(repo.name, lane.name);
+          wanted.add(key);
+          if (!laneLoops.has(key)) startLaneLoop(repo.name, lane.name);
+        }
       }
-      for (const [name, handle] of repoLoops) {
-        if (!activeConfig.repos.some((r) => r.name === name)) handle.stop();
+      for (const [key, handle] of laneLoops) {
+        if (!wanted.has(key)) handle.stop();
       }
 
       await new Promise<void>((resolve) => {
@@ -242,7 +327,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       sleepResolve();
       sleepResolve = null;
     }
-    for (const handle of repoLoops.values()) handle.stop();
+    for (const handle of laneLoops.values()) handle.stop();
 
     // If currently implementing, drain before aborting.
     //
@@ -262,26 +347,10 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
     const drainMs =
       Number(process.env.AI_AGENT_SHUTDOWN_DRAIN_MS) ||
       Math.max(longestRun, config.reviewMaxDurationMs);
-    // Several repos can be mid-run at once now, so drain ALL of them. Waiting on
-    // a single controller would have returned as soon as the first one finished
-    // and left the rest to be SIGKILLed with half-built branches — the exact
-    // outcome TimeoutStopSec=1800 exists to prevent.
-    if (getActiveRunCount() > 0) {
-      logger.info(
-        `Waiting for ${getActiveRunCount()} in-progress run(s) to finish (${Math.round(drainMs / 1000)}s timeout)...`,
-        { repos: getActiveRunRepos(), queued: getQueuedRepoCount() },
-      );
-      const deadline = Date.now() + drainMs;
-      while (getActiveRunCount() > 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-      if (getActiveRunCount() > 0) {
-        logger.warn("Drain window elapsed — aborting in-progress run(s)", { repos: getActiveRunRepos() });
-        abortAllRuns();
-      }
-    }
+    // Every lane of every repo can be mid-run at once, so drain ALL of them —
+    // the runs and the lane passes around them (see drainInFlight).
+    await drainInFlight(drainMs, logger);
 
-    bridge?.shutdown();
     logger.info("Shutdown complete");
   };
 

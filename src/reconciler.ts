@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { gh, verifyPRExists, transitionImplementationLabels } from "./github.js";
+import { gh, knownOpenPr, verifyPRExists } from "./github.js";
+import { fillTitle, signed } from "./github/conventions.js";
 
 export interface ReconciliationResult {
   reconciled: boolean;
@@ -37,12 +38,14 @@ interface OrphanedCommit {
   message: string;
 }
 
-function git(args: string[], cwd: string): string {
+const GIT_TIMEOUT_MS = 30_000;
+
+export function git(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
+    timeout: GIT_TIMEOUT_MS,
   }).trim();
 }
 
@@ -60,28 +63,36 @@ function git(args: string[], cwd: string): string {
  * draining. The fetch didn't fail — it was cancelled — and reporting that as a
  * WARN sent one investigation at the clone and the remote before the timestamps
  * ruled both out.
+ *
+ * But Node's own `timeout` also kills with SIGTERM, and reports `code: "ETIMEDOUT"`.
+ * Reading every SIGTERM as a shutdown logged 693 "interrupted by shutdown" lines
+ * across at most 16 real shutdowns (foreman#61) — a slow fetch hidden as a non-event.
  */
-interface GitFailure {
+export interface GitFailure {
   error: string;
   stderr?: string;
   signal?: string;
   /** Killed by a shutdown signal rather than failing on its own merits. */
   cancelled: boolean;
+  /** Killed by the helper's own timeout. Never a cancellation. */
+  timedOut?: boolean;
 }
 
-function formatGitError(err: unknown): GitFailure {
-  const e = err as { message?: string; stderr?: unknown; signal?: string | null };
+export function formatGitError(err: unknown): GitFailure {
+  const e = err as { message?: string; stderr?: unknown; signal?: string | null; code?: string };
   const stderr = typeof e?.stderr === "string"
     ? e.stderr.trim()
     : Buffer.isBuffer(e?.stderr)
       ? e.stderr.toString("utf-8").trim()
       : "";
   const signal = e?.signal ?? undefined;
+  const timedOut = e?.code === "ETIMEDOUT";
   return {
     error: e?.message ?? String(err),
     ...(stderr ? { stderr } : {}),
     ...(signal ? { signal } : {}),
-    cancelled: signal === "SIGTERM" || signal === "SIGINT",
+    cancelled: !timedOut && (signal === "SIGTERM" || signal === "SIGINT"),
+    ...(timedOut ? { timedOut } : {}),
   };
 }
 
@@ -129,12 +140,47 @@ export function checkLocalBranchDivergence(
   }
 }
 
+/**
+ * Filled by `fastForwardFeatureBranch` when it returns "diverged". The merge
+ * base identifies the episode: commits added on either side keep it, and only
+ * a reconcile (or a rewrite) moves it.
+ */
+export interface BranchDivergence {
+  ahead?: number;
+  behind?: number;
+  mergeBase?: string;
+}
+
 export type FastForwardOutcome =
   | "advanced"       // features moved up to base; origin updated
   | "already-current"
   | "work-in-flight" // features carries commits base lacks — nothing to do, not a fault
   | "diverged"       // both sides have unique commits — a human decides
   | "unknown";       // a git call failed; caller must not infer anything
+
+/**
+ * Does a recorded divergence still hold? Read-only (fetch + counts + diff, no
+ * checkout, no push), so it is safe while a revision session holds the shared
+ * clone. The implement phase returns at its pending-revision gate before
+ * fastForwardFeatureBranch runs, so without this a block outlives its cause
+ * for as long as a feature PR is in review/revise (jerky_service #76/#79,
+ * 2026-10-05). Returns undefined when git fails: that proves nothing.
+ */
+export function divergenceStillHolds(config: RepoConfig): boolean | undefined {
+  const { repoPath, baseBranch, featureBranch } = config;
+  if (!baseBranch || !featureBranch || baseBranch === featureBranch) return false;
+  try {
+    git(["fetch", "origin", baseBranch, featureBranch, "--quiet"], repoPath);
+    const ahead = parseInt(git(["rev-list", "--count", `origin/${baseBranch}..origin/${featureBranch}`], repoPath), 10);
+    const behind = parseInt(git(["rev-list", "--count", `origin/${featureBranch}..origin/${baseBranch}`], repoPath), 10);
+    if (Number.isNaN(ahead) || Number.isNaN(behind)) return undefined;
+    if (!(ahead > 0 && behind > 0)) return false;
+    const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+    return git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) !== "";
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Fast-forward the shared feature branch onto its base, and push.
@@ -169,6 +215,7 @@ export type FastForwardOutcome =
 export function fastForwardFeatureBranch(
   config: RepoConfig,
   logger: Logger,
+  divergence?: BranchDivergence,
 ): FastForwardOutcome {
   const { repoPath, baseBranch, featureBranch } = config;
   if (!baseBranch || !featureBranch || baseBranch === featureBranch) {
@@ -188,11 +235,29 @@ export function fastForwardFeatureBranch(
     );
     if (Number.isNaN(ahead) || Number.isNaN(behind)) return "unknown";
 
+    // Base's unique commits change no files — the main→develop back-sync after
+    // a promotion adds merge commits only. That is not divergence: features
+    // already holds base's whole tree, so an in-flight feature PR proceeds.
+    // (jerky_service 2026-10-05: sync PR #85 landed while PR #84 was open, and
+    // every waiting issue stopped as "diverged, 2 ahead 2 behind".)
     if (ahead > 0 && behind > 0) {
-      logger.warn(
+      const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+      if (git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) === "") return "work-in-flight";
+    }
+
+    if (ahead > 0 && behind > 0) {
+      // Debug, not warn: the orchestrator announces a divergence once per
+      // episode (foreman#44). A warn here repeated every cycle — 837 lines in
+      // a week that nobody read.
+      logger.debug(
         `${featureBranch} has diverged from ${baseBranch} (${ahead} ahead, ${behind} behind) — not fast-forwarding. A human decides this one.`,
         { repo: config.name, ahead, behind },
       );
+      if (divergence) {
+        divergence.ahead = ahead;
+        divergence.behind = behind;
+        divergence.mergeBase = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+      }
       return "diverged";
     }
     if (ahead > 0) return "work-in-flight";
@@ -258,8 +323,13 @@ function hasOpenPR(
   featureBranch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string } | null {
+): { number: number; url: string } | null | "unknown" {
   try {
+    // Every cycle, for every branch with commits waiting on review, this asks
+    // whether the PR is still open — and almost always it is. The fleet state
+    // answers that without a request; only "not known open" goes to GitHub.
+    const known = knownOpenPr(githubRepo, featureBranch, baseBranch);
+    if (known) return { number: known.number, url: known.url };
     const json = gh([
       "pr", "list",
       "--repo", githubRepo,
@@ -272,7 +342,11 @@ function hasOpenPR(
     const prs: { number: number; url: string }[] = JSON.parse(json || "[]");
     return prs.length > 0 ? prs[0] : null;
   } catch {
-    return null;
+    // Unknown, never "no open PR". Read as null, a failed lookup made the
+    // reconciler open a second PR for a branch that already had one: 10 refused
+    // `gh pr create` calls on jerky_service (PR #144) during the 2026-10-14
+    // ENOBUFS outage. The caller skips the branch until a pass can read it.
+    return "unknown";
   }
 }
 
@@ -294,7 +368,7 @@ function findLastClosedUnmergedPR(
   featureBranch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string; headSha: string } | null {
+): { number: number; url: string; headSha: string } | null | "unknown" {
   try {
     const json = gh([
       "pr", "list",
@@ -316,9 +390,9 @@ function findLastClosedUnmergedPR(
     const latest = unmerged[0];
     return { number: latest.number, url: latest.url, headSha: latest.headRefOid };
   } catch {
-    // Unknown, not "no rejection" — the caller treats null as "no guard available"
-    // and proceeds, which preserves the pre-guard behaviour on a gh failure.
-    return null;
+    // Unknown, not "no rejection": proceeding on a failed read would re-propose
+    // a diff a person may have just refused. The caller skips the branch.
+    return "unknown";
   }
 }
 
@@ -334,10 +408,10 @@ function createReconciliationPR(
     : "_No linked issues found in commit messages_";
 
   const title = issueNumbers.length === 1
-    ? `feat: implement #${issueNumbers[0]}`
-    : `feat: implement ${commitCount} change(s) from ${headBranch}`;
+    ? fillTitle(config.github.reconcileTitle, { N: issueNumbers[0] })
+    : fillTitle(config.github.reconcileBatchTitle, { n: commitCount, branch: headBranch });
 
-  const body = `## Feature PR (Reconciled)
+  const body = signed(`## Feature PR (Reconciled)
 
 This PR was created automatically by Foreman's reconciliation phase.
 Orphaned commits were found on \`${headBranch}\` with no open PR targeting \`${config.baseBranch}\`.
@@ -346,10 +420,7 @@ Orphaned commits were found on \`${headBranch}\` with no open PR targeting \`${c
 ${issueList}
 
 ### Commits
-${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\`
-
----
-_Automated by slashbin-ai-agent (reconciler)_`;
+${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``, config.github, " (reconciler)");
 
   try {
     const result = gh([
@@ -385,7 +456,9 @@ export function reconcileRepo(
     git(["fetch", "origin"], config.repoPath);
   } catch (err) {
     const failure = formatGitError(err);
-    if (failure.cancelled) {
+    if (failure.timedOut) {
+      logger.warn(`git fetch timed out after ${GIT_TIMEOUT_MS}ms, skipping reconciliation`, { repo: config.name, ...failure });
+    } else if (failure.cancelled) {
       // Shutdown, not a fault. The next start reconciles this repo normally.
       logger.info("Reconciliation cancelled — git fetch was interrupted by shutdown", {
         repo: config.name,
@@ -431,6 +504,10 @@ export function reconcileRepo(
 
     // Check if PR already exists for this specific branch
     const existingPR = hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    if (existingPR === "unknown") {
+      logger.warn(`Could not read the open PRs for ${branch} — skipping reconciliation this pass rather than risk a duplicate PR`);
+      continue;
+    }
     if (existingPR) {
       logger.debug(`PR already exists for ${branch}: #${existingPR.number} — no reconciliation needed`);
       continue;
@@ -442,6 +519,10 @@ export function reconcileRepo(
     const lastRejected = findLastClosedUnmergedPR(
       config.githubRepo, branch, config.baseBranch, config.repoPath,
     );
+    if (lastRejected === "unknown") {
+      logger.warn(`Could not read the closed PRs for ${branch} — skipping reconciliation this pass rather than re-propose refused work`);
+      continue;
+    }
     if (lastRejected) {
       const headSha = commits[0].hash; // git log lists newest first
       if (headSha === lastRejected.headSha) {
@@ -493,19 +574,12 @@ export function reconcileRepo(
 
     logger.info(`Reconciliation PR created and verified: ${prUrl}`);
 
-    // Apply `pr under review` to each linked issue. The implement phase normally
-    // does this after a successful PR open, but reconciler PRs are recovery for
-    // orphan commits left by an implementer that crashed (e.g. max-turns) before
-    // labeling — without this, the Review phase's gate (`findPRsNeedingReview`)
-    // never sees the PR and it sits dead-zoned indefinitely.
-    if (issueNumbers.length > 0) {
-      transitionImplementationLabels(
-        config.githubRepo,
-        issueNumbers,
-        config.repoPath,
-        logger,
-      );
-    }
+    // Reporting the linked issues `new → inReview` is the CALLER's job, through
+    // its work source (`runReconcileStage` does it right after this returns).
+    // Reconciler PRs are recovery for orphan commits left by an implementer that
+    // crashed (e.g. max-turns) before reporting — without that report the Review
+    // phase's gate (`findPRsNeedingReview`) never sees the PR and it sits
+    // dead-zoned indefinitely. A direct caller of this export must report too.
     return {
       reconciled: true, prUrl, issueNumbers, commitCount: commits.length,
       ...(rejected.length > 0 ? { rejected } : {}),

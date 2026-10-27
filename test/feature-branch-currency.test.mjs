@@ -16,10 +16,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { orchestratorSource } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
-const orchestrator = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
+const orchestrator = orchestratorSource();
 
 const fn = (() => {
   const i = reconciler.indexOf("export function fastForwardFeatureBranch");
@@ -38,7 +39,7 @@ test("an in-flight feature PR is reported, not treated as a failure", () => {
   // features ahead of base is the NORMAL mid-cycle state. Failing there would
   // halt implementation every time a feature PR is open.
   assert.match(fn, /if \(ahead > 0\) return "work-in-flight"/, "features ahead must not be an error");
-  const flightIdx = fn.indexOf('"work-in-flight"');
+  const flightIdx = fn.indexOf('if (ahead > 0) return "work-in-flight"');
   const divergedIdx = fn.indexOf('return "diverged"');
   assert.ok(divergedIdx < flightIdx, "divergence must be checked before the ahead-only shortcut");
 });
@@ -69,4 +70,13 @@ test("the fast-forward runs BEFORE the implement session, not after", () => {
 test("a repo whose base and feature branch are the same is left alone", () => {
   // Docs-site style repos run main-only; there is nothing to fast-forward.
   assert.match(fn, /baseBranch === featureBranch/, "main-only repos must short-circuit");
+});
+
+test("base commits that change no files are not divergence (post-promotion back-sync)", () => {
+  // jerky_service 2026-10-05: the main→develop sync added two merge commits
+  // while a feature PR was open, and implementation stopped repo-wide.
+  const both = fn.indexOf("ahead > 0 && behind > 0");
+  const emptyCheck = fn.indexOf('"diff", "--name-only", mb');
+  const diverged = fn.indexOf('return "diverged"');
+  assert.ok(emptyCheck > both && emptyCheck < diverged, "the content check must run before divergence is declared");
 });

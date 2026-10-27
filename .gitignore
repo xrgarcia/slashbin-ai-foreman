@@ -4,6 +4,7 @@ dist/
 *.tgz
 .agent.pid
 .agent-state.json
+.github-state.json
 agent.log
 logs/
 .ai-agent.json

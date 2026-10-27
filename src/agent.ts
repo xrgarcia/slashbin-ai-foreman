@@ -1,11 +1,20 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, createWriteStream, type WriteStream } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import type { AgentConfig, RepoConfig } from "./config.js";
+import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha } from "./github.js";
+import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha, forgetOpenPrs } from "./github.js";
 import { checkoutPathFor } from "./review-checkout.js";
+import { isUpstreamBlocked } from "./upstream-backoff.js";
+import { parseStageTrailer, type CustomStage } from "./stages.js";
+import { redactAll } from "./redact.js";
+import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "./review-progress.js";
+import { claudeTrustEnabled, ensureClaudeTrust, isUntrustedWarning } from "./claude-trust.js";
+import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./github/conventions.js";
+import { contractBlock, contractReaderPath, setContractReaderEnv } from "./handoff-contract.js";
+export { redactAll };
 
 const FOREMAN_OVERRIDES = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -13,6 +22,38 @@ const FOREMAN_OVERRIDES = resolve(
   ".claude",
   "system-prompt-overrides.md"
 );
+
+/**
+ * The PreToolUse hook every session runs under (hooks/session-secret-gate.mjs).
+ * Resolved from this file's location for the same reason as FOREMAN_OVERRIDES.
+ */
+export const SESSION_SECRET_GATE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "hooks",
+  "session-secret-gate.mjs"
+);
+
+/**
+ * The `--settings` JSON passed to every Claude session: a Bash PreToolUse hook
+ * that blocks commands printing an environment or credential value. Sessions
+ * hold GH_TOKEN and run with --dangerously-skip-permissions inside the service
+ * repo, so neither a permission prompt nor that repo's own hooks stand between
+ * a session and `env` — and what a session prints lands in its transcript,
+ * which the Foreman's log redaction never sees. Passed with --settings so it
+ * applies whatever the service repo's settings say (they merge; this adds).
+ * The node binary is absolute: a systemd PATH may not carry it.
+ */
+/** Bash, plus every tool that returns file content to the transcript. */
+export const SESSION_SECRET_GATE_TOOLS = "Bash|Read|Grep|Edit|MultiEdit|NotebookEdit|NotebookRead";
+export function sessionSettings(): string {
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(SESSION_SECRET_GATE)}`;
+  return JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: SESSION_SECRET_GATE_TOOLS, hooks: [{ type: "command", command }] }] },
+  });
+}
+
+let secretGateLogged = false;
 
 /**
  * Describe a non-zero exit WITHOUT letting stderr impersonate the root cause.
@@ -75,6 +116,21 @@ export interface RevisionResult {
   noCommit?: boolean;
   /** The reason given on the trailer. Present only when `noCommit` is true. */
   noCommitReason?: string;
+  /**
+   * The agent found the issue's work already present on the feature branch and
+   * produced no PR because there is nothing to land (`FOREMAN_RESULT: landed`).
+   * `landedIssue` is the issue it named; the Foreman closes it as completed.
+   */
+  landed?: boolean;
+  landedIssue?: number;
+  landedReason?: string;
+  /** The session's own final message, for observers (unredacted, uncapped). */
+  summary?: string;
+  /**
+   * The run was refused by the Claude session limit, not failed on its merits.
+   * The orchestrator reports it to the upstream back-off and charges no retry.
+   */
+  upstreamLimit?: UpstreamLimit;
 }
 
 /**
@@ -123,6 +179,11 @@ export interface ReviewResult {
   // The same trailers, structured, so the orchestrator can check the run's
   // post-condition (did the issues it claims to have merged actually advance?).
   trailers?: ReviewTrailer[];
+  /**
+   * The run was refused by the Claude session limit, not failed on its merits.
+   * The orchestrator reports it to the upstream back-off and charges no retry.
+   */
+  upstreamLimit?: UpstreamLimit;
 }
 
 /**
@@ -188,8 +249,26 @@ export interface ImplementationResult {
   skipped?: boolean;
   // Reason the agent gave for skipping, surfaced from its output.
   skipReason?: string;
+  // What the skip waits on (`owner/repo#N` or `#N`), from the trailer's
+  // `waiting_on=` field. Undefined when the skip named none.
+  waitingOn?: string;
   // Issues the agent decided to skip. Empty/undefined when no skip was detected.
   skippedIssues?: number[];
+  /**
+   * The agent found the issue's work already present on the feature branch and
+   * produced no PR because there is nothing to land (`FOREMAN_RESULT: landed`).
+   * `landedIssue` is the issue it named; the Foreman closes it as completed.
+   */
+  landed?: boolean;
+  landedIssue?: number;
+  landedReason?: string;
+  /** The session's own final message, for observers (unredacted, uncapped). */
+  summary?: string;
+  /**
+   * The run was refused by the Claude session limit, not failed on its merits.
+   * The orchestrator reports it to the upstream back-off and charges no retry.
+   */
+  upstreamLimit?: UpstreamLimit;
 }
 
 // Detect a deliberate skip in the agent's output. Two signals, in order of
@@ -208,7 +287,7 @@ export interface ImplementationResult {
  * guess does not get to pre-empt the evidence.
  */
 // Exported for tests: the field parse is what broke, so it is tested by calling.
-export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number } {
+export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?: string; issue?: number; waitingOn?: string } {
   // Find the trailer LINE first, then read its fields off it, so the fields may
   // appear in any order. The previous shape — `skipped(?:\s+reason="...")?` —
   // only bound `reason` when it immediately followed `skipped`, so the moment the
@@ -217,9 +296,15 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
   // state.skipped[n].reason and is the ONLY input to isResolvedTransientSkip,
   // which recognises a transient divergence solely by matching the agent's own
   // wording. A dropped reason turns a self-clearing skip into a 24h back-off.
-  const line = stdout.match(/FOREMAN_RESULT:\s*skipped[^\n]*/i);
-  if (!line) return { skipped: false };
-  const trailer = line[0];
+  //
+  // The trailer must START a line. Unanchored, prose that merely names it is a
+  // declaration: Slashbin-console 2026-10-01 18:27Z and 19:35Z, an agent wrote
+  // "I left off the `FOREMAN_RESULT: skipped` line on purpose" and was booked as
+  // a batch-wide skip — #1107/#1111/#1115 backed off for 1h, then 2h, for a skip
+  // nobody declared (slashbin-ai-foreman#49). The last trailer line wins.
+  const lines = stdout.match(/^[ \t]*FOREMAN_RESULT:\s*skipped[^\n]*/gim);
+  if (!lines) return { skipped: false };
+  const trailer = lines[lines.length - 1].trim();
   const reason = trailer.match(/\breason="([^"]*)"/i);
   // An OPTIONAL `issue=<N>` scopes the skip to the one issue the agent stopped
   // on. Without it the skip applies to the whole batch we handed over, which is
@@ -228,11 +313,35 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
   // invocation, so unscoped there means every other approved issue in the repo
   // gets backed off 30m..24h for a defect in a spec it never read.
   const scoped = trailer.match(/\bissue="?#?(\d+)"?/i);
+  // An OPTIONAL `waiting_on="owner/repo#N"` (or `#N` in this repo) names the
+  // issue or PR the skip waits on. The held issue runs again once it closes or
+  // merges (backoff.skip.hold). Read only from this field — never parsed out of
+  // the prose reason — and read with the reason removed, so a reason that
+  // quotes the field cannot set it.
+  const waiting = trailer.replace(/\breason="[^"]*"/i, "").match(/\bwaiting_?on="?((?:[\w.-]+\/[\w.-]+)?#\d+)"?/i);
   return {
     skipped: true,
     reason: reason ? reason[1] : "no reason given",
     issue: scoped ? Number(scoped[1]) : undefined,
+    waitingOn: waiting ? waiting[1] : undefined,
   };
+}
+
+/**
+ * `FOREMAN_RESULT: landed issue=<N> reason="<evidence>"` — the work is already
+ * on the feature branch, so there is nothing to build (Slashbin-Ingest-Gateway#222
+ * and jerky_skuvault_service#478, 2026-10-26). Anchored to a line start like the
+ * skip trailer, and `issue=` is REQUIRED: this closes an issue, so it never
+ * applies to a batch. The last trailer line wins. Exported for tests.
+ */
+export function detectDeclaredLanded(stdout: string): { landed: boolean; issue?: number; reason?: string } {
+  const lines = stdout.match(/^[ \t]*FOREMAN_RESULT:\s*landed[^\n]*/gim);
+  if (!lines) return { landed: false };
+  const trailer = lines[lines.length - 1].trim();
+  const issue = trailer.match(/\bissue="?#?(\d+)"?/i);
+  if (!issue) return { landed: false };
+  const reason = trailer.match(/\breason="([^"]*)"/i);
+  return { landed: true, issue: Number(issue[1]), reason: reason ? reason[1] : "no evidence given" };
 }
 
 function detectSkipSignal(stdout: string): { skipped: boolean; reason?: string } {
@@ -286,11 +395,81 @@ const IMAGE_HANDLING_INSTRUCTIONS = `IMAGE HANDLING: If an issue body or PR revi
 
 The Authorization header is required for private-repo URLs (github.com/.../raw/...) and harmless for public CDN URLs (github.com/user-attachments/...). If a fetch fails, log a warning and proceed with the text spec — do not abort the implementation.`;
 
-interface SpawnOptions {
+/**
+ * The generic skills shipped with the Foreman, selected per repo with
+ * `skillPath: "builtin:"` / `revisionSkillPath: "builtin:"`. Resolved from this
+ * file's own location (like FOREMAN_OVERRIDES), never from cwd — the session
+ * runs inside the managed repo, where `skills/` means something else or nothing.
+ * Kept out of `.claude/skills/` so Claude Code does not offer them as
+ * user-invocable skills in a session opened on the Foreman itself.
+ */
+export const BUILTIN_SKILL = "builtin:";
+const FOREMAN_SKILLS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills");
+
+/** The priority tiers as one line, e.g. `S1 > security > S2+bug > … > chore`. */
+function priorityOrder(github: GithubConventions): string {
+  return github.priorityLabels.map((tier) => tier.join("+")).join(" > ");
+}
+
+type PromptPart = { ok: true; text: string } | { ok: false; error: string };
+
+/**
+ * The opening instruction for a skill-mode prompt. A repo-local path is handed
+ * to the session to read, exactly as before. `builtin:` inlines the bundled
+ * SKILL.md instead of pointing at it: the text the session follows is then the
+ * text this Foreman build shipped with, wherever the package is installed.
+ */
+function skillInstruction(config: RepoConfig, skillPath: string, builtin: "implement" | "revise"): PromptPart {
+  if (skillPath !== BUILTIN_SKILL) return { ok: true, text: `Read and follow the skill at ${skillPath}.` };
+  const file = join(FOREMAN_SKILLS_DIR, builtin, "SKILL.md");
+  try {
+    const body = readFileSync(file, "utf8").trim();
+    // The built-in skill is the same text for every repo, so the per-repo
+    // facts it cannot carry are stated here. Labels are not among them: they
+    // reach the session as FOREMAN_TRIGGER_LABEL / FOREMAN_LIFECYCLE_LABELS /
+    // FOREMAN_BLOCKED_LABEL / FOREMAN_PRIORITY_LABELS.
+    return {
+      ok: true,
+      text: `Follow the skill below — the Foreman's built-in skills/${builtin}/SKILL.md.\n\n` +
+        `Repository: ${config.githubRepo}. Feature branch: ${config.featureBranch}. ` +
+        `Pull requests target: ${config.baseBranch}.\n\n` +
+        `===== SKILL =====\n${body}\n===== END SKILL =====`,
+    };
+  } catch (err) {
+    return { ok: false, error: `built-in ${builtin} skill unreadable at ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * A configured overlay, read relative to the managed repo. Configured but
+ * unreadable is a failure for this work item — running the skill without the
+ * operator's rules would be a partial application, so the caller does not
+ * launch Claude at all.
+ */
+function readOverlay(config: RepoConfig, overlayPath: string | undefined, field: string): PromptPart {
+  if (!overlayPath) return { ok: true, text: "" };
+  const file = resolve(config.repoPath, overlayPath);
+  try {
+    const body = readFileSync(file, "utf8").trim();
+    return { ok: true, text: `\n\n===== REPO OVERLAY (${overlayPath}) — applies on top of the skill above =====\n${body}\n===== END OVERLAY =====` };
+  } catch (err) {
+    return { ok: false, error: `${field} ${overlayPath} unreadable at ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export interface SpawnOptions {
   /** Working directory for the claude process. */
   cwd: string;
+  /** Daemon env names the session inherits on top of SESSION_ENV_ESSENTIALS (config `sessionEnv`). */
+  sessionEnv: string[];
   /** Value to inject as GH_TOKEN (controls GitHub account attribution). */
   ghToken?: string;
+  /** The repo's trigger label, handed to the session as FOREMAN_TRIGGER_LABEL. */
+  triggerLabel: string;
+  /** The configured lifecycle labels, handed to the session as FOREMAN_LIFECYCLE_LABELS. */
+  lifecycleLabels: LifecycleLabels;
+  /** The `github` block: its blocked and priority labels reach the session as FOREMAN_BLOCKED_LABEL / FOREMAN_PRIORITY_LABELS. */
+  github?: GithubConventions;
   model?: string;
   allowedTools: string[];
   /** MCP client config to load (`--mcp-config`); each server it names is allowed. */
@@ -315,6 +494,153 @@ interface SpawnOptions {
    * when in fact the run had merged the PR 55 minutes earlier.
    */
   runLabel?: string;
+  /** Extra session env on top of the label env every session gets. */
+  extraEnv?: Record<string, string>;
+}
+
+/**
+ * Daemon env names every session inherits when set: what a shell, git over SSH
+ * and the Claude CLI need to run. Nothing else crosses unless `sessionEnv`
+ * names it.
+ */
+export const SESSION_ENV_ESSENTIALS: readonly string[] = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+  "TZ", "TMPDIR", "TERM", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
+];
+
+/** Copy each name present in the daemon env. */
+function pickEnv(names: readonly string[], into: Record<string, string> = {}): Record<string, string> {
+  for (const n of names) {
+    const v = process.env[n];
+    if (v !== undefined) into[n] = v;
+  }
+  return into;
+}
+
+/**
+ * A Claude session's whole environment, built from an allowlist.
+ *
+ * It used to be `{ ...process.env }`. The production daemon runs under
+ * `doppler run`, so every session — run with --dangerously-skip-permissions —
+ * held every secret in that config, both GitHub tokens among them; on
+ * 2026-10-01 a custom-stage session listed its env and printed
+ * FOREMAN_GITHUB_TOKEN into its Claude transcript.
+ *
+ * Order matters: the inherited names first, then GH_TOKEN, the label vars and
+ * extraEnv, so nothing inherited can overwrite the token this phase assigned.
+ * Set here because every session goes through spawnClaudeWithOptions — a new
+ * caller cannot forget the label vars or widen the env by accident.
+ */
+export function buildSessionEnv(opts: SpawnOptions): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(opts.sessionEnv ?? [])]);
+  // GH_TOKEN must be a string or absent — never literal "undefined".
+  if (opts.ghToken) env.GH_TOKEN = opts.ghToken;
+  // The configured label names, for the skill. The daemon filtering on a renamed
+  // trigger label while the skill runs `gh issue list --label approved` selects
+  // work the agent never finds, so the skill reads these instead of its own
+  // literals. Labels as one JSON map (`JSON.parse` once, iterate the set); the
+  // trigger label on its own, since it selects work and a skill uses it alone in
+  // `--label`.
+  setLabelEnv(env, opts.triggerLabel, opts.lifecycleLabels, opts.github);
+  if (opts.extraEnv) Object.assign(env, opts.extraEnv);
+  return env;
+}
+
+/**
+ * Every label name a session may read or write: the trigger label alone (it is
+ * used alone in `--label`), the lifecycle labels and the priority tiers as JSON,
+ * and the blocked label. Set the same way for the builder, the Tech Lead and the
+ * SRE, so no skill falls back on a literal name.
+ */
+function setLabelEnv(
+  env: Record<string, string>,
+  triggerLabel: string | undefined,
+  lifecycleLabels: LifecycleLabels | undefined,
+  github: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
+): void {
+  if (triggerLabel) env.FOREMAN_TRIGGER_LABEL = triggerLabel;
+  if (lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(lifecycleLabels);
+  env.FOREMAN_BLOCKED_LABEL = github.blockedLabel;
+  env.FOREMAN_PRIORITY_LABELS = JSON.stringify(github.priorityLabels);
+}
+
+/**
+ * The Tech Lead hand-off's environment. It reads TECHLEAD_GITHUB_KEY by name and
+ * sets GH_TOKEN itself — so it receives its own token (account slasbhin-techlead)
+ * and never the Foreman's or the EM's,
+ * plus its own TECH_LEAD_* settings and the configured label names. From the EM
+ * checkout it gets one thing: the handoff-contract reader's path (EM#614), which
+ * it renders into its review prompt as authority, not as rubric. Review itself
+ * moved wholly to it, 2026-10-10.
+ */
+export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  pickEnv(Object.keys(process.env).filter((n) => n.startsWith("TECH_LEAD_")), env);
+  pickEnv(["TECHLEAD_GITHUB_KEY"], env);
+  // The configured label names, exactly as every Claude session gets them
+  // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
+  setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
+  setContractReaderEnv(env, agentConfig.emRepoPath);
+  return env;
+}
+
+/**
+ * The EM unstick call's environment (#103). The EM acts as itself: it receives
+ * the existing EM_GITHUB_TOKEN by name (never the Foreman's, the Tech Lead's or
+ * the SRE's) plus the session essentials and any configured sessionEnv.
+ */
+export function buildEmEnv(agentConfig: AgentConfig): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  pickEnv(["EM_GITHUB_TOKEN"], env);
+  return env;
+}
+
+/** A value shorter than this is not redacted: too likely to match ordinary text. */
+const MIN_SECRET_LENGTH = 8;
+
+/**
+ * The values redacted from everything a child prints: every agent's GitHub token and
+ * each `sessionEnv` name, read from the daemon env at spawn, 8+ characters,
+ * longest first (so a value containing another is replaced whole).
+ */
+export function secretValues(sessionEnv: readonly string[]): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY", ...sessionEnv]) {
+    const value = process.env[name];
+    if (value !== undefined && value.length >= MIN_SECRET_LENGTH && !out.some((s) => s.value === value)) {
+      out.push({ name, value });
+    }
+  }
+  return out.sort((a, b) => b.value.length - a.value.length);
+}
+
+/**
+ * Redact a stream written in chunks. A value split across two chunks would
+ * escape a per-chunk redactor, so `push` holds back the last L − 1 characters
+ * (L = longest value) — the most of a value that can still be incomplete — and
+ * prepends them to the next chunk. `flush` releases the held tail; it MUST run
+ * before the stream ends, or whatever was written last (the run's trailer) is lost.
+ */
+export function createStreamRedactor(secrets: ReadonlyArray<{ name: string; value: string }>): {
+  push(chunk: string): string;
+  flush(): string;
+} {
+  const hold = secrets.reduce((m, s) => Math.max(m, s.value.length), 0) - 1;
+  let tail = "";
+  return {
+    push(chunk: string): string {
+      if (secrets.length === 0) return chunk;
+      const text = redactAll(tail + chunk, secrets);
+      const cut = Math.max(0, text.length - hold);
+      tail = text.slice(cut);
+      return text.slice(0, cut);
+    },
+    flush(): string {
+      const out = redactAll(tail, secrets);
+      tail = "";
+      return out;
+    },
+  };
 }
 
 /**
@@ -337,7 +663,7 @@ export function mcpServerNames(path: string, logger: Logger): string[] {
  * Low-level Claude CLI spawn. All callers go through this so the timeout/abort/
  * stream-capture behavior is shared. The per-call options carry cwd, token, and
  * tool surface — implement/revise run in the service repo under the Foreman
- * token; review runs in the EM repo under the EM token (see reviewOpenPRs).
+ * token. Review is not a Claude session at all: the Tech Lead runs it (reviewViaTechLead).
  */
 function spawnClaudeWithOptions(
   prompt: string,
@@ -345,12 +671,29 @@ function spawnClaudeWithOptions(
   logger: Logger,
   abortSignal?: AbortSignal
 ): Promise<SpawnResult> {
+  // Every builder session — implement, revise, custom stage — carries the shared
+  // handoff contract (EM#614), or an explicit CONTRACT UNAVAILABLE naming why.
+  // The EM checkout comes from the daemon env (AI_AGENT_EM_REPO_PATH), the only
+  // place a builder spawn can see it.
+  prompt = `${prompt}\n\n${contractBlock(contractReaderPath(process.env.AI_AGENT_EM_REPO_PATH))}`;
   const args = [
     "--print",
     prompt,
     "--max-turns", String(opts.maxTurns),
     "--dangerously-skip-permissions",
   ];
+
+  // Every session runs under the secret gate. A missing hook file is a broken
+  // install, not a reason to run ungated quietly — say so on every spawn.
+  if (existsSync(SESSION_SECRET_GATE)) {
+    args.push("--settings", sessionSettings());
+    if (!secretGateLogged) {
+      logger.info(`Session secret gate on: ${SESSION_SECRET_GATE}`);
+      secretGateLogged = true;
+    }
+  } else {
+    logger.error(`Session secret gate MISSING (${SESSION_SECRET_GATE}) — this session can print credentials`);
+  }
 
   // Overrides for the harness defaults that fight how a non-interactive builder
   // has to behave (.claude/system-prompt-overrides.md in THIS repo).
@@ -405,23 +748,63 @@ function spawnClaudeWithOptions(
     }
   }
 
-  // GH_TOKEN must be a string or absent — never literal "undefined".
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (opts.ghToken) env.GH_TOKEN = opts.ghToken;
+  const env = buildSessionEnv(opts);
+
+  // Claude Code ignores an untrusted checkout's .claude/settings.json and .mcp.json
+  // and only says so on stderr. Trust it first — under the session's own HOME /
+  // CLAUDE_CONFIG_DIR, which is where this session will look (src/claude-trust.ts).
+  ensureClaudeTrust(opts.cwd, logger, env);
+
+  // Everything the child prints is redacted at each sink — transcript, logger
+  // lines, and the stdout/stderr handed back (which feed trailer parsing and
+  // describeSpawnFailure, whose tails become logged errors). The allowlist keeps
+  // the other secrets out of the session; these values are the ones it may hold.
+  const secrets = secretValues(opts.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  let stderrLine = "";
+  let untrustedSeen = false;
+  const warnStderr = (line: string) => {
+    if (!line) return;
+    logger.warn(`[claude stderr] ${redactAll(line, secrets)}`);
+    // Still untrusted despite the check above (trust off, unparseable config, or a
+    // concurrent rewrite dropped it): name the path and trust it so the NEXT
+    // session in this checkout is clean. This session is not re-run.
+    if (!untrustedSeen && isUntrustedWarning(line)) {
+      untrustedSeen = true;
+      if (claudeTrustEnabled()) {
+        logger.warn(`Claude Code reports ${opts.cwd} is not trusted — this session ran without the repo's .claude/settings.json and .mcp.json; trusting it for the next one`);
+        const outcome = ensureClaudeTrust(opts.cwd, logger, env, "untrusted warning on stderr");
+        if (outcome === "already") {
+          logger.warn(`Claude Code trust: ${opts.cwd} is already marked trusted in the config this session reads, yet Claude Code still reports it untrusted — check HOME / CLAUDE_CONFIG_DIR in sessionEnv`);
+        }
+      } else {
+        logger.warn(`Claude Code reports ${opts.cwd} is not trusted, and trustManagedRepos is off — trust it yourself or the repo's .claude/settings.json and .mcp.json are ignored`);
+      }
+    }
+  };
 
   return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
     let stderr = "";
     let child: ChildProcess | null = null;
     let timedOut = false;
+    let finished = false;
 
     const finish = (r: SpawnResult) => {
+      if (finished) return;
+      finished = true;
+      warnStderr(stderrLine);
+      stderrLine = "";
       if (transcript) {
+        transcript.write(outRedactor.flush());
+        const errTail = errRedactor.flush();
+        if (errTail) transcript.write(`[stderr] ${errTail}`);
         transcript.write(`\n===== END (exit=${r.exitCode}${r.timedOut ? ", timedOut" : ""}) @ ${new Date().toISOString()} =====\n`);
         transcript.end();
         transcript = null;
       }
-      resolve(r);
+      resolve({ ...r, stdout: redactAll(r.stdout, secrets), stderr: redactAll(r.stderr, secrets) });
     };
 
     const timeout = setTimeout(() => {
@@ -453,18 +836,21 @@ function spawnClaudeWithOptions(
     });
 
     child.stdout?.on("data", (data: Buffer) => {
-      stdout += data.toString();
-      transcript?.write(data);
+      const text = data.toString();
+      stdout += text;
+      transcript?.write(outRedactor.push(text));
     });
 
     child.stderr?.on("data", (data: Buffer) => {
       const text = data.toString();
       stderr += text;
-      transcript?.write(`[stderr] ${text}`);
-      const lines = text.split("\n").filter(Boolean);
-      for (const line of lines) {
-        logger.warn(`[claude stderr] ${line}`);
-      }
+      const safe = errRedactor.push(text);
+      if (safe) transcript?.write(`[stderr] ${safe}`);
+      // One logger line per COMPLETE line, so a value split across two chunks
+      // is whole when it is redacted; the remainder is emitted in finish().
+      const lines = (stderrLine + text).split("\n");
+      stderrLine = lines.pop() ?? "";
+      for (const line of lines) warnStderr(line);
     });
 
     child.on("error", (err) => {
@@ -497,7 +883,11 @@ function spawnClaude(
     prompt,
     {
       cwd: config.repoPath,
+      sessionEnv: config.sessionEnv,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
+      triggerLabel: config.triggerLabel,
+      lifecycleLabels: config.lifecycleLabels,
+      github: config.github,
       model: config.model,
       allowedTools: config.allowedTools,
       mcpConfig: config.builderMcpConfig,
@@ -551,8 +941,109 @@ export function extractStreamResult(stdout: string): string | undefined {
   return undefined;
 }
 
+/** A Claude refusal on the account session limit, as read from a failed run. */
+export interface UpstreamLimit {
+  reason: string;
+  /** The reset the refusal stated, resolved to epoch ms; absent when unparseable. */
+  resetAtMs?: number;
+}
+
 /**
- * Invoke Claude CLI to implement all approved issues for a repo.
+ * Classify a FAILED run as a Claude session-limit refusal, or `undefined`.
+ *
+ * Two arms, one per output mode (2026-10-01 journal: 294 of 294 review hits on
+ * the first, 97 of 97 implement/revise hits on the second):
+ *  - stream-json (review): the last `"type":"result"` event has
+ *    `is_error: true` and `api_error_status: 429`.
+ *  - plain text (implement, revise): no result event, and the trimmed stdout
+ *    starts with "You've hit your" and mentions a limit.
+ * A bare "session limit" substring anywhere is NOT enough — prose can carry it.
+ */
+export function detectUpstreamLimit(stdout: string): UpstreamLimit | undefined {
+  const lines = stdout.split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let evt: { type?: unknown; is_error?: unknown; api_error_status?: unknown; result?: unknown };
+    try {
+      evt = JSON.parse(lines[i]);
+    } catch {
+      continue; // not a JSON line — keep scanning
+    }
+    if (!evt || evt.type !== "result") continue;
+    if (evt.is_error !== true || evt.api_error_status !== 429) return undefined;
+    const reason = typeof evt.result === "string" && evt.result.trim() ? evt.result.trim() : "Claude API 429";
+    return { reason, resetAtMs: parseClaudeReset(reason) };
+  }
+  const text = stdout.trim();
+  if (/^You(?:'|\u2019)ve hit your/.test(text) && /limit/i.test(text)) {
+    const reason = text.split("\n")[0].slice(0, 300);
+    return { reason, resetAtMs: parseClaudeReset(text) };
+  }
+  return undefined;
+}
+
+/**
+ * `resets 12:10pm (America/Chicago)` → the next occurrence of that wall-clock
+ * time in that zone, as epoch ms. Resolved through Intl (not a fixed offset) so
+ * DST is honoured. Unparseable text or an unknown zone → undefined.
+ */
+export function parseClaudeReset(text: string, now = Date.now()): number | undefined {
+  const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i.exec(text);
+  if (!m) return undefined;
+  let hour = Number(m[1]) % 12;
+  if (m[3].toLowerCase() === "pm") hour += 12;
+  const minute = m[2] ? Number(m[2]) : 0;
+  if (minute > 59) return undefined;
+  const zone = m[4].trim();
+  try {
+    const today = zonedParts(now, zone);
+    for (let dayOffset = 0; dayOffset <= 1; dayOffset++) {
+      const at = zonedWallToUtc(today.year, today.month, today.day + dayOffset, hour, minute, zone);
+      if (at > now) return at;
+    }
+  } catch {
+    // RangeError on an unknown time zone
+  }
+  return undefined;
+}
+
+function zonedParts(ms: number, zone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(ms);
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  return { year: get("year"), month: get("month"), day: get("day"), hour: get("hour"), minute: get("minute"), second: get("second") };
+}
+
+/** Offset (ms) of `zone` from UTC at instant `ms`. */
+function zoneOffset(ms: number, zone: string): number {
+  const p = zonedParts(ms, zone);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return asUtc - Math.floor(ms / 1000) * 1000;
+}
+
+/** The UTC instant whose wall-clock in `zone` reads the given fields (day may overflow). */
+function zonedWallToUtc(year: number, month: number, day: number, hour: number, minute: number, zone: string): number {
+  const guess = Date.UTC(year, month - 1, day, hour, minute);
+  const first = guess - zoneOffset(guess, zone);
+  const second = guess - zoneOffset(first, zone);
+  return second;
+}
+
+/**
+ * The hand-off line: the work items the source selected, as the only work the
+ * session may do. One sentence, so a skill can quote it back.
+ */
+export function workItemsLine(issueNumbers: number[]): string {
+  return `Implement exactly these work items, and no others: ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
+}
+
+/**
+ * Invoke Claude CLI to implement the selected work items for a repo.
+ *
+ * `issueNumbers` is the Foreman's capped discovery batch: the inline prompt's
+ * scope and what a batch-wide skip backs off. `handOff` is the uncapped list a
+ * skill chooses from; it defaults to `issueNumbers`.
  * The skill (SKILL.md) owns inventory, prioritization, implementation,
  * and PR creation. Foreman just triggers and detects the result.
  */
@@ -561,7 +1052,8 @@ export async function implementApprovedIssues(
   logger: Logger,
   abortSignal?: AbortSignal,
   priorFailureReason?: string | null,
-  issueNumbers?: number[]
+  issueNumbers?: number[],
+  handOff?: number[],
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
 
@@ -570,10 +1062,33 @@ export async function implementApprovedIssues(
   // directions: the trailer is only honoured when the branch really did not move.
   const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
+  // Resolve the skill and the overlay before anything is launched: either one
+  // configured but unreadable fails this item with Claude never started.
+  const skill = config.skillPath ? skillInstruction(config, config.skillPath, "implement") : null;
+  const overlay = readOverlay(config, config.skillOverlayPath, "skillOverlayPath");
+  for (const part of [skill, overlay]) {
+    if (part && !part.ok) {
+      logger.error(`Implementation not started for ${config.name}: ${part.error}`);
+      return { success: false, error: part.error };
+    }
+  }
+
   let prompt: string;
 
-  if (config.skillPath) {
-    prompt = `Read and follow the skill at ${config.skillPath}.\n\nImplement all approved issues for this repository. The skill defines the full workflow — follow it exactly.\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+  if (config.skillPath && skill?.ok) {
+    // The work source chose the batch; the session builds from it and nothing
+    // else, so an item from a source the skill cannot query is still built.
+    // A repo-local skill that runs its own `gh issue list` gets these same
+    // GitHub issues back, so it is told to pick and order within the batch as
+    // it always has — the batch only takes away issues outside it.
+    //
+    // `handOff` is what the implement stage chose to hand over — its build
+    // batch (buildBatchSize, default one issue). Without one, the batch.
+    const items = handOff && handOff.length > 0 ? handOff : issueNumbers;
+    const scope = items && items.length > 0
+      ? `${workItemsLine(items)} If the skill runs its own issue query, it returns these same issues: choose and order among them as the skill directs, but take nothing outside this list.`
+      : `Implement all approved issues for this repository.`;
+    prompt = `${skill.text}\n\n${scope} The skill defines the full workflow — follow it exactly.\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else if (config.prompt) {
     // Custom user prompt — don't auto-modify (backward compat). Users who want
     // image handling in a custom prompt should include their own instructions.
@@ -581,7 +1096,7 @@ export async function implementApprovedIssues(
   } else {
     const issueScope = issueNumbers && issueNumbers.length > 0
       ? `Implement ONLY these issues: ${issueNumbers.map(n => `#${n}`).join(", ")}. Read each issue with \`gh issue view <number>\` to understand the requirements.`
-      : `Implement all open GitHub issues labeled "approved" in this repository.\n\n1. Query GitHub for approved issues: gh issue list --label approved --state open --json number,title,body,labels\n2. Prioritize by severity (S1 > security > S2+bug > ... > chore).`;
+      : `Implement all open GitHub issues labeled "${config.triggerLabel}" in this repository.\n\n1. Query GitHub for them: gh issue list --label ${JSON.stringify(config.triggerLabel)} --state open --json number,title,body,labels\n2. Skip any labeled ${JSON.stringify(config.github.blockedLabel)}. Prioritize by labels, highest first: ${priorityOrder(config.github)}.`;
 
     prompt = `${issueScope}
 
@@ -595,13 +1110,21 @@ ${IMAGE_HANDLING_INSTRUCTIONS}
 Work autonomously. Do not ask questions.`;
   }
 
+  if (overlay.ok) prompt += overlay.text;
+
   // Skip-signaling protocol: an issue body may explicitly direct the agent NOT
   // to implement (e.g., investigation-first, blocked on external verification).
   // If the agent decides not to implement any of the assigned issues, it must
   // end its output with a single line `FOREMAN_RESULT: skipped reason="<text>"`
   // so the orchestrator can distinguish a deliberate no-op from a failed
   // implementation attempt and back off accordingly.
-  prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nThis tells the Foreman to back off on THAT issue rather than re-queue it every cycle. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
+  prompt += `\n\nIMPORTANT — Skip protocol: If you stop on an issue without producing a PR — because its body directs you NOT to write code (investigation-first, "no immediate code change", waiting on external verification), or because its spec is unusable (a cited path that does not exist, an acceptance script you cannot fetch, a convention you cannot resolve) — do NOT create an empty PR or guess at a fix. Comment on the issue saying what would unblock it, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one-line explanation>"\n\nIf the issue is waiting on another issue or PR (a dependency not merged yet, a precondition another issue delivers), add \` waiting_on="<owner/repo#N>"\` (or \`#N\` in this repo) to that line, e.g. \`FOREMAN_RESULT: skipped issue=127 waiting_on="acme/site#166" reason="refund_policy.md is on unmerged PR #166"\`.\n\nThis tells the Foreman to hold THAT issue in Blocked rather than re-queue it every cycle: it runs again only when the issue changes (a comment, an edit, a label) or the \`waiting_on\` issue closes or PR merges. Always include \`issue=\` — without it the skip applies to every issue in this batch, which takes issues you never read off the board too. If at least one issue in the batch IS implementable, implement those normally and only skip the rest (a created PR plus a scoped trailer is a valid combination).`;
+
+  // Landed protocol, in the common prompt so a repo-local skill hears it too
+  // (the built-in skill carries it as well). Without it "all 16 already on
+  // features" ended as prose, no trailer, and the issue stayed open and approved
+  // while the issues blocked by it waited (jerky_skuvault_service#478, 2026-10-26).
+  prompt += `\n\nIMPORTANT — Nothing-to-land protocol: if the work an issue asks for is ALREADY on ${config.featureBranch} (for example every dependency PR is already merged there), there is nothing to build and no PR to open. Comment the evidence on the issue (what you checked: PR numbers, SHAs), push nothing, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: landed issue=<the issue number> reason="<one-line evidence>"\n\nThe Foreman then closes the issue as completed, which releases every issue blocked by it. Never end with prose such as "No PR produced" or "No code change to land" alone: it is not heard, and the issue stays open. If the work cannot land and a person must act, use the skip protocol above instead.`;
 
   // Third Way: if a prior attempt failed, include context so Claude can adapt
   if (priorFailureReason) {
@@ -611,6 +1134,8 @@ Work autonomously. Do not ask questions.`;
   const transcriptPath = phaseTranscriptPath("implement", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
   const result = await spawnClaude(prompt, config, logger, abortSignal, transcriptPath);
+  // The session may have opened a PR the cached list predates.
+  forgetOpenPrs(config.githubRepo);
 
   if (result.timedOut) {
     return { success: false, error: "timed out" };
@@ -619,7 +1144,7 @@ Work autonomously. Do not ask questions.`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
   }
 
   // A DECLARED skip, with no new commits, is authoritative — and it has to be
@@ -639,6 +1164,30 @@ Work autonomously. Do not ask questions.`;
   // agent not to emit the trailer when it created a PR, but "the agent followed
   // the prompt" is exactly the assumption that should not be load-bearing — so
   // a declaration is only honoured when the branch demonstrably did not move.
+  // A declared LANDED is the same kind of declaration, with the same SHA guard:
+  // "nothing to land" is only believable when the branch did not move. It names
+  // its issue and the orchestrator closes only an issue in the batch.
+  const declaredLanded = detectDeclaredLanded(result.stdout);
+  if (declaredLanded.landed) {
+    const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+    if (beforeSha && afterSha && beforeSha !== afterSha) {
+      logger.warn(
+        `Agent emitted a landed trailer but ${config.featureBranch} advanced ` +
+        `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
+      );
+    } else {
+      logger.info(`Implementation found #${declaredLanded.issue} already landed — ${declaredLanded.reason}`);
+      return {
+        success: false,
+        landed: true,
+        landedIssue: declaredLanded.issue,
+        landedReason: declaredLanded.reason,
+        summary: extractStreamResult(result.stdout),
+        error: `already landed: ${declaredLanded.reason}`,
+      };
+    }
+  }
+
   const declaredSkip = detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
     const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
@@ -652,22 +1201,21 @@ Work autonomously. Do not ask questions.`;
       // cannot back off the issues behind it.
       //
       // A named issue is TRUSTED even when it is not in `issueNumbers`, and that
-      // is deliberate. In skill mode the prompt never interpolates the batch
-      // (see the skillPath branch below): the agent runs the skill's own
-      // `gh issue list --label approved` and selects by the skill's priority
-      // table, which is strictly WIDER than what we tracked — the batch was
-      // already filtered by the `implemented` cache and by the escalating skip
-      // back-off, while those issues stay open and `approved` on GitHub and so
-      // remain visible to the agent. So "not in the batch" is an ordinary
-      // outcome, not a mistake, and widening to the batch on account of it would
-      // reintroduce exactly the starvation the scope exists to prevent. The
-      // agent naming one issue is strictly more information than the batch list.
+      // is deliberate. The prompt names the batch, but a repo-local skill still
+      // runs its own `gh issue list` first, and that query is strictly WIDER
+      // than the batch — the batch was already filtered by the `implemented`
+      // cache and by the escalating skip back-off, while those issues stay open
+      // and trigger-labelled on GitHub and so remain visible to the agent. So
+      // "not in the batch" is an ordinary outcome, not a mistake, and widening
+      // to the batch on account of it would reintroduce exactly the starvation
+      // the scope exists to prevent. The agent naming one issue is strictly
+      // more information than the batch list.
       const named = declaredSkip.issue;
       if (named !== undefined && !(issueNumbers ?? []).includes(named)) {
         logger.info(
           `Skip names #${named}, which was outside the tracked batch ` +
           `(${(issueNumbers ?? []).map((n) => `#${n}`).join(", ") || "none"}) — ` +
-          `expected in skill mode, where the agent selects from its own query. Honouring the scope.`,
+          `possible in skill mode, where a repo-local skill also runs its own query. Honouring the scope.`,
         );
       }
       logger.info(
@@ -677,8 +1225,10 @@ Work autonomously. Do not ask questions.`;
       return {
         success: false,
         skipped: true,
+        summary: extractStreamResult(result.stdout),
         skipReason: declaredSkip.reason,
         skippedIssues: named !== undefined ? [named] : (issueNumbers ?? []),
+        waitingOn: declaredSkip.waitingOn,
         error: `skipped: ${declaredSkip.reason}`,
       };
     }
@@ -688,8 +1238,9 @@ Work autonomously. Do not ask questions.`;
   const prMatch = result.stdout.match(/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
   let prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
 
-  // Fallback: query GitHub directly for an open feature PR
-  if (!prUrl) {
+  // Fallback: query GitHub directly for an open feature PR. This spawn is
+  // outside runGh, so it has to honour the GitHub back-off itself.
+  if (!prUrl && !isUpstreamBlocked("github")) {
     logger.info("PR URL not found in output, querying GitHub as fallback");
     const fallback = spawnSync("gh", [
       "pr", "list",
@@ -728,7 +1279,7 @@ Work autonomously. Do not ask questions.`;
     }
 
     logger.info(`PR created and verified: ${prUrl}`);
-    return { success: true, prUrl };
+    return { success: true, prUrl, summary: extractStreamResult(result.stdout) };
   }
 
   // If Claude exited cleanly but no new PR was found, check if an existing
@@ -742,7 +1293,7 @@ Work autonomously. Do not ask questions.`;
   );
   if (existingPR) {
     logger.info("No new PR created, but existing feature PR found — treating as success (commits added to existing PR)");
-    return { success: true };
+    return { success: true, summary: extractStreamResult(result.stdout) };
   }
 
   // Before flagging "no PR" as a failure, check whether the agent deliberately
@@ -758,6 +1309,7 @@ Work autonomously. Do not ask questions.`;
     return {
       success: false,
       skipped: true,
+      summary: extractStreamResult(result.stdout),
       skipReason: skip.reason,
       skippedIssues: issueNumbers ?? [],
       error: `skipped: ${skip.reason}`,
@@ -775,7 +1327,7 @@ Work autonomously. Do not ask questions.`;
 }
 
 /**
- * Invoke Claude CLI to revise PRs that have review feedback ("pr pending actions").
+ * Invoke Claude CLI to revise PRs that have review feedback (`pr pending actions`).
  * The revision skill reads review comments, implements fixes, and pushes.
  *
  * The orchestrator passes the specific PR number and issue numbers so the
@@ -793,7 +1345,7 @@ export async function revisePRFeedback(
   // Capture the feature branch's HEAD SHA before invoking Claude so we can
   // detect the no-op case where Claude exits 0 without pushing any commits.
   // Without this, a silent no-op would be reported as success and the
-  // orchestrator would (incorrectly) transition labels to "pr under review",
+  // orchestrator would (incorrectly) transition labels to `pr under review`,
   // hiding the fact that the requested fix was never applied.
   const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
@@ -807,14 +1359,23 @@ export async function revisePRFeedback(
   // for none, the previous round already satisfied it, or the remaining work is
   // on an issue body rather than the branch. Before this trailer existed, that
   // outcome was indistinguishable from a silent no-op and was marked failed, so
-  // the labels never returned to "pr under review" and the PR could never be
+  // the labels never returned to `pr under review` and the PR could never be
   // re-reviewed — Slashbin-console#843 sat in exactly that deadlock.
   const noCommitNote = `\n\nIF NO CODE CHANGE IS NEEDED: do not invent one. Say so on its own line, as the LAST line of your output:\n\n  FOREMAN_REVISION no-commit reason=<one line: why the branch is already correct>\n\nWithout that trailer, a run that pushes nothing is treated as a failed revision — which is the correct default, because a silent no-op and a deliberate one look identical from outside.`;
 
+  const skill = config.revisionSkillPath ? skillInstruction(config, config.revisionSkillPath, "revise") : null;
+  const overlay = readOverlay(config, config.revisionSkillOverlayPath, "revisionSkillOverlayPath");
+  for (const part of [skill, overlay]) {
+    if (part && !part.ok) {
+      logger.error(`Revision not started for ${config.name}: ${part.error}`);
+      return { success: false, error: part.error };
+    }
+  }
+
   let prompt: string;
 
-  if (config.revisionSkillPath) {
-    prompt = `Read and follow the skill at ${config.revisionSkillPath}.\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${labelNote}${noCommitNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+  if (config.revisionSkillPath && skill?.ok) {
+    prompt = `${skill.text}\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${labelNote}${noCommitNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else {
     prompt = `Revise PR #${prNumber || "(find open PRs with review feedback)"} in this repository.
 
@@ -831,6 +1392,8 @@ ${IMAGE_HANDLING_INSTRUCTIONS}
 Work autonomously. Do not ask questions.`;
   }
 
+  if (overlay.ok) prompt += overlay.text;
+
   const transcriptPath = phaseTranscriptPath("revise", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
   const result = await spawnClaude(prompt, config, logger, abortSignal, transcriptPath);
@@ -842,14 +1405,14 @@ Work autonomously. Do not ask questions.`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
   }
 
   // Post-revision self-check: confirm Claude actually pushed commits to the
   // feature branch. A clean exit with no SHA change means the revision was a
   // silent no-op (skill misfire, agent decided "nothing to fix", failed push,
   // etc.). Treat it as a failure so the orchestrator does not transition labels
-  // to "pr under review" — that would lie about the PR's state and cause the
+  // to `pr under review` — that would lie about the PR's state and cause the
   // EM to re-review unchanged code.
   //
   // Conservative on lookup failures: if either SHA is null (transient gh
@@ -859,7 +1422,7 @@ Work autonomously. Do not ask questions.`;
     // Declared no-commit: the revision determined the branch is already correct
     // and said so on the trailer. That is a real outcome, not a misfire, and it
     // must return success — otherwise the orchestrator never transitions the
-    // labels back to "pr under review" and the PR is unreviewable forever.
+    // labels back to `pr under review` and the PR is unreviewable forever.
     const declared = REVISION_NO_COMMIT.exec(result.stdout);
     if (declared) {
       const reason = declared[1].trim().slice(0, 300);
@@ -867,7 +1430,7 @@ Work autonomously. Do not ask questions.`;
         `PR revision made no commit BY DECLARATION on ${config.featureBranch} ` +
         `(SHA unchanged at ${beforeSha.slice(0, 10)}): ${reason}`,
       );
-      return { success: true, noCommit: true, noCommitReason: reason };
+      return { success: true, noCommit: true, noCommitReason: reason, summary: extractStreamResult(result.stdout) };
     }
 
     const outputTail = result.stdout.slice(-500).trim();
@@ -879,197 +1442,530 @@ Work autonomously. Do not ask questions.`;
   }
 
   logger.info(`PR revision completed successfully for ${config.name}`);
-  return { success: true };
+  return { success: true, summary: extractStreamResult(result.stdout) };
+}
+
+/** What a custom stage is handed: the work in flight on the repo when the pass reached it. */
+export interface CustomStageInput {
+  /** The open feature → base PR the stage runs against. */
+  prNumber: number;
+  /** Issues that PR implements (the same reading the implement phase uses). */
+  issueNumbers: number[];
+  /** Head of the feature branch the verdict applies to. */
+  headSha: string;
+}
+
+export interface CustomStageResult {
+  /** `pass` / `blocked` as declared by the FOREMAN_STAGE trailer; `failed` when none was. */
+  verdict: "pass" | "blocked" | "failed";
+  reason?: string;
+  /** Set when the Claude session limit refused the run — no verdict was reached. */
+  upstreamLimit?: UpstreamLimit;
 }
 
 /**
- * Invoke the EM repo's /review-all-prs skill, scoped to a single service repo,
- * in a headless Claude session.
- *
- * This is categorically different from implement/revise: those run IN the service
- * repo under the Foreman token with a narrow tool set. Review is a decision-layer
- * workflow — it needs the EM repo's MCP servers, npm scripts (healthcheck/verify/
- * validate), and context/docs — so it runs with:
- *   - cwd  = the EM repo (agentConfig.emRepoPath), so it loads the EM .mcp.json,
- *            .claude/skills, and context/docs
- *   - token = EM_GITHUB_TOKEN, so reviews/merges are attributed to the EM account
- *             (memory: feedback_mcp_github_for_review_actions)
- *   - the broad reviewAllowedTools surface (GitHub/Postgres/Redis/Railway MCP)
- *
- * Full-fidelity: the skill posts verdicts, merges approved PRs to develop, verifies
- * dev, files S3/S4 follow-ups, and updates labels itself. The review's label side
- * effects feed the existing phases: APPROVE → `pr approved` (awaiting the EM
- * outcome-gate); REQUEST_CHANGES → `pr pending actions` (revise phase).
- *
- * The skill remains the PRIMARY labeler — it does things the orchestrator cannot
- * (post the review body, file the follow-ups that belong with the verdict). But it
- * is no longer the ONLY one: the orchestrator reconciles the outcome label from the
- * returned trailers when the skill merged without labeling. See
- * `reconcileReviewOutcomeLabels` in orchestrator.ts for why the write moved.
+ * Run one custom stage: a single Claude session on the stage's skill, in the
+ * managed repo, under the Foreman token with the implement session's model,
+ * tools and budget. The session is told the repo, branches, PR, issues and head
+ * in its prompt and as FOREMAN_STAGE_* env, next to the label env every session
+ * gets. Its verdict is the FOREMAN_STAGE trailer; the Foreman does nothing with
+ * the work items itself — whatever the stage should change (comments, labels),
+ * its skill does.
  */
-export async function reviewOpenPRs(
-  repoConfig: RepoConfig,
-  agentConfig: AgentConfig,
+export async function runCustomStage(
+  config: RepoConfig,
+  stage: CustomStage,
+  input: CustomStageInput,
   logger: Logger,
   abortSignal?: AbortSignal,
-  transcriptPath?: string,
-  runLabel?: string,
-): Promise<ReviewResult> {
-  const emToken = process.env.EM_GITHUB_TOKEN;
-  if (!emToken) {
-    return { success: false, error: "EM_GITHUB_TOKEN not set — refusing to run review without EM-account attribution" };
-  }
-  if (!agentConfig.emRepoPath) {
-    return { success: false, error: "emRepoPath not configured — cannot locate the review skill" };
-  }
+): Promise<CustomStageResult> {
+  const issues = input.issueNumbers.map((n) => `#${n}`).join(", ") || "none referenced";
+  const prompt =
+    `Read and follow the skill at ${stage.skillPath}.\n\n` +
+    `This is the "${stage.id}" stage of the Foreman pipeline for ${config.githubRepo}. ` +
+    `Work in flight: PR #${input.prNumber} (${config.featureBranch} → ${config.baseBranch}) at ${input.headSha}, ` +
+    `implementing issues: ${issues}.\n\n` +
+    `End your output with exactly one verdict line and nothing after it:\n\n` +
+    `  FOREMAN_STAGE pass\n` +
+    `  FOREMAN_STAGE blocked reason="<one line: what must change before this work goes further>"\n\n` +
+    `\`blocked\` stops every later stage for this repo until ${config.featureBranch} moves. ` +
+    `A run with no verdict line is recorded as failed, which stops them too.\n\n` +
+    `Work autonomously. Do not ask questions.`;
 
-  logger.info(`Starting review for ${repoConfig.name} (${repoConfig.githubRepo}) — cwd=${agentConfig.emRepoPath}`);
-
-  const { minutes: reviewBudgetMinutes, deadlineIso: reviewDeadlineIso } =
-    reviewBudget(agentConfig.reviewMaxDurationMs);
-
-  const prompt = `Read and follow the skill at ${agentConfig.reviewSkillPath}.
-
-Review the open feature PRs for the repository \`${repoConfig.githubRepo}\` ONLY. Treat this as the skill's repo-scoped mode (equivalent to \`--repo ${repoConfig.githubRepo}\`): scope every step — inventory, review, merge, verify — to that single repository, and use the full \`owner/repo\` slug \`${repoConfig.githubRepo}\` for all GitHub operations (do not rely on a short repo alias).
-
-WORKING COPY — use this one, do not make your own:
-A checkout of \`${repoConfig.githubRepo}\` is already prepared and fetched for you at \`${checkoutPathFor(agentConfig, repoConfig)}\`. Read the code there: \`git -C <that path> checkout <branch>\`, \`git -C <that path> diff\`, and so on. It is reused across runs, so its \`node_modules\` is usually already installed.
-Do NOT \`git clone\` this repo anywhere else, and do NOT clone into \`/tmp\` for any reason. \`/tmp\` here is a RAM filesystem with a hard limit on the NUMBER of files, and a repo plus its \`node_modules\` consumes tens of thousands of them; improvised review clones exhausted that limit on 2026-09-12 and left every agent on the box unable to run a single command, including the ones needed to clean it up. If you need a second working tree, use \`git -C <that path> worktree add\` inside that same directory — it shares the object store instead of duplicating it.
-
-Follow the skill exactly and act autonomously — do NOT ask questions or wait for confirmation:
-- Do NOT run healthchecks up front. A healthcheck verifies a deployment; a review that requests changes deploys nothing. Run them only in post-merge verification (skill Phase 5, via \`npm run verify\`), against a merge this run actually made.
-- Review each open \`features → develop\` PR (skill Phase 3): the Fix-Completeness gate first, then the rubric.
-- For APPROVED PRs: post the review from the EM account, merge to develop, then verify dev and label \`pr approved\` per the skill. Do NOT apply \`ready for prod release\`, and do NOT remove it either — that label is the EM outcome-gate's signature (separation of duties; see /review-pr Step 17). If a linked issue already carries it, the EM has signed off ahead of you: leave that issue's labels alone entirely. Removing it silently blocks the promotion PR forever, so the Foreman now detects and restores it — but a restore is a repaired mistake, not a supported path.
-- For BLOCKED PRs: post REQUEST_CHANGES, label the linked issue \`pr pending actions\`, and file S3/S4 follow-up issues per the skill.
-- Update issue labels yourself exactly as the skill specifies. The orchestrator reconciles the outcome label from your trailer only when you left it unset — it never overrides a label you did set.
-
-CRITICAL — THIS IS A HEADLESS SESSION. THERE IS NO NEXT TURN.
-Ending your turn ends the process. Anything still running is killed at that instant, and everything you had not done yet never happens.
-
-- NEVER end your turn to "wait" for something. There is nothing to wait with. Do not say "I'll wait for X to land", "let me check back", or "proceeding once this completes" — those sentences are how a merged PR gets left with a mislabeled issue forever.
-- Run post-merge verification IN THE FOREGROUND and block on it. Do NOT launch it as a background task and yield — a backgrounded verify is killed the moment you stop, so its result never arrives and the labeling step after it never runs.
-- The merge is irreversible and the labeling is not automatic. Once you merge a PR you MUST, in the same turn, finish verification and set the issue's labels. If you cannot finish, say so explicitly in your final message rather than stopping quietly.
-- If a step genuinely cannot complete (verification times out, a deploy never settles), do NOT stall — record the outcome, label the issue \`pr pending actions\`, and emit the trailer with \`deploy=FAILURE\`. A reported failure is recoverable; silence is not.
-
-WALL-CLOCK BUDGET — you have ${reviewBudgetMinutes} minutes, until ${reviewDeadlineIso}.
-The process is SIGTERMed at that instant. You get no warning and no chance to write anything, so nothing you were partway through survives.
-
-- Check the clock before you start anything that polls. If the thing you are watching will not finish in the time you have LEFT, it does not fit in this run — and starting it anyway spends the rest of your budget to learn what you already knew.
-- A criterion that converges on its own schedule — a backfill sweeping historical rows, a deploy that settles when it settles, an index build — is the case this rule exists for. Do NOT poll it to the wall. Take the measurement you can take now, finish the labeling, and emit \`hold=<reason>\` on that PR's trailer line (see below).
-- A held issue is visible and recoverable: the Foreman leaves it alone and reports it as held, and the EM resolves it when the criterion can be checked. A run killed mid-poll is none of those things — it is recorded as a plain failure, and the review and merge it already completed are thrown away.
-- This does NOT license ending your turn to "wait". Holding is a decision you record and report; waiting is stopping and hoping. Never do the second.
-
-If there are no open feature PRs awaiting review for this repo, that is a clean no-op — say so and emit exactly \`FOREMAN_REVIEW none\` as your final line.
-
-IMPORTANT — status trailer: After you finish, end your output with one line per PR you acted on, in EXACTLY this format (nothing after the last one):
-
-FOREMAN_REVIEW pr=#<number> verdict=<APPROVE|REQUEST_CHANGES> merged=<yes|no> deploy=<SUCCESS|FAILURE|NA>
-
-Rules for the trailer: \`merged=yes\` only if you actually merged the PR to the base branch. \`deploy=SUCCESS\`/\`deploy=FAILURE\` reflects the post-merge deployment+verification result for that merge (use \`deploy=NA\` when nothing was merged, or when the repo has no deployment to verify, e.g. a docs/CLI/npm-package repo). Emit one trailer line for every PR you reviewed this run.
-
-OPTIONAL — deliberate hold: if you merged a PR but are INTENTIONALLY leaving the issue at \`pr under review\`, append \`hold=<short-reason-slug>\` to that PR's trailer line. Two cases qualify: an acceptance criterion cannot be observed YET (nothing has happened that would let you check it), or it cannot be observed IN TIME (it is converging, but not inside the budget above). Both are decisions; both belong in the trailer rather than in a poll loop:
-
-FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-not-observable-until-0300z
-
-Use it ONLY for a decision you actually made. It tells the Foreman the label is missing ON PURPOSE, so it will neither auto-set the label nor auto-re-verify behind you — the issue stays visible as a held item instead of being reported as a failure. Omit the field entirely for the normal case; omitting it means "I finished the labeling."
-
-Note: the Foreman now reconciles the outcome label from this trailer as a BACKSTOP — if you merged and did not label, it applies the label your trailer implies. That is a safety net, not a substitute: still set the labels yourself per the skill, because only you can file the follow-ups and post the review body that go with them.
-
-The trailer is MANDATORY and is the last thing you emit. A run that ends without either a \`FOREMAN_REVIEW pr=…\` line or \`FOREMAN_REVIEW none\` is recorded as a FAILED review regardless of how much work you did, because from the outside it is indistinguishable from a session that died mid-merge.
-
-${IMAGE_HANDLING_INSTRUCTIONS}`;
-
+  const transcriptPath = phaseTranscriptPath(`stage-${stage.id}`, config.name);
+  logger.info(`Starting stage "${stage.id}" for ${config.name} on PR #${input.prNumber} — transcript: ${transcriptPath}`);
   const result = await spawnClaudeWithOptions(
     prompt,
     {
-      cwd: agentConfig.emRepoPath,
-      ghToken: emToken,
-      model: agentConfig.reviewModel,
-      allowedTools: agentConfig.reviewAllowedTools,
-      maxTurns: agentConfig.reviewMaxTurns,
-      maxDurationMs: agentConfig.reviewMaxDurationMs,
-      streamJson: true,
+      cwd: config.repoPath,
+      sessionEnv: config.sessionEnv,
+      ghToken: process.env.FOREMAN_GITHUB_TOKEN,
+      triggerLabel: config.triggerLabel,
+      lifecycleLabels: config.lifecycleLabels,
+      github: config.github,
+      model: config.model,
+      allowedTools: config.allowedTools,
+      mcpConfig: config.builderMcpConfig,
+      maxTurns: config.maxTurns,
+      maxDurationMs: config.maxDurationMs,
       transcriptPath,
-      runLabel: runLabel ?? `review of ${repoConfig.githubRepo}`,
+      runLabel: `stage "${stage.id}" on ${config.name} PR #${input.prNumber}`,
+      extraEnv: {
+        FOREMAN_STAGE_ID: stage.id,
+        FOREMAN_STAGE_REPO: config.githubRepo,
+        FOREMAN_STAGE_BASE_BRANCH: config.baseBranch,
+        FOREMAN_STAGE_FEATURE_BRANCH: config.featureBranch,
+        FOREMAN_STAGE_PR: String(input.prNumber),
+        FOREMAN_STAGE_ISSUES: JSON.stringify(input.issueNumbers),
+        FOREMAN_STAGE_HEAD_SHA: input.headSha,
+      },
     },
     logger,
-    abortSignal
+    abortSignal,
   );
 
-  if (result.timedOut) {
-    return { success: false, error: "timed out" };
-  }
-
+  if (result.timedOut) return { verdict: "failed", reason: "timed out" };
   if (result.exitCode !== 0) {
-    const error = describeSpawnFailure(result);
-    logger.error(`Review Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error };
+    return { verdict: "failed", reason: describeSpawnFailure(result), upstreamLimit: detectUpstreamLimit(result.stdout) };
+  }
+  const trailer = parseStageTrailer(result.stdout);
+  if (!trailer) return { verdict: "failed", reason: "no FOREMAN_STAGE verdict line — outcome unknown" };
+  return trailer;
+}
+
+/**
+ * Hand one PR's review to the Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427).
+ *
+ * The Tech Lead judges on Codex inside a read-only sandbox and does the writes in
+ * its own code; it emits the same FOREMAN_REVIEW trailer this phase already
+ * parses, so every post-condition and label reconcile below applies unchanged.
+ *
+ * Exit 3 is its "I could not take this, and I wrote NOTHING" signal (Codex signed
+ * out, out of allowance, timed out, or a path it does not cover). That returns
+ * `{ fallback: true }` and the caller waits and offers the PR again — never to
+ * Claude (Ray, 2026-10-10). Any other non-zero exit is an ordinary failure: it
+ * may have written.
+ *
+ * While it runs, each `TECH_LEAD_PROGRESS` line on its stderr (reading, depth
+ * check, final check: review-progress.ts) goes to `onProgress` as it arrives.
+ * A callback that throws is ignored: progress never fails a review.
+ */
+export async function reviewViaTechLead(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+  onProgress?: (m: ReviewMilestone) => void,
+): Promise<ReviewResult | { fallback: true; reason: string }> {
+  const techLead = agentConfig.techLeadPath;
+  if (!techLead) return { fallback: true, reason: "techLeadPath not configured" };
+  if (!process.env.TECHLEAD_GITHUB_KEY) {
+    return { success: false, error: "TECHLEAD_GITHUB_KEY not set — refusing to run review without Tech Lead attribution" };
+  }
+  const args = [join(techLead, "bin/tech-lead.mjs"), "review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
+  logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead (Codex)`);
+
+  // Redacted at every sink, as in spawnClaudeWithOptions: the transcript as it
+  // streams, and the stdout/stderr the trailer parse and the error read.
+  const secrets = secretValues(agentConfig.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolveRun) => {
+    const child = spawn("node", args, {
+      cwd: techLead,
+      env: buildTechLeadEnv(agentConfig, repoConfig),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "", timedOut = false;
+    const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath)) : null;
+    child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
+    const milestones = onProgress ? milestoneReader(onProgress) : null;
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); milestones?.push(t); });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, agentConfig.reviewMaxDurationMs);
+    const onAbort = () => child.kill("SIGTERM");
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      milestones?.end();
+      if (log) {
+        log.write(outRedactor.flush());
+        log.write(errRedactor.flush());
+        log.end();
+      }
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(withoutProgressLines(stderr), secrets), timedOut });
+    });
+  });
+
+  if (out.code === 3) {
+    const reason = out.stdout.trim().split("\n").pop() || "Codex unavailable";
+    logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — retried later`);
+    return { fallback: true, reason };
+  }
+  if (out.timedOut) return { success: false, error: "Tech Lead review timed out" };
+  if (out.code !== 0) {
+    return { success: false, error: `Tech Lead review failed (exit ${out.code}): ${(out.stderr.trim() || out.stdout).trim().slice(-400)}` };
   }
 
-  // Parse from the FULL result text; truncate only for display. The trailer is
-  // required to be the LAST thing the agent emits, so parsing a length-capped
-  // copy discards exactly the part that carries the outcome.
-  const fullResult = extractStreamResult(result.stdout);
-  const summary = fullResult?.slice(0, SUMMARY_DISPLAY_LIMIT);
-
-  // Read the VERDICT out of the agent's final result text, not raw stdout.
-  // `result.stdout` is the stream-json transcript, and it opens with the prompt
-  // we just sent — which quotes the trailer format and the no-op sentinel
-  // verbatim. Scanning stdout for the sentinel therefore matches OUR OWN
-  // INSTRUCTIONS on every single run, silently declaring every dead session a
-  // clean no-op and disabling the gate below completely.
-  //
-  // The trailer regex survives stdout because the prompt's example is literally
-  // `pr=#<number>` and the pattern demands `\d+` — but that is a coincidence of
-  // the placeholder, not a guarantee. Prefer the result text; fall back to
-  // stdout only when no result event was emitted at all.
-  const trailers = parseReviewTrailerRecords(fullResult ?? result.stdout);
-  const declaredNoOp = fullResult ? REVIEW_NOOP_SENTINEL.test(fullResult) : false;
-  const statusLine = formatReviewTrailers(trailers);
-
-  // --- Trailer gate ------------------------------------------------------
-  // A clean exit says the PROCESS ended tidily. It says nothing about whether
-  // the REVIEW finished, and the two diverge in the one case that costs us: the
-  // agent merges the PR, then ends its turn before labeling. The session exits
-  // 0, we recorded success, reset the failure counter, and moved on — while the
-  // issue sat pinned at `pr under review` with its PR already merged, invisible
-  // to every phase (`findPRsNeedingReview` only matches OPEN PRs).
-  //
-  // Measured 2026-08-03 before this gate existed: 15 of 234 review runs (6.4%)
-  // emitted no trailer, 9 of them exiting 0 — i.e. silently booked as wins.
-  // slashbin-io-worker#564 is the worked example: merged PR #565 at 02:07Z,
-  // backgrounded its verification, ended its turn with "I'll wait for the
-  // verification run to land", and the harness killed the background tasks and
-  // exited 0.
-  //
-  // So: no trailer and no explicit no-op sentinel = FAILED, whatever the exit
-  // code claimed. This does not by itself repair anything — the merge already
-  // happened — but it converts a silent orphan into a logged, alerted failure,
-  // and the dead-zone recovery in the orchestrator takes it from there.
+  const trailers = parseReviewTrailerRecords(out.stdout);
+  const declaredNoOp = REVIEW_NOOP_SENTINEL.test(out.stdout);
   if (trailers.length === 0 && !declaredNoOp) {
-    logger.error(
-      `Review for ${repoConfig.name} exited 0 but emitted no FOREMAN_REVIEW trailer — outcome unknown; treating as FAILED${transcriptPath ? ` (transcript ${transcriptPath})` : ""}`,
-    );
-    return {
-      success: false,
-      error:
-        "no FOREMAN_REVIEW trailer emitted — the review session ended without declaring an outcome (likely stopped mid-run after merging); check the issue labels",
-      summary,
-      trailers,
+    return { success: false, error: "Tech Lead exited 0 without a FOREMAN_REVIEW trailer — outcome unknown; check the issue labels", trailers };
+  }
+  const statusLine = formatReviewTrailers(trailers);
+  const summary = out.stdout.trim().slice(0, SUMMARY_DISPLAY_LIMIT);
+  logger.info(`Tech Lead review of ${repoConfig.githubRepo} PR #${prNumber}: ${statusLine || "no-op"}`);
+  return { success: true, summary, statusLine, trailers };
+}
+
+/**
+ * The SRE's environment: essentials, `sessionEnv`, the label names, its own SRE_*
+ * settings (SRE_GITHUB_KEY among them, account `slashbin-sre`) and the EM checkout it
+ * verifies from. No other agent's token. Until 2026-10-10 this was the Tech Lead's env,
+ * which carried the Tech Lead's key and no token the SRE reads, so the SRE posted as
+ * whatever `gh` login was active on the host.
+ */
+export function buildSreEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
+  pickEnv(Object.keys(process.env).filter((n) => n.startsWith("SRE_")), env);
+  if (agentConfig.emRepoPath && !env.SRE_EM_REPO) env.SRE_EM_REPO = agentConfig.emRepoPath;
+  setContractReaderEnv(env, agentConfig.emRepoPath);
+  return env;
+}
+
+/**
+ * The verify run's ceiling. The SRE's own budget is a hook canary (3 min), a
+ * Codex run (40 min) and, on Codex failure, a Claude run (40 min); the Foreman
+ * kills only past all three.
+ */
+export const SRE_VERIFY_MAX_DURATION_MS = 90 * 60_000;
+
+/** What a verify hand-off came back with. */
+export type VerifyResult =
+  /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string }
+  /** No verdict: an error or a timeout. Nothing was written. */
+  | { kind: "error"; error: string };
+
+/**
+ * The verdict a verify trailer carries. Pass is an approved merge with a clean
+ * (or not-applicable) deploy and no hold; everything else is a hold with the
+ * reason the EM reads on the card. Pure, exported for tests.
+ */
+export function verifyVerdict(t: ReviewTrailer): { pass: boolean; reason?: string } {
+  if (t.hold) return { pass: false, reason: t.hold };
+  if (t.verdict !== "APPROVE" || !t.merged) return { pass: false, reason: `unexpected trailer verdict=${t.verdict} merged=${t.merged}` };
+  if (/^(SUCCESS|NA)$/.test(t.deploy)) return { pass: true };
+  return { pass: false, reason: t.deploy === "FAILURE" ? "dev-verify-failed" : `deploy=${t.deploy}` };
+}
+
+/**
+ * Hand one merged PR to the SRE (`<srePath>/bin/sre.mjs verify`) for dev
+ * verification (EM#440). The SRE posts the evidence comment and writes no label;
+ * the Foreman reads the trailer it prints last and moves the label itself.
+ *
+ * The SRE runs on Codex only. When Codex cannot run it still exits 0, with
+ * `hold=codex-unavailable` in the trailer; the orchestrator defers on that.
+ */
+export async function verifyViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<VerifyResult> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "error", error: "srePath not configured" };
+  if (!process.env.SRE_GITHUB_KEY) {
+    return { kind: "error", error: "SRE_GITHUB_KEY not set — refusing to verify without SRE-account (slashbin-sre) attribution" };
+  }
+  const args = [join(sre, "bin/sre.mjs"), "verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)];
+  logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification`);
+
+  const secrets = secretValues(agentConfig.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolveRun) => {
+    const child = spawn("node", args, { cwd: sre, env: buildSreEnv(agentConfig, repoConfig), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", timedOut = false;
+    const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath)) : null;
+    child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, SRE_VERIFY_MAX_DURATION_MS);
+    const onAbort = () => child.kill("SIGTERM");
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      if (log) {
+        log.write(outRedactor.flush());
+        log.write(errRedactor.flush());
+        log.end();
+      }
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(stderr, secrets), timedOut });
+    });
+  });
+
+  if (out.timedOut) return { kind: "error", error: "SRE verification timed out" };
+  if (out.code !== 0) {
+    return { kind: "error", error: `SRE verification failed (exit ${out.code}): ${(out.stderr || out.stdout).trim().slice(-400)}` };
+  }
+  const trailer = parseReviewTrailerRecords(out.stdout).filter((t) => t.pr === prNumber).pop();
+  if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
+  const v = verifyVerdict(trailer);
+  logger.info(`SRE verification of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
+}
+
+// --- The release stage's hand-offs (EM#578) ---
+
+/** The Tech Lead's promotion approval: one read of the diff and one review. */
+export const TECH_LEAD_APPROVE_MAX_DURATION_MS = 20 * 60_000;
+
+interface CliRun { code: number | null; stdout: string; stderr: string; timedOut: boolean }
+
+/**
+ * Run `node <dir>/<script> ...args` the way reviewViaTechLead and verifyViaSre
+ * do: cwd the agent's checkout, its own env, a kill at `maxMs` or on abort,
+ * and the session secrets redacted at every sink (the transcript as it
+ * streams, and the stdout/stderr returned).
+ */
+async function runAgentCli(
+  dir: string,
+  script: string,
+  args: string[],
+  env: Record<string, string>,
+  agentConfig: AgentConfig,
+  maxMs: number,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<CliRun> {
+  const secrets = secretValues(agentConfig.sessionEnv ?? []);
+  const outRedactor = createStreamRedactor(secrets);
+  const errRedactor = createStreamRedactor(secrets);
+  return new Promise<CliRun>((resolveRun) => {
+    const child = spawn("node", [join(dir, script), ...args], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", timedOut = false;
+    const log = transcriptPath ? (mkdirSync(dirname(transcriptPath), { recursive: true }), createWriteStream(transcriptPath, { flags: "a" })) : null;
+    child.stdout.on("data", (b: Buffer) => { const t = b.toString(); stdout += t; log?.write(outRedactor.push(t)); });
+    child.stderr.on("data", (b: Buffer) => { const t = b.toString(); stderr += t; log?.write(errRedactor.push(t)); });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, maxMs);
+    const onAbort = () => child.kill("SIGTERM");
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (e) => { stderr += String(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      if (log) {
+        log.write(outRedactor.flush());
+        log.write(errRedactor.flush());
+        log.end();
+      }
+      resolveRun({ code, stdout: redactAll(stdout, secrets), stderr: redactAll(stderr, secrets), timedOut });
+    });
+  });
+}
+
+const tail = (r: CliRun) => (r.stderr || r.stdout).trim().slice(-400);
+
+/** How the Tech Lead answered a promotion approval. */
+export type PromotionApproval =
+  | { kind: "approved" }
+  /** Exit 4: the Tech Lead looked and refused. A person must decide. */
+  | { kind: "refused"; reason: string }
+  /** Anything else (exit 3 "could not run, wrote nothing", an error, a timeout): ask again later. */
+  | { kind: "retry"; reason: string };
+
+/**
+ * Ask the Tech Lead to approve release PR `prNumber` at exactly `sha`
+ * (`tech-lead.mjs approve-promotion`). The SRE's deploy refuses a PR without
+ * that approval at that head. Exit 0 approved, 4 refused, anything else retry.
+ */
+export async function approvePromotionViaTechLead(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  sha: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<PromotionApproval> {
+  const techLead = agentConfig.techLeadPath;
+  if (!techLead) return { kind: "retry", reason: "techLeadPath not configured" };
+  if (!process.env.TECHLEAD_GITHUB_KEY) return { kind: "retry", reason: "TECHLEAD_GITHUB_KEY not set — refusing to approve without Tech Lead attribution" };
+  logger.info(`Asking the Tech Lead to approve release PR #${prNumber} on ${repoConfig.githubRepo} at ${sha.slice(0, 10)}`);
+  const r = await runAgentCli(techLead, "bin/tech-lead.mjs",
+    ["approve-promotion", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--sha", sha],
+    buildTechLeadEnv(agentConfig, repoConfig), agentConfig, TECH_LEAD_APPROVE_MAX_DURATION_MS, abortSignal, transcriptPath);
+  if (r.timedOut) return { kind: "retry", reason: "Tech Lead approval timed out" };
+  if (r.code === 0) return { kind: "approved" };
+  const last = r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
+  if (r.code === 4) return { kind: "refused", reason: last || "refused" };
+  return { kind: "retry", reason: `exit ${r.code}: ${tail(r)}` };
+}
+
+/** How long one `em.mjs unstick` call may run before it is killed (#103). */
+export const EM_UNSTICK_MAX_DURATION_MS = 20 * 60_000;
+
+/** How the EM answered an unstick call. The Foreman never clears a block on any of them. */
+export type UnstickOutcome =
+  /** Exit 0: the EM acted; the block is released by the normal unblock checks, not by this. */
+  | { kind: "invoked"; detail: string }
+  /** Exit 2: the EM escalated to a person; no retry until the reason changes. */
+  | { kind: "escalated"; detail: string }
+  /** Exit 3: the EM declined. */
+  | { kind: "declined"; detail: string }
+  /** Anything else (error, timeout, not configured): retried up to the attempt cap. */
+  | { kind: "failed"; detail: string };
+
+/**
+ * Ask the EM to unstick `issue` (`em.mjs unstick --repo --issue --kind --reason`),
+ * cwd the EM checkout. Exit 0 invoked, 2 escalated, 3 declined, else failed.
+ */
+export async function unstickViaEm(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  issue: number,
+  kind: string,
+  reason: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<UnstickOutcome> {
+  const em = agentConfig.emRepoPath;
+  if (!em) return { kind: "failed", detail: "emRepoPath not configured" };
+  if (!process.env.EM_GITHUB_TOKEN) return { kind: "failed", detail: "EM_GITHUB_TOKEN not set" };
+  logger.info(`Asking the EM to unstick ${repoConfig.githubRepo}#${issue} (${kind})`);
+  const r = await runAgentCli(em, "bin/em.mjs",
+    ["unstick", "--repo", repoConfig.githubRepo, "--issue", String(issue), "--kind", kind, "--reason", reason],
+    buildEmEnv(agentConfig), agentConfig, EM_UNSTICK_MAX_DURATION_MS, abortSignal, transcriptPath);
+  if (r.timedOut) return { kind: "failed", detail: "EM unstick timed out" };
+  const last = r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
+  if (r.code === 0) return { kind: "invoked", detail: last };
+  if (r.code === 2) return { kind: "escalated", detail: last };
+  if (r.code === 3) return { kind: "declined", detail: last };
+  return { kind: "failed", detail: `exit ${r.code}: ${tail(r)}` };
+}
+
+/** The SRE deploy trailer: the last line of `sre.mjs deploy` (exit 0, and exit 3 too). */
+export interface DeployTrailer {
+  pr: number;
+  merged: boolean;
+  mergeSha: string | null;
+  verify: "pass" | "hold" | "fail" | "none";
+  hold?: string;
+  evidence?: string;
+}
+
+/**
+ * Parse `SRE_DEPLOY pr=#N merged=<yes|no> merge_sha=<sha|none>
+ * verify=<pass|hold|fail|none> [hold=<slug>] [evidence=<url>]`; the last one
+ * for `prNumber` wins. Same grammar as the SRE's own parser (lib/deploy.mjs);
+ * a merge_sha that is not 40 hex reads as none. Null when there is none. Pure,
+ * exported for tests.
+ */
+export function parseDeployTrailer(stdout: string, prNumber: number): DeployTrailer | null {
+  const re = /SRE_DEPLOY\s+pr=#?(\d+)\s+merged=(yes|no)\s+merge_sha=(\S+)\s+verify=(pass|hold|fail|none)(?:\s+hold=([\w/-]+))?(?:\s+evidence=(\S+))?/g;
+  let found: DeployTrailer | null = null;
+  for (const m of stdout.matchAll(re)) {
+    if (Number(m[1]) !== prNumber) continue;
+    found = {
+      pr: prNumber,
+      merged: m[2] === "yes",
+      mergeSha: /^[0-9a-f]{40}$/.test(m[3]) ? m[3] : null,
+      verify: m[4] as DeployTrailer["verify"],
+      ...(m[5] ? { hold: m[5] } : {}),
+      ...(m[6] ? { evidence: m[6] } : {}),
     };
   }
+  return found;
+}
 
-  if (summary) {
-    logger.info(`Review completed for ${repoConfig.name}:\n${summary}`);
-  } else {
-    logger.info(`Review completed for ${repoConfig.name} (no parseable summary; see transcript${transcriptPath ? ` ${transcriptPath}` : ""})`);
-  }
-  if (statusLine) {
-    logger.info(`Review outcome for ${repoConfig.name}: ${statusLine}`);
-  } else {
-    logger.info(`Review for ${repoConfig.name}: clean no-op (no PRs awaiting review)`);
-  }
-  return { success: true, summary, statusLine, trailers };
+/** What a deploy hand-off came back with. */
+export type DeployResult =
+  | { kind: "trailer"; trailer: DeployTrailer }
+  /**
+   * Exit 1: the SRE refused a precondition (PR not open, head moved, no Tech
+   * Lead approval at that head); nothing ran. The release stage re-reads the
+   * head and asks again on its backoff.
+   */
+  | { kind: "refused"; reason: string }
+  /** Exit 3 (whatever its trailer says), a timeout or any other failure: nothing merged that the Foreman knows of; ask again later. */
+  | { kind: "retry"; reason: string };
+
+/**
+ * Hand release PR `prNumber` at `sha` to the SRE (`sre.mjs deploy`): it
+ * validates, merges (as itself, sha-pinned, never squash), waits for the
+ * deploy and verifies production. It never tags, relabels or closes: the
+ * Foreman does that from the trailer.
+ */
+export async function deployViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  sha: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+): Promise<DeployResult> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "retry", reason: "srePath not configured" };
+  if (!process.env.SRE_GITHUB_KEY) return { kind: "retry", reason: "SRE_GITHUB_KEY not set — refusing to deploy without SRE-account attribution" };
+  logger.info(`Handing release PR #${prNumber} on ${repoConfig.githubRepo} at ${sha.slice(0, 10)} to the SRE to deploy`);
+  const r = await runAgentCli(sre, "bin/sre.mjs",
+    ["deploy", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--sha", sha],
+    buildSreEnv(agentConfig, repoConfig), agentConfig, agentConfig.sreDeployMaxDurationMs, abortSignal, transcriptPath);
+  const trailer = parseDeployTrailer(r.stdout, prNumber);
+  // A merge the trailer reports is the truth whatever the exit: it must never
+  // be read as "nothing happened".
+  if (trailer?.merged) return { kind: "trailer", trailer };
+  // Exit 3 prints a trailer too (hold=codex-unavailable / em-mirror-unavailable),
+  // but it means "could not run, nothing merged": retry, whatever it says.
+  if (r.code === 3) return { kind: "retry", reason: `the SRE could not run (${trailer?.hold ?? tail(r)})` };
+  if (trailer && r.code === 0) return { kind: "trailer", trailer };
+  if (r.timedOut) return { kind: "retry", reason: "SRE deploy timed out" };
+  if (r.code === 1) return { kind: "refused", reason: tail(r) || "refused" };
+  if (r.code === 0) return { kind: "retry", reason: "SRE exited 0 without an SRE_DEPLOY trailer for this PR" };
+  return { kind: "retry", reason: `exit ${r.code}: ${tail(r)}` };
+}
+
+/**
+ * Verify a merged release PR in production (`sre.mjs verify --mode prod`), for
+ * an issue whose prod verification held, or run its 30-minute soak (`--mode
+ * soak`; the SRE's ledger records it, so its promotion-verify sweep skips a
+ * release the Foreman soaked). Same trailer and verdict as the dev verify
+ * (verifyVerdict); the hold slug is the reason. A soak with nothing left to
+ * soak exits 1: `{ kind: "nothing" }`.
+ */
+export async function verifyProdViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+  transcriptPath?: string,
+  mode: "prod" | "soak" = "prod",
+): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "error", error: "srePath not configured" };
+  if (!process.env.SRE_GITHUB_KEY) return { kind: "error", error: "SRE_GITHUB_KEY not set — refusing to verify without SRE-account attribution" };
+  const what = mode === "soak" ? "30-minute soak" : "prod verification";
+  logger.info(`Handing release PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for its ${what}`);
+  const r = await runAgentCli(sre, "bin/sre.mjs",
+    ["verify", "--mode", mode, "--repo", repoConfig.githubRepo, "--pr", String(prNumber)],
+    buildSreEnv(agentConfig, repoConfig), agentConfig, SRE_VERIFY_MAX_DURATION_MS, abortSignal, transcriptPath);
+  if (r.timedOut) return { kind: "error", error: `SRE ${what} timed out` };
+  if (mode === "soak" && r.code === 1) return { kind: "nothing", reason: tail(r) || "nothing to soak" };
+  if (r.code !== 0) return { kind: "error", error: `SRE ${what} failed (exit ${r.code}): ${tail(r)}` };
+  const trailer = parseReviewTrailerRecords(r.stdout).filter((t) => t.pr === prNumber).pop();
+  if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
+  const v = verifyVerdict(trailer);
+  logger.info(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
 }
 
 /**
