@@ -262,6 +262,18 @@ async function holdRelease(
 }
 
 /** A STOP: the issues need a person. Blocked, with the reason on each; `release pending` stays. */
+/**
+ * SRE deploy holds that only a person or a new commit clears. Every other unmerged hold retries
+ * on the back-off; these did too, and each retry bought a Tech Lead approval and an SRE run
+ * (slashbin-cli#161: 46 refused merges at one sha; slashbin-io-worker#724: 13 approvals behind
+ * a red required check).
+ */
+const DEPLOY_STOPS: Record<string, string> = {
+  "predeploy-stop": "the SRE's pre-deploy check said STOP (`predeploy-stop`)",
+  "merge-refused-repeatedly": "GitHub refused the SRE's merge repeatedly at this head (`merge-refused-repeatedly`)",
+  "merge-blocked-check": "a required check is red at this head, after one re-run (`merge-blocked-check`)",
+};
+
 async function stopRelease(repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger): Promise<void> {
   const body =
     `${RELEASE_STOP_MARK} ${pr ? `Release PR #${pr}: ` : ""}${reason}${evidence ? ` (${evidence})` : ""}. ` +
@@ -605,8 +617,9 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
 
   if (r.kind !== "trailer" || !r.trailer.merged) {
     dropRelease(repoConfig, pr.number);
-    if (r.kind === "trailer" && r.trailer.hold === "predeploy-stop") {
-      await stopRelease(repoConfig, pr.number, pending, "the SRE's pre-deploy check said STOP (`predeploy-stop`)", r.trailer.evidence, logger);
+    const stop = r.kind === "trailer" ? DEPLOY_STOPS[r.trailer.hold ?? ""] : undefined;
+    if (stop && r.kind === "trailer") {
+      await stopRelease(repoConfig, pr.number, pending, stop, r.trailer.evidence, logger);
       return true;
     }
     const why = r.kind === "trailer" ? `not merged (${r.trailer.hold ?? "no reason given"})` : r.reason;
