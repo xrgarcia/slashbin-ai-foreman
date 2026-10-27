@@ -347,6 +347,14 @@ Type: object · Default: see [skill-sync.md](skill-sync.md)
 
 Keep each repo's skill copies on a golden source, one approved issue at a time, off unless `enabled` (docs/skill-sync.md). prefault for the same reason as above.
 
+## Dependabot
+
+### `dependabot`
+
+Type: object · Default: `{"securityOnly":true}`
+
+The Dependabot stage's selection. Global, like `github`. `securityOnly` (default true) batches and lands only security updates: a Dependabot PR is one iff a package it bumps has an OPEN Dependabot alert on the repo. Other version-update PRs are left alone (not batched, merged or closed). When the alerts API cannot be read (404 with alerts disabled, a network error) the cycle batches nothing. Set `{ "securityOnly": false }` to batch every Dependabot PR.
+
 ## Per-repo entries (`repos[]`)
 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
