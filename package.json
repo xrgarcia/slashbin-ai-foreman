@@ -8,10 +8,13 @@
     "slashbin-ai-agent": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "hooks",
+    "skills"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/stamp-build.mjs",
+    "prepare": "npm run build",
     "dev": "tsx watch src/cli.ts",
     "start": "node agent-manager.mjs start",
     "stop": "node agent-manager.mjs stop",
@@ -25,17 +28,24 @@
     "start:fg": "node dist/cli.js",
     "once": "node dist/cli.js --once",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs",
+    "setup": "npm install && npm run build && node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "labels:install": "node scripts/install-labels.mjs",
+    "paperclip:register": "node scripts/paperclip/agent.mjs",
+    "paperclip:doctor": "node dist/cli.js paperclip:doctor",
+    "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs",
+    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "ws": "^8.20.0",
+    "ws": "^8.22.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

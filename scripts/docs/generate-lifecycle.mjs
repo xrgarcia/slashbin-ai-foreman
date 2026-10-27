@@ -1,0 +1,291 @@
+#!/usr/bin/env node
+// Generate docs/lifecycle.md from the state machine the Foreman runs. Run as
+// `npm run docs:generate` (writes every generated doc) or `npm run docs:check`
+// (exits 1 when a committed doc differs from what this would write). Run
+// `npm run build` first.
+//
+// Nothing a reader needs to trust is written down here:
+//   - the stages, their meanings, the moves and each move's trigger come from
+//     the BUILT `src/lifecycle.ts`, the tables the orchestrator runs on;
+//   - the event kinds come from the `WorkEvent` union in `src/adapters.ts`.
+// What IS written here is prose and one line per event kind. An event kind
+// this file does not know, or one it knows that the code dropped, stops the
+// run, so the doc cannot quietly fall behind the code.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const OUT = join(root, "docs", "lifecycle.md");
+const ADAPTERS_SRC = join(root, "src", "adapters.ts");
+const built = join(root, "dist", "lifecycle.js");
+
+function fail(msg) {
+  console.error(`generate-lifecycle: ${msg}`);
+  process.exit(1);
+}
+
+if (!existsSync(ADAPTERS_SRC)) fail(`${ADAPTERS_SRC} not found.`);
+if (!existsSync(built)) fail(`${built} not found — run \`npm run build\` first.`);
+
+const { STAGES, STAGE_MEANING, STATE_STAGE, MOVES, SESSION_STAGE, SESSION_FALLBACK_STAGE, RELEASE_STAGE } = await import(built);
+const { issueStage, SOURCE_BLOCKED_LABEL } = await import(join(root, "dist", "github-work-source.js"));
+const { defaultLifecycleLabels } = await import(join(root, "dist", "config.js"));
+const { UNBLOCK_CHECKS, CHECK_WORDS } = await import(join(root, "dist", "unblock.js"));
+
+// --- What marks each stage on a GitHub issue, read back through issueStage itself ---
+// (the function the board and the EM's queue use), so this column cannot drift from it.
+
+const TRIGGER = "approved";
+const STAGE_MARK = {};
+for (const l of [TRIGGER, SOURCE_BLOCKED_LABEL, ...Object.values(defaultLifecycleLabels())]) {
+  const st = issueStage([l], false, defaultLifecycleLabels(), TRIGGER);
+  if (st) STAGE_MARK[st] = [...(STAGE_MARK[st] ?? []), `\`${l}\``];
+}
+STAGE_MARK[issueStage([], true, defaultLifecycleLabels(), TRIGGER)] = ["an open release PR names it"];
+STAGE_MARK.done = ["closed", ...(STAGE_MARK.done ?? [])];
+
+// --- Event kinds: the union in adapters.ts, described here ---
+
+const EVENTS = {
+  claim: "The Foreman took the item for an implement session.",
+  transition: "A lifecycle move (the table below). `observed: true` when an AI session already wrote the labels itself and the Foreman is only reporting what it saw: the work source does not write again.",
+  prLink: "The item's PR was opened.",
+  blocked: "The Foreman stopped and needs a person (the reason says why).",
+  verifyWaiting: "Dev verification waits on something that clears by itself and resumes on its own; no person is needed.",
+  escalated: "Work stopped for the EM's ruling: the PR is not converging under review (a scope ruling on the PR resumes it), or a skipped issue used up `backoff.skip.maxAttempts` sessions (a person changing the issue resumes it; an agent's edit or label buys one session, its comment nothing). See [Unblocking a card](#unblocking-a-card).",
+  unblocked: "A check resolved an earlier block.",
+  merged: "The item's PR merged to the base branch.",
+  promoted: "A promotion PR to the production branch now carries the item.",
+  session: "A session (implement, review, verify, revise) started or ended, with the items it held.",
+  reviewProgress: "A running Tech Lead review reached a new stage (reading, depth check, final check): every milestone so far, at most once per stage.",
+  waiting: "Items the Foreman is holding, and on what (an occupied branch, a back-off).",
+  release: "A release PR opened, merged or closed, with the items it carries.",
+  promotionStall: "Promotion is stuck (the base branch is ahead of production and nothing is marked ready), or cleared.",
+  backoff: "A daemon-wide pause on an upstream (GitHub rate limit, Claude session limit) began or ended.",
+  snapshot: "After each pass: every open item's stage as the work source sees it, so a plugin can heal drift.",
+};
+
+const adapters = readFileSync(ADAPTERS_SRC, "utf8");
+const union = adapters.match(/export type WorkEvent =\n([\s\S]*?);\n/);
+if (!union) fail("no `export type WorkEvent =` union in src/adapters.ts.");
+const kinds = [...union[1].matchAll(/kind: "(\w+)"/g)].map((m) => m[1]);
+const unknown = kinds.filter((k) => !(k in EVENTS));
+const dropped = Object.keys(EVENTS).filter((k) => !kinds.includes(k));
+if (unknown.length) fail(`WorkEvent kind(s) with no description here: ${unknown.join(", ")}`);
+if (dropped.length) fail(`described here but gone from WorkEvent: ${dropped.join(", ")}`);
+
+// --- Blocks: the kinds and checks in src/unblock.ts, described here ---
+// Each kind says why the Foreman stopped and what a person does to clear it; each
+// check says which act passes it. A kind or check this file does not know, or one
+// it knows that the code dropped, stops the run.
+
+const BLOCK_KINDS = {
+  "skip": "The implement session declined the issue: a precondition outside the repo, investigation only, or already done. Its comment on the issue says what it waits on.",
+  "divergence": "The feature branch diverged from its base.",
+  "verify-no-pr": "The issue is labelled merged, but no merged PR closes it.",
+  "verify-held": "Dev verification failed and is waiting out its back-off; it retries by itself.",
+  "verify-exhausted": "Dev verification failed its last attempt.",
+  "revision-exhausted": "Revision of the issue's PR failed its retries.",
+  "revision-stalemate": "The reviser and the reviewer disagree, and the reviser pushed nothing.",
+};
+const CHECK_ACTS = {
+  transientCauseGone: "Clear the condition the skip named (reconcile the branch, close the blocking PR).",
+  waitedOnDone: "Close or merge the issue or PR the skip named in `waiting_on`.",
+  issueChanged: "Edit, comment on or label the issue (anyone but the Foreman). Escalated: see below.",
+  divergenceCleared: "Reconcile the feature branch with its base.",
+  mergedPrFound: "Merge a PR into the base branch that closes the issue.",
+  baseAdvanced: "Land a fix on the base branch.",
+  specEdited: "Edit the issue's body (the spec the SRE verifies against).",
+  prHeadMoved: "Push a commit to the PR.",
+};
+for (const [what, known, have] of [["block kind", BLOCK_KINDS, UNBLOCK_CHECKS], ["unblock check", CHECK_ACTS, CHECK_WORDS]]) {
+  const unknownK = Object.keys(have).filter((k) => !(k in known));
+  const droppedK = Object.keys(known).filter((k) => !(k in have));
+  if (unknownK.length) fail(`${what}(s) in src/unblock.ts with no description here: ${unknownK.join(", ")}`);
+  if (droppedK.length) fail(`${what}(s) described here but gone from src/unblock.ts: ${droppedK.join(", ")}`);
+}
+
+// --- The page ---
+
+const code = (s) => `\`${s}\``;
+const lines = [];
+const out = (...l) => lines.push(...l);
+
+out(
+  "<!-- GENERATED by scripts/docs/generate-lifecycle.mjs from src/lifecycle.ts and src/adapters.ts. Do not edit by hand: run `npm run build && npm run docs:generate`. -->",
+  "",
+  "# The Foreman lifecycle",
+  "",
+  "[Project README](../README.md) · [All documentation](README.md)",
+  "",
+  "## Contents",
+  "",
+  "- [Stages](#stages)",
+  "- [Moves](#moves)",
+  "- [Sessions](#sessions)",
+  "- [Releases](#releases)",
+  "  - [The release stage](#the-release-stage)",
+  "- [Unblocking a card](#unblocking-a-card)",
+  "- [Events](#events)",
+  "",
+  "Every work item moves through one state machine, `src/lifecycle.ts`. The orchestrator never names",
+  "a state change itself: it calls `advance(item, \"<move>\")` (`src/work-source.ts`), which looks the",
+  "move up in the table below and emits one `transition` event. Everything else it reports is an",
+  "event too, through the same `emit()`.",
+  "",
+  "Each event goes to two kinds of listener, and neither reads the other:",
+  "",
+  "- **The work source** (`WorkSourceAdapter.record`) — today GitHub issues (`src/github-work-source.ts`),",
+  "  which turns each move into exactly one `gh issue edit` of lifecycle labels. Other events write nothing there.",
+  "- **Observers** (`WorkObserver.onEvent`) — optional plugins, queued and best-effort: the Paperclip",
+  "  board mirror (`src/paperclip/`, on when `paperclip.enabled`) and the daemon's activity log. An",
+  "  observer that fails or hangs never stops the Foreman.",
+  "",
+  "So the core calls one interface; GitHub is updated, and Paperclip too when it is enabled.",
+  "",
+  "## Stages",
+  "",
+  "Where an item can be. The `…ing` stages exist only while a session runs.",
+  "",
+  "On a GitHub issue each stage is one label. Where an issue carries more than one, the stage is",
+  "the first that applies in `issueStage` (`src/github-work-source.ts`): `blocked`, `done`,",
+  "`prodVerifyHeld`, `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on",
+  "back to `approved`. The Foreman writes every label except the EM's `ready for prod release`;",
+  "`pendingVerification` is the one stage waiting on the EM.",
+  "",
+  "| Stage | Label | Meaning |",
+  "|---|---|---|",
+  ...[...STAGES, "done"].map((s) => `| ${code(s)} | ${(STAGE_MARK[s] ?? ["— (a session holds it)"]).join(" or ")} | ${STAGE_MEANING[s]} |`),
+  "",
+  "## Moves",
+  "",
+  "Every state change the Foreman makes. *From* is the state the caller knows the item is in;",
+  "`unknown` means the work source reads the item first and changes only what is there (recovery).",
+  "",
+  "| Move | From | To | Stage | When |",
+  "|---|---|---|---|---|",
+  ...Object.entries(MOVES).map(([m, t]) => `| ${code(m)} | ${t.from} | ${t.to} | ${code(STATE_STAGE[t.to])} | ${t.why} |`),
+  "",
+  "```mermaid",
+  "stateDiagram-v2",
+  ...Object.entries(MOVES).map(([m, t]) => `  ${t.from} --> ${t.to}: ${m}`),
+  "```",
+  "",
+  "## Sessions",
+  "",
+  "While a session runs it holds its items in a stage; when it ends with nothing newer said, they return to the fallback.",
+  "",
+  "| Session | Holds items in | Falls back to |",
+  "|---|---|---|",
+  ...Object.keys(SESSION_STAGE).map((p) => `| ${p} | ${code(SESSION_STAGE[p])} | ${code(SESSION_FALLBACK_STAGE[p])} |`),
+  "",
+  "## Releases",
+  "",
+  "| Release PR | Leaves its items in |",
+  "|---|---|",
+  ...Object.entries(RELEASE_STAGE).map(([s, st]) => `| ${s} | ${st === null ? "where they were" : code(st)} |`),
+  "",
+  "With the release stage on, a merge is not the end: the moves after it (`prodVerified`, `prodHeld`) place each item again in the same pass.",
+  "",
+  "### The release stage",
+  "",
+  "`release` is a built-in stage after `promote`, with no Claude session. It is on by default only when both",
+  "`srePath` and `techLeadPath` are set; otherwise it is skipped with a startup warning, and an explicit",
+  "`release` in `stages` without both is refused at startup. From merge to close the Foreman writes every",
+  "lifecycle label; the one label a person writes is the EM's `ready for prod release`.",
+  "",
+  "1. **Promote** moves each `ready for prod release` issue into the release PR and to `release pending`",
+  "   (also when it updates an existing PR). When the base branch has nothing to promote (a 0-file diff),",
+  "   the issue's work is already in production: it is closed only on evidence (a passed prod verification",
+  "   the release stage recorded for it, in `.agent-state.json`, at the commit production is at now);",
+  "   otherwise it gets `release pending` and the release stage verifies it.",
+  "2. **Tech Lead** approves the release PR at its exact head (`tech-lead.mjs approve-promotion`). A refusal",
+  "   blocks the PR's issues with a comment; anything other than approve or refuse backs off (`backoff.releaseRetry`).",
+  "3. **SRE** merges, deploys and verifies (`sre.mjs deploy`, up to `sreDeployMaxDurationMs`). Its",
+  "   `SRE_DEPLOY` trailer decides the outcome: only `hold=predeploy-stop` blocks; every other hold, and",
+  "   any run without a trailer, is retried.",
+  "4. **Tag.** Once merged, the merge commit gets an annotated tag named by `github.releaseTagFormat`",
+  "   (reused if one is already there). Never a GitHub Release object, never a `v` prefix.",
+  "5. **Close or hold.** A pass comments on each issue (tag, merge commit, evidence), strips its lifecycle",
+  "   labels and closes it. A hold or fail labels it `prod verification held`, reopens it if GitHub's",
+  "   keywords closed it, comments the reason, and re-verifies (`sre.mjs verify --mode prod`) on",
+  "   `backoff.prodVerifyRetry`. No issue is ever left closed-but-unverified or open-but-unlabelled.",
+  "6. **Soak.** At least 30 minutes after the merge, the stage runs `sre.mjs verify --mode soak` once;",
+  "   a hold or fail reopens the issues to `prod verification held`.",
+  "",
+  "**Adoption.** A base → production PR merged in the last 48 hours by anyone else, whose lifecycle issues",
+  "this stage has not closed, is adopted: no Tech Lead or deploy, but a prod verification (or the result of",
+  "an existing `## Production Verification` comment), the tag, the soak, and the same close/hold paths.",
+  "Issues the SRE's promotion-verify sweep marked `blocked` (\"**Production release check needs a person.**\")",
+  "are moved to `prod verification held`. The SRE's promotion-verify-sweep (a systemd timer on the owner's",
+  "desktop) is retired once this ships.",
+  "",
+  "The promote and release path sends nothing to Discord: what needs a person is a comment and a label",
+  "on the issue, which also moves its Paperclip card.",
+  "",
+  "## Unblocking a card",
+  "",
+  "**Unblock on GitHub, never on the board.** The Foreman reads GitHub, not Paperclip: a Blocked card",
+  "only mirrors a hold the Foreman keeps on the issue. Moving the card to To Do, or handing it to the",
+  "Foreman's agent, releases nothing. That agent never wakes from Paperclip, and the next move or sync puts",
+  "the card back. Do the act that releases the hold, below. The Foreman checks every held item each pass",
+  "(`src/unblock.ts`), and when a check passes it clears its own state, moves the card back to the",
+  "column its GitHub labels call for, and notes which check released it.",
+  "",
+  "**A closed issue holds nothing.** Whatever the Foreman's state says, a card whose issue GitHub reads",
+  "closed goes to done (completed) or cancelled (not planned), and each pass the Foreman drops its own",
+  "skip, hold, failure and unstick entries for closed issues (`src/closed-holds.ts`). The mirror also reads",
+  "the issue behind every card that is not closed and has no open issue, so a close missed while Paperclip",
+  "was down is reconciled on the next snapshot (jerky_ops#138, 2026-10-26). A Blocked card whose hold the",
+  "Foreman's state no longer records is released to the column its labels call for.",
+  "",
+  "**Which block is it?** The card's unblock note and the Foreman's last comment on the issue or PR",
+  "give the reason. A skip's comment names what it waits on.",
+  "",
+  "| Block | Why the Foreman stopped | Released by (any one, checked in this order) |",
+  "|---|---|---|",
+  ...Object.entries(UNBLOCK_CHECKS).map(([k, checks]) => `| ${code(k)} | ${BLOCK_KINDS[k]} | ${checks.map((c) => CHECK_ACTS[c]).join("<br>")} |`),
+  `| the ${code(SOURCE_BLOCKED_LABEL)} label | A person or tool labelled the issue ${code(SOURCE_BLOCKED_LABEL)}: the Foreman never picks it up. | Remove the label. |`,
+  "| `needsRuling`: PR not converging | The PR was sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question. | Post a comment on the PR whose first line opens `**EM scope ruling`. |",
+  "| `needsRuling`: skip escalated | A skip used up `backoff.skip.maxAttempts` sessions in a row. | See below. |",
+  "",
+  "**A stop that holds other issues up** tells them. When a skip's cause will not clear by itself (not a",
+  "diverged or occupied feature branch) and GitHub records open issues as blocked by the skipped issue",
+  "(`/dependencies/blocking`), the Foreman comments on each dependent naming the dead blocker, labels it",
+  "`blocked`, and escalates it for the EM; the skipped issue is labelled `blocked` too. Each dependent is told",
+  "once (`deadBlockerTold` in the skip's state). Remove the `blocked` label on a dependent to release it.",
+  "The opposite outcome, the work **already on the feature branch**, ends `FOREMAN_RESULT: landed issue=N`:",
+  "the Foreman closes the issue as completed with the evidence, which releases its dependents",
+  "(`src/github/dead-blocker.ts`; gateway#222 / skuvault#478, 2026-10-26).",
+  "",
+  "**An escalated skip** stops reading the condition and the waited-on reference: only a change to the",
+  "issue counts, and who made it matters. A person's edit, comment or label releases it and resets the",
+  "attempt count. An account in `backoff.skip.agentLogins` (another agent: the EM, the SRE, a reviewer) is",
+  "not a person: its edit or label buys one session and keeps the count, so a second skip escalates again;",
+  "its comment releases nothing. So an agent that has cleared the precondition records that in the",
+  "issue body (an edit), not in a comment. Don't touch an issue whose precondition is still unmet: every",
+  "release spends a session.",
+  "",
+  "The card notes for each release are in `CHECK_WORDS`. A wait the Foreman clears by itself (an occupied",
+  "branch, a dev verification waiting on a deploy, a prod verification held on a back-off) needs nothing.",
+  "",
+  "## Events",
+  "",
+  "The full `WorkEvent` contract (`src/adapters.ts`). Only `transition` writes to the work source.",
+  "",
+  "| Event | Meaning |",
+  "|---|---|",
+  ...kinds.map((k) => `| ${code(k)} | ${EVENTS[k]} |`),
+  "",
+);
+
+const text = lines.join("\n");
+if (process.argv.includes("--check")) {
+  const current = existsSync(OUT) ? readFileSync(OUT, "utf8") : "";
+  if (current !== text) fail("docs/lifecycle.md is stale — run `npm run build && npm run docs:generate` and commit the result.");
+  console.log("docs/lifecycle.md is up to date.");
+} else {
+  writeFileSync(OUT, text);
+  console.log(`wrote ${OUT}`);
+}

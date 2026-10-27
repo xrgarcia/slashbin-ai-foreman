@@ -17,10 +17,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { orchestratorSource } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
-const orchestrator = readFileSync(join(root, "src/orchestrator.ts"), "utf-8");
+const orchestrator = orchestratorSource();
 
 /** The live regex, lifted from source so the test cannot drift from it. */
 function noCommitPattern() {
@@ -84,4 +85,12 @@ test("the no-commit streak clears on a real push and when feedback clears", () =
   const deletes = orchestrator.match(/consecutiveNoCommit\.delete\(repoName\)/g) ?? [];
   assert.ok(deletes.length >= 2,
     `a streak that never resets escalates a healthy repo later — found ${deletes.length} clear sites`);
+});
+
+test("an escalated stalemate stops launching revision sessions until the feedback clears", () => {
+  const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  const skip = fn.indexOf("(consecutiveNoCommit.get(repoName) ?? 0) > MAX_CONSECUTIVE_NO_COMMIT");
+  assert.ok(skip > 0, "without it every cycle re-runs a paid revision that re-answers the same review");
+  assert.ok(skip < fn.indexOf("revisePRFeedback("), "the skip must come before the session launches");
+  assert.ok(fn.indexOf("consecutiveNoCommit.delete(repoName)") < skip, "clearing pending feedback must still reset it");
 });
