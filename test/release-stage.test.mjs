@@ -6,7 +6,8 @@
 //
 // What they hold the stage to:
 //   - the Tech Lead approves at the PR's head before the SRE deploys it, and a
-//     refusal (exit 4) or an SRE `predeploy-stop` blocks the issues with a
+//     refusal (exit 4) or an SRE `predeploy-stop`, `merge-refused-repeatedly` or
+//     `merge-blocked-check` blocks the issues with a
 //     comment; every other failure retries on a back-off and writes nothing;
 //   - a merge is tagged with a plain annotated tag (never a GitHub Release, never
 //     a `v*` name), reused when one is already on the merge commit;
@@ -372,18 +373,20 @@ test("SRE deploy refused (exit 1) retries", async () => {
   assert.equal(await run(2), false);
 });
 
-test("predeploy-stop is the one deploy STOP: the issues are blocked with the evidence", async () => {
-  world(pending(), {
-    approve: { exit: 0 },
-    deploy: { exit: 0, out: "SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=predeploy-stop evidence=https://example.test/stop" },
+for (const hold of ["predeploy-stop", "merge-refused-repeatedly", "merge-blocked-check"]) {
+  test(`${hold} is a deploy STOP: the issues are blocked with the evidence`, async () => {
+    world(pending(), {
+      approve: { exit: 0 },
+      deploy: { exit: 0, out: `SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=${hold} evidence=https://example.test/stop` },
+    });
+    assert.equal(await run(), true);
+    for (const n of [5, 6]) {
+      assert.ok(gh().issues[n].labels.includes("blocked"));
+      assert.match(commentsOn(n)[0], new RegExp(hold));
+      assert.match(commentsOn(n)[0], /https:\/\/example\.test\/stop/);
+    }
   });
-  assert.equal(await run(), true);
-  for (const n of [5, 6]) {
-    assert.ok(gh().issues[n].labels.includes("blocked"));
-    assert.match(commentsOn(n)[0], /predeploy-stop/);
-    assert.match(commentsOn(n)[0], /https:\/\/example\.test\/stop/);
-  }
-});
+}
 
 test("merged but held: reopened at `prod verification held`, re-verified on the back-off, closed on a pass", async () => {
   world(pending(), {
