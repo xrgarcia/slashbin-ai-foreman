@@ -65,8 +65,13 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    (`main` → `develop`) through a sync PR, to keep them aligned after promotions. The
    sync PR is merged under `TECHLEAD_GITHUB_KEY`; without it, the PR opens but does not
    merge.
-9. **Dependabot** — files one issue covering the open Dependabot PRs on the working
-   branches, so the updates go through the implement session like any other work. It is
+9. **Dependabot** — files one issue covering the open Dependabot **security** PRs on the working
+   branches, so the updates go through the implement session like any other work. A PR is a
+   security update iff a package it bumps has an open Dependabot alert on the repo (grouped PRs: the
+   packages are read from the title and body; unreadable means non-security). Other version-update
+   PRs are left alone — not batched, merged or closed. If the alerts API cannot be read (404 when
+   alerts are disabled, a network error) the cycle batches nothing. `dependabot.securityOnly: false`
+   restores batching every Dependabot PR. It is
    filed with the trigger label when the repo sets `dependencyPreApproved` (the owner's standing authorization, 2026-10-24,
    covers every Foreman-managed repo for slashbin.io, jerky.com and cmneb; the flag stays
    opt-in per repo and default off, so a newly onboarded repo needs a deliberate edit). Renovate

@@ -55,7 +55,7 @@ release needs both. The [starter setup](#start-with-one-repo) begins with PRs.
 | Dev verification (SRE) | Ask the configured SRE to check merged work in dev, retry failed checks, and optionally hold the next build until verification passes. | [Verification](docs/pipeline.md#the-stages) |
 | Promotion and release to production | Open a promotion PR for authorized work. With the release stage configured, coordinate approval, deployment, production verification, tagging, and issue closure. | [Release contract](docs/lifecycle.md#the-release-stage) |
 | Branch sync | Open a PR to merge the production branch back into the base branch after promotion; merge it automatically when the reviewer token is supplied. | [Branch sync](docs/pipeline.md#the-stages) |
-| Dependency batches | Gather Dependabot or Renovate PRs into an issue for the normal implementation flow, with optional preapproval per repo. | [Dependency batches](docs/pipeline.md#the-stages) |
+| Dependency batches | Gather Dependabot security updates (or, with `dependabot.securityOnly: false`, every Dependabot or Renovate PR) into an issue for the normal implementation flow, with optional preapproval per repo. | [Dependency batches](docs/pipeline.md#the-stages) |
 | Custom stages | Run your own skill against an open feature PR and gate the next stage in its lane on the result. | [Custom stages](docs/pipeline.md#custom-stages) |
 | One state machine | Track work through named states and moves, with a lifecycle reference generated from source. | [Lifecycle](docs/lifecycle.md) |
 | Multi-repo or single-repo | Manage one repo or many from one daemon, with per-repo branches, skills, models, and run budgets. | [Repo configuration](docs/config-guide.md#multi-repo-mode) |
