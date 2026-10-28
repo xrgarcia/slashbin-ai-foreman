@@ -54,6 +54,8 @@ import {
   addReleasePrIssues,
   productionHead,
   unsignedIssues,
+  unsignedInHead,
+  foremanAppliedOrHold,
   syncSignoff,
   type ReleasePrView,
 } from "../github.js";
@@ -583,7 +585,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   // while the release lists an issue without `ready for prod release` (or a label
   // it moves on to). Before the back-off wait, so the hold shows at once; it
   // clears itself on the pass after the last issue is signed.
-  const unsigned = unsignedIssues(issues, listed, repoConfig.lifecycleLabels);
+  const unsigned = unsignedIssues(issues, listed, repoConfig.lifecycleLabels, foremanAppliedOrHold(repoConfig, logger));
   if (unsigned.length > 0) {
     try {
       syncSignoff(repoConfig, open.number, viewReleasePr(repoConfig, open.number).headSha, unsigned, logger);
@@ -610,6 +612,25 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     return false;
   }
   if (pr.state !== "OPEN" || !/^[0-9a-f]{40}$/.test(pr.headSha)) return false;
+  // The body is a snapshot: an issue that merged to the base branch after it was written is in
+  // this head all the same. Read what the head carries now, then the head again: if it moved,
+  // the decision was about another commit, so decide again next pass.
+  const late = unsignedInHead(repoConfig, logger);
+  if (late === null) {
+    logger.warn(`Release PR #${pr.number}: could not read what ${repoConfig.baseBranch} carries; not deploying`);
+    return false;
+  }
+  if (late.length > 0) {
+    syncSignoff(repoConfig, pr.number, pr.headSha, late, logger);
+    logger.info(`Release PR #${pr.number}: ${late.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM; not deploying`);
+    return false;
+  }
+  try {
+    if (viewReleasePr(repoConfig, pr.number).headSha !== pr.headSha) return false;
+  } catch (err) {
+    logger.warn(`Could not re-read release PR #${pr.number}: ${errText(err)}`);
+    return false;
+  }
   syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);

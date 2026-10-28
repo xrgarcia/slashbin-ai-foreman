@@ -19,8 +19,9 @@
 
 import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { hasLabel, type IssueSnapshot } from "./cache.js";
+import { getOpenIssues, hasLabel, type IssueSnapshot } from "./cache.js";
 import { gh } from "./gh.js";
+import { CARRIED_MARK, listCarriedMerges } from "./release-carry.js";
 
 /** Marks the comment naming the unsigned set, so a restart does not repeat it. */
 export const SIGNOFF_MARK = "<!-- foreman:release-unsigned";
@@ -30,13 +31,75 @@ export interface SignoffGate {
   unsigned: number[];
 }
 
-/** The listed open issues that carry no sign-off label, ascending. Pure, exported for tests. */
-export function unsignedIssues(open: readonly IssueSnapshot[], listed: ReadonlySet<number>, labels: LifecycleLabels): number[] {
+/**
+ * The listed open issues that carry no sign-off label, ascending, plus any that
+ * carry one the Foreman wrote itself (`foremanSigned`). Pure, exported for tests.
+ */
+export function unsignedIssues(
+  open: readonly IssueSnapshot[],
+  listed: ReadonlySet<number>,
+  labels: LifecycleLabels,
+  foremanSigned: (issue: number) => boolean = () => false,
+): number[] {
   const signedLabels = [labels.readyForProd, labels.releasePending, labels.prodVerifyHeld, labels.readyToClose];
   return open
-    .filter((i) => listed.has(i.number) && !signedLabels.some((l) => hasLabel(i, l)))
+    .filter((i) => listed.has(i.number) && (!signedLabels.some((l) => hasLabel(i, l)) || foremanSigned(i.number)))
     .map((i) => i.number)
     .sort((a, b) => a - b);
+}
+
+const humanSigned = new Set<string>();
+
+/**
+ * True when the Foreman, not the EM, put the sign-off on issue `n`: before
+ * foreman#128 adoption applied `ready for prod release` itself and left a
+ * "foreman:release-carried" comment. Such an issue is signed only if someone
+ * other than the comment's author later applied `ready for prod release`
+ * (the label events name the actor). An issue with no such comment was never
+ * adopted. Reads GitHub only for issues carrying the comment; a human sign-off
+ * is remembered. Throws on a failed read (the caller holds the release).
+ */
+export function foremanApplied(config: RepoConfig, n: number): boolean {
+  const key = `${config.githubRepo}#${n}`;
+  if (humanSigned.has(key)) return false;
+  const rows = gh([
+    "api", `repos/${config.githubRepo}/issues/${n}/comments?per_page=100`, "--paginate",
+    "--jq", ".[] | {body: .body, by: .user.login} | @json",
+  ], config.repoPath).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { body?: string; by?: string });
+  const adopted = rows.find((r) => (r.body ?? "").includes(CARRIED_MARK));
+  if (!adopted?.by) return false;
+  const events = gh([
+    "api", `repos/${config.githubRepo}/issues/${n}/events?per_page=100`, "--paginate",
+    "--jq", '.[] | select(.event=="labeled") | {label: .label.name, by: .actor.login} | @json',
+  ], config.repoPath).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { label?: string; by?: string });
+  const byEm = events.some((e) => e.label === config.lifecycleLabels.readyForProd && e.by !== adopted.by);
+  if (byEm) humanSigned.add(key);
+  return !byEm;
+}
+
+/** `foremanApplied` for the gate: a failed read counts as Foreman-applied, so the release holds. */
+export function foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: number) => boolean {
+  return (n) => {
+    try {
+      return foremanApplied(config, n);
+    } catch (err) {
+      logger.warn(`Could not tell who signed off #${n}: ${errText(err)}`);
+      return true;
+    }
+  };
+}
+
+/**
+ * The open issues the production branch would gain from the base branch
+ * right now (its merges, read live) that are not signed off, ascending; null
+ * when the merges cannot be read. The release PR's body is a snapshot: an issue
+ * that merged after it was written is in the head all the same.
+ */
+export function unsignedInHead(config: RepoConfig, logger: Logger): number[] | null {
+  const merges = listCarriedMerges(config, logger);
+  if (merges === null) return null;
+  const carried = new Set(merges.filter((m) => !m.exempt).flatMap((m) => m.issues));
+  return unsignedIssues(getOpenIssues(config.githubRepo, config.repoPath, logger), carried, config.lifecycleLabels, foremanAppliedOrHold(config, logger));
 }
 
 const posted = new Map<string, string>();
@@ -44,6 +107,7 @@ const posted = new Map<string, string>();
 /** Forget what was posted. For tests. */
 export function resetSignoff(): void {
   posted.clear();
+  humanSigned.clear();
 }
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));

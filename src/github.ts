@@ -69,6 +69,8 @@ export {
 export {
   type SignoffGate,
   unsignedIssues,
+  unsignedInHead,
+  foremanAppliedOrHold,
   syncSignoff,
   resetSignoff,
   SIGNOFF_MARK,
