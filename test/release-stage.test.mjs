@@ -1126,3 +1126,18 @@ test("signoff: a merged PR that cannot be read holds the release and is named, t
   assert.equal(await run(2), false);
   assert.match(statuses().at(-1).description, /#7/);
 });
+
+test("signoff: an unreadable merged PR whose number contains 404 is still named and holds the release", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(404, "feat: B", "Closes #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(404, "2")],
+  }, { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  const g = gh();
+  g.unreadable = [404];
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0);
+  assert.match(statuses()[0].description, /#404/);
+});

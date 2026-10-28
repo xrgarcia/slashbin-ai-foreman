@@ -127,7 +127,8 @@ export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unreso
         // Not-a-PR is the normal case for an issue number; any other failure leaves a merge
         // unread, so the caller that must be sure of the inventory is told which one.
         const f = formatGhError(err);
-        if (unresolved && !/could not resolve|not found|404/i.test(`${f.message} ${f.stderr}`)) unresolved.push(pr);
+        // Judge by gh's stderr alone: the error message embeds the command, so a PR numbered 404 would match.
+        if (unresolved && !/could not resolve to a pull ?request/i.test(f.stderr ?? "")) unresolved.push(pr);
         continue;
       }
       if (view.state !== "MERGED") continue;
