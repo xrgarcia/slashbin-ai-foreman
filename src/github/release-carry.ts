@@ -53,6 +53,7 @@ export const NO_CARRY: ReleaseCarry = { adopted: [], prsByIssue: new Map(), unli
 export const CARRIED_MARK = "<!-- foreman:release-carried";
 
 interface PrView {
+  state: string;
   title: string;
   body: string;
   headRefName: string;
@@ -80,9 +81,10 @@ function readPr(repo: string, pr: number, cwd: string): PrView {
   const key = `${repo}#${pr}`;
   const known = prViews.get(key);
   if (known) return known;
-  const out = gh(["pr", "view", String(pr), "--repo", repo, "--json", "title,body,headRefName,commits"], cwd);
+  const out = gh(["pr", "view", String(pr), "--repo", repo, "--json", "state,title,body,headRefName,commits"], cwd);
   const v = JSON.parse(out || "{}") as Partial<PrView>;
   const view: PrView = {
+    state: v.state ?? "",
     title: v.title ?? "",
     body: v.body ?? "",
     headRefName: v.headRefName ?? "",
@@ -114,7 +116,11 @@ export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger): Carri
       const pr = mergedPrNumber(c.headline);
       if (pr === null || seen.has(pr)) continue;
       seen.add(pr);
-      const view = readPr(repo, pr, cwd);
+      // A `(#N)` suffix on a commit inside a merge is usually an ISSUE number, so
+      // the number may not be a PR at all: skip it, never abandon the inventory.
+      let view: PrView;
+      try { view = readPr(repo, pr, cwd); } catch { continue; }
+      if (view.state !== "MERGED") continue;
       const issues = extractImplementedIssues({ title: view.title, body: view.body, commits: view.commits })
         .filter((n) => n !== pr);
       const exempt = issues.length === 0 &&
