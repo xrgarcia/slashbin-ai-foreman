@@ -4,6 +4,7 @@ import type { LifecycleLabels } from "../config.js";
 import type { Logger } from "../logger.js";
 import { findOpenPrs, formatGhError, getOpenIssues, hasLabel } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
+import { unlinkedSection, type ReleaseCarry } from "./release-carry.js";
 import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
 
 
@@ -80,6 +81,7 @@ export function updatePromotionPR(
   issues: PromotionIssue[],
   cwd: string,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
+  unlinked: ReleaseCarry["unlinked"] = [],
 ): boolean {
   const issueList = issues
     .map((i) => `- #${i.number}: ${i.title}`)
@@ -92,7 +94,7 @@ export function updatePromotionPR(
   const body = signed(`## Production Promotion
 
 ### Issues included
-${issueList}`, conventions);
+${issueList}${unlinkedSection(unlinked)}`, conventions);
 
   // REST, NOT `gh pr edit` (2026-07-27).
   //
@@ -193,6 +195,7 @@ export function createPromotionPR(
   cwd: string,
   logger?: Logger,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
+  unlinked: ReleaseCarry["unlinked"] = [],
 ): string | null {
   const issueList = issues
     .map((i) => `- #${i.number}: ${i.title}`)
@@ -205,7 +208,7 @@ export function createPromotionPR(
   const body = signed(`## Production Promotion
 
 ### Issues included
-${issueList}`, conventions);
+${issueList}${unlinkedSection(unlinked)}`, conventions);
 
   try {
     const result = gh([

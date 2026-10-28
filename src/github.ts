@@ -66,6 +66,17 @@ export {
   stripReadyForProdLabel,
   createPromotionPR,
 } from "./github/promotion.js";
+export {
+  type CarriedMerge,
+  type ReleaseCarry,
+  NO_CARRY,
+  adoptCarried,
+  noteCarried,
+  listCarriedMerges,
+  planCarry,
+  mergedPrNumber,
+  resetReleaseCarry,
+} from "./github/release-carry.js";
 export { issueTitles, readPrDigest, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
 export {
   checkPRHasChanges,
