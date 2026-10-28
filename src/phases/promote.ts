@@ -434,8 +434,8 @@ export async function tryPromotion(
     // carries that is not already authorized or listed (foreman#90).
     const authorized = new Set([...listedSet, ...issues.map((i) => i.number), ...carried.map((i) => i.number), ...stillListed.map((i) => i.number)]);
     const carry = adoptCarried(repoConfig, authorized, promoLogger);
-    issues = union(issues, carry.adopted);
-    const wanted = releaseActive ? union(union(stillListed, carried), issues) : issues;
+    // Adopted issues are listed, not signed: only `issues` (the EM's) move to release pending.
+    const wanted = releaseActive ? union(union(stillListed, carried), union(issues, carry.adopted)) : union(issues, carry.adopted);
     const missing = wanted.filter((i) => !listedSet.has(i.number));
     const unlistedPrs = carry.unlinked.filter((u) => !existingPR.body.includes(`PR ${u.pr}:`));
 
@@ -540,7 +540,6 @@ export async function tryPromotion(
   // that is not already authorized (foreman#90), so the PR lists them all.
   const authorizedNums = toList.map((i) => i.number);
   const carry: ReleaseCarry = adoptCarried(repoConfig, new Set(authorizedNums), promoLogger);
-  issues = union(issues, carry.adopted);
   toList = union(toList, carry.adopted);
 
   const prUrl = createPromotionPR(
