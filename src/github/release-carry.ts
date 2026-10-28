@@ -60,7 +60,7 @@ interface PrView {
   commits: PrCommit[];
 }
 
-// A merged PR's text does not change what it links to; one read per PR per run.
+// One read per PR within a pass; cleared at the start of each pass so a corrected PR body is re-read.
 const prViews = new Map<string, PrView>();
 
 /** Forget the cached PR reads. For tests. */
@@ -101,6 +101,7 @@ function readPr(repo: string, pr: number, cwd: string): PrView {
  */
 export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger): CarriedMerge[] | null {
   const { githubRepo: repo, productionBranch, baseBranch, repoPath: cwd } = repoConfig;
+  prViews.clear();
   try {
     const out = gh([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}?per_page=100`, "--paginate",
@@ -138,7 +139,7 @@ export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger): Carri
 
 /**
  * Split the carried merges into what the release was authorized for and the
- * rest. A merge linked to several issues is covered when any is authorized.
+ * rest, issue by issue: a merge linked to several issues adopts each one that is not authorized.
  * `titleOf` gives an open issue's title, or null (not open: left out). Pure,
  * exported for tests.
  */
@@ -152,8 +153,10 @@ export function planCarry(
   for (const m of merges) {
     if (m.exempt) continue;
     if (m.issues.length === 0) { unlinked.push({ pr: m.pr, title: m.title }); continue; }
-    if (m.issues.some((n) => authorized.has(n))) continue;
-    for (const n of m.issues) prsByIssue.set(n, [...(prsByIssue.get(n) ?? []), m.pr]);
+    // Per issue: a merge-mate being authorized does not authorize this one.
+    for (const n of m.issues) {
+      if (!authorized.has(n)) prsByIssue.set(n, [...(prsByIssue.get(n) ?? []), m.pr]);
+    }
   }
   const adopted: PromotionIssue[] = [];
   for (const n of [...prsByIssue.keys()].sort((a, b) => a - b)) {
