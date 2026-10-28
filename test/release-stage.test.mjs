@@ -937,3 +937,47 @@ test("carry: only a merge commit or a (#N) squash suffix is a merge", () => {
   assert.equal(mergedPrNumber("feat: thing, see #650 for more"), null);
   assert.equal(mergedPrNumber("Merge branch 'main' into develop"), null);
 });
+
+test("carry: one PR linking an authorized and an unauthorized issue adopts the unauthorized one (new release)", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [mergedFeature(50, "feat: A and B", "Closes #5\nCloses #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1")],
+  });
+  assert.equal(await promote(1), "promoted");
+  assert.match(newestRelease().body, /- #5: Issue 5\n- #7: Issue 7/);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "release pending"]);
+  assert.equal(carriedNotes(7).length, 1);
+  assert.match(carriedNotes(7)[0], /alongside #5/);
+  assert.equal(carriedNotes(5).length, 0);
+});
+
+test("carry: one PR linking an authorized and an unauthorized issue adopts the unauthorized one (existing release)", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A and B", "Closes #5\nCloses #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1")],
+  });
+  await promote(1);
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #7: Issue 7/);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "release pending"]);
+  assert.match(carriedNotes(7)[0], /release PR #100 alongside #5/);
+});
+
+test("carry: a corrected PR body is re-read on the next pass", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A", "Closes #5")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1")],
+  });
+  await promote(1);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "pr approved"], "not linked yet");
+  const st = gh();
+  st.prs[50].body = "Closes #5\nCloses #7";
+  writeFileSync(GH_STATE, JSON.stringify(st));
+  await promote(2);
+  assert.match(gh().prs[100].body, /- #7: Issue 7/);
+});
