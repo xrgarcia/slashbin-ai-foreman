@@ -95,11 +95,13 @@ export function foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: nu
  * when the merges cannot be read. The release PR's body is a snapshot: an issue
  * that merged after it was written is in the head all the same.
  */
-export function unsignedInHead(config: RepoConfig, logger: Logger): number[] | null {
-  const merges = listCarriedMerges(config, logger);
+export function unsignedInHead(config: RepoConfig, logger: Logger): { unsigned: number[]; unresolved: number[] } | null {
+  const unresolved: number[] = [];
+  const merges = listCarriedMerges(config, logger, unresolved);
   if (merges === null) return null;
   const carried = new Set(merges.filter((m) => !m.exempt).flatMap((m) => m.issues));
-  return unsignedIssues(getOpenIssues(config.githubRepo, config.repoPath, logger), carried, config.lifecycleLabels, foremanAppliedOrHold(config, logger));
+  const unsigned = unsignedIssues(getOpenIssues(config.githubRepo, config.repoPath, logger), carried, config.lifecycleLabels, foremanAppliedOrHold(config, logger));
+  return { unsigned, unresolved };
 }
 
 const posted = new Map<string, string>();
@@ -119,21 +121,24 @@ const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
  * the unsigned set changed since the last post, and comments once per set.
  * A failed write is logged and retried next pass; it never throws.
  */
-export function syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger): void {
+export function syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved: number[] = []): void {
+  const held = unsigned.length + unresolved.length > 0;
   const key = `${config.githubRepo}#${pr}`;
-  const state = `${headSha}|${unsigned.join(",")}`;
+  const state = `${headSha}|${unsigned.join(",")}|${unresolved.join(",")}`;
   if (posted.get(key) === state) return;
   const ctx = config.github.signoffStatusContext;
-  const description = unsigned.length === 0
+  const description = !held
     ? "Every issue in this release is signed off by the EM"
-    : `Awaiting EM sign-off (ready for prod release): ${list(unsigned)}`.slice(0, 140);
+    : (unsigned.length > 0
+      ? `Awaiting EM sign-off (ready for prod release): ${list(unsigned)}`
+      : `Cannot read merged PR ${list(unresolved)}; sign-off unknown`).slice(0, 140);
   try {
     gh([
       "api", "--method", "POST", `repos/${config.githubRepo}/statuses/${headSha}`,
-      "-f", `state=${unsigned.length === 0 ? "success" : "failure"}`, "-f", `context=${ctx}`, "-f", `description=${description}`, "--silent",
+      "-f", `state=${held ? "failure" : "success"}`, "-f", `context=${ctx}`, "-f", `description=${description}`, "--silent",
     ], config.repoPath);
-    if (unsigned.length > 0) {
-      const mark = `${SIGNOFF_MARK} ${unsigned.join(",")} -->`;
+    if (held) {
+      const mark = `${SIGNOFF_MARK} ${unsigned.join(",")}${unresolved.length ? `;unread ${unresolved.join(",")}` : ""} -->`;
       const seen = gh([
         "api", `repos/${config.githubRepo}/issues/${pr}/comments?per_page=100`, "--paginate", "--jq", ".[] | {body: .body} | @json",
       ], config.repoPath);
@@ -142,8 +147,14 @@ export function syncSignoff(config: RepoConfig, pr: number, headSha: string, uns
           "api", "--method", "POST", `repos/${config.githubRepo}/issues/${pr}/comments`,
           "-f", `body=${[
             mark,
-            `**Release held: ${unsigned.length} issue(s) not signed off by the EM.** This release PR lists ${list(unsigned)}, ` +
-            `which do not carry \`${config.lifecycleLabels.readyForProd}\`. Do not merge it. The Foreman will not ask for the Tech Lead's ` +
+            (unsigned.length > 0
+              ? `**Release held: ${unsigned.length} issue(s) not signed off by the EM.** This release PR lists ${list(unsigned)}, ` +
+                `which do not carry \`${config.lifecycleLabels.readyForProd}\`. `
+              : "") +
+            (unresolved.length > 0
+              ? `**Release held: merged PR ${list(unresolved)} could not be read**, so what it carries is unknown. `
+              : "") +
+            `Do not merge it. The Foreman will not ask for the Tech Lead's ` +
             "approval or the SRE's deploy while any is unsigned, and the `" + ctx + "` status stays failed.",
             "",
             `The hold clears on its own once the EM applies \`${config.lifecycleLabels.readyForProd}\` to each, or they leave the release.`,
@@ -152,7 +163,7 @@ export function syncSignoff(config: RepoConfig, pr: number, headSha: string, uns
       }
     }
     posted.set(key, state);
-    if (unsigned.length > 0) logger.warn(`Release PR #${pr}: held, ${list(unsigned)} not signed off by the EM`);
+    if (held) logger.warn(`Release PR #${pr}: held, ${list(unsigned)} not signed off by the EM${unresolved.length ? `; unread ${list(unresolved)}` : ""}`);
     else logger.info(`Release PR #${pr}: every issue signed off`);
   } catch (err) {
     logger.warn(`Release PR #${pr}: could not post the sign-off status: ${errText(err)}`);

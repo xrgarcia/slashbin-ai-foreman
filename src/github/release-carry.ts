@@ -102,7 +102,7 @@ function readPr(repo: string, pr: number, cwd: string): PrView {
  * issues it implements. Null when GitHub could not be read: the release then
  * proceeds with the authorized issues only, as it did before this read existed.
  */
-export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger): CarriedMerge[] | null {
+export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unresolved?: number[]): CarriedMerge[] | null {
   const { githubRepo: repo, productionBranch, baseBranch, repoPath: cwd } = repoConfig;
   prViews.clear();
   try {
@@ -123,7 +123,13 @@ export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger): Carri
       // A `(#N)` suffix on a commit inside a merge is usually an ISSUE number, so
       // the number may not be a PR at all: skip it, never abandon the inventory.
       let view: PrView;
-      try { view = readPr(repo, pr, cwd); } catch { continue; }
+      try { view = readPr(repo, pr, cwd); } catch (err) {
+        // Not-a-PR is the normal case for an issue number; any other failure leaves a merge
+        // unread, so the caller that must be sure of the inventory is told which one.
+        const f = formatGhError(err);
+        if (unresolved && !/could not resolve|not found|404/i.test(`${f.message} ${f.stderr}`)) unresolved.push(pr);
+        continue;
+      }
       if (view.state !== "MERGED") continue;
       const issues = extractImplementedIssues({ title: view.title, body: view.body, commits: view.commits })
         .filter((n) => n !== pr);
