@@ -56,7 +56,9 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
    at the PR head → SRE `deploy` (merge, deploy, verify) → annotated tag on the merge commit
    (never a GitHub Release, never a `v` prefix) → close each issue on a passed prod
    verification, or `prod verification held` and re-verify on a back-off; then a 30-minute
-   soak. Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
+   soak. A release PR listing an issue without `ready for prod release` (or a label it moves on
+   to) is held: no approval, no merge, a failing `github.signoffStatusContext` status and a comment
+   naming the issues; it clears itself once the EM signs them (foreman#128). Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
    Discord. See docs/lifecycle.md.
 9. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
    `emRepoPath`, Paperclip or not) — calls `bin/em.mjs unstick` in the EM checkout for each stuck

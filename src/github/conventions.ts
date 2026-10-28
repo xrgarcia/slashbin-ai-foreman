@@ -64,6 +64,11 @@ export const githubConventionsSchema = z.object({
     .refine((f) => !/^v/i.test(f), "releaseTagFormat must not start with \"v\" (semantic-release reads v* tags)")
     .refine((f) => isTagName(fillReleaseTag(f, 1, new Date(0))), "releaseTagFormat must fill to a valid git tag name")
     .default("release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"),
+  // The commit status the Foreman puts on a release PR's head while it lists an
+  // open issue the EM has not signed off (no `ready for prod release` or later
+  // release-stage label). Failing while any is unsigned, passing once none is:
+  // add it to the production branch's required checks to hold a human merge too.
+  signoffStatusContext: name.default("foreman/em-sign-off"),
   // The last line of every PR body the Foreman writes. Empty writes none. No
   // "#<number>": every #N in a promotion PR's body is read as an issue it carries.
   signature: z.string().trim()

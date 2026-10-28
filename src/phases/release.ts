@@ -53,6 +53,8 @@ import {
   removeBlockedLabel,
   addReleasePrIssues,
   productionHead,
+  unsignedIssues,
+  syncSignoff,
   type ReleasePrView,
 } from "../github.js";
 import { releaseTagName } from "../github/conventions.js";
@@ -575,9 +577,23 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   const open = findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   if (!open) return false;
   const key = `${repoConfig.githubRepo}#${open.number}`;
-  if (releaseBackoff.waiting(key)) return false;
   const listed = new Set(releaseIssues(open.body));
   const issues = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).filter((i) => listed.has(i.number));
+  // The EM's sign-off gate (foreman#128): no Tech Lead approval and no SRE merge
+  // while the release lists an issue without `ready for prod release` (or a label
+  // it moves on to). Before the back-off wait, so the hold shows at once; it
+  // clears itself on the pass after the last issue is signed.
+  const unsigned = unsignedIssues(issues, listed, repoConfig.lifecycleLabels);
+  if (unsigned.length > 0) {
+    try {
+      syncSignoff(repoConfig, open.number, viewReleasePr(repoConfig, open.number).headSha, unsigned, logger);
+    } catch (err) {
+      logger.warn(`Could not read release PR #${open.number}: ${errText(err)}`);
+    }
+    logger.info(`Release PR #${open.number}: ${unsigned.map((n) => `#${n}`).join(", ")} not signed off by the EM; not deploying`);
+    return false;
+  }
+  if (releaseBackoff.waiting(key)) return false;
   const pending = issues.filter((i) => hasLabel(i, repoConfig.lifecycleLabels.releasePending)).map((i) => i.number);
   if (pending.length === 0) return false;
   const stopped = issues.filter((i) => hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number);
@@ -594,6 +610,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     return false;
   }
   if (pr.state !== "OPEN" || !/^[0-9a-f]{40}$/.test(pr.headSha)) return false;
+  syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);
   const approval = await asRun(repoConfig, (signal) =>
