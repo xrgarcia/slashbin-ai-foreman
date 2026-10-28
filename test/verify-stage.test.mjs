@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
 import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf, followUpsToBuild } from "../dist/orchestrator.js";
+import { TOOLING_HOLDS } from "../dist/phases/verify.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
 const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
@@ -160,7 +161,7 @@ import { reworkIssueTitle, reworkIssueBody, reworkIssueArgs } from "../dist/orch
 
 test("verifyHoldPlan: visual-qa-failed is a rework; infrastructure and sign-in holds still charge", () => {
   assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "rework" });
-  for (const r of ["sign-in-failed", "dev-unreachable", "dev-verify-failed"]) assert.deepEqual(verifyHoldPlan(r), { kind: "charge" });
+  for (const r of ["sign-in-failed", "dev-unreachable", "dev-verify-failed", "visual-qa-unsafe-host", "acceptance-failed"]) assert.deepEqual(verifyHoldPlan(r), { kind: "charge" });
 });
 
 test("pickVerifyTarget: a rework waits for its fix, then re-verifies at once", () => {
@@ -195,4 +196,20 @@ test("the rework issue: title, label, and the sections the flight gate needs", (
   const args = reworkIssueArgs("o/r", "T", body, "approved");
   assert.deepEqual(args.slice(0, 6), ["issue", "create", "--repo", "o/r", "--title", "T"]);
   assert.deepEqual(args.slice(-2), ["--label", "approved"]);
+});
+
+test("verifyHoldPlan: every SRE tooling hold defers; verdict holds do not", () => {
+  for (const r of TOOLING_HOLDS) assert.deepEqual(verifyHoldPlan(r), { kind: "defer" }, r);
+  for (const r of ["registry-unavailable", "visual-qa-review-unavailable", "visual-qa-sign-in-failed", "visual-qa-dev-unreachable", "visual-qa-sha-unproven"]) assert.ok(TOOLING_HOLDS.includes(r), r);
+  assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "rework" });
+  assert.deepEqual(verifyHoldPlan("acceptance-failed"), { kind: "charge" });
+});
+
+test("TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checkout is absent)", async (t) => {
+  let src;
+  try { src = (await import("node:fs")).readFileSync(`${process.env.HOME}/code/slashbin_ai_sre/lib/reuse.mjs`, "utf8"); } catch { return t.skip("no SRE checkout"); }
+  const m = /RERUN_HOLDS = \/\^\((.*?)\)\$\//.exec(src);
+  assert.ok(m, "RERUN_HOLDS found");
+  const sre = m[1].split("|").filter((x) => !x.startsWith("wait-until"));
+  assert.deepEqual([...TOOLING_HOLDS].sort(), sre.sort());
 });
