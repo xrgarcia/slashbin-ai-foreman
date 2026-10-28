@@ -23,7 +23,7 @@ import { tryRelease, resetReleaseStage, SOAK_DELAY_MS } from "../dist/phases/rel
 import { tryPromotion } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/agent.js";
-import { readPvResult, configureIssueCache, productionDriftFiles } from "../dist/github.js";
+import { readPvResult, configureIssueCache, productionDriftFiles, mergedPrNumber, resetReleaseCarry } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -83,7 +83,12 @@ if (a[0] === "pr") {
     out(l.sort((x, y) => y.number - x.number).slice(0, Number(flag("--limit") || 100)));
   }
   if (a[1] === "view") { const p = st.prs[a[2]]; if (!p) fail("no PR " + a[2]); out(p); }
-  if (a[1] === "create") fail("no pr create in this fake");
+  if (a[1] === "create") {
+    const number = 200 + Object.keys(st.prs).length;
+    st.prs[number] = { number, url: "https://github.com/${REPO}/pull/" + number, title: flag("--title"), state: "OPEN",
+      headRefName: flag("--head"), baseRefName: flag("--base"), headRefOid: "a".repeat(40), mergeCommit: null, mergedAt: null, body: flag("--body") };
+    save(); out("https://github.com/${REPO}/pull/" + number + "\\n");
+  }
 }
 if (a[0] === "api") {
   const valued = new Set(["--method", "--jq", "-f"]);
@@ -92,6 +97,9 @@ if (a[0] === "api") {
   let m;
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
   if (/\\/commits\\//.test(path)) out(st.prodHead);
+  if (/\\/compare\\//.test(path) && st.compareCommits && (flag("--jq") || "").includes("headline")) {
+    out(st.compareCommits.map((c) => JSON.stringify(c)).join("\\n"));
+  }
   if (/\\/compare\\//.test(path)) {
     const files = st.comparePaths ? st.comparePaths.length : st.compareFiles;
     out({ ahead: files > 0 ? 2 : 1, files, ...(st.comparePaths ? { paths: st.comparePaths } : {}) });
@@ -193,11 +201,11 @@ const mergedPr = (number, body, mergeSha, minutesAgo) =>
 
 let stateDir;
 /** A fresh world: GitHub, the agents' answers, the Foreman's state and the stage's memory. */
-function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, prodHead = MERGE }, ctl = {}) {
+function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, compareCommits, prodHead = MERGE }, ctl = {}) {
   writeFileSync(GH_STATE, JSON.stringify({
     issues: Object.fromEntries(issues.map((i) => [i.number, i])),
     prs: Object.fromEntries(prs.map((p) => [p.number, p])),
-    comments, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}),
+    comments, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}), ...(compareCommits ? { compareCommits } : {}),
   }));
   writeFileSync(CTL, JSON.stringify(ctl));
   writeFileSync(GH_LOG, "");
@@ -205,6 +213,7 @@ function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {
   stateDir = mkdtempSync(join(tmp, "state-"));
   setStatePath(stateDir);
   resetReleaseStage();
+  resetReleaseCarry();
 }
 const gh = () => JSON.parse(readFileSync(GH_STATE, "utf8"));
 const ghCalls = () => readFileSync(GH_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -821,4 +830,154 @@ test("the release back-offs exist and start at ten minutes or less", () => {
     assert.ok(DEFAULT_BACKOFF[k].baseMs <= 600_000, `${k} base ≤ 10 min`);
   }
   assert.equal(config.backoff.releaseRetry.baseMs, DEFAULT_BACKOFF.releaseRetry.baseMs);
+});
+
+
+// --- The release carries every merge on develop (foreman#90) ----------------------
+
+const mergedFeature = (number, title, body, extra = {}) => ({
+  number, url: `https://github.com/${REPO}/pull/${number}`, title, state: "MERGED", headRefName: `feat-${number}`,
+  baseRefName: "develop", mergeCommit: { oid: "d".repeat(40) }, mergedAt: new Date().toISOString(), body, ...extra,
+});
+const mergeCommit = (pr, ch = "1") => ({ sha: ch.repeat(40), headline: `Merge pull request #${pr} from example/feat-${pr}` });
+const CARRIED = "<!-- foreman:release-carried";
+const carriedNotes = (n) => commentsOn(n).filter((b) => b.startsWith(CARRIED));
+const openedReleases = () => ghCalls().filter((c) => c[0] === "pr" && c[1] === "create");
+const newestRelease = () => Object.values(gh().prs).find((p) => p.number >= 200);
+const issueNumbersIn = (body) => [...new Set([...body.matchAll(/#(\d+)/g)].map((m) => Number(m[1])))];
+
+test("carry: authorized A + unauthorized B on develop: the release PR lists both, B is adopted like A and told once", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: B", "Closes #7")],
+    compareFiles: 3,
+    // The constituent commits end in an ISSUE number (#5, #7), not a PR: they must not abort the read.
+    compareCommits: [{ sha: "8".repeat(40), headline: "feat: A (#5)" }, mergeCommit(50, "1"), { sha: "9".repeat(40), headline: "feat: B (#7)" }, mergeCommit(51, "2")],
+  });
+  assert.equal(await promote(1), "promoted");
+  assert.equal(openedReleases().length, 1, "the release is not refused");
+  const pr = newestRelease();
+  assert.match(pr.body, /### Issues included\n- #5: Issue 5\n- #7: Issue 7/);
+  for (const n of [5, 7]) assert.deepEqual(gh().issues[n].labels, ["approved", "release pending"], `#${n} treated alike`);
+  assert.equal(carriedNotes(5).length, 0, "the authorized issue is not told it was carried");
+  const c = carriedNotes(7);
+  assert.equal(c.length, 1);
+  assert.match(c[0], new RegExp(`Carried to production in release PR #${pr.number} alongside #5`));
+  assert.match(c[0], /PR #51/);
+
+  // A re-run adds nothing and posts nothing more.
+  await promote(2);
+  assert.equal(carriedNotes(7).length, 1);
+  assert.equal(openedReleases().length, 1);
+});
+
+test("carry: legacy (no release stage) strips the label from the adopted issue like the authorized one", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: B", "Closes #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(51, "2")],
+  });
+  assert.equal(await promote(1, false), "promoted");
+  assert.match(newestRelease().body, /- #7: Issue 7/);
+  for (const n of [5, 7]) assert.ok(!gh().issues[n].labels.includes("ready for prod release"), `#${n} stripped`);
+});
+
+test("carry: only authorized merges (and sync/bot PRs): the release PR is what it was, with nothing adopted", async () => {
+  world({
+    issues: [issue(5, "ready for prod release")],
+    prs: [
+      mergedFeature(50, "feat: A", "Related to #5"),
+      mergedFeature(53, "chore: sync develop with main", "Branch Sync", { headRefName: "main" }),
+      mergedFeature(54, "Bump left-pad", "bump", { headRefName: "dependabot/npm/left-pad-2" }),
+    ],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(53, "2"), mergeCommit(54, "3"), { sha: "4".repeat(40), headline: "feat: part of A" }],
+  });
+  assert.equal(await promote(1), "promoted");
+  const pr = newestRelease();
+  assert.deepEqual(issueNumbersIn(pr.body), [5]);
+  assert.doesNotMatch(pr.body, /no linked issue/);
+  assert.deepEqual(gh().issues[5].labels, ["approved", "release pending"]);
+  assert.deepEqual(carriedNotes(5), []);
+});
+
+test("carry: a merge that links to no issue is listed by PR number, apart from the issues", async () => {
+  world({
+    issues: [issue(5, "ready for prod release")],
+    prs: [mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(55, "hotfix: straight to develop (#55)", "no issue here")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), { sha: "5".repeat(40), headline: "hotfix: straight to develop (#55)" }],
+  });
+  assert.equal(await promote(1), "promoted");
+  const pr = newestRelease();
+  assert.match(pr.body, /### Merges with no linked issue\n- PR 55: hotfix: straight to develop \(55\)/);
+  assert.deepEqual(issueNumbersIn(pr.body), [5], "a PR number is never read as an issue");
+});
+
+test("carry: an open release PR is rewritten to list the adopted issue", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(7, "pr approved")],
+    prs: [
+      releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"),
+      mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(52, "feat: B", "Refs #7"),
+    ],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(52, "3")],
+  });
+  await promote(1);
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #7: Issue 7/);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "release pending"]);
+  assert.match(carriedNotes(7)[0], /release PR #100 alongside #5/);
+});
+
+test("carry: only a merge commit or a (#N) squash suffix is a merge", () => {
+  assert.equal(mergedPrNumber("Merge pull request #648 from x/y"), 648);
+  assert.equal(mergedPrNumber("feat: thing (#650)"), 650);
+  assert.equal(mergedPrNumber("feat: thing, see #650 for more"), null);
+  assert.equal(mergedPrNumber("Merge branch 'main' into develop"), null);
+});
+
+test("carry: one PR linking an authorized and an unauthorized issue adopts the unauthorized one (new release)", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [mergedFeature(50, "feat: A and B", "Closes #5\nCloses #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1")],
+  });
+  assert.equal(await promote(1), "promoted");
+  assert.match(newestRelease().body, /- #5: Issue 5\n- #7: Issue 7/);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "release pending"]);
+  assert.equal(carriedNotes(7).length, 1);
+  assert.match(carriedNotes(7)[0], /alongside #5/);
+  assert.equal(carriedNotes(5).length, 0);
+});
+
+test("carry: one PR linking an authorized and an unauthorized issue adopts the unauthorized one (existing release)", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A and B", "Closes #5\nCloses #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1")],
+  });
+  await promote(1);
+  assert.match(gh().prs[100].body, /- #5: Issue 5\n- #7: Issue 7/);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "release pending"]);
+  assert.match(carriedNotes(7)[0], /release PR #100 alongside #5/);
+});
+
+test("carry: a corrected PR body is re-read on the next pass", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A", "Closes #5")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1")],
+  });
+  await promote(1);
+  assert.deepEqual(gh().issues[7].labels, ["approved", "pr approved"], "not linked yet");
+  const st = gh();
+  st.prs[50].body = "Closes #5\nCloses #7";
+  writeFileSync(GH_STATE, JSON.stringify(st));
+  await promote(2);
+  assert.match(gh().prs[100].body, /- #7: Issue 7/);
 });
