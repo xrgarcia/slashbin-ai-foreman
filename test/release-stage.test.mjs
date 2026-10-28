@@ -851,7 +851,8 @@ test("carry: authorized A + unauthorized B on develop: the release PR lists both
     issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
     prs: [mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: B", "Closes #7")],
     compareFiles: 3,
-    compareCommits: [mergeCommit(50, "1"), mergeCommit(51, "2")],
+    // The constituent commits end in an ISSUE number (#5, #7), not a PR: they must not abort the read.
+    compareCommits: [{ sha: "8".repeat(40), headline: "feat: A (#5)" }, mergeCommit(50, "1"), { sha: "9".repeat(40), headline: "feat: B (#7)" }, mergeCommit(51, "2")],
   });
   assert.equal(await promote(1), "promoted");
   assert.equal(openedReleases().length, 1, "the release is not refused");
