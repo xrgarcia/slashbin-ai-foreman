@@ -36,6 +36,7 @@ import {
   productionHead,
   productionDriftFiles,
   findReleaseStop,
+  releaseMayProceed,
   type PromotionIssue,
 } from "../github.js";
 import { emit, advance } from "../work-source.js";
@@ -431,6 +432,10 @@ export async function tryPromotion(
     const missing = wanted.filter((i) => !listedSet.has(i.number));
 
     if (missing.length > 0) {
+      // The PR promotes all of `develop`: refuse to rewrite it while `develop`
+      // carries a merge no listed issue covers (foreman#90).
+      const authorized = new Set([...listedSet, ...wanted.map((i) => i.number)]);
+      if (!releaseMayProceed(repoConfig, authorized, wanted.map((i) => i.number), promoLogger)) return null;
       const updated = updatePromotionPR(
         repoConfig.githubRepo, existingPR.number, wanted, repoConfig.repoPath, repoConfig.github,
       );
@@ -525,6 +530,11 @@ export async function tryPromotion(
   if (diffFiles < 0) {
     promoLogger.warn("Could not compute branch diff — proceeding with promotion PR creation (best effort)");
   }
+
+  // The PR promotes all of `develop`: open it only when every merge on it
+  // belongs to an issue it lists (foreman#90).
+  const toListNums = toList.map((i) => i.number);
+  if (!releaseMayProceed(repoConfig, new Set(toListNums), toListNums, promoLogger)) return null;
 
   const prUrl = createPromotionPR(
     repoConfig.githubRepo,

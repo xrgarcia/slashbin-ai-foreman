@@ -141,6 +141,11 @@ lifecycle label; the one label a person writes is the EM's `ready for prod relea
    the issue's work is already in production: it is closed only on evidence (a passed prod verification
    the release stage recorded for it, in `.agent-state.json`, at the commit production is at now);
    otherwise it gets `release pending` and the release stage verifies it.
+   A release PR promotes all of the base branch, so promote (opening or updating it) and the release stage
+   (before the Tech Lead and the SRE) first read the merges the base branch carries that production lacks.
+   If any links to an issue the PR does not list, or to no issue (sync and dependency-bot PRs aside), the
+   release is refused: nothing is opened, updated or deployed, and each listed issue gets one comment per
+   blocking set naming the unauthorized issues and PRs (foreman#90).
 2. **Tech Lead** approves the release PR at its exact head (`tech-lead.mjs approve-promotion`). A refusal
    blocks the PR's issues with a comment; anything other than approve or refuse backs off (`backoff.releaseRetry`).
 3. **SRE** merges, deploys and verifies (`sre.mjs deploy`, up to `sreDeployMaxDurationMs`). Its

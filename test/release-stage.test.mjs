@@ -23,7 +23,7 @@ import { tryRelease, resetReleaseStage, SOAK_DELAY_MS } from "../dist/phases/rel
 import { tryPromotion } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/agent.js";
-import { readPvResult, configureIssueCache, productionDriftFiles } from "../dist/github.js";
+import { readPvResult, configureIssueCache, productionDriftFiles, mergedPrNumber, resetReleaseGate } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -83,7 +83,12 @@ if (a[0] === "pr") {
     out(l.sort((x, y) => y.number - x.number).slice(0, Number(flag("--limit") || 100)));
   }
   if (a[1] === "view") { const p = st.prs[a[2]]; if (!p) fail("no PR " + a[2]); out(p); }
-  if (a[1] === "create") fail("no pr create in this fake");
+  if (a[1] === "create") {
+    const number = 200 + Object.keys(st.prs).length;
+    st.prs[number] = { number, url: "https://github.com/${REPO}/pull/" + number, title: flag("--title"), state: "OPEN",
+      headRefName: flag("--head"), baseRefName: flag("--base"), headRefOid: "a".repeat(40), mergeCommit: null, mergedAt: null, body: flag("--body") };
+    save(); out("https://github.com/${REPO}/pull/" + number + "\\n");
+  }
 }
 if (a[0] === "api") {
   const valued = new Set(["--method", "--jq", "-f"]);
@@ -92,6 +97,9 @@ if (a[0] === "api") {
   let m;
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
   if (/\\/commits\\//.test(path)) out(st.prodHead);
+  if (/\\/compare\\//.test(path) && st.compareCommits && (flag("--jq") || "").includes("headline")) {
+    out(st.compareCommits.map((c) => JSON.stringify(c)).join("\\n"));
+  }
   if (/\\/compare\\//.test(path)) {
     const files = st.comparePaths ? st.comparePaths.length : st.compareFiles;
     out({ ahead: files > 0 ? 2 : 1, files, ...(st.comparePaths ? { paths: st.comparePaths } : {}) });
@@ -193,11 +201,11 @@ const mergedPr = (number, body, mergeSha, minutesAgo) =>
 
 let stateDir;
 /** A fresh world: GitHub, the agents' answers, the Foreman's state and the stage's memory. */
-function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, prodHead = MERGE }, ctl = {}) {
+function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, compareCommits, prodHead = MERGE }, ctl = {}) {
   writeFileSync(GH_STATE, JSON.stringify({
     issues: Object.fromEntries(issues.map((i) => [i.number, i])),
     prs: Object.fromEntries(prs.map((p) => [p.number, p])),
-    comments, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}),
+    comments, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}), ...(compareCommits ? { compareCommits } : {}),
   }));
   writeFileSync(CTL, JSON.stringify(ctl));
   writeFileSync(GH_LOG, "");
@@ -205,6 +213,7 @@ function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {
   stateDir = mkdtempSync(join(tmp, "state-"));
   setStatePath(stateDir);
   resetReleaseStage();
+  resetReleaseGate();
 }
 const gh = () => JSON.parse(readFileSync(GH_STATE, "utf8"));
 const ghCalls = () => readFileSync(GH_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -821,4 +830,131 @@ test("the release back-offs exist and start at ten minutes or less", () => {
     assert.ok(DEFAULT_BACKOFF[k].baseMs <= 600_000, `${k} base ≤ 10 min`);
   }
   assert.equal(config.backoff.releaseRetry.baseMs, DEFAULT_BACKOFF.releaseRetry.baseMs);
+});
+
+// --- The release gate (foreman#90): a release promotes all of develop -------------
+
+const mergedFeature = (number, title, body, extra = {}) => ({
+  number, url: `https://github.com/${REPO}/pull/${number}`, title, state: "MERGED", headRefName: `feat-${number}`,
+  baseRefName: "develop", mergeCommit: { oid: "d".repeat(40) }, mergedAt: new Date().toISOString(), body, ...extra,
+});
+const mergeCommit = (pr, ch = "1") => ({ sha: ch.repeat(40), headline: `Merge pull request #${pr} from example/feat-${pr}` });
+const REFUSAL = "<!-- foreman:release-gate-refusal";
+const refusals = (n) => commentsOn(n).filter((b) => b.startsWith(REFUSAL));
+const openedReleases = () => ghCalls().filter((c) => c[0] === "pr" && c[1] === "create");
+
+test("gate: authorized A + unauthorized B on develop: no release PR is opened, the outcome names B, once", async () => {
+  world({
+    issues: [issue(5, "ready for prod release"), issue(7, "pr approved")],
+    prs: [mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: B", "Closes #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(51, "2")],
+  });
+  const log = captureLogger();
+  assert.equal(await tryPromotion(repo, log, 1, true), null);
+  assert.deepEqual(openedReleases(), [], "the release PR was not opened");
+  assert.equal(gh().issues[5].labels.includes("release pending"), false, "A is not moved into a release that did not open");
+  assert.ok(log.at("warn").some((m) => /Release refused/.test(m) && /#7 \(PR #51\)/.test(m)), "the log names B and its PR");
+  const c = refusals(5);
+  assert.equal(c.length, 1, "A is told once");
+  assert.match(c[0], /#7: merged by PR #51/);
+  assert.match(c[0], /ready for prod release/);
+  assert.match(c[0], /revert/);
+  assert.ok(!/#50/.test(c[0]), "A's own merge is not named as unauthorized");
+  assert.equal(commentsOn(7).length, 0, "the unauthorized issue is not the one told");
+
+  // The same blocking set does not comment again, within a run or after lost state.
+  await tryPromotion(repo, log, 2, true);
+  assert.equal(refusals(5).length, 1, "state dedupe");
+  editState((st) => { delete st.releaseGateNoted; });
+  await tryPromotion(repo, log, 3, true);
+  assert.equal(refusals(5).length, 1, "marker dedupe survives lost state");
+
+  // A different set is a new refusal.
+  const st = gh();
+  st.prs[52] = mergedFeature(52, "feat: C", "Refs #8");
+  st.issues[8] = issue(8, "pr approved");
+  st.compareCommits.push(mergeCommit(52, "3"));
+  writeFileSync(GH_STATE, JSON.stringify(st));
+  await tryPromotion(repo, log, 4, true);
+  assert.equal(refusals(5).length, 2);
+  assert.match(refusals(5)[1], /#8: merged by PR #52/);
+});
+
+test("gate: only authorized merges (and sync/bot PRs): the release PR opens as today and lists the issue", async () => {
+  world({
+    issues: [issue(5, "ready for prod release")],
+    prs: [
+      mergedFeature(50, "feat: A", "Related to #5"),
+      mergedFeature(53, "chore: sync develop with main", "Branch Sync", { headRefName: "main" }),
+      mergedFeature(54, "Bump left-pad", "bump", { headRefName: "dependabot/npm/left-pad-2" }),
+    ],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(53, "2"), mergeCommit(54, "3"), { sha: "4".repeat(40), headline: "feat: part of A" }],
+  });
+  assert.equal(await tryPromotion(repo, captureLogger(), 1, true), "promoted");
+  assert.equal(openedReleases().length, 1);
+  const opened = Object.values(gh().prs).find((p) => p.number >= 200);
+  assert.match(opened.body, /#5: Issue 5/);
+  assert.deepEqual(gh().issues[5].labels, ["approved", "release pending"]);
+  assert.deepEqual(refusals(5), []);
+});
+
+test("gate: a merge that links to no issue blocks, listed by PR number", async () => {
+  world({
+    issues: [issue(5, "ready for prod release")],
+    prs: [mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(55, "hotfix: straight to develop", "no issue here")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), { sha: "5".repeat(40), headline: "hotfix: straight to develop (#55)" }],
+  });
+  assert.equal(await tryPromotion(repo, captureLogger(), 1, true), null);
+  assert.deepEqual(openedReleases(), []);
+  const c = refusals(5);
+  assert.equal(c.length, 1);
+  assert.match(c[0], /PR #55 \(hotfix: straight to develop\).*links to no issue/);
+});
+
+test("gate: an open release PR is not updated while develop carries an unauthorized merge", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(6, "ready for prod release"), issue(7, "pr approved")],
+    prs: [
+      releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"),
+      mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: A2", "Related to #6"), mergedFeature(52, "feat: B", "Refs #7"),
+    ],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(51, "2"), mergeCommit(52, "3")],
+  });
+  await promote(1);
+  assert.doesNotMatch(gh().prs[100].body, /#6/, "not rewritten");
+  assert.equal(refusals(5).length, 1);
+  assert.equal(refusals(6).length, 1);
+  assert.match(refusals(6)[0], /#7: merged by PR #52/);
+});
+
+test("gate: the release stage will not hand a PR to the Tech Lead or the SRE while develop carries an unauthorized merge", async () => {
+  const w = pending();
+  world({
+    ...w,
+    issues: [...w.issues, issue(7, "pr approved")],
+    prs: [...w.prs, mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(52, "feat: B", "Refs #7")],
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(52, "3")],
+  }, { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  assert.equal(await run(), false);
+  assert.deepEqual(agentCalls(), [], "neither agent ran");
+  assert.equal(refusals(5).length, 1);
+  assert.equal(refusals(6).length, 1);
+
+  // Cleared: B is authorized, the same PR deploys.
+  const st = gh();
+  st.issues[7].labels.push("ready for prod release");
+  writeFileSync(GH_STATE, JSON.stringify(st));
+  assert.equal(await run(2), true);
+  assert.equal(agentCalls().length, 2);
+});
+
+test("gate: only a merge commit or a (#N) squash suffix is a merge", () => {
+  assert.equal(mergedPrNumber("Merge pull request #648 from x/y"), 648);
+  assert.equal(mergedPrNumber("feat: thing (#650)"), 650);
+  assert.equal(mergedPrNumber("feat: thing, see #650 for more"), null);
+  assert.equal(mergedPrNumber("Merge branch 'main' into develop"), null);
 });
