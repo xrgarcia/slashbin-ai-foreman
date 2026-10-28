@@ -45,9 +45,32 @@ export function reopensOnBaseAdvance(reason: string): boolean {
 }
 
 /**
+ * SRE holds that mean "the verifier or its tooling could not run" — no verdict on
+ * the change, so no attempt is charged (Slashbin-console#1445 spent 3 attempts on
+ * visual-qa-review-unavailable; jerky_data_receiver#543 on registry-unavailable).
+ * Mirrors the SRE's own re-run list, `slashbin_ai_sre/lib/reuse.mjs` RERUN_HOLDS,
+ * minus `wait-until-*` (a named wait, handled separately). Verdicts (`visual-qa-failed`,
+ * `acceptance-failed`, `dev-verify-failed`, ...) and `visual-qa-unsafe-host` (a
+ * deterministic config refusal a retry cannot clear) are NOT here: they charge or rework.
+ */
+export const TOOLING_HOLDS: readonly string[] = [
+  "codex-unavailable",
+  "em-mirror-unavailable",
+  "registry-unavailable",
+  "tooling-unavailable",
+  "evidence-check-failed",
+  "no-evidence-comment",
+  "visual-qa-dev-unreachable",
+  "visual-qa-sign-in-failed",
+  "visual-qa-review-unavailable",
+  "visual-qa-sha-unproven",
+];
+export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes(reason);
+
+/**
  * What a non-passing verify costs. Pure, exported for tests.
  *
- * - `defer`: the SRE could not run (Codex or its EM spec mirror unavailable) —
+ * - `defer`: the SRE could not run (any `TOOLING_HOLDS` member) —
  *   nothing was verified, so no attempt is charged; the repo asks again shortly.
  * - `wait`: the SRE verified what it could and named the time the rest becomes
  *   observable (`wait-until-YYYYMMDDTHHMMZ`) — not a failure, so no attempt is
@@ -58,7 +81,7 @@ export function reopensOnBaseAdvance(reason: string): boolean {
  * - `charge`: a real hold or error — one attempt spent.
  */
 export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wait"; retryAt: string } | { kind: "rework" } | { kind: "charge" } {
-  if (/^(codex-unavailable|em-mirror-unavailable)$/.test(reason)) return { kind: "defer" };
+  if (isToolingHold(reason)) return { kind: "defer" };
   const m = /^wait-until-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z$/.exec(reason);
   if (m) {
     const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z`);
