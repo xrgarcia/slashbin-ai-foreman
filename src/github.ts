@@ -67,6 +67,13 @@ export {
   createPromotionPR,
 } from "./github/promotion.js";
 export {
+  type SignoffGate,
+  unsignedIssues,
+  syncSignoff,
+  resetSignoff,
+  SIGNOFF_MARK,
+} from "./github/release-signoff.js";
+export {
   type CarriedMerge,
   type ReleaseCarry,
   NO_CARRY,
