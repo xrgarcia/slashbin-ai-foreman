@@ -101,6 +101,19 @@ export function followUpsOf(holder: number, batch: readonly number[], titles: Re
   return batch.filter((n) => marker.test(titles.get(n) ?? ""));
 }
 
+/**
+ * What a held dev verification lets build now: its follow-ups, found across
+ * everything buildable (`handOff`), not just the build's `batch`. The batch is
+ * trimmed to the top of the queue by priority then number, so a rework issue
+ * filed after the queue's older work sat outside it, and the verification
+ * waited on a fix the build never saw (Slashbin-console #1440 behind #1431,
+ * 2026-10-27: "this build takes #1432, 2 stay queued", every cycle). Pure,
+ * exported for tests.
+ */
+export function followUpsToBuild(holder: number, batch: readonly number[], handOff: readonly number[], titles: ReadonlyMap<number, string>): number[] {
+  return followUpsOf(holder, [...new Set([...batch, ...handOff])], titles);
+}
+
 /** Title of round `round`'s rework issue for `n`; "follow-up to #n" is what followUpsOf matches. Pure, exported for tests. */
 export function reworkIssueTitle(round: number, n: number): string {
   return `Visual QA rework ${round} for #${n} — follow-up to #${n}`;

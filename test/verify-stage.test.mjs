@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf } from "../dist/orchestrator.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf, followUpsToBuild } from "../dist/orchestrator.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
 const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
@@ -126,6 +126,19 @@ test("followUpsOf: the fix a held verification asks for builds instead of queuei
   assert.deepEqual(followUpsOf(1338, [1340, 1341, 1342], titles), [1340]);
   assert.deepEqual(followUpsOf(1338, [1341], titles), [], "no follow-up, the hold stands");
   assert.deepEqual(followUpsOf(1338, [9999], titles), [], "an issue with no cached title is not a follow-up");
+});
+
+test("followUpsToBuild: a follow-up outside the trimmed batch still builds", () => {
+  // Slashbin-console #1440 behind #1431, 2026-10-27: the batch (size 1) was #1432,
+  // so the rework issue #1440 stayed queued and #1431 could never pass.
+  const titles = new Map([
+    [1432, "Unrelated work"],
+    [1433, "More unrelated work"],
+    [1440, reworkIssueTitle(1, 1431)],
+  ]);
+  assert.deepEqual(followUpsToBuild(1431, [1432], [1432, 1433, 1440], titles), [1440]);
+  assert.deepEqual(followUpsToBuild(1431, [1440], [1432, 1440], titles), [1440], "in the batch too: listed once");
+  assert.deepEqual(followUpsToBuild(1431, [1432], [1432, 1433], titles), [], "no follow-up, the hold stands");
 });
 
 test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state> reasons, nothing else", async () => {
