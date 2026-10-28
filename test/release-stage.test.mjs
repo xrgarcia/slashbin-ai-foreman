@@ -82,7 +82,7 @@ if (a[0] === "pr") {
     if (since) l = l.filter((p) => p.mergedAt && p.mergedAt.slice(0, 19) >= since[1]);
     out(l.sort((x, y) => y.number - x.number).slice(0, Number(flag("--limit") || 100)));
   }
-  if (a[1] === "view") { const p = st.prs[a[2]]; if (!p) fail("no PR " + a[2]); out(p); }
+  if (a[1] === "view") { if ((st.unreadable || []).includes(Number(a[2]))) fail("HTTP 502: Bad Gateway"); const p = st.prs[a[2]]; if (!p) fail("Could not resolve to a PullRequest with the number of " + a[2]); out(p); }
   if (a[1] === "create") {
     const number = 200 + Object.keys(st.prs).length;
     st.prs[number] = { number, url: "https://github.com/${REPO}/pull/" + number, title: flag("--title"), state: "OPEN",
@@ -1101,4 +1101,28 @@ test("signoff: an issue the Foreman itself labelled before this fix is unsigned 
   writeFileSync(GH_STATE, JSON.stringify(g));
   assert.equal(await run(2), true);
   assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);
+});
+
+test("signoff: a merged PR that cannot be read holds the release and is named, then clears when readable", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: B", "Closes #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(51, "2")],
+  }, { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  let g = gh();
+  g.unreadable = [51];
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0, "neither agent is asked while a merge is unread");
+  assert.deepEqual(statuses().map((s) => s.state), ["failure"]);
+  assert.match(statuses()[0].description, /#51/);
+  assert.match(heldComments(100)[0], /#51/);
+
+  // Readable again: #7 is now found and named.
+  g = gh();
+  g.unreadable = [];
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  assert.equal(await run(2), false);
+  assert.match(statuses().at(-1).description, /#7/);
 });

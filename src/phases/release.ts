@@ -620,9 +620,9 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     logger.warn(`Release PR #${pr.number}: could not read what ${repoConfig.baseBranch} carries; not deploying`);
     return false;
   }
-  if (late.length > 0) {
-    syncSignoff(repoConfig, pr.number, pr.headSha, late, logger);
-    logger.info(`Release PR #${pr.number}: ${late.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM; not deploying`);
+  if (late.unsigned.length > 0 || late.unresolved.length > 0) {
+    syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
+    logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);
     return false;
   }
   try {
