@@ -55,7 +55,7 @@ const flags = (n) => a.flatMap((x, i) => (x === n ? [a[i + 1]] : []));
 const fields = () => Object.fromEntries(flags("-f").map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)]));
 const comment = (n, body) => {
   st.seq = (st.seq || 0) + 1;
-  (st.comments[n] = st.comments[n] || []).push({ url: "https://github.com/${REPO}/issues/" + n + "#issuecomment-" + st.seq, body, at: new Date().toISOString() });
+  (st.comments[n] = st.comments[n] || []).push({ url: "https://github.com/${REPO}/issues/" + n + "#issuecomment-" + st.seq, body, at: new Date().toISOString(), by: "foreman-bot" });
 };
 if (a.some((x) => /\\/releases(\\/|$)/.test(x)) || a[0] === "release") fail("the release stage must never touch GitHub Releases");
 if (a[0] === "issue") {
@@ -95,6 +95,7 @@ if (a[0] === "api") {
   const path = a.find((x, i) => i > 0 && !x.startsWith("-") && !valued.has(a[i - 1]));
   const method = flag("--method") || "GET";
   let m;
+  if ((m = /issues\\/(\\d+)\\/events/.exec(path))) out(((st.events || {})[m[1]] || []).map((e) => JSON.stringify(e)).join("\\n"));
   if (method === "POST" && /\\/statuses\\//.test(path)) { (st.statuses = st.statuses || []).push({ sha: path.split("/").pop(), ...fields() }); save(); out(""); }
   if (method === "POST" && (m = /issues\\/(\\d+)\\/comments$/.exec(path))) { comment(m[1], fields().body); save(); out(""); }
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
@@ -1058,4 +1059,46 @@ test("signoff: an issue carried in by a develop merge is never signed by the For
   assert.equal(agentCalls().length, 0, "the carried release does not merge");
   assert.equal(statuses()[0].state, "failure");
   assert.match(heldComments(n)[0], /#7/);
+});
+
+test("signoff: an unsigned issue that merged after the release body was written holds the release at the head that carries it", async () => {
+  world({
+    issues: [issue(5, "release pending"), issue(7, "pr approved")],
+    prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5"), mergedFeature(50, "feat: A", "Related to #5"), mergedFeature(51, "feat: B", "Closes #7")],
+    compareFiles: 3,
+    compareCommits: [mergeCommit(50, "1"), mergeCommit(51, "2")],
+  }, { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0, "neither the Tech Lead nor the SRE is asked");
+  assert.deepEqual(statuses().map((s) => s.state), ["failure"]);
+  assert.match(heldComments(100)[0], /#7/);
+  assert.doesNotMatch(heldComments(100)[0], /#5/);
+
+  // Signed (and moved on by promote): the same head deploys.
+  const g = gh();
+  g.issues[7].labels.push("ready for prod release");
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  await promote(2);
+  assert.equal(await run(3), true);
+  assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);
+});
+
+test("signoff: an issue the Foreman itself labelled before this fix is unsigned until someone else signs it", async () => {
+  const marked = { url: "u", body: "<!-- foreman:release-carried pr=100 -->\n**Carried to production in release PR #100.**", at: "2026-10-28T10:00:00Z", by: "foreman-bot" };
+  world({ ...pending(), comments: { 6: [marked] }, }, { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  // #6 was labelled `release pending` by the old adoption; the only `ready for prod release` event is the Foreman's own.
+  let g = gh();
+  g.events = { 6: [{ label: "ready for prod release", by: "foreman-bot" }] };
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0);
+  assert.match(statuses()[0].description, /#6/);
+  assert.doesNotMatch(statuses()[0].description, /#5/);
+
+  // The EM applies `ready for prod release` himself: a label event by someone else.
+  g = gh();
+  g.events = { 6: [{ label: "ready for prod release", by: "foreman-bot" }, { label: "ready for prod release", by: "ray" }] };
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  assert.equal(await run(2), true);
+  assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);
 });
