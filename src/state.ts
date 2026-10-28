@@ -167,9 +167,6 @@ export interface RepoState {
   // e.g. "1283"), so a release stopped for a person is WARNed once per change
   // rather than every stall check while it waits.
   promotionHeldNoted?: string;
-  // The blocking set the release gate last refused a release for (foreman#90),
-  // e.g. "i647,p650", so a refusal that lasts days comments once per set.
-  releaseGateNoted?: string;
   // Stuck work the unstick stage has taken to the EM, keyed `<issue>:<kind>`
   // (src/unstick.ts). Persisted so a restart does not call the EM again for the
   // same reason, and so a failed call is retried to its cap across restarts.
@@ -302,7 +299,6 @@ function loadRepoStateCopy(repoName: string): RepoState {
       prodVerified: { ...(repo.prodVerified ?? {}) },
       ...(repo.promotionStallNoted ? { promotionStallNoted: [...repo.promotionStallNoted] } : {}),
       ...(repo.promotionHeldNoted ? { promotionHeldNoted: repo.promotionHeldNoted } : {}),
-      ...(repo.releaseGateNoted ? { releaseGateNoted: repo.releaseGateNoted } : {}),
       ...(repo.unstick ? { unstick: Object.fromEntries(Object.entries(repo.unstick).map(([k, v]) => [k, { ...v }])) } : {}),
     };
   }

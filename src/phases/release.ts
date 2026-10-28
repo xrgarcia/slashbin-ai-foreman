@@ -53,7 +53,6 @@ import {
   removeBlockedLabel,
   addReleasePrIssues,
   productionHead,
-  releaseMayProceed,
   type ReleasePrView,
 } from "../github.js";
 import { releaseTagName } from "../github/conventions.js";
@@ -595,16 +594,6 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     return false;
   }
   if (pr.state !== "OPEN" || !/^[0-9a-f]{40}$/.test(pr.headSha)) return false;
-
-  // The SRE merges the whole of `develop`. Never ask the Tech Lead or the SRE
-  // to release a PR that carries a merge its listed issues do not cover
-  // (foreman#90), whatever the PR was opened with.
-  const authorized = new Set([
-    ...listed,
-    ...getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
-      .filter((i) => hasLabel(i, repoConfig.lifecycleLabels.readyForProd)).map((i) => i.number),
-  ]);
-  if (!releaseMayProceed(repoConfig, authorized, pending, logger)) return false;
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);
   const approval = await asRun(repoConfig, (signal) =>

@@ -36,7 +36,9 @@ import {
   productionHead,
   productionDriftFiles,
   findReleaseStop,
-  releaseMayProceed,
+  adoptCarried,
+  noteCarried,
+  type ReleaseCarry,
   type PromotionIssue,
 } from "../github.js";
 import { emit, advance } from "../work-source.js";
@@ -350,7 +352,7 @@ export async function tryPromotion(
   // its issues have lost that label.
   await followRelease(repoConfig, promoLogger, releaseActive);
 
-  const issues = findReadyForProdIssues(
+  let issues = findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
   );
   const carried = releaseActive ? carriedIssues(repoConfig, promoLogger) : [];
@@ -428,22 +430,25 @@ export async function tryPromotion(
     const stillListed = releaseActive
       ? open.filter((i) => listedSet.has(i.number)).map((i) => ({ number: i.number, title: i.title }))
       : [];
+    // The PR promotes all of `develop`: adopt every issue whose merge it
+    // carries that is not already authorized or listed (foreman#90).
+    const authorized = new Set([...listedSet, ...issues.map((i) => i.number), ...carried.map((i) => i.number), ...stillListed.map((i) => i.number)]);
+    const carry = adoptCarried(repoConfig, authorized, promoLogger);
+    issues = union(issues, carry.adopted);
     const wanted = releaseActive ? union(union(stillListed, carried), issues) : issues;
     const missing = wanted.filter((i) => !listedSet.has(i.number));
+    const unlistedPrs = carry.unlinked.filter((u) => !existingPR.body.includes(`PR ${u.pr}:`));
 
-    if (missing.length > 0) {
-      // The PR promotes all of `develop`: refuse to rewrite it while `develop`
-      // carries a merge no listed issue covers (foreman#90).
-      const authorized = new Set([...listedSet, ...wanted.map((i) => i.number)]);
-      if (!releaseMayProceed(repoConfig, authorized, wanted.map((i) => i.number), promoLogger)) return null;
+    if (missing.length > 0 || unlistedPrs.length > 0) {
       const updated = updatePromotionPR(
-        repoConfig.githubRepo, existingPR.number, wanted, repoConfig.repoPath, repoConfig.github,
+        repoConfig.githubRepo, existingPR.number, wanted, repoConfig.repoPath, repoConfig.github, carry.unlinked,
       );
       if (updated) {
         promoLogger.info(
           `Updated promotion PR #${existingPR.number} — added ${missing.length} issue(s): ${missing.map((i) => `#${i.number}`).join(", ")}`
         );
         if (releaseActive) await queue(issues.map((i) => i.number));
+        noteCarried(repoConfig, carry, existingPR.number, wanted.map((i) => i.number).filter((n) => !carry.adopted.some((a) => a.number === n)), promoLogger);
       } else {
         promoLogger.error(
           `Failed to update promotion PR #${existingPR.number} — ${missing.length} dev-verified issue(s) are BLOCKED from production and no promotion PR reflects them. This is not cosmetic: the promote phase found the work and could not act on it.`
@@ -459,7 +464,7 @@ export async function tryPromotion(
   // No open release PR. With the release stage on and nothing newly
   // authorized, only carried issues remain: their release PR was closed
   // unmerged, or merged (the release stage's adoption owns that).
-  const toList = releaseActive ? union(carried, issues) : issues;
+  let toList = releaseActive ? union(carried, issues) : issues;
 
   // Guard: confirm develop actually has file changes main is missing before
   // creating the promotion PR. develop can be "ahead" of main by 1+ commits
@@ -531,10 +536,12 @@ export async function tryPromotion(
     promoLogger.warn("Could not compute branch diff — proceeding with promotion PR creation (best effort)");
   }
 
-  // The PR promotes all of `develop`: open it only when every merge on it
-  // belongs to an issue it lists (foreman#90).
-  const toListNums = toList.map((i) => i.number);
-  if (!releaseMayProceed(repoConfig, new Set(toListNums), toListNums, promoLogger)) return null;
+  // The PR promotes all of `develop`: adopt every issue whose merge it carries
+  // that is not already authorized (foreman#90), so the PR lists them all.
+  const authorizedNums = toList.map((i) => i.number);
+  const carry: ReleaseCarry = adoptCarried(repoConfig, new Set(authorizedNums), promoLogger);
+  issues = union(issues, carry.adopted);
+  toList = union(toList, carry.adopted);
 
   const prUrl = createPromotionPR(
     repoConfig.githubRepo,
@@ -544,6 +551,7 @@ export async function tryPromotion(
     repoConfig.repoPath,
     promoLogger,
     repoConfig.github,
+    carry.unlinked,
   );
 
   if (prUrl) {
@@ -551,6 +559,8 @@ export async function tryPromotion(
       issues: toList.map((i) => i.number),
     });
     const nums = issues.map((i) => i.number);
+    const prNumber = Number(/\/pull\/(\d+)/.exec(prUrl)?.[1]);
+    if (Number.isFinite(prNumber)) noteCarried(repoConfig, carry, prNumber, authorizedNums, promoLogger);
     if (releaseActive) {
       // The release PR owns them now: `ready for prod release` → `release pending`.
       await queue(nums);
