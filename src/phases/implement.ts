@@ -28,7 +28,7 @@ import { findIssuesMergedToBase } from "../github.js";
 import { announceDeadBlocker, closeAlreadyLanded, holdBlocker, isDeadBlockerReason } from "../github/dead-blocker.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
-import { devVerifyHolding, followUpsOf } from "./verify.js";
+import { devVerifyHolding, followUpsToBuild } from "./verify.js";
 import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import {
   escalatedReason,
@@ -518,8 +518,10 @@ export async function tryBatchImplementation(
   // The fix a failed verification asks for is filed as a follow-up to it.
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (Slashbin-console#1340 behind #1338, 32 min, 2026-10-20).
-  // It builds now, alone.
-  const fixes = !featurePr && verifying !== null ? followUpsOf(verifying, actionableIssues, titles) : [];
+  // It builds now, alone. Looked for in all of `handOff`, not the trimmed batch:
+  // a rework issue outside the batch starved while the verification waited on
+  // it (Slashbin-console #1440 behind #1431, 2026-10-27).
+  const fixes = !featurePr && verifying !== null ? followUpsToBuild(verifying, actionableIssues, handOff, titles) : [];
   if (fixes.length > 0) {
     actionableIssues.splice(0, actionableIssues.length, ...fixes);
     repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the follow-up to #${verifying}, whose dev verification is waiting on it`);
