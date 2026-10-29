@@ -270,6 +270,11 @@ export const configSchema = z.object({
   qaPath: z.string().optional(),
   // GitHub repos (owner/name) QA applies to. QA supports only the Console today.
   qaRepos: z.array(z.string()).default(["xrgarcia/Slashbin-console"]),
+  // Whether QA gates delivery. false (default) = report-only: the card advances on the
+  // SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances,
+  // FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card
+  // like an SRE hold. Needs `qaPath`. A config flip, reversible.
+  qaGate: z.boolean().default(false),
   // The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex
   // run and a prod-verification Codex run of up to 40 min each, plus the merge
   // and the deploy wait. The Foreman kills the deploy only past this; a deploy
@@ -512,6 +517,8 @@ export interface AgentConfig {
   qaPath?: string;
   /** Repos QA applies to. */
   qaRepos: string[];
+  /** QA gates the advance to prApproved (see configSchema). */
+  qaGate: boolean;
   /** Ceiling on one SRE deploy run (the release stage). */
   sreDeployMaxDurationMs: number;
   /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
@@ -670,6 +677,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
     qaRepos: fileConfig.qaRepos,
+    qaGate: fileConfig.qaGate,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
@@ -866,6 +874,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaRepos: [...parsed.qaRepos],
+    qaGate: parsed.qaGate,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,

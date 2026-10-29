@@ -1659,7 +1659,7 @@ export const SRE_VERIFY_MAX_DURATION_MS = 90 * 60_000;
 /** What a verify hand-off came back with. */
 export type VerifyResult =
   /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
-  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string }
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA" }
   /** No verdict: an error or a timeout. Nothing was written. */
   | { kind: "error"; error: string };
 

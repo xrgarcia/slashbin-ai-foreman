@@ -259,6 +259,12 @@ Type: string[] · Default: `["xrgarcia/Slashbin-console"]`
 
 GitHub repos (owner/name) QA applies to. QA supports only the Console today.
 
+### `qaGate`
+
+Type: boolean · Default: `false`
+
+Whether QA gates delivery. false (default) = report-only: the card advances on the SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances, FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card like an SRE hold. Needs `qaPath`. A config flip, reversible.
+
 ### `sreDeployMaxDurationMs`
 
 Type: integer · Default: `7200000` (2 h) · Env: `AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS`
