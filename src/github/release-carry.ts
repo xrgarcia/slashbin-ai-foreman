@@ -27,6 +27,7 @@ import type { Logger } from "../logger.js";
 import { formatGhError, getOpenIssues, hasLabel } from "./cache.js";
 import { commentOnIssue } from "./ci-gate.js";
 import { gh } from "./gh.js";
+import { hasCommentContaining } from "./pr-comments.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import type { PromotionIssue } from "./promotion.js";
 
@@ -214,26 +215,18 @@ export function unlinkedSection(unlinked: ReleaseCarry["unlinked"]): string {
   return `\n\n### Merges with no linked issue\n${unlinked.map((u) => `- PR ${u.pr}: ${u.title.replace(/#/g, "")}`).join("\n")}`;
 }
 
-function alreadyCarried(repoConfig: RepoConfig, n: number, mark: string): boolean {
-  const out = gh([
-    "api", `repos/${repoConfig.githubRepo}/issues/${n}/comments?per_page=100`, "--paginate",
-    "--jq", ".[] | {body: .body} | @json",
-  ], repoConfig.repoPath);
-  return out.split("\n").some((l) => l.trim() && ((JSON.parse(l) as { body?: string }).body ?? "").includes(mark));
-}
-
 /** One comment on each adopted issue once its release PR exists; the marker keeps it to one. */
-export function noteCarried(
+export async function noteCarried(
   repoConfig: RepoConfig,
   carry: ReleaseCarry,
   releasePr: number,
   authorized: number[],
   logger: Logger,
-): void {
+): Promise<void> {
   for (const i of carry.adopted) {
     const mark = `${CARRIED_MARK} pr=${releasePr} -->`;
     try {
-      if (alreadyCarried(repoConfig, i.number, mark)) continue;
+      if (await hasCommentContaining(repoConfig, i.number, mark)) continue;
       const prs = carry.prsByIssue.get(i.number) ?? [];
       const alongside = authorized.length > 0 ? ` alongside ${authorized.map((n) => `#${n}`).join(", ")}` : "";
       commentOnIssue(repoConfig, i.number, [

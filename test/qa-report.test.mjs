@@ -17,8 +17,8 @@ function deps(over = {}) {
   const posted = [];
   const d = {
     runs: 0, posted,
-    hasReport: () => false,
-    post: (pr, body) => posted.push({ pr, body }),
+    hasReport: async () => false,
+    post: async (pr, body) => { posted.push({ pr, body }); },
     run: async () => { d.runs++; return { kind: "manifest", exitCode: 0, manifest }; },
     ...over,
   };
@@ -49,7 +49,7 @@ test("a pass on Console runs QA once and posts the report under its heading", as
 });
 
 test("a second pass does not run or re-post: an existing heading comment ends it", async () => {
-  const d = deps({ hasReport: () => true });
+  const d = deps({ hasReport: async () => true });
   await runQaReport(CONSOLE, 1485, d, logger);
   assert.equal(d.runs, 0);
   assert.equal(d.posted.length, 0);
@@ -73,9 +73,9 @@ test("a crash, a timeout and a post failure never reject, and the crash is told 
   assert.match(crash.posted[0].body, /QA errored/);
   assert.ok(logs.some((l) => /errored/.test(l)), "and logged");
 
-  const broken = deps({ post: () => { throw new Error("gh down"); } });
+  const broken = deps({ post: async () => { throw new Error("gh down"); } });
   await assert.doesNotReject(runQaReport(CONSOLE, 2, broken, logger));
-  const unreadable = deps({ hasReport: () => { throw new Error("gh down"); } });
+  const unreadable = deps({ hasReport: async () => { throw new Error("gh down"); } });
   await assert.doesNotReject(runQaReport(CONSOLE, 3, unreadable, logger));
 });
 
@@ -104,4 +104,18 @@ test("verify wiring: the card advances first, QA is started after and never awai
   assert.ok(!/await\s+runQaReport/.test(src), "nothing waits on QA");
   assert.match(src.slice(qaAt - 200, qaAt), /qaApplies\(/, "gated on the QA repo list");
   assert.equal((src.match(/runQaReport\(/g) ?? []).length, 1, "only the pass path runs QA");
+});
+
+test("a timer fires while a slow lookup and a slow post are pending: runQaReport blocks nothing", async () => {
+  const slow = (ms) => new Promise((r) => setTimeout(r, ms));
+  const d = deps({ hasReport: async () => { await slow(150); return false; }, post: async (pr, body) => { await slow(150); d.posted.push({ pr, body }); } });
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  const started = runQaReport(CONSOLE, 4242, d, logger);
+  assert.equal(d.runs, 0, "the call returns before any work starts");
+  assert.equal(ticks, 0);
+  await started;
+  clearInterval(timer);
+  assert.equal(d.posted.length, 1);
+  assert.ok(ticks >= 15, `the loop kept ticking through ~300ms of waits (ticks=${ticks})`);
 });

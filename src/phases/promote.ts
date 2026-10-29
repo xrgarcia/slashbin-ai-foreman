@@ -448,7 +448,7 @@ export async function tryPromotion(
           `Updated promotion PR #${existingPR.number} — added ${missing.length} issue(s): ${missing.map((i) => `#${i.number}`).join(", ")}`
         );
         if (releaseActive) await queue(issues.map((i) => i.number));
-        noteCarried(repoConfig, carry, existingPR.number, wanted.map((i) => i.number).filter((n) => !carry.adopted.some((a) => a.number === n)), promoLogger);
+        await noteCarried(repoConfig, carry, existingPR.number, wanted.map((i) => i.number).filter((n) => !carry.adopted.some((a) => a.number === n)), promoLogger);
       } else {
         promoLogger.error(
           `Failed to update promotion PR #${existingPR.number} — ${missing.length} dev-verified issue(s) are BLOCKED from production and no promotion PR reflects them. This is not cosmetic: the promote phase found the work and could not act on it.`
@@ -559,7 +559,7 @@ export async function tryPromotion(
     });
     const nums = issues.map((i) => i.number);
     const prNumber = Number(/\/pull\/(\d+)/.exec(prUrl)?.[1]);
-    if (Number.isFinite(prNumber)) noteCarried(repoConfig, carry, prNumber, authorizedNums, promoLogger);
+    if (Number.isFinite(prNumber)) await noteCarried(repoConfig, carry, prNumber, authorizedNums, promoLogger);
     if (releaseActive) {
       // The release PR owns them now: `ready for prod release` → `release pending`.
       await queue(nums);

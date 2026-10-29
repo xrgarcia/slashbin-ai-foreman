@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { buildQaEnv, runAgentCli, type CliRun } from "./agent.js";
-import { prHasCommentWithHeading, commentOnPr } from "./github/pr-comments.js";
+import { hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
 
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
@@ -35,8 +35,8 @@ export type QaOutcome =
 /** Injected edges, so the decision is testable without a browser, Codex or GitHub. */
 export interface QaDeps {
   run(args: { repo: string; pr: number; out: string }): Promise<QaOutcome>;
-  hasReport(pr: number): boolean;
-  post(pr: number, body: string): void;
+  hasReport(pr: number): Promise<boolean>;
+  post(pr: number, body: string): Promise<void>;
 }
 
 const NOT_A_GATE =
@@ -72,8 +72,10 @@ export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger
   const key = `${repo}#${pr}`;
   if (inFlight.has(key)) return;
   inFlight.add(key);
+  // Yield first: the caller's turn ends before any of this work starts.
+  await new Promise<void>((r) => setImmediate(r));
   try {
-    if (deps.hasReport(pr)) {
+    if (await deps.hasReport(pr)) {
       logger.info(`QA: ${key} already has a report; not running again`);
       return;
     }
@@ -87,7 +89,7 @@ export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger
     }
     if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
     else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
-    deps.post(pr, qaReportBody(pr, outcome));
+    await deps.post(pr, qaReportBody(pr, outcome));
   } catch (e) {
     logger.warn(`QA: ${key} report not posted: ${String(e).slice(0, 300)}`);
   } finally {
@@ -106,7 +108,7 @@ export function qaApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boo
  */
 export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger): QaDeps {
   return {
-    hasReport: (pr) => prHasCommentWithHeading(repoConfig, pr, QA_HEADING),
+    hasReport: (pr) => hasCommentStartingWith(repoConfig, pr, QA_HEADING),
     post: (pr, body) => commentOnPr(repoConfig, pr, body),
     async run({ repo, pr, out }) {
       const em = agentConfig.emRepoPath;
