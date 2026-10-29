@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { QA_HEADING, QA_MAX_DURATION_MS, QA_REVIEW_CEILING_MS, stalledStep, qaApplies, qaReportBody, readOutcome, runQaReport } from "../dist/qa-report.js";
+import { qaGateMarker, QA_HEADING, QA_MAX_DURATION_MS, QA_REVIEW_CEILING_MS, stalledStep, qaApplies, qaReportBody, readOutcome, runQaReport } from "../dist/qa-report.js";
 
 const logs = [];
 const logger = { info: (m) => logs.push(m), warn: (m) => logs.push(m), error() {}, debug() {}, child() { return this; } };
@@ -128,5 +128,8 @@ test("a timeout names the QA step that was running", () => {
   assert.match(run("[qa] PR #9 T @ abc: 3 files\n[qa] affected pages: /a\n").detail, /during capture/);
   assert.match(run("[qa] PR #9 T @ abc: 3 files\n").detail, /during reading the PR/);
   assert.match(run("").detail, /before QA logged anything/);
-  assert.equal(stalledStep("noise\n"), "before QA logged anything");
+  assert.equal(review.step, "review");
+  assert.notEqual(qaGateMarker(review), qaGateMarker({ kind: "errored", detail: "timed out after 10 minutes" }), "a step-named stall is not deduped against the legacy ERROR report");
+  assert.match(qaGateMarker(review), /^<!-- foreman-qa sha=none verdict=ERROR step=review -->$/);
+  assert.equal(stalledStep("noise\n").text, "before QA logged anything");
 });
