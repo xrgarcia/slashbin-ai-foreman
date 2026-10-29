@@ -6,8 +6,8 @@ import type { Logger } from "../logger.js";
 import type { SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
-import { verifyViaSre } from "../agent.js";
-import { qaApplies, realQaDeps, runQaReport } from "../qa-report.js";
+import { verifyViaSre, type VerifyResult } from "../agent.js";
+import { applyQaGate, qaApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, gh } from "../github.js";
 import { getOpenIssues } from "../github/cache.js";
@@ -143,12 +143,18 @@ export function reworkIssueTitle(round: number, n: number): string {
   return `Visual QA rework ${round} for #${n} — follow-up to #${n}`;
 }
 
-/** The body of the rework issue for `n`; `summary` is the SRE's (redacted) output. Pure, exported for tests. */
-export function reworkIssueBody(n: number, pr: number, summary: string): string {
+/**
+ * The body of the rework issue for `n`; `summary` is the SRE's (redacted) output, or, with
+ * `by: "QA"`, QA's regression lines and shot names. Pure, exported for tests.
+ */
+export function reworkIssueBody(n: number, pr: number, summary: string, by: "SRE" | "QA" = "SRE"): string {
+  const qa = by === "QA";
   return [
-    `Dev visual QA of PR #${pr} failed for #${n} at the SHA the SRE captured. The SRE's evidence comment on #${n} and on the PR carries the images and the per-criterion verdicts.`,
+    qa
+      ? `QA of PR #${pr} found regressions for #${n} on dev: pages this PR made worse than the stored baseline. The QA Report comment on the PR carries the verdict and the pages.`
+      : `Dev visual QA of PR #${pr} failed for #${n} at the SHA the SRE captured. The SRE's evidence comment on #${n} and on the PR carries the images and the per-criterion verdicts.`,
     ``,
-    `Fix the layout defects named there, without changing scope.`,
+    qa ? `Fix the regressions named below, without changing scope. Defects that were already there before the PR are not part of this.` : `Fix the layout defects named there, without changing scope.`,
     ``,
     `## Pre-Flight`,
     ``,
@@ -156,12 +162,14 @@ export function reworkIssueBody(n: number, pr: number, summary: string): string 
     ``,
     `## Acceptance`,
     ``,
-    `The SRE re-captures #${n}'s screens at the new dev SHA and the visual QA verdict is PASS. A FAIL files the next rework; infrastructure or sign-in failures hold as before.`,
+    qa
+      ? `QA re-checks #${n}'s pages at the new dev SHA and its verdict is PASS (no regression against the baseline). A FAIL files the next rework; a HELD run holds as before.`
+      : `The SRE re-captures #${n}'s screens at the new dev SHA and the visual QA verdict is PASS. A FAIL files the next rework; infrastructure or sign-in failures hold as before.`,
     ``,
-    `## SRE verification output`,
+    qa ? `## QA output` : `## SRE verification output`,
     ``,
     "```",
-    summary.slice(-1500),
+    qa ? summary.slice(0, 3500) : summary.slice(-1500),
     "```",
     ``,
   ].join("\n");
@@ -303,8 +311,13 @@ export async function tryVerify(
 
   try {
     await emit({ kind: "session", session: { ...session, status: "started" } }, null, vlog);
-    const r = await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
+    const sre = await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
+    // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
+    // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
+    const r: VerifyResult = sre.kind === "verdict" && sre.pass && config.qaGate && qaApplies(repoConfig, config)
+      ? await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog)
+      : sre;
 
     if (r.kind === "verdict" && r.pass) {
       verifyDefer.clear(repoName);
@@ -315,8 +328,8 @@ export async function tryVerify(
         delete kept[n];
       }
       saveRepoState(repoName, { ...after, verifyHeld: kept });
-      // Report-only QA, after the card has moved and not awaited: it can never delay or hold it.
-      if (qaApplies(repoConfig, config)) {
+      // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
+      if (!config.qaGate && qaApplies(repoConfig, config)) {
         void runQaReport(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
@@ -361,7 +374,7 @@ export async function tryVerify(
         try {
           issue = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog).find((i) => i.title === title)?.number ?? null;
           if (issue === null) {
-            const out = gh(reworkIssueArgs(repoConfig.githubRepo, title, reworkIssueBody(n, target.prNumber, r.kind === "verdict" ? r.summary : r.error), repoConfig.triggerLabel), repoConfig.repoPath);
+            const out = gh(reworkIssueArgs(repoConfig.githubRepo, title, reworkIssueBody(n, target.prNumber, r.kind === "verdict" ? r.summary : r.error, r.kind === "verdict" ? r.by : undefined), repoConfig.triggerLabel), repoConfig.repoPath);
             const m = /\/issues\/(\d+)/.exec(out);
             issue = m ? parseInt(m[1], 10) : null;
           }
