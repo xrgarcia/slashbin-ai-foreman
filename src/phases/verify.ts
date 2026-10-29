@@ -7,6 +7,7 @@ import type { SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { verifyViaSre } from "../agent.js";
+import { qaApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, gh } from "../github.js";
 import { getOpenIssues } from "../github/cache.js";
@@ -314,6 +315,10 @@ export async function tryVerify(
         delete kept[n];
       }
       saveRepoState(repoName, { ...after, verifyHeld: kept });
+      // Report-only QA, after the card has moved and not awaited: it can never delay or hold it.
+      if (qaApplies(repoConfig, config)) {
+        void runQaReport(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
+      }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
       events?.push({ message: `✅ ${repoConfig.githubRepo} PR #${target.prNumber} verified in dev — ${issues} → "${repoConfig.lifecycleLabels.prApproved}"`, level: "info" });
       return true;

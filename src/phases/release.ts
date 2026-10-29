@@ -607,7 +607,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   const unsigned = unsignedIssues(issues, listed, repoConfig.lifecycleLabels, foremanAppliedOrHold(repoConfig, logger));
   if (unsigned.length > 0) {
     try {
-      syncSignoff(repoConfig, open.number, viewReleasePr(repoConfig, open.number).headSha, unsigned, logger);
+      await syncSignoff(repoConfig, open.number, viewReleasePr(repoConfig, open.number).headSha, unsigned, logger);
     } catch (err) {
       logger.warn(`Could not read release PR #${open.number}: ${errText(err)}`);
     }
@@ -640,7 +640,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     return false;
   }
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
-    syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
+    await syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);
     return false;
   }
@@ -650,7 +650,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     logger.warn(`Could not re-read release PR #${pr.number}: ${errText(err)}`);
     return false;
   }
-  syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
+  await syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);
   const approval = await asRun(repoConfig, (signal) =>
