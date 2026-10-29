@@ -272,6 +272,7 @@ async function holdRelease(
     try {
       verifiedHead = productionHead(repoConfig);
       passHead.set(repoConfig.name, verifiedHead);
+      lastHeadProbe.set(repoConfig.name, now());
     } catch (err) {
       logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
     }
@@ -769,9 +770,10 @@ export async function tryRelease(
           for (const rel of moved) {
             const stored = st.prodReleases?.[rel.pr];
             if (!stored) continue;
-            if (stored.verifiedHead) rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} moved to ${short(head)} since its last prod verification; re-verifying now`);
+            // A hold recorded before heads were stored has no head to compare: verify it once now.
+            rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} ${stored.verifiedHead ? "moved" : "head unrecorded"} at ${short(head)} since its last prod verification; re-verifying now`);
             stored.verifiedHead = head;
-            if (rel.verifiedHead) stored.retryAt = iso(t);
+            stored.retryAt = iso(t);
           }
         });
       }
