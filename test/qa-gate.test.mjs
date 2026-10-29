@@ -50,8 +50,8 @@ test("FAIL: not a pass; the visual-qa-failed rework hold carries QA's regression
   assert.match(body, /## QA output/);
 });
 
-test("HELD, a crash, an unreadable run and an inconsistent exit hold with a charged qa-* reason; never a pass", async () => {
-  for (const o of [result("HELD", 3), { kind: "errored", detail: "timed out after 10 minutes" }, new Error("boom"), { kind: "manifest", exitCode: 0, manifest: manifests.FAIL }, { kind: "manifest", exitCode: 0, manifest: { verdict: "WAT" } }]) {
+test("HELD and an inconsistent exit hold with a charged qa-* reason; never a pass", async () => {
+  for (const o of [result("HELD", 3), { kind: "manifest", exitCode: 0, manifest: manifests.FAIL }, { kind: "manifest", exitCode: 0, manifest: { verdict: "WAT" } }]) {
     const out = await applyQaGate(sre, REPO, 5, deps(o), logger);
     assert.equal(out.pass, false, JSON.stringify(o).slice(0, 60));
     assert.match(out.reason, /^qa-/);
@@ -104,4 +104,25 @@ test("verify wiring: the gate runs before the advance; report-only runs only wit
   assert.match(src, /config\.qaGate && qaApplies\(/);
   assert.match(src, /!config\.qaGate && qaApplies\(/, "gate off keeps the unawaited report-only run");
   assert.ok(!/await\s+runQaReport/.test(src));
+});
+
+test("an errored QA run (timeout, crash) holds as qa-errored and charges no attempt, so it never exhausts", async () => {
+  for (const o of [{ kind: "errored", detail: "timed out after 30 minutes during review" }, new Error("boom")]) {
+    const out = await applyQaGate(sre, REPO, 5, deps(o), logger);
+    assert.equal(out.pass, false);
+    assert.equal(out.reason, "qa-errored");
+    assert.deepEqual(verifyHoldPlan(out.reason), { kind: "defer" }, "retries on the schedule without spending an attempt");
+  }
+  // Three errored runs in a row: every one defers; none is a charge, so attempts never reach maxAttempts.
+  let charged = 0;
+  for (let i = 0; i < 3; i++) {
+    const out = await applyQaGate(sre, REPO, 5, deps({ kind: "errored", detail: "x" }), logger);
+    if (verifyHoldPlan(out.reason).kind === "charge") charged++;
+  }
+  assert.equal(charged, 0);
+});
+
+test("a QA FAIL still takes the rework path and a verdict HELD still charges", async () => {
+  assert.deepEqual(verifyHoldPlan((await applyQaGate(sre, REPO, 5, deps(result("FAIL", 1)), logger)).reason), { kind: "rework" });
+  assert.deepEqual(verifyHoldPlan((await applyQaGate(sre, REPO, 5, deps(result("HELD", 3)), logger)).reason), { kind: "charge" });
 });

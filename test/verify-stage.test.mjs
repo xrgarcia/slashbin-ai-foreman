@@ -211,5 +211,6 @@ test("TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checkout i
   const m = /RERUN_HOLDS = \/\^\((.*?)\)\$\//.exec(src);
   assert.ok(m, "RERUN_HOLDS found");
   const sre = m[1].split("|").filter((x) => !x.startsWith("wait-until"));
-  assert.deepEqual([...TOOLING_HOLDS].sort(), sre.sort());
+  // qa-errored is the Foreman's own QA gate, not an SRE hold.
+  assert.deepEqual(TOOLING_HOLDS.filter((x) => x !== "qa-errored").sort(), sre.sort());
 });
