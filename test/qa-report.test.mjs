@@ -87,7 +87,7 @@ test("readOutcome: 0, 1 and 3 with a manifest are results; a timeout or another 
   assert.equal(ok(2).kind, "errored");
   assert.equal(readOutcome({ code: null, stdout: "", stderr: "", timedOut: true }, dir, logger).kind, "errored");
   assert.equal(readOutcome({ code: 0, stdout: "", stderr: "", timedOut: false }, "/nonexistent", logger).kind, "errored");
-  assert.equal(QA_MAX_DURATION_MS, 1_200_000);
+  assert.equal(QA_MAX_DURATION_MS, 5_400_000);
 });
 
 test("an errored body says QA errored and carries no process output", () => {

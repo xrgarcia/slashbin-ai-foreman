@@ -109,7 +109,7 @@ test("verify wiring: the gate runs before the advance; report-only runs only wit
 
 // slashbin-ai-foreman#137: an errored QA run is the checker failing, not a verdict.
 test("#137: a timeout, a crash or an unreadable run holds qa-errored, which charges no attempt; never a pass", async () => {
-  for (const o of [{ kind: "errored", detail: "timed out after 20 minutes during the review step" }, new Error("boom"), { kind: "errored", detail: "exit 0 but manifest.json is unreadable" }]) {
+  for (const o of [{ kind: "errored", detail: "timed out after 90 minutes during the review step" }, new Error("boom"), { kind: "errored", detail: "exit 0 but manifest.json is unreadable" }]) {
     const out = await applyQaGate(sre, REPO, 5, deps(o), logger);
     assert.equal(out.pass, false);
     assert.equal(out.reason, "qa-errored");
@@ -120,7 +120,7 @@ test("#137: a timeout, a crash or an unreadable run holds qa-errored, which char
 test("#137: an SRE pass then three errored QA runs never spends an attempt, so it never exhausts", async () => {
   let attempts = 0;
   for (let i = 0; i < 3; i++) {
-    const out = await applyQaGate(sre, REPO, 5, deps({ kind: "errored", detail: "timed out after 20 minutes during the review step" }), logger);
+    const out = await applyQaGate(sre, REPO, 5, deps({ kind: "errored", detail: "timed out after 90 minutes during the review step" }), logger);
     if (verifyHoldPlan(out.reason).kind === "charge" || verifyHoldPlan(out.reason).kind === "rework") attempts++;
   }
   assert.equal(attempts, 0);
