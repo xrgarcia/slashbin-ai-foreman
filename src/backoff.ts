@@ -84,7 +84,8 @@ export const backoffConfigSchema = z.object({
   // re-verifies production after one window, longer each time, with no attempt
   // cap: the issue stays open at `prod verification held` until a pass closes
   // it or a person steps in. A `hold=wait-until-…` time the SRE reports wins
-  // when it is later. Default 10 min rising to 6 h.
+  // when it is later. A new head on the production branch since the last attempt
+  // makes the release due now, once per head. Default 10 min rising to 6 h.
   prodVerifyRetry: z.object(win(600_000, 21_600_000, 2)).prefault({}),
   // GitHub's rate limit or Claude's session limit refused work. The whole daemon
   // pauses that upstream; a GitHub reset time it reports wins over the window.

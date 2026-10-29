@@ -74,6 +74,10 @@ export const ADOPT_SCAN_MS = 10 * 60_000;
 export let releaseBackoff = new BackoffTracker();
 /** Per repo: when it was last scanned for releases to adopt. */
 const lastAdoptScan = new Map<string, number>();
+/** Per repo: when a held release last compared the production head with the one it was verified at. */
+const lastHeadProbe = new Map<string, number>();
+/** Spacing of those head reads: one `commits/<branch>` call per repo per minute while a release is held. */
+export const HEAD_PROBE_MS = 60_000;
 /** `repo#pr` already found to name no issue to adopt; `repo#issue` already checked for an SRE sweep hold. */
 const adoptChecked = new Set<string>();
 
@@ -81,6 +85,7 @@ const adoptChecked = new Set<string>();
 export function resetReleaseStage(): void {
   releaseBackoff = new BackoffTracker();
   lastAdoptScan.clear();
+  lastHeadProbe.clear();
   adoptChecked.clear();
 }
 
@@ -255,8 +260,15 @@ async function holdRelease(
     }
   }
   logger.warn(`Release PR #${rel.pr}: prod verification held (${v.hold}), attempt ${attempts}; re-verify at ${retryAt}`);
+  let verifiedHead = rel.verifiedHead;
+  try {
+    verifiedHead = productionHead(repoConfig);
+  } catch (err) {
+    logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
+  }
   putRelease(repoConfig, {
     ...rel, phase: "held", attempts, retryAt, hold: v.hold,
+    ...(verifiedHead ? { verifiedHead } : {}),
     ...(v.evidence ? { evidence: v.evidence } : {}),
   });
 }
@@ -680,6 +692,24 @@ export async function tryRelease(
       }
     } catch (err) {
       rlog.debug(`Could not read release PR #${rel.pr}: ${errText(err)}`);
+    }
+  }
+
+  // A held release waits out its back-off, but a new production head (the blocker's fix
+  // shipping in another release) makes it due now, once per head (#1477, 2026-10-29: held
+  // 5 h 20 m past a fix that landed). Reuses `productionHead`, read at most once a minute.
+  const waiting = releases.filter((r) => r.phase === "held" && !due(r.retryAt));
+  if (waiting.length > 0 && t - (lastHeadProbe.get(repoConfig.name) ?? 0) >= HEAD_PROBE_MS) {
+    lastHeadProbe.set(repoConfig.name, t);
+    try {
+      const head = productionHead(repoConfig);
+      for (const rel of waiting) {
+        if (rel.verifiedHead === head) continue;
+        if (rel.verifiedHead) rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} moved to ${short(head)} since its last prod verification; re-verifying now`);
+        putRelease(repoConfig, { ...rel, verifiedHead: head, ...(rel.verifiedHead ? { retryAt: iso(t) } : {}) });
+      }
+    } catch (err) {
+      rlog.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
     }
   }
 
