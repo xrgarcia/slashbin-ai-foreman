@@ -14,11 +14,14 @@ export const QA_HEADING = "## QA Report (report-only)";
 
 /**
  * One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment.
- * Above QA's own longest internal ceiling: one Codex review run may take 15 minutes
- * (slashbin_ai_qa `lib/review.mjs:113`, `lib/codex.mjs:49`, 900_000 ms), which QA does not
- * export to us, so a normal review is never killed mid-run (slashbin-ai-foreman#137).
+ * QA reviews serially, one Codex run per 4 shots (slashbin_ai_qa `lib/review.mjs` BATCH_SIZE)
+ * plus a 2-run control, each allowed 900 s (`lib/review.mjs:113`, `lib/codex.mjs:49`), so its
+ * own ceiling grows with the pages a PR touches. Slashbin-console PR #1518 (a `shared/schema.ts`
+ * change fans out to all 18 routes, 72 shots, 18 batches) was still reviewing when 20 minutes
+ * killed it (2026-10-29 21:03Z, capture had taken 4 min). 90 minutes covers that review; a
+ * longer one is a tooling hold (`qa-errored`) that retries without charging (slashbin-ai-foreman#137).
  */
-export const QA_MAX_DURATION_MS = 20 * 60_000;
+export const QA_MAX_DURATION_MS = 90 * 60_000;
 
 /**
  * Which QA step a killed run was in, from its `[qa]` progress lines on stderr
