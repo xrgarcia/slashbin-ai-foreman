@@ -40,6 +40,12 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    before. With `buildWaitsForDevVerify` (default on) a repo's next build waits until
    its last merge has passed dev verification, so one issue is in flight per repo from
    build to verified on dev.
+   **QA report (report-only, on when `qaPath` is set):** after a pass on a `qaRepos` repo
+   (the Console), the Foreman runs `qa.mjs check` once for that PR, in the background, and
+   posts `## QA Report (report-only)` on it. Nothing waits on it and it never holds or
+   reworks the card; a crash or a 10-minute timeout becomes an "errored" comment. Once per
+   PR: an existing comment with the heading ends it. `DEV_SESSION_MINT_KEY` reaches only
+   the QA child, through the EM checkout's `doppler-run.mjs` (needs `emRepoPath`).
 4. **Promote** — opens or updates the promotion PR (base branch → production branch,
    `develop` → `main` by default) for issues labeled `ready for prod release`, moving
    them to `release pending`. `ready for prod release` is the one lifecycle label a

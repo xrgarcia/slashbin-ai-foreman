@@ -1,0 +1,137 @@
+// The QA report: after the SRE's dev verify passes, run `qa.mjs check` once for the
+// merged PR and say what it found on the PR. Report-only: nothing here moves a label,
+// holds a card or waits (the caller does not await `reportQaAfterVerify`'s work).
+import { mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { AgentConfig, RepoConfig } from "./config.js";
+import type { Logger } from "./logger.js";
+import { buildQaEnv, runAgentCli, type CliRun } from "./agent.js";
+import { prHasCommentWithHeading, commentOnPr } from "./github/pr-comments.js";
+
+/** The heading the comment opens with; also the idempotency key. */
+export const QA_HEADING = "## QA Report (report-only)";
+
+/** One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment. */
+export const QA_MAX_DURATION_MS = 10 * 60_000;
+
+/** The EM script that hands a named Doppler key to one child, and nothing else. */
+const DOPPLER_RUN = "scripts/secrets/doppler-run.mjs";
+const MINT_KEY = "DEV_SESSION_MINT_KEY";
+
+/** What `manifest.json` carries that the report reads. */
+export interface QaManifest {
+  verdict: string;
+  reason?: string | null;
+  hold?: string | null;
+  pages?: Array<{ route: string; why?: string }>;
+  shots?: unknown[];
+}
+
+export type QaOutcome =
+  | { kind: "manifest"; exitCode: number; manifest: QaManifest }
+  | { kind: "errored"; detail: string };
+
+/** Injected edges, so the decision is testable without a browser, Codex or GitHub. */
+export interface QaDeps {
+  run(args: { repo: string; pr: number; out: string }): Promise<QaOutcome>;
+  hasReport(pr: number): boolean;
+  post(pr: number, body: string): void;
+}
+
+const NOT_A_GATE =
+  "This result does not gate delivery yet: the card has already moved on, and pre-existing defects on pages " +
+  "this PR touched still count as failures until slashbin_ai_qa#2 separates them from the PR's own.";
+
+/** The comment body for a QA outcome. Pure. */
+export function qaReportBody(pr: number, outcome: QaOutcome): string {
+  const head = `${QA_HEADING}\n\n`;
+  if (outcome.kind === "errored") {
+    return `${head}**QA errored** on PR #${pr}: ${outcome.detail}. No verdict was produced.\n\n${NOT_A_GATE}`;
+  }
+  const m = outcome.manifest;
+  const lines = [`**Verdict: ${m.verdict}**`, `Reason: ${m.reason ?? "(none recorded)"}`];
+  if (m.hold) lines.push(`Hold: ${m.hold}`);
+  const pages = m.pages ?? [];
+  lines.push("", "Pages checked:");
+  if (pages.length === 0) lines.push("- none");
+  for (const p of pages) lines.push(`- \`${p.route}\`${p.why ? ` — ${p.why}` : ""}`);
+  lines.push("", `Shots: ${(m.shots ?? []).length}`, "", NOT_A_GATE);
+  return head + lines.join("\n");
+}
+
+const inFlight = new Set<string>();
+
+/**
+ * Check PR `pr` once and post the report. Never throws and never rejects: a failed
+ * read, run, parse or post is a log line (and, where the PR can still be told, an
+ * "errored" comment). At most one report per PR: an existing comment with the heading,
+ * or a run already in flight in this process, ends it.
+ */
+export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger: Logger): Promise<void> {
+  const key = `${repo}#${pr}`;
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
+  try {
+    if (deps.hasReport(pr)) {
+      logger.info(`QA: ${key} already has a report; not running again`);
+      return;
+    }
+    const out = join(homedir(), ".cache", "foreman-qa", repo.replace("/", "__"), String(pr));
+    let outcome: QaOutcome;
+    try {
+      mkdirSync(out, { recursive: true });
+      outcome = await deps.run({ repo, pr, out });
+    } catch (e) {
+      outcome = { kind: "errored", detail: `the run threw (${String(e).slice(0, 200)})` };
+    }
+    if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
+    else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
+    deps.post(pr, qaReportBody(pr, outcome));
+  } catch (e) {
+    logger.warn(`QA: ${key} report not posted: ${String(e).slice(0, 300)}`);
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+/** Whether QA applies to `repoConfig` on this install. */
+export function qaApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
+  return Boolean(agentConfig.qaPath) && agentConfig.qaRepos.includes(repoConfig.githubRepo);
+}
+
+/**
+ * The real edges: `qa.mjs check` run under the EM's doppler-run.mjs, which gives
+ * DEV_SESSION_MINT_KEY (project = the repo, config dev) to that child alone.
+ */
+export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger): QaDeps {
+  return {
+    hasReport: (pr) => prHasCommentWithHeading(repoConfig, pr, QA_HEADING),
+    post: (pr, body) => commentOnPr(repoConfig, pr, body),
+    async run({ repo, pr, out }) {
+      const em = agentConfig.emRepoPath;
+      const qa = agentConfig.qaPath;
+      if (!em || !qa) return { kind: "errored", detail: "emRepoPath and qaPath must both be set" };
+      const args = ["--keys", `${MINT_KEY}@${repo}`, "dev", "--", "node", join(qa, "bin/qa.mjs"), "check", "--repo", repo, "--pr", String(pr), "--out", out];
+      const r: CliRun = await runAgentCli(em, DOPPLER_RUN, args, buildQaEnv(agentConfig), agentConfig, QA_MAX_DURATION_MS);
+      return readOutcome(r, out, logger);
+    },
+  };
+}
+
+/** Exit 0/1/3 with a readable manifest is a result; a timeout, any other exit or a missing manifest is an error. */
+export function readOutcome(r: CliRun, out: string, logger: Logger): QaOutcome {
+  if (r.timedOut) return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes` };
+  if (![0, 1, 3].includes(r.code ?? -1)) {
+    // stderr tail goes to the log only (already redacted of known secrets), never onto the PR.
+    logger.warn(`QA: exit ${r.code}; tail: ${(r.stderr || r.stdout).trim().slice(-300)}`);
+    return { kind: "errored", detail: `exit code ${r.code}` };
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as QaManifest;
+    if (!manifest.verdict) return { kind: "errored", detail: "manifest.json has no verdict" };
+    return { kind: "manifest", exitCode: r.code as number, manifest };
+  } catch (e) {
+    return { kind: "errored", detail: `exit ${r.code} but manifest.json is unreadable (${String(e).slice(0, 100)})` };
+  }
+}
