@@ -65,6 +65,11 @@ export const TOOLING_HOLDS: readonly string[] = [
   "visual-qa-sign-in-failed",
   "visual-qa-review-unavailable",
   "visual-qa-sha-unproven",
+  // The Foreman's own QA gate (src/qa-report.ts) produced no verdict: timeout, crash or no
+  // manifest. The checker could not run, so nothing was verified (Slashbin-console#1492 spent
+  // all 3 attempts on 10-minute QA timeouts after the SRE had passed). Not an SRE hold, so
+  // it is absent from the SRE's RERUN_HOLDS; the mirror test knows to leave it out.
+  "qa-errored",
 ];
 export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes(reason);
 

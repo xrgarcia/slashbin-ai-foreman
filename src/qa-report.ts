@@ -12,8 +12,37 @@ import { hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./git
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
 
-/** One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment. */
-export const QA_MAX_DURATION_MS = 10 * 60_000;
+/**
+ * QA's longest single internal ceiling: one Codex review run, 900 s
+ * (slashbin_ai_qa lib/review.mjs:113 `reviewShots` timeoutMs, lib/codex.mjs:49).
+ * Keep in step with it; QA does not export it.
+ */
+export const QA_REVIEW_CEILING_MS = 15 * 60_000;
+
+/**
+ * One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment.
+ * `qa.mjs check` = read the PR, capture shots (about 5 min for 12 shots on 2026-10-29),
+ * then review them with Codex (up to QA_REVIEW_CEILING_MS), then compare to the baseline.
+ * The Foreman's 10 minutes was shorter than the review alone, so every run was killed before
+ * QA could write a verdict. This covers capture (allowed twice the observed time) plus one full
+ * review stall, plus margin, so QA's own "review unavailable" HELD verdict lands before this kill.
+ */
+export const QA_MAX_DURATION_MS = 10 * 60_000 + QA_REVIEW_CEILING_MS + 5 * 60_000;
+
+/**
+ * Which QA step was running when the run was killed, from the last `[qa] ...` line of its
+ * stderr (qa.mjs check logs one per step, lib/check.mjs). Pure; "unknown" when there is no line.
+ */
+export function stalledStep(stderr: string): string {
+  const lines = stderr.split("\n").filter((l) => l.startsWith("[qa] "));
+  const last = lines[lines.length - 1];
+  if (!last) return "before QA logged anything";
+  const step = /reviewing against/.test(last) ? "review"
+    : /^\[qa\] affected pages:/.test(last) ? "capture"
+    : /^\[qa\] PR #/.test(last) ? "reading the PR"
+    : "capture";
+  return `${step}; last QA log: ${last.slice(5).replace(/[`\r]/g, "").slice(0, 120)}`;
+}
 
 /** The EM script that hands a named Doppler key to one child, and nothing else. */
 const DOPPLER_RUN = "scripts/secrets/doppler-run.mjs";
@@ -137,7 +166,11 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
 
 /** Exit 0/1/3 with a readable manifest is a result; a timeout, any other exit or a missing manifest is an error. */
 export function readOutcome(r: CliRun, out: string, logger: Logger): QaOutcome {
-  if (r.timedOut) return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes` };
+  if (r.timedOut) {
+    const step = stalledStep(r.stderr);
+    logger.warn(`QA: killed after ${QA_MAX_DURATION_MS / 60_000} minutes during ${step}`);
+    return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes during ${step}` };
+  }
   if (![0, 1, 3].includes(r.code ?? -1)) {
     // stderr tail goes to the log only (already redacted of known secrets), never onto the PR.
     logger.warn(`QA: exit ${r.code}; tail: ${(r.stderr || r.stdout).trim().slice(-300)}`);

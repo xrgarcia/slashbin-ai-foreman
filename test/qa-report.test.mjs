@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { QA_HEADING, QA_MAX_DURATION_MS, qaApplies, qaReportBody, readOutcome, runQaReport } from "../dist/qa-report.js";
+import { QA_HEADING, QA_MAX_DURATION_MS, QA_REVIEW_CEILING_MS, stalledStep, qaApplies, qaReportBody, readOutcome, runQaReport } from "../dist/qa-report.js";
 
 const logs = [];
 const logger = { info: (m) => logs.push(m), warn: (m) => logs.push(m), error() {}, debug() {}, child() { return this; } };
@@ -87,7 +87,7 @@ test("readOutcome: 0, 1 and 3 with a manifest are results; a timeout or another 
   assert.equal(ok(2).kind, "errored");
   assert.equal(readOutcome({ code: null, stdout: "", stderr: "", timedOut: true }, dir, logger).kind, "errored");
   assert.equal(readOutcome({ code: 0, stdout: "", stderr: "", timedOut: false }, "/nonexistent", logger).kind, "errored");
-  assert.equal(QA_MAX_DURATION_MS, 600_000);
+  assert.ok(QA_MAX_DURATION_MS > QA_REVIEW_CEILING_MS + 5 * 60_000, "outlasts QA's 15-minute review plus capture");
 });
 
 test("an errored body says QA errored and carries no process output", () => {
@@ -118,4 +118,15 @@ test("a timer fires while a slow lookup and a slow post are pending: runQaReport
   clearInterval(timer);
   assert.equal(d.posted.length, 1);
   assert.ok(ticks >= 15, `the loop kept ticking through ~300ms of waits (ticks=${ticks})`);
+});
+
+test("a timeout names the QA step that was running", () => {
+  const dir = "/nonexistent";
+  const run = (stderr) => readOutcome({ code: null, stdout: "", stderr, timedOut: true }, dir, logger);
+  const review = run("[qa] PR #9 T @ abc: 3 files\n[qa] affected pages: /a\n[qa] captured 12 shots; reviewing against 12 baseline shots\n");
+  assert.match(review.detail, /during review; last QA log: captured 12 shots/);
+  assert.match(run("[qa] PR #9 T @ abc: 3 files\n[qa] affected pages: /a\n").detail, /during capture/);
+  assert.match(run("[qa] PR #9 T @ abc: 3 files\n").detail, /during reading the PR/);
+  assert.match(run("").detail, /before QA logged anything/);
+  assert.equal(stalledStep("noise\n"), "before QA logged anything");
 });
