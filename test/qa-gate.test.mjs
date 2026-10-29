@@ -126,3 +126,13 @@ test("a QA FAIL still takes the rework path and a verdict HELD still charges", a
   assert.deepEqual(verifyHoldPlan((await applyQaGate(sre, REPO, 5, deps(result("FAIL", 1)), logger)).reason), { kind: "rework" });
   assert.deepEqual(verifyHoldPlan((await applyQaGate(sre, REPO, 5, deps(result("HELD", 3)), logger)).reason), { kind: "charge" });
 });
+
+test("a timeout during review posts its step even when the PR already has the legacy ERROR report", async () => {
+  const legacy = qaGateMarker({ kind: "errored", detail: "timed out after 10 minutes" });
+  const o = { kind: "errored", detail: "timed out after 30 minutes during review; last QA log: captured 12 shots", step: "review" };
+  const d = deps(o);
+  d.markers.add(legacy);
+  await applyQaGate(sre, REPO, 5, d, logger);
+  assert.equal(d.posted.length, 1);
+  assert.match(d.posted[0], /during review/);
+});

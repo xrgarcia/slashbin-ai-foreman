@@ -33,15 +33,14 @@ export const QA_MAX_DURATION_MS = 10 * 60_000 + QA_REVIEW_CEILING_MS + 5 * 60_00
  * Which QA step was running when the run was killed, from the last `[qa] ...` line of its
  * stderr (qa.mjs check logs one per step, lib/check.mjs). Pure; "unknown" when there is no line.
  */
-export function stalledStep(stderr: string): string {
+export function stalledStep(stderr: string): { step: string; text: string } {
   const lines = stderr.split("\n").filter((l) => l.startsWith("[qa] "));
   const last = lines[lines.length - 1];
-  if (!last) return "before QA logged anything";
+  if (!last) return { step: "start", text: "before QA logged anything" };
   const step = /reviewing against/.test(last) ? "review"
-    : /^\[qa\] affected pages:/.test(last) ? "capture"
-    : /^\[qa\] PR #/.test(last) ? "reading the PR"
+    : /^\[qa\] PR #/.test(last) ? "reading-the-pr"
     : "capture";
-  return `${step}; last QA log: ${last.slice(5).replace(/[`\r]/g, "").slice(0, 120)}`;
+  return { step, text: `${step === "reading-the-pr" ? "reading the PR" : step}; last QA log: ${last.slice(5).replace(/[`\r]/g, "").slice(0, 120)}` };
 }
 
 /** The EM script that hands a named Doppler key to one child, and nothing else. */
@@ -70,7 +69,8 @@ export interface QaFinding {
 
 export type QaOutcome =
   | { kind: "manifest"; exitCode: number; manifest: QaManifest }
-  | { kind: "errored"; detail: string };
+  /** `step`: the QA step a timeout killed (a marker-safe word), so a new stall is not deduped against an older report. */
+  | { kind: "errored"; detail: string; step?: string };
 
 /** Injected edges, so the decision is testable without a browser, Codex or GitHub. */
 export interface QaDeps {
@@ -167,9 +167,9 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
 /** Exit 0/1/3 with a readable manifest is a result; a timeout, any other exit or a missing manifest is an error. */
 export function readOutcome(r: CliRun, out: string, logger: Logger): QaOutcome {
   if (r.timedOut) {
-    const step = stalledStep(r.stderr);
-    logger.warn(`QA: killed after ${QA_MAX_DURATION_MS / 60_000} minutes during ${step}`);
-    return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes during ${step}` };
+    const { step, text } = stalledStep(r.stderr);
+    logger.warn(`QA: killed after ${QA_MAX_DURATION_MS / 60_000} minutes during ${text}`);
+    return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes during ${text}`, step };
   }
   if (![0, 1, 3].includes(r.code ?? -1)) {
     // stderr tail goes to the log only (already redacted of known secrets), never onto the PR.
@@ -197,7 +197,7 @@ const findingLine = (f: QaFinding) =>
 /** The hidden marker that keys a gating report to a head SHA and verdict; one comment per marker. */
 export function qaGateMarker(outcome: QaOutcome): string {
   return outcome.kind === "errored"
-    ? "<!-- foreman-qa sha=none verdict=ERROR -->"
+    ? `<!-- foreman-qa sha=none verdict=ERROR${outcome.step ? ` step=${outcome.step}` : ""} -->`
     : `<!-- foreman-qa sha=${outcome.manifest.sha ?? "unknown"} verdict=${outcome.manifest.verdict} -->`;
 }
 
