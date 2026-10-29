@@ -1462,3 +1462,45 @@ test("a Blocked card that predates this process is released once the Foreman's s
     assert.equal(fake.rows[0].status, want, `foremanHeld ${foremanHeld}`);
   }
 });
+
+// --- A re-move waits for the run an assignment woke (SLA-2959, 2026-10-29) ------------
+
+const raceRoles = { em: { name: "Engineering Manager", id: "em-agent" }, techLead: { name: "Tech Lead", id: "tl-agent" } };
+const raceBoard = () => ({ ...paperclipBoardDefaults().board, blocked: { ...paperclipBoardDefaults().board.blocked, owner: "em" } });
+
+test("a move off a card whose assignee has a run checked out is deferred, then applied once the run clears", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "required checks not green", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+  // Paperclip woke the EM seat: the run is open and checked out, the card in_progress.
+  Object.assign(fake.rows[0], { status: "in_progress", executionRunId: "run-1", checkoutRunId: "run-1" });
+  const before = statusPatches(fake).length;
+  // The Foreman's second write: back to review, to the Tech Lead.
+  await mirror.onState(item, "approved", "inReview", repoConfig, logger());
+  assert.equal(statusPatches(fake).length, before, "no status write while the run is in flight");
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+  // The run clears: the next snapshot applies the move.
+  Object.assign(fake.rows[0], { executionRunId: null, checkoutRunId: null });
+  await onSnap(mirror, "example/r", [], logger());
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.equal(fake.rows[0].assigneeAgentId, AGENT, "inReview is the Foreman's stage: the card goes back to its agent");
+});
+
+test("no run on the card: the move is not deferred; a move that leaves it in_progress is never deferred", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "x", repoConfig, logger());
+  await mirror.onState(item, "approved", "inReview", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "in_review", "no run on the card: no deferral");
+  await mirror.onBlocked(item, "y", repoConfig, logger());
+  Object.assign(fake.rows[0], { status: "in_progress", executionRunId: "run-2", checkoutRunId: "run-2" });
+  await mirror.onState(item, "inReview", "queued", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "queued is todo: deferred while the EM's run is in flight");
+  await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the session's stage is in_progress: not deferred");
+  assert.equal(fake.rows[0].assigneeAgentId, AGENT, "and it was written through the run");
+});

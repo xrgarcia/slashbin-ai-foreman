@@ -23,6 +23,10 @@ export type PaperclipIssue = {
   labelIds?: string[];
   /** The board's short name for the task (e.g. SLA-1500). */
   identifier?: string | null;
+  /** The run Paperclip has open on the task (an assignee's wake), null when none. */
+  executionRunId?: string | null;
+  /** The run that has the task checked out, null when none. */
+  checkoutRunId?: string | null;
   /** When the task was created (ISO): of two tasks for one issue, the older is the card. */
   createdAt?: string;
 };

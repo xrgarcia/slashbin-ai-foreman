@@ -292,6 +292,13 @@ wake checking the card out. A `needsRuling` owner whose agent wakes on assignmen
 `blocked` cards: every escalation arrives `blocked`, and one that refuses blocked work leaves
 the ruling unmade.
 
+The Foreman does not re-move a card while a run of its assignee is in flight. Assigning a card to a
+seat that wakes opens a run whose checkout flips the card to `in_progress`; a second write that sets
+any other status and reassigns makes Paperclip cancel that run, and the cancel leaves an execution
+hold that freezes the card (SLA-2959, 2026-10-29). So a move reads the card first: with
+`executionRunId` or `checkoutRunId` set on a card held by another agent, the move is deferred and
+retried at the next snapshot. A move whose status is `in_progress` is never deferred.
+
 | Stage | Meaning | Default owner | Default status | Default stage label |
 |---|---|---|---|---|
 | `approved` | Authorized and waiting to be built. | `foreman` | `todo` | none |
