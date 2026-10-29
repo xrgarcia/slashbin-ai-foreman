@@ -12,8 +12,25 @@ import { hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./git
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
 
-/** One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment. */
-export const QA_MAX_DURATION_MS = 10 * 60_000;
+/**
+ * One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment.
+ * Above QA's own longest internal ceiling: one Codex review run may take 15 minutes
+ * (slashbin_ai_qa `lib/review.mjs:113`, `lib/codex.mjs:49`, 900_000 ms), which QA does not
+ * export to us, so a normal review is never killed mid-run (slashbin-ai-foreman#137).
+ */
+export const QA_MAX_DURATION_MS = 20 * 60_000;
+
+/**
+ * Which QA step a killed run was in, from its `[qa]` progress lines on stderr
+ * (`lib/check.mjs`): "review" once it logged "captured N shots; reviewing", "capture"
+ * once it resolved pages or took a shot, else "setup". Pure.
+ */
+export function qaStepOf(stderr: string): "setup" | "capture" | "review" {
+  const lines = stderr.split("\n").filter((l) => l.startsWith("[qa] "));
+  if (lines.some((l) => /\bcaptured \d+ shots; reviewing\b/.test(l))) return "review";
+  if (lines.some((l) => /^\[qa\] (shot |resolved |affected pages)/.test(l))) return "capture";
+  return "setup";
+}
 
 /** The EM script that hands a named Doppler key to one child, and nothing else. */
 const DOPPLER_RUN = "scripts/secrets/doppler-run.mjs";
@@ -137,7 +154,12 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
 
 /** Exit 0/1/3 with a readable manifest is a result; a timeout, any other exit or a missing manifest is an error. */
 export function readOutcome(r: CliRun, out: string, logger: Logger): QaOutcome {
-  if (r.timedOut) return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes` };
+  if (r.timedOut) {
+    const step = qaStepOf(r.stderr);
+    const last = r.stderr.split("\n").filter((l) => l.startsWith("[qa] ")).pop() ?? "(no progress line)";
+    logger.warn(`QA: killed at ${QA_MAX_DURATION_MS / 60_000} minutes during ${step}; last line: ${last.slice(0, 200)}`);
+    return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes during the ${step} step` };
+  }
   if (![0, 1, 3].includes(r.code ?? -1)) {
     // stderr tail goes to the log only (already redacted of known secrets), never onto the PR.
     logger.warn(`QA: exit ${r.code}; tail: ${(r.stderr || r.stdout).trim().slice(-300)}`);
@@ -163,8 +185,9 @@ const findingLine = (f: QaFinding) =>
 
 /** The hidden marker that keys a gating report to a head SHA and verdict; one comment per marker. */
 export function qaGateMarker(outcome: QaOutcome): string {
+  // An errored run is keyed by its detail too, so a timeout in a different step still posts.
   return outcome.kind === "errored"
-    ? "<!-- foreman-qa sha=none verdict=ERROR -->"
+    ? `<!-- foreman-qa sha=none verdict=ERROR detail=${outcome.detail.replace(/[^\w.-]+/g, "-").slice(0, 80)} -->`
     : `<!-- foreman-qa sha=${outcome.manifest.sha ?? "unknown"} verdict=${outcome.manifest.verdict} -->`;
 }
 
@@ -221,7 +244,9 @@ async function postGateReport(pr: number, outcome: QaOutcome, deps: QaDeps, chec
  * PASS returns the SRE result untouched. FAIL becomes the existing visual-QA
  * rework hold (`visual-qa-failed`, with QA's regressions and shots). HELD, a
  * crash, a timeout, an unreadable manifest or an exit that disagrees with its
- * verdict becomes a `qa-*` hold: never an advance on an unknown. Never throws.
+ * verdict becomes a `qa-*` hold: never an advance on an unknown. An errored run
+ * (`qa-errored`) is a tooling hold that charges no attempt (`TOOLING_HOLDS`,
+ * slashbin-ai-foreman#137). Never throws.
  */
 export async function applyQaGate(
   sre: Extract<VerifyResult, { kind: "verdict" }>,

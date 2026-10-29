@@ -53,8 +53,11 @@ export function reopensOnBaseAdvance(reason: string): boolean {
  * minus `wait-until-*` (a named wait, handled separately). Verdicts (`visual-qa-failed`,
  * `acceptance-failed`, `dev-verify-failed`, ...) and `visual-qa-unsafe-host` (a
  * deterministic config refusal a retry cannot clear) are NOT here: they charge or rework.
+ * `qa-errored` is the Foreman's own QA gate failing to produce a verdict (timeout, crash,
+ * no manifest) after an SRE pass: the checker could not run, so it charges nothing either
+ * (slashbin-ai-foreman#137; Slashbin-console#1492 spent 3 attempts on QA timeouts).
  */
-export const TOOLING_HOLDS: readonly string[] = [
+export const SRE_TOOLING_HOLDS: readonly string[] = [
   "codex-unavailable",
   "em-mirror-unavailable",
   "registry-unavailable",
@@ -66,6 +69,9 @@ export const TOOLING_HOLDS: readonly string[] = [
   "visual-qa-review-unavailable",
   "visual-qa-sha-unproven",
 ];
+/** The Foreman's own checkers that could not run: its QA gate (slashbin-ai-foreman#137). */
+export const FOREMAN_TOOLING_HOLDS: readonly string[] = ["qa-errored"];
+export const TOOLING_HOLDS: readonly string[] = [...SRE_TOOLING_HOLDS, ...FOREMAN_TOOLING_HOLDS];
 export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes(reason);
 
 /**
@@ -281,6 +287,9 @@ export async function tryVerify(
       : await releaseIfResolved(kind, {
         specEdited: issueEditedSince(repoConfig, n, h.heldAt),
         ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
+        // Exhausted on a reason that no longer charges (it joined TOOLING_HOLDS after the
+        // attempts were spent): those attempts were never verdicts, so it reopens.
+        ...(exhausted ? { holdNoLongerCharged: isToolingHold(h.reason) } : {}),
       }, [n], repoConfig, vlog);
     if (ok) { delete held[n]; released = true; }
   }
