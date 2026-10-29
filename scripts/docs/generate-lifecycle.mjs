@@ -97,6 +97,7 @@ const CHECK_ACTS = {
   mergedPrFound: "Merge a PR into the base branch that closes the issue.",
   baseAdvanced: "Land a fix on the base branch.",
   specEdited: "Edit the issue's body (the spec the SRE verifies against).",
+  holdNoLongerCharged: "Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own.",
   prHeadMoved: "Push a commit to the PR.",
 };
 for (const [what, known, have] of [["block kind", BLOCK_KINDS, UNBLOCK_CHECKS], ["unblock check", CHECK_ACTS, CHECK_WORDS]]) {

@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
 import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf, followUpsToBuild } from "../dist/orchestrator.js";
-import { TOOLING_HOLDS } from "../dist/phases/verify.js";
+import { TOOLING_HOLDS, SRE_TOOLING_HOLDS } from "../dist/phases/verify.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
 const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
@@ -205,11 +205,12 @@ test("verifyHoldPlan: every SRE tooling hold defers; verdict holds do not", () =
   assert.deepEqual(verifyHoldPlan("acceptance-failed"), { kind: "charge" });
 });
 
-test("TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checkout is absent)", async (t) => {
+test("SRE_TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checkout is absent)", async (t) => {
   let src;
   try { src = (await import("node:fs")).readFileSync(`${process.env.HOME}/code/slashbin_ai_sre/lib/reuse.mjs`, "utf8"); } catch { return t.skip("no SRE checkout"); }
   const m = /RERUN_HOLDS = \/\^\((.*?)\)\$\//.exec(src);
   assert.ok(m, "RERUN_HOLDS found");
   const sre = m[1].split("|").filter((x) => !x.startsWith("wait-until"));
-  assert.deepEqual([...TOOLING_HOLDS].sort(), sre.sort());
+  assert.deepEqual([...SRE_TOOLING_HOLDS].sort(), sre.sort());
+  assert.ok(TOOLING_HOLDS.includes("qa-errored"), "the Foreman QA gate's own tooling hold (#137)");
 });

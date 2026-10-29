@@ -43,6 +43,8 @@ export interface BlockFacts {
   specEdited?: boolean;
   /** Someone pushed to the PR after the Foreman stopped on it. */
   prHeadMoved?: boolean;
+  /** An exhausted verify hold's reason is now a tooling hold, which charges no attempt. */
+  holdNoLongerCharged?: boolean;
 }
 
 export type UnblockCheck = keyof BlockFacts;
@@ -53,7 +55,7 @@ export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>
   "divergence": ["divergenceCleared"],
   "verify-no-pr": ["mergedPrFound"],
   "verify-held": ["specEdited"],
-  "verify-exhausted": ["specEdited", "baseAdvanced"],
+  "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged"],
   "revision-exhausted": ["prHeadMoved"],
   "revision-stalemate": ["prHeadMoved"],
 };
@@ -68,6 +70,7 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",
   specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",
   prHeadMoved: "the PR received new commits since the Foreman stopped — resuming",
+  holdNoLongerCharged: "the hold's reason means the checker could not run, which no longer spends an attempt — verifying again with a fresh attempt count",
 };
 
 /** The first check for `kind` that `facts` pass, or null. Only `true` passes. */

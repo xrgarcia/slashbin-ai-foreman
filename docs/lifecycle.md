@@ -196,7 +196,7 @@ give the reason. A skip's comment names what it waits on.
 | `divergence` | The feature branch diverged from its base. | Reconcile the feature branch with its base. |
 | `verify-no-pr` | The issue is labelled merged, but no merged PR closes it. | Merge a PR into the base branch that closes the issue. |
 | `verify-held` | Dev verification failed and is waiting out its back-off; it retries by itself. | Edit the issue's body (the spec the SRE verifies against). |
-| `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch. |
+| `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch.<br>Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own. |
 | `revision-exhausted` | Revision of the issue's PR failed its retries. | Push a commit to the PR. |
 | `revision-stalemate` | The reviser and the reviewer disagree, and the reviser pushed nothing. | Push a commit to the PR. |
 | the `blocked` label | A person or tool labelled the issue `blocked`: the Foreman never picks it up. | Remove the label. |

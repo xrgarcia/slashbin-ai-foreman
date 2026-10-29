@@ -2,7 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { applyQaGate, qaGateBody, qaGateMarker, qaFailSummary, QA_GATE_HEADING, qaApplies } from "../dist/qa-report.js";
+import { applyQaGate, qaGateBody, qaGateMarker, qaFailSummary, QA_GATE_HEADING, qaApplies, QA_MAX_DURATION_MS, readOutcome, qaStepOf } from "../dist/qa-report.js";
+import { passingCheck } from "../dist/unblock.js";
 import { verifyHoldPlan, reworkIssueBody } from "../dist/phases/verify.js";
 import { configSchema } from "../dist/config.js";
 
@@ -50,8 +51,8 @@ test("FAIL: not a pass; the visual-qa-failed rework hold carries QA's regression
   assert.match(body, /## QA output/);
 });
 
-test("HELD, a crash, an unreadable run and an inconsistent exit hold with a charged qa-* reason; never a pass", async () => {
-  for (const o of [result("HELD", 3), { kind: "errored", detail: "timed out after 10 minutes" }, new Error("boom"), { kind: "manifest", exitCode: 0, manifest: manifests.FAIL }, { kind: "manifest", exitCode: 0, manifest: { verdict: "WAT" } }]) {
+test("HELD and an inconsistent exit hold with a charged qa-* reason; never a pass", async () => {
+  for (const o of [result("HELD", 3), { kind: "manifest", exitCode: 0, manifest: manifests.FAIL }, { kind: "manifest", exitCode: 0, manifest: { verdict: "WAT" } }]) {
     const out = await applyQaGate(sre, REPO, 5, deps(o), logger);
     assert.equal(out.pass, false, JSON.stringify(o).slice(0, 60));
     assert.match(out.reason, /^qa-/);
@@ -104,4 +105,51 @@ test("verify wiring: the gate runs before the advance; report-only runs only wit
   assert.match(src, /config\.qaGate && qaApplies\(/);
   assert.match(src, /!config\.qaGate && qaApplies\(/, "gate off keeps the unawaited report-only run");
   assert.ok(!/await\s+runQaReport/.test(src));
+});
+
+// slashbin-ai-foreman#137: an errored QA run is the checker failing, not a verdict.
+test("#137: a timeout, a crash or an unreadable run holds qa-errored, which charges no attempt; never a pass", async () => {
+  for (const o of [{ kind: "errored", detail: "timed out after 20 minutes during the review step" }, new Error("boom"), { kind: "errored", detail: "exit 0 but manifest.json is unreadable" }]) {
+    const out = await applyQaGate(sre, REPO, 5, deps(o), logger);
+    assert.equal(out.pass, false);
+    assert.equal(out.reason, "qa-errored");
+    assert.deepEqual(verifyHoldPlan(out.reason), { kind: "defer" });
+  }
+});
+
+test("#137: an SRE pass then three errored QA runs never spends an attempt, so it never exhausts", async () => {
+  let attempts = 0;
+  for (let i = 0; i < 3; i++) {
+    const out = await applyQaGate(sre, REPO, 5, deps({ kind: "errored", detail: "timed out after 20 minutes during the review step" }), logger);
+    if (verifyHoldPlan(out.reason).kind === "charge" || verifyHoldPlan(out.reason).kind === "rework") attempts++;
+  }
+  assert.equal(attempts, 0);
+});
+
+test("#137: a QA FAIL still takes the rework path, as before", async () => {
+  const out = await applyQaGate(sre, REPO, 5, deps(result("FAIL", 1)), logger);
+  assert.deepEqual(verifyHoldPlan(out.reason), { kind: "rework" });
+});
+
+test("#137: an exhausted hold on a reason that no longer charges reopens; a charged one does not", () => {
+  assert.equal(passingCheck("verify-exhausted", { holdNoLongerCharged: true }), "holdNoLongerCharged");
+  assert.equal(passingCheck("verify-exhausted", { holdNoLongerCharged: false }), null);
+});
+
+test("#137: the QA ceiling is above QA's own 15-minute review ceiling", () => {
+  assert.ok(QA_MAX_DURATION_MS > 15 * 60_000);
+});
+
+test("#137: a timeout names the step that was running, on the comment and in the log", () => {
+  const warns = [];
+  const lg = { ...logger, warn(m) { warns.push(m); } };
+  const review = readOutcome({ code: null, stdout: "", timedOut: true, stderr: "[qa] PR #1 x @ abc: 3 files\n[qa] affected pages: /a\n[qa] shot /a phone settled=true 10ms\n[qa] captured 12 shots; reviewing against 12 baseline shots\n" }, "/nonexistent", lg);
+  assert.equal(review.kind, "errored");
+  assert.match(review.detail, /during the review step/);
+  assert.match(qaGateBody(5, review), /during the review step/);
+  assert.match(warns.join("\n"), /during review; last line: \[qa\] captured 12 shots/);
+  const capture = readOutcome({ code: null, stdout: "", timedOut: true, stderr: "[qa] affected pages: /a\n[qa] shot /a phone settled=true 10ms\n" }, "/nonexistent", lg);
+  assert.match(capture.detail, /during the capture step/);
+  assert.equal(qaStepOf(""), "setup");
+  assert.notEqual(qaGateMarker(review), qaGateMarker(capture), "a timeout in another step still posts");
 });
