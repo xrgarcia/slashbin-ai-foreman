@@ -117,6 +117,8 @@ if (config.qaPath) {
   if (qaOk && dopplerOk) line("PASS", "QA report", `on for ${config.qaRepos.join(", ")}`);
   else line("FAIL", "QA report", `${!qaOk ? "qaPath has no bin/qa.mjs. " : ""}${!dopplerOk ? "emRepoPath has no scripts/secrets/doppler-run.mjs (it supplies DEV_SESSION_MINT_KEY). " : ""}QA reports will post as errored.`.trim());
 }
+if (config.qaGate && !config.qaPath) line("FAIL", "QA gate", "qaGate is true but qaPath is not set, so QA never runs and nothing is gated.");
+else if (config.qaGate) line("PASS", "QA gate", "on: QA runs before a verify pass advances the card");
 // The release stage (EM#578): the Tech Lead approves the release PR, the SRE deploys it.
 const releaseWarning = releaseStageWarning(config);
 if (releaseWarning) line("WARN", "release stage", releaseWarning);
