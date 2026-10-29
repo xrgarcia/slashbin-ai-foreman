@@ -595,6 +595,19 @@ export function buildEmEnv(agentConfig: AgentConfig): Record<string, string> {
   return env;
 }
 
+/**
+ * The QA hand-off's environment: essentials, `sessionEnv`, and the Foreman's own
+ * token as GH_TOKEN (QA reads the PR with `gh pr view`; the Foreman is the reader
+ * every Claude session already runs as). QA's one secret, DEV_SESSION_MINT_KEY, is
+ * NOT here and not in the daemon env: `doppler-run.mjs` in the EM checkout fetches it
+ * for the QA child alone (qa-report.ts).
+ */
+export function buildQaEnv(agentConfig: AgentConfig): Record<string, string> {
+  const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
+  if (process.env.FOREMAN_GITHUB_TOKEN) env.GH_TOKEN = process.env.FOREMAN_GITHUB_TOKEN;
+  return env;
+}
+
 /** A value shorter than this is not redacted: too likely to match ordinary text. */
 const MIN_SECRET_LENGTH = 8;
 
@@ -1726,7 +1739,7 @@ export async function verifyViaSre(
 /** The Tech Lead's promotion approval: one read of the diff and one review. */
 export const TECH_LEAD_APPROVE_MAX_DURATION_MS = 20 * 60_000;
 
-interface CliRun { code: number | null; stdout: string; stderr: string; timedOut: boolean }
+export interface CliRun { code: number | null; stdout: string; stderr: string; timedOut: boolean }
 
 /**
  * Run `node <dir>/<script> ...args` the way reviewViaTechLead and verifyViaSre
@@ -1734,7 +1747,7 @@ interface CliRun { code: number | null; stdout: string; stderr: string; timedOut
  * and the session secrets redacted at every sink (the transcript as it
  * streams, and the stdout/stderr returned).
  */
-async function runAgentCli(
+export async function runAgentCli(
   dir: string,
   script: string,
   args: string[],

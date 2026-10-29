@@ -21,6 +21,7 @@ import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { getOpenIssues, hasLabel, type IssueSnapshot } from "./cache.js";
 import { gh } from "./gh.js";
+import { hasCommentContaining } from "./pr-comments.js";
 import { CARRIED_MARK, listCarriedMerges } from "./release-carry.js";
 
 /** Marks the comment naming the unsigned set, so a restart does not repeat it. */
@@ -121,7 +122,7 @@ const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
  * the unsigned set changed since the last post, and comments once per set.
  * A failed write is logged and retried next pass; it never throws.
  */
-export function syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved: number[] = []): void {
+export async function syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved: number[] = []): Promise<void> {
   const held = unsigned.length + unresolved.length > 0;
   const key = `${config.githubRepo}#${pr}`;
   const state = `${headSha}|${unsigned.join(",")}|${unresolved.join(",")}`;
@@ -139,10 +140,7 @@ export function syncSignoff(config: RepoConfig, pr: number, headSha: string, uns
     ], config.repoPath);
     if (held) {
       const mark = `${SIGNOFF_MARK} ${unsigned.join(",")}${unresolved.length ? `;unread ${unresolved.join(",")}` : ""} -->`;
-      const seen = gh([
-        "api", `repos/${config.githubRepo}/issues/${pr}/comments?per_page=100`, "--paginate", "--jq", ".[] | {body: .body} | @json",
-      ], config.repoPath);
-      if (!seen.split("\n").some((l) => l.trim() && ((JSON.parse(l) as { body?: string }).body ?? "").includes(mark))) {
+      if (!(await hasCommentContaining(config, pr, mark))) {
         gh([
           "api", "--method", "POST", `repos/${config.githubRepo}/issues/${pr}/comments`,
           "-f", `body=${[
