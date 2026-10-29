@@ -449,6 +449,24 @@ test("a held release is due now once the production head moves, then the back-of
   assert.equal(await run(4), false, "same head: once per head");
 });
 
+test("a head change across many held releases is one head read; a hold in that pass adds no read", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed"), prod: VERIFY(100, "publish-failed") });
+  await run();
+  const old = new Date(Date.now() + 3_600_000).toISOString();
+  editState((st) => {
+    for (let pr = 200; pr < 232; pr++) st.prodReleases[pr] = { pr, headSha: MERGE, issues: [], phase: "held", attempts: 1, retryAt: old, verifiedHead: MERGE, since: old };
+    st.prodReleases[100].retryAt = old;
+  });
+  const st0 = gh(); st0.prodHead = "e".repeat(40); writeFileSync(GH_STATE, JSON.stringify(st0));
+  resetReleaseStage();
+  const reads = () => ghCalls().filter((c) => c.some((x) => /\/commits\//.test(x))).length;
+  const before = reads();
+  assert.equal(await run(2), true, "a moved head makes a held release due");
+  assert.equal(reads() - before, 1, "one head read for the pass, the hold included");
+  const rs = loadRepoState("rel").prodReleases;
+  assert.ok(Object.values(rs).every((r) => r.verifiedHead === "e".repeat(40)), "every held release records the new head");
+});
+
 test("a held re-verify that holds for the same reason comments once", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("fail"), prod: VERIFY(100, "prod-verify-failed") });
   await run();

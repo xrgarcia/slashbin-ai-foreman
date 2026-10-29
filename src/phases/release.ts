@@ -80,6 +80,8 @@ export let releaseBackoff = new BackoffTracker();
 const lastAdoptScan = new Map<string, number>();
 /** Per repo: when a held release last compared the production head with the one it was verified at. */
 const lastHeadProbe = new Map<string, number>();
+/** Per repo: the production head this pass already read, so a hold in the same pass records it without a second read. */
+const passHead = new Map<string, string>();
 /** Spacing of those head reads: one `commits/<branch>` call per repo per minute while a release is held. */
 export const HEAD_PROBE_MS = 60_000;
 /** `repo#pr` already found to name no issue to adopt; `repo#issue` already checked for an SRE sweep hold. */
@@ -90,6 +92,7 @@ export function resetReleaseStage(): void {
   releaseBackoff = new BackoffTracker();
   lastAdoptScan.clear();
   lastHeadProbe.clear();
+  passHead.clear();
   adoptChecked.clear();
 }
 
@@ -264,11 +267,14 @@ async function holdRelease(
     }
   }
   logger.warn(`Release PR #${rel.pr}: prod verification held (${v.hold}), attempt ${attempts}; re-verify at ${retryAt}`);
-  let verifiedHead = rel.verifiedHead;
-  try {
-    verifiedHead = productionHead(repoConfig);
-  } catch (err) {
-    logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
+  let verifiedHead = passHead.get(repoConfig.name) ?? rel.verifiedHead;
+  if (!passHead.has(repoConfig.name)) {
+    try {
+      verifiedHead = productionHead(repoConfig);
+      passHead.set(repoConfig.name, verifiedHead);
+    } catch (err) {
+      logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
+    }
   }
   putRelease(repoConfig, {
     ...rel, phase: "held", attempts, retryAt, hold: v.hold,
@@ -717,6 +723,7 @@ export async function tryRelease(
   if (repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch) return false;
   if (isUpstreamBlocked("github")) return false;
   const rlog = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "release" });
+  passHead.delete(repoConfig.name);
 
   if (now() - (lastAdoptScan.get(repoConfig.name) ?? 0) >= ADOPT_SCAN_MS) {
     lastAdoptScan.set(repoConfig.name, now());
@@ -754,10 +761,19 @@ export async function tryRelease(
     lastHeadProbe.set(repoConfig.name, t);
     try {
       const head = productionHead(repoConfig);
-      for (const rel of waiting) {
-        if (rel.verifiedHead === head) continue;
-        if (rel.verifiedHead) rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} moved to ${short(head)} since its last prod verification; re-verifying now`);
-        putRelease(repoConfig, { ...rel, verifiedHead: head, ...(rel.verifiedHead ? { retryAt: iso(t) } : {}) });
+      passHead.set(repoConfig.name, head);
+      const moved = waiting.filter((r) => r.verifiedHead !== head);
+      if (moved.length > 0) {
+        // One state write for every release the new head touches.
+        save(repoConfig, (st) => {
+          for (const rel of moved) {
+            const stored = st.prodReleases?.[rel.pr];
+            if (!stored) continue;
+            if (stored.verifiedHead) rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} moved to ${short(head)} since its last prod verification; re-verifying now`);
+            stored.verifiedHead = head;
+            if (rel.verifiedHead) stored.retryAt = iso(t);
+          }
+        });
       }
     } catch (err) {
       rlog.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
