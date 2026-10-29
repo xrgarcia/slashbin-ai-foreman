@@ -449,6 +449,22 @@ test("a held release is due now once the production head moves, then the back-of
   assert.equal(await run(4), false, "same head: once per head");
 });
 
+test("a hold persisted before heads were recorded is due on the first probe, then waits per head", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed"), prod: VERIFY(100, "publish-failed") });
+  await run();
+  editState((st) => {
+    delete st.prodReleases[100].verifiedHead;
+    st.prodReleases[100].retryAt = new Date(Date.now() + 6 * 3_600_000).toISOString();
+  });
+  resetReleaseStage();
+  assert.equal(await run(2), true, "no recorded head: verified on the first probe, not after six hours");
+  assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
+  assert.equal(loadRepoState("rel").prodReleases[100].verifiedHead, MERGE, "the head is recorded");
+
+  resetReleaseStage();
+  assert.equal(await run(3), false, "same head on the next probe: the back-off holds");
+});
+
 test("a head change across many held releases is one head read; a hold in that pass adds no read", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed"), prod: VERIFY(100, "publish-failed") });
   await run();
