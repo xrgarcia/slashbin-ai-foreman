@@ -346,6 +346,8 @@ export class PaperclipMirror implements WorkObserver {
   private readonly blockedReason = new Map<string, string>();
   /** Task id → the role key that holds its Blocked card when it is not the stage's owner (`sre`: a failed dev deploy). */
   private readonly blockedOwner = new Map<string, string>();
+  /** A move a run of the card's assignee in flight deferred, retried at the next snapshot. */
+  private readonly deferredMoves = new Map<string, PaperclipStepMove>();
   /** The last dev-verification wait note per row, so a repeated wait writes nothing. */
   private readonly verifyWaitNote = new Map<string, string>();
   /** Task id → the GitHub stage last seen for its issue, from the cycle snapshot. */
@@ -579,6 +581,7 @@ export class PaperclipMirror implements WorkObserver {
   async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
     this.snapshotRepos.add(_repo);
     if (!(await this.ensureIndex())) return;
+    await this.retryDeferredMoves();
     const blocked = `status:${this.statusName("blocked")}`;
     const cards = read.cards;
     // With `ownsCards`, every issue has a card before the lifecycle pass places
@@ -1503,6 +1506,11 @@ export class PaperclipMirror implements WorkObserver {
       if (to !== SESSION_STAGE[h.phase]) h.restore = to;
       return true;
     }
+    if (await this.runInFlight(id, to)) {
+      this.deferredMoves.set(id, to);
+      return false;
+    }
+    this.deferredMoves.delete(id);
     let bucket: Bucket;
     let holder: Record<string, unknown> = {};
     let label: string | null = null;
@@ -1532,6 +1540,39 @@ export class PaperclipMirror implements WorkObserver {
       }
     }
     return ok;
+  }
+
+  /**
+   * True when moving `id` to `to` now would cut across a run of the card's
+   * assignee. Assigning a card to a seat that wakes on assignment opens a run
+   * whose checkout flips the card to in_progress; a second write within a
+   * second or two that sets any other status (and reassigns) makes Paperclip
+   * cancel the run, and the cancel's recovery settle leaves an execution hold
+   * that freezes the card (SLA-2959, 2026-10-29). A write leaving the status
+   * in_progress cancels cleanly (SLA-2948, SLA-2918), so it goes through.
+   *
+   * Decided on the card's own `executionRunId` / `checkoutRunId`, as the API
+   * returns them, not on a timer: on SLA-2959 the row already showed the
+   * checkout (status in_progress) when the second write arrived, and a timer
+   * would also delay every legitimate back-to-back reassignment. An unreadable
+   * row defers nothing.
+   */
+  private async runInFlight(id: string, to: PaperclipStepMove): Promise<boolean> {
+    if (to === null || to === "waiting") return false;
+    const target = to === "done" ? "done" : stageTarget(this.cfg, to, to === "blocked" ? this.blockedOwner.get(id) : undefined).bucket;
+    if (target === "in_progress") return false;
+    const row = await this.safeCall("read task", () => this.client.getIssue(id), id);
+    const assignee = row.ok ? row.value?.assigneeAgentId : undefined;
+    if (row.ok && assignee && assignee !== this.cfg.agentId && (row.value?.executionRunId || row.value?.checkoutRunId)) return true;
+    return false;
+  }
+
+  /** Retry the moves a run in flight deferred; the last one asked for wins. */
+  private async retryDeferredMoves(): Promise<void> {
+    for (const [id, to] of [...this.deferredMoves]) {
+      if (this.holds.has(id) || this.closedCards.has(id)) { this.deferredMoves.delete(id); continue; }
+      await this.move(id, to);
+    }
   }
 
   /**
