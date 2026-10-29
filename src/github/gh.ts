@@ -1,7 +1,8 @@
 // The gh CLI runner: retries transient failures, signals upstream limits, and
 // runs as the Tech Lead identity when a review needs it.
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { ghResource, recordGhCall } from "../gh-usage.js";
 import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "../upstream-backoff.js";
 import { formatGhError, invalidateSnapshotIfMutating } from "./cache.js";
@@ -117,6 +118,54 @@ export function runGh(args: string[], cwd: string, token: string): string {
     }
   }
   throw lastErr;
+}
+
+const execFileAsync = promisify(execFile);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * `runGh` without blocking the event loop: the same back-off gate, retry on transient
+ * failures and rate-limit handling, but `execFile` and a timer between attempts. For
+ * work that runs beside the poll loop (a report posted after a verify pass).
+ */
+export async function runGhAsync(args: string[], cwd: string, token: string): Promise<string> {
+  if (isUpstreamBlocked("github")) throw new UpstreamBackoffError("GitHub back-off active");
+  let lastErr: unknown;
+  const retry = backoffSettings().gh;
+  for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
+    try {
+      recordGhCall(args);
+      const { stdout } = await execFileAsync("gh", args, {
+        cwd, encoding: "utf-8", timeout: 30_000, maxBuffer: GH_MAX_BUFFER, env: { ...process.env, GH_TOKEN: token },
+      });
+      return stdout.trim();
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitGhError(err)) {
+        console.warn(`[gh] RATE LIMIT EXHAUSTED — GitHub API quota is spent, skipping: gh ${args.slice(0, 3).join(" ")}`);
+        const { message, stderr } = formatGhError(err);
+        signalUpstreamLimit("github", stderr.split("\n")[0] || message.split("\n")[0], { token, resource: ghResource(args) });
+        throw err;
+      }
+      if (attempt < retry.maxAttempts && isTransientGhError(err)) {
+        const wait = backoffDelay(attempt, retry);
+        const { message, stderr } = formatGhError(err);
+        console.warn(`[gh] transient failure (attempt ${attempt}/${retry.maxAttempts}), retrying in ${wait}ms: ${stderr.split("\n")[0] || message}`);
+        await sleep(wait);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+/** Async `gh` as the Foreman (see `gh`). */
+export async function ghAsync(args: string[], cwd: string): Promise<string> {
+  const foremanToken = process.env.FOREMAN_GITHUB_TOKEN;
+  if (!foremanToken) throw new Error("FOREMAN_GITHUB_TOKEN not set — cannot operate as Foreman");
+  invalidateSnapshotIfMutating(args);
+  return runGhAsync(args, cwd, foremanToken);
 }
 
 /** Run gh CLI using the Foreman token (slashbin-foreman account). */
