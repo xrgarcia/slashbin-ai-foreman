@@ -262,6 +262,14 @@ export const configSchema = z.object({
   // `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved.
   // Unset = no verify stage: the review run verifies and labels as before.
   srePath: z.string().optional(),
+  // The QA agent (xrgarcia/slashbin_ai_qa): when set, a PR the SRE's dev verify
+  // passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the
+  // result is posted on the PR as "## QA Report (report-only)". It never gates:
+  // the card moves to prApproved first and nothing waits on QA. Unset = no QA.
+  // Needs `emRepoPath` (its doppler-run.mjs supplies DEV_SESSION_MINT_KEY).
+  qaPath: z.string().optional(),
+  // GitHub repos (owner/name) QA applies to. QA supports only the Console today.
+  qaRepos: z.array(z.string()).default(["xrgarcia/Slashbin-console"]),
   // The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex
   // run and a prod-verification Codex run of up to 40 min each, plus the merge
   // and the deploy wait. The Foreman kills the deploy only past this; a deploy
@@ -500,6 +508,10 @@ export interface AgentConfig {
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
+  /** Absolute path to the QA checkout; undefined = no QA report. */
+  qaPath?: string;
+  /** Repos QA applies to. */
+  qaRepos: string[];
   /** Ceiling on one SRE deploy run (the release stage). */
   sreDeployMaxDurationMs: number;
   /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
@@ -656,6 +668,8 @@ export function loadConfig(configPath?: string): AgentConfig {
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
+    qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
+    qaRepos: fileConfig.qaRepos,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
@@ -850,6 +864,8 @@ export function loadConfig(configPath?: string): AgentConfig {
     unstickEscalationOwner: parsed.unstickEscalationOwner,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
+    qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
+    qaRepos: [...parsed.qaRepos],
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,

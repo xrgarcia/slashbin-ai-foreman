@@ -247,6 +247,18 @@ Type: string · Default: none · Env: `AI_AGENT_SRE_PATH`
 
 The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved. Unset = no verify stage: the review run verifies and labels as before.
 
+### `qaPath`
+
+Type: string · Default: none · Env: `AI_AGENT_QA_PATH`
+
+The QA agent (xrgarcia/slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` (its doppler-run.mjs supplies DEV_SESSION_MINT_KEY).
+
+### `qaRepos`
+
+Type: string[] · Default: `["xrgarcia/Slashbin-console"]`
+
+GitHub repos (owner/name) QA applies to. QA supports only the Console today.
+
 ### `sreDeployMaxDurationMs`
 
 Type: integer · Default: `7200000` (2 h) · Env: `AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS`
