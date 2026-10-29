@@ -427,6 +427,28 @@ test("merged but held: reopened at `prod verification held`, re-verified on the 
   assert.equal(tagsCreated().length, 1, "tagged once");
 });
 
+test("a held release is due now once the production head moves, then the back-off resumes", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed evidence=https://example.test/pv1"), prod: VERIFY(100, "publish-failed") });
+  await run();
+  const setHead = (sha) => { const st = gh(); st.prodHead = sha; writeFileSync(GH_STATE, JSON.stringify(st)); };
+  assert.equal(loadRepoState("rel").prodReleases[100].verifiedHead, MERGE, "the head at the hold is recorded");
+
+  resetReleaseStage();
+  assert.equal(await run(2), false, "head unchanged: not due");
+
+  setHead("f".repeat(40));
+  resetReleaseStage();
+  assert.equal(await run(3), true, "head changed: due now");
+  assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
+  const rel = loadRepoState("rel").prodReleases[100];
+  assert.equal(rel.attempts, 2);
+  assert.equal(rel.verifiedHead, "f".repeat(40));
+  assert.ok(Date.parse(rel.retryAt) - Date.now() >= DEFAULT_BACKOFF.prodVerifyRetry.baseMs, "back-off resumes");
+
+  resetReleaseStage();
+  assert.equal(await run(4), false, "same head: once per head");
+});
+
 test("a held re-verify that holds for the same reason comments once", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("fail"), prod: VERIFY(100, "prod-verify-failed") });
   await run();

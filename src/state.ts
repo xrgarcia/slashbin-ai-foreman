@@ -99,6 +99,8 @@ export interface ProdRelease {
   attempts: number;
   /** ISO time before which a held release is not re-verified. */
   retryAt?: string;
+  /** The production branch head at the last prod verification attempt; a different head makes a held release due now. */
+  verifiedHead?: string;
   /** ISO time the release stage started it. */
   since: string;
   /**
