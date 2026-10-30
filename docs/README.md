@@ -41,6 +41,7 @@ its own section contents and links back here.
 | [Pipeline](pipeline.md) | Which stages run, what do they require, and how do lanes and custom gates work? |
 | [Review](review.md) | How does the Tech Lead review and merge? How are missing outcome labels and deliberate holds handled? |
 | [Lifecycle reference](lifecycle.md) *(generated)* | What state is an issue in, what moves it, how is a Blocked card released, and what constitutes a verified release? |
+| [EM coordination map](em-coordination.md) | What must the Engineering Manager do, or leave alone, at each stage and hold? (Test-checked against the source.) |
 | [Paperclip](paperclip.md) *(generated)* | How do I enable the board mirror, map roles and stages, verify it, or remove it? |
 | [Skills](skills.md) | What instructions does a session receive? How do built-ins, overlays, prompt variables, and images work? |
 | [Skill sync](skill-sync.md) | How do repo skill copies pick up a shared version as approved work arrives? |
