@@ -1,0 +1,15 @@
+{
+  "_about": "Shared corpus for the Acceptance rule enforced by .claude/hooks/approved_gate_hook.py (check_acceptance, structural part) and by the Foreman at pickup (slashbin-ai-foreman). ok=true means the issue may be built. Both implementations must give these verdicts. Add a case here before changing either.",
+  "script": "scripts/foreman/foreman-approved-needs-acceptance-acceptance.mjs",
+  "cases": [
+    { "id": "A1-named-script", "ok": true, "body": "## Problem\nx\n\n## Acceptance\n- **Script:** `scripts/jerky-com/jerky_service-200-acceptance.mjs`\n- **Invocation:** POST /x\n\n## Notes\ny" },
+    { "id": "A2-no-script-with-reason", "ok": true, "body": "## Acceptance\n- **No-Script:** docs-only change to a README, no caller can observe it at runtime.\n" },
+    { "id": "A3-crlf-and-trailing-space-heading", "ok": true, "body": "## Problem\r\nx\r\n\r\n## Acceptance  \r\n- **Script:** `scripts/a/b-1-acceptance.mjs`\r\n" },
+    { "id": "H1-no-section", "ok": false, "body": "## Problem\nx\n\n## Requirements\ny\n" },
+    { "id": "H2-jerky_service-200-checkbox-list-heading-with-suffix", "ok": false, "body": "## Problem\nx\n\n## Acceptance (dev; incident pings are internal-only)\n\n- [ ] **#10555 replay:** classified not_a_ticket 0.95 -> no ping.\n- [ ] A test fails if any path can drop a keyword hit.\n" },
+    { "id": "H3-section-without-script-or-no-script", "ok": false, "body": "## Acceptance\n\n- [ ] it works\n- [ ] a test covers it\n" },
+    { "id": "H4-no-script-reason-too-short", "ok": false, "body": "## Acceptance\n- **No-Script:** internal only\n" },
+    { "id": "H5-only-a-data-file-is-named", "ok": false, "body": "## Acceptance\nRuns against `scripts/a/baseline.json`.\n" },
+    { "id": "H6-heading-only-mentioned-in-prose", "ok": false, "body": "## Problem\nThe red run is pasted in `## Acceptance` above.\n" }
+  ]
+}
