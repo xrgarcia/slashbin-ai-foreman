@@ -43,14 +43,16 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    **QA report (report-only, on when `qaPath` is set):** after a pass on a `qaRepos` repo
    (the Console), the Foreman runs `qa.mjs check` once for that PR, in the background, and
    posts `## QA Report (report-only)` on it. Nothing waits on it and it never holds or
-   reworks the card; a crash or a 10-minute timeout becomes an "errored" comment. Once per
+   reworks the card; a crash or a 90-minute timeout (`QA_MAX_DURATION_MS`) becomes an "errored" comment. Once per
    PR: an existing comment with the heading ends it. `DEV_SESSION_MINT_KEY` reaches only
    the QA child, through the EM checkout's `doppler-run.mjs` (needs `emRepoPath`).
    **With `qaGate: true`** QA runs *before* the advance: PASS advances; FAIL (a regression,
    or a defect with no baseline) takes the visual-QA rework path (`hold=visual-qa-failed`,
-   the rework issue carrying QA's regression lines and shot names); HELD, a crash or a
-   timeout holds the card as `qa-*` (stays `pr merged`, Blocked, retried on
-   `backoff.verifyRetry`). The comment is `## QA Report`, keyed by head SHA and verdict so
+   the rework issue carrying QA's regression lines and shot names); HELD or an
+   inconsistent verdict holds the card as `qa-held-*` / `qa-inconsistent` (stays `pr merged`,
+   Blocked, charged on `backoff.verifyRetry`); a crash or the 90-minute timeout is `qa-errored`,
+   a tooling hold that retries on `backoff.agentUnavailable` without charging an attempt.
+   Visual-QA rework runs at most 2 rounds (`verifyRetry.maxAttempts` 3). The comment is `## QA Report`, keyed by head SHA and verdict so
    a re-run after a restart does not double-post. Default false = the report-only step above.
 4. **Promote** — opens or updates the promotion PR (base branch → production branch,
    `develop` → `main` by default) for issues labeled `ready for prod release`, moving
@@ -158,7 +160,7 @@ built-ins in the order above (verify only with `srePath`; release only with both
 { "stages": [
   { "type": "reconcile" }, { "type": "review" }, { "type": "verify" }, { "type": "promote" },
   { "type": "release" }, { "type": "revise" }, { "type": "implement" }, { "type": "branch-sync" },
-  { "type": "dependabot" }
+  { "type": "dependabot" }, { "type": "unstick" }
 ] }
 ```
 

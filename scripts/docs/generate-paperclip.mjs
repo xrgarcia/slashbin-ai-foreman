@@ -119,7 +119,7 @@ const WHEN = {
   verifyWaiting: "Dev verification waits on something that clears by itself (the deploy is still building, or the SRE could not run) and resumes on its own. The card stays in review; Blocked is for holds a person must clear.",
   verifyStarted: "A dev-verification session starts on the merged pull request; the note names the verifier.",
   verifyFinished: "Dev verification passes; the issue moves on to release.",
-  verifyFailed: "Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most.",
+  verifyFailed: "Dev verification holds or errors; the issue is blocked with the reason and retried after 10 minutes, then 20, then left blocked for a person (`backoff.verifyRetry`); tooling and `wait-until` holds charge no attempt.",
 };
 const stepIds = Object.keys(PAPERCLIP_STEPS);
 const unknown = stepIds.filter((s) => !(s in WHEN));

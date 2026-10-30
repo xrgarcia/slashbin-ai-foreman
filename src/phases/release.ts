@@ -291,7 +291,7 @@ async function holdRelease(
  * (slashbin-cli#161: 46 refused merges at one sha; slashbin-io-worker#724: 13 approvals behind
  * a red required check).
  */
-const DEPLOY_STOPS: Record<string, string> = {
+export const DEPLOY_STOPS: Readonly<Record<string, string>> = {
   "predeploy-stop": "the SRE's pre-deploy check said STOP (`predeploy-stop`)",
   "merge-refused-repeatedly": "GitHub refused the SRE's merge repeatedly at this head (`merge-refused-repeatedly`)",
   "merge-blocked-check": "a required check is red at this head, after one re-run (`merge-blocked-check`)",
