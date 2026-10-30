@@ -51,10 +51,10 @@ come at 10 minutes, then 20, then the issue goes `blocked` (verify-exhausted).
 
 | Code | Kind | Foreman does by itself | EM input |
 |---|---|---|---|
-| `codex-unavailable`, `em-mirror-unavailable`, `registry-unavailable`, `tooling-unavailable`, `evidence-check-failed`, `no-evidence-comment`, `visual-qa-dev-unreachable`, `visual-qa-sign-in-failed`, `visual-qa-review-unavailable`, `visual-qa-sha-unproven`, `qa-errored` | defer (tooling) | retries on `backoff.agentUnavailable` (2 → 30 min), no attempt charged, silent | none — wait. Persisting for hours is a tooling defect: file it on the SRE or Foreman |
+| `codex-unavailable`, `em-mirror-unavailable`, `registry-unavailable`, `tooling-unavailable`, `evidence-check-failed`, `no-evidence-comment`, `visual-qa-dev-unreachable`, `visual-qa-sign-in-failed`, `visual-qa-review-unavailable`, `visual-qa-sha-unproven`, `qa-errored`, `qa-held-dev-unreachable`, `qa-held-sign-in-failed`, `qa-held-review-unavailable`, `qa-held-pr-unreadable`, `qa-held-baseline-unreadable` | defer (tooling) | retries on `backoff.agentUnavailable` (2 → 30 min), no attempt charged, silent | none — wait. Persisting for hours is a tooling defect: file it on the SRE or Foreman |
 | `wait-until-YYYYMMDDTHHMMZ` | wait | retries at that time, no charge | none — wait |
 | `visual-qa-failed` | rework | files its own `approved` issue "Visual QA rework N for #X", builds it, re-verifies the original when it merges; at most 2 rounds | **none — wait.** Filing your own corrective builds it twice (Slashbin-console#1535). After the last round it is a charged hold → `verify-exhausted` |
-| `qa-held-*`, `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
+| every other `qa-held-*` (`unsafe-host`, `browser-crashed`, `nothing-captured`), `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
 | `dev-verify-failed`, `deploy=…` | charged | blocked with owner SRE (`deployFailed`) | route to the SRE |
 | `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked` | a wait while it retries — unless the evidence already shows the spec or the build is wrong: then edit the spec (`specEdited` releases it at once) or file the fix as a follow-up (below), without waiting out the attempts. `baseAdvanced` does **not** release this one |
 
