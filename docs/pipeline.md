@@ -79,7 +79,10 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    characters (the EM's `approved` rule, enforced again here because a customer can apply the
    label themselves; `src/github/acceptance-gate.ts`). A held issue gets one comment per
    reason (hidden marker `<!-- foreman:readiness-hold KEY -->`) and becomes eligible by
-   itself once the body is fixed. Issues already carrying a lifecycle label are not judged.
+   itself once the body is fixed. The acceptance hold is also emitted in the cycle's waiting set (with its
+   reason) every held cycle, so a board shows it; fixing the body clears it. Issues already carrying a
+   lifecycle label are not judged. Generated rework issues state a `**No-Script:**` reason (their parent's
+   dev verification is re-run) so they pass the same rule.
 8. **Branch Sync** — merges the production branch back into the base branch
    (`main` → `develop`) through a sync PR, to keep them aligned after promotions. The
    sync PR is merged under `TECHLEAD_GITHUB_KEY`; without it, the PR opens but does not

@@ -150,3 +150,66 @@ test("readiness and acceptance holds are keyed separately: each is announced, ne
   await eligible(await connector("d-restarted-2"));
   assert.equal(posted().length, 2, "the older readiness comment still dedupes behind the acceptance one");
 });
+
+// ---- the board: the hold reaches the cycle's waiting set (Tech Lead S2, R1/R2) ----
+
+test("the hold comment tells a non-engineer that the EM will add the acceptance material", async () => {
+  reset(caseBody("H3-section-without-script-or-no-script"));
+  await eligible(await connector("s3"));
+  assert.match(posted()[0].body, /Engineering Manager \(EM\) will add the missing acceptance material/);
+});
+
+async function cycleWaiting(restart) {
+  const { registerWorkSource, addObserver, drainObservers } = await import("../dist/work-source.js");
+  const { tryBatchImplementation } = await import("../dist/phases/implement.js");
+  const p = join(tmp, "cfg.json");
+  writeFileSync(p, JSON.stringify({ stages: [{ type: "implement" }], repos: [{ name: "ws", repoPath: tmp, githubRepo: "example/repo" }] }));
+  const cfg = loadConfig(p);
+  const seen = [];
+  registerWorkSource(await connector(restart));
+  addObserver({ async onEvent(e) { if (e.kind === "waiting") seen.push(e); } });
+  await tryBatchImplementation(cfg.repos[0], cfg, logger, 1);
+  await drainObservers();
+  registerWorkSource(null);
+  return seen;
+}
+
+test("R1: a checkbox-only approved issue, nothing else buildable, is emitted as waiting with its acceptance reason", async () => {
+  reset(caseBody("H2-jerky_service-200-checkbox-list-heading-with-suffix"));
+  const seen = await cycleWaiting("w1");
+  const items = seen.at(-1).items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].item.issueNumber, 7);
+  assert.match(items[0].reason, /## Acceptance/);
+  assert.equal(items[0].skipped, undefined, "a Foreman-held wait, not a skip");
+  assert.equal(posted().length, 1);
+});
+
+test("R2: every held cycle and a restart emit it, one comment throughout; fixing the body clears it", async () => {
+  reset(caseBody("H2-jerky_service-200-checkbox-list-heading-with-suffix"));
+  for (const r of ["w2a", "w2b", "w2c-restarted"]) {
+    const seen = await cycleWaiting(r);
+    assert.deepEqual(seen.at(-1).items.map((i) => i.item.issueNumber), [7], r);
+  }
+  assert.equal(posted().length, 1, "comment deduplicated across cycles and restart");
+  setState({ body: GOOD });
+  const after = await cycleWaiting("w2d");
+  assert.deepEqual(after.at(-1)?.items ?? [], [], "the board reason is cleared");
+});
+
+test("every waiting emit in the implement stage carries the acceptance holds", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "implement.ts"), "utf8");
+  const emits = src.match(/kind: "waiting"[^\n]*/g);
+  assert.ok(emits.length >= 5);
+  for (const e of emits) assert.match(e, /acceptanceHolds|waitingSet\(/, e);
+  assert.match(src, /const waitingSet = \(block[^\n]*\n\s*\.\.\.acceptanceHolds/);
+});
+
+test("a generated rework issue (SRE or QA) passes the gate, naming its parent", async () => {
+  const { reworkIssueBody } = await import("../dist/phases/verify.js");
+  for (const by of ["SRE", "QA"]) {
+    const body = reworkIssueBody(7, 70, "diagnostic text", by);
+    assert.equal(acceptanceVerdict(body).ok, true, by);
+    assert.match(body, /\*\*No-Script:\*\*[^\n]*#7/, by);
+  }
+});

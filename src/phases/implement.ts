@@ -6,7 +6,7 @@ import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
-import { selectWork, emit, advance, hasObservers } from "../work-source.js";
+import { selectWork, heldWork, emit, advance, hasObservers } from "../work-source.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import {
   discoveryBatch,
@@ -274,9 +274,11 @@ export async function tryBatchImplementation(
   //     rest of `handOff` stays queued, untouched, for a later build.
   const offered = (await selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
   let handOff = offered;
+  // Issues held for an invalid Acceptance wait on the board in every set this cycle emits, offered work or not.
+  const acceptanceHolds = [...heldWork(repoConfig)];
   if (offered.length === 0) {
     // Nothing offered, so nothing waits: observers clear this repo's waits.
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: [] }, null, repoLogger);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
     // Reset failure count when there's no work (issues were resolved externally)
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -319,7 +321,7 @@ export async function tryBatchImplementation(
   const alreadyImplemented = new Set(repoState.implemented);
   handOff = handOff.filter((n) => !alreadyImplemented.has(n));
   if (handOff.length === 0) {
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: [] }, null, repoLogger);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
     if (failures > 0) failureCount.set(repoName, 0);
     return null;
@@ -430,6 +432,7 @@ export async function tryBatchImplementation(
   // drops out of it has stopped waiting, which is how an observer clears it.
   // A recorded branch divergence holds everything else back too (foreman#44).
   const waitingSet = (block: BranchBlock | undefined) => [
+    ...acceptanceHolds,
     ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0], skipped: true })),
     ...(block ? handOff.map((n) => ({ item: itemOf(repoConfig, n), reason: divergenceReason(block) })) : []),
   ];

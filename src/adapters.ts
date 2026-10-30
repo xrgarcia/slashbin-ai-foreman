@@ -57,6 +57,13 @@ export interface WorkSourceAdapter {
   ): Promise<WorkItem[]>;
 
   /**
+   * The items `selectWork` last left out because of a hold the source judged on the
+   * item itself (an unmet acceptance requirement), each with its reason, for the
+   * cycle's waiting set. Optional: a source with no such holds omits it.
+   */
+  heldWork?(repoConfig: RepoConfig): ReadonlyArray<WaitingItem>;
+
+  /**
    * Record `event` on the source. Resolves `true` when the source recorded a
    * change, `false` when it wrote nothing (already there, no longer open, a
    * failed write, or an event this source keeps no record of). Never throws.
