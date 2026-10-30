@@ -168,6 +168,10 @@ export function reworkIssueBody(n: number, pr: number, summary: string, by: "SRE
     ``,
     `## Acceptance`,
     ``,
+    // One rule: pickup holds an \`approved\` issue with no script or No-Script reason (EM#99), so a generated
+    // repair states one. Its verification is the parent's own, re-run after this merges.
+    `- **No-Script:** this repair is verified by re-running parent #${n}'s dev verification at the new dev SHA, not by a committed script of its own.`,
+    ``,
     qa
       ? `QA re-checks #${n}'s pages at the new dev SHA and its verdict is PASS (no regression against the baseline). A FAIL files the next rework; a HELD run holds as before.`
       : `The SRE re-captures #${n}'s screens at the new dev SHA and the visual QA verdict is PASS. A FAIL files the next rework; infrastructure or sign-in failures hold as before.`,

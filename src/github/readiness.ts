@@ -180,7 +180,7 @@ export function holdComment(kind: HoldKind, reasons: string[], approver: string)
     : "Holding this issue: it cannot be built until its body says how the work is accepted.";
   const tail = kind === "readiness"
     ? "The build starts automatically when these hold. No action is needed unless a line above is invalid, in which case edit the readiness block."
-    : "The build starts automatically once the issue body is edited to fix this.";
+    : "You do not need to write this yourself: the Engineering Manager (EM) will add the missing acceptance material to the issue. The build starts automatically once it is there.";
   return [
     `${MARKER_PREFIX}${markerKey(kind, reasons)} -->`,
     `${lead} Approved by @${approver}; the approval stands.`,

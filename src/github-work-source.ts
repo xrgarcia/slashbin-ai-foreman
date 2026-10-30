@@ -2,7 +2,7 @@
 // translates the core lifecycle (lifecycle.ts) into issue labels and back,
 // and is the only module that knows which label means which stage.
 
-import type { ItemState, SnapshotCard, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
+import type { ItemState, SnapshotCard, WaitingItem, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import {
   closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, gh, ghKeyed, hasLabel,
@@ -91,6 +91,9 @@ const blockerHoldAnnounced = new Map<string, string>();
 /** `repo#issue|kind` → the reason of that kind already on the issue as a comment, so GitHub is read for it once per run, not every cycle. */
 const holdCommented = new Map<string, string>();
 
+/** repo → the issues the last full eligibility pass held for an invalid Acceptance, with the reason: the board's view of the hold. */
+const acceptanceHeld = new Map<string, WaitingItem[]>();
+
 /**
  * GitHub issues as a work source — the first `WorkSourceAdapter` connector.
  *
@@ -138,6 +141,10 @@ export function closedWins(open: readonly SnapshotCard[], closed: readonly Snaps
 export class GitHubIssueConnector implements WorkSourceAdapter {
   async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
     return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
+  }
+
+  heldWork(repoConfig: RepoConfig): ReadonlyArray<WaitingItem> {
+    return acceptanceHeld.get(repoConfig.githubRepo) ?? [];
   }
 
   async record(event: WorkEvent, repoConfig: RepoConfig, logger: Logger): Promise<boolean> {
@@ -587,13 +594,15 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     const lifecycleLabelValues = Object.values(config.lifecycleLabels);
 
     const actionable: number[] = [];
+    const held: WaitingItem[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
       if (labels.includes(config.github.blockedLabel)) continue;
       if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
-      if (this.waitsOnBlocker(config, issue.number, logger)) continue;
+      if (this.waitsOnBlocker(config, issue.number, logger, held)) continue;
       actionable.push(issue.number);
     }
+    acceptanceHeld.set(config.githubRepo, held);
     return actionable;
   }
 
@@ -602,7 +611,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * branch (dependencies.ts). An unreadable dependency list holds the issue too:
    * a stall is logged and visible, a build out of order is neither.
    */
-  private waitsOnBlocker(config: RepoConfig, num: number, logger: Logger): boolean {
+  private waitsOnBlocker(config: RepoConfig, num: number, logger: Logger, held: WaitingItem[] = []): boolean {
     const key = `${config.githubRepo}#${num}`;
     let hold: string | null;
     let announce: { kind: HoldKind; reasons: string[] } | null = null;
@@ -636,6 +645,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       holdCommented.delete(`${key}|acceptance`);
       return false;
     }
+    if (announce?.kind === "acceptance") held.push({ item: { issueNumber: num, repo: config.githubRepo }, reason: hold });
     if (announce) {
       const memo = `${key}|${announce.kind}`;
       if (holdCommented.get(memo) !== hold && announceHold(config, num, announce.kind, announce.reasons)) {
