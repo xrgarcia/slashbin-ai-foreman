@@ -240,7 +240,7 @@ knows of are redacted from every note before it is sent.
 | `reviewFailed` | The review fails. | unchanged | `review failed: {detail}` |
 | `verifyStarted` | A dev-verification session starts on the merged pull request; the note names the verifier. | `verifying` | `{reviewer} verifying PR #{pr} in dev` |
 | `verifyFinished` | Dev verification passes; the issue moves on to release. | unchanged | `dev verification finished: {detail}` |
-| `verifyFailed` | Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most. | unchanged | `dev verification did not pass: {detail}` |
+| `verifyFailed` | Dev verification holds or errors; the issue is blocked with the reason and retried after 10 minutes, then 20, then left blocked for a person (`backoff.verifyRetry`); tooling and `wait-until` holds charge no attempt. | unchanged | `dev verification did not pass: {detail}` |
 
 A task is created only when the Foreman picks an issue up (`claim`). A later step on an issue
 that has no task writes nothing.
