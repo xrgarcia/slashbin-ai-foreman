@@ -213,4 +213,6 @@ test("SRE_TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checko
   const sre = m[1].split("|").filter((x) => !x.startsWith("wait-until"));
   assert.deepEqual([...SRE_TOOLING_HOLDS].sort(), sre.sort());
   assert.ok(TOOLING_HOLDS.includes("qa-errored"), "the Foreman QA gate's own tooling hold (#137)");
+  for (const r of ["qa-held-dev-unreachable", "qa-held-sign-in-failed", "qa-held-review-unavailable"]) assert.ok(TOOLING_HOLDS.includes(r), r);
+  for (const r of ["qa-held-unsafe-host", "qa-held-browser-crashed", "qa-held-nothing-captured"]) assert.ok(!TOOLING_HOLDS.includes(r), r);
 });
