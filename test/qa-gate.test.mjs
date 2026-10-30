@@ -51,8 +51,12 @@ test("FAIL: not a pass; the visual-qa-failed rework hold carries QA's regression
   assert.match(body, /## QA output/);
 });
 
-test("HELD and an inconsistent exit hold with a charged qa-* reason; never a pass", async () => {
-  for (const o of [result("HELD", 3), { kind: "manifest", exitCode: 0, manifest: manifests.FAIL }, { kind: "manifest", exitCode: 0, manifest: { verdict: "WAT" } }]) {
+test("a HELD QA could re-run by itself is free; a deterministic HELD and an inconsistent exit charge; never a pass", async () => {
+  const unsafe = { kind: "manifest", exitCode: 3, manifest: { ...manifests.HELD, hold: "unsafe-host" } };
+  const free = await applyQaGate(sre, REPO, 5, deps(result("HELD", 3)), logger);
+  assert.equal(free.pass, false);
+  assert.deepEqual(verifyHoldPlan(free.reason), { kind: "defer" }, "a dev outage spends no attempt");
+  for (const o of [unsafe, { kind: "manifest", exitCode: 0, manifest: manifests.FAIL }, { kind: "manifest", exitCode: 0, manifest: { verdict: "WAT" } }]) {
     const out = await applyQaGate(sre, REPO, 5, deps(o), logger);
     assert.equal(out.pass, false, JSON.stringify(o).slice(0, 60));
     assert.match(out.reason, /^qa-/);
