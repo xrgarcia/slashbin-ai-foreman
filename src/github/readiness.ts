@@ -147,8 +147,11 @@ export function unmetReadiness(readiness: Readiness, read: GhRead): string[] {
   return unmet;
 }
 
-/** The hidden marker a readiness-hold comment carries, naming the reason it announced. */
+/** The hidden marker a hold comment carries, naming the reason it announced. */
 const MARKER_PREFIX = "<!-- foreman:readiness-hold ";
+
+/** Why an issue is held. Each kind is announced and deduped on its own, so one never suppresses another. */
+export type HoldKind = "readiness" | "acceptance";
 
 /** A short stable digest of a reason, so the marker never carries issue text. */
 function reasonKey(reason: string): string {
@@ -157,22 +160,46 @@ function reasonKey(reason: string): string {
   return h.toString(36);
 }
 
-/** The comment announcing a readiness hold. Carries the marker that dedupes it. */
-export function readinessHoldComment(unmet: string[], approver: string): string {
+/** The marker key for a reason: readiness keeps its original bare digest; other kinds are prefixed. */
+function markerKey(kind: HoldKind, reasons: string[]): string {
+  const digest = reasonKey(reasons.join("\n"));
+  return kind === "readiness" ? digest : `${kind}:${digest}`;
+}
+
+/** The kind a hold comment announced, from its marker; undefined when it carries none. */
+function kindOf(comment: string | undefined): HoldKind | undefined {
+  const m = comment?.match(/<!-- foreman:readiness-hold (\S+) -->/);
+  if (!m) return undefined;
+  return m[1].startsWith("acceptance:") ? "acceptance" : "readiness";
+}
+
+/** The comment announcing a hold. Carries the marker that dedupes it. */
+export function holdComment(kind: HoldKind, reasons: string[], approver: string): string {
+  const lead = kind === "readiness"
+    ? "Holding this issue: its Pre-Flight readiness block is not met yet."
+    : "Holding this issue: it cannot be built until its body says how the work is accepted.";
+  const tail = kind === "readiness"
+    ? "The build starts automatically when these hold. No action is needed unless a line above is invalid, in which case edit the readiness block."
+    : "The build starts automatically once the issue body is edited to fix this.";
   return [
-    `${MARKER_PREFIX}${reasonKey(unmet.join("\n"))} -->`,
-    `Holding this issue: its Pre-Flight readiness block is not met yet. Approved by @${approver}; the approval stands.`,
+    `${MARKER_PREFIX}${markerKey(kind, reasons)} -->`,
+    `${lead} Approved by @${approver}; the approval stands.`,
     "",
-    "Unmet:",
-    ...unmet.map((u) => `- \`${u}\``),
+    kind === "readiness" ? "Unmet:" : "Missing:",
+    ...reasons.map((u) => `- ${kind === "readiness" ? `\`${u}\`` : u}`),
     "",
-    "The build starts automatically when these hold. No action is needed unless a line above is invalid, in which case edit the readiness block.",
+    tail,
   ].join("\n");
 }
 
-/** Whether `comment` (the Foreman's latest) is the hold comment for exactly this reason. */
-export function announcesReason(comment: string | undefined, unmet: string[]): boolean {
-  return comment?.includes(`${MARKER_PREFIX}${reasonKey(unmet.join("\n"))} -->`) ?? false;
+/** The readiness-hold comment (kept for callers that predate hold kinds). */
+export function readinessHoldComment(unmet: string[], approver: string): string {
+  return holdComment("readiness", unmet, approver);
+}
+
+/** Whether `comment` (the Foreman's latest of this kind) is the hold comment for exactly these reasons. */
+export function announcesReason(comment: string | undefined, reasons: string[], kind: HoldKind = "readiness"): boolean {
+  return comment?.includes(`${MARKER_PREFIX}${markerKey(kind, reasons)} -->`) ?? false;
 }
 
 const COMMENTS_QUERY = `query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){issue(number:$n){
@@ -217,26 +244,32 @@ type LabeledNode = { label?: { name?: string }; actor?: { login?: string } | nul
 
 /**
  * Say, once, on the issue why it is held. The dedupe is the marker in the
- * Foreman's own latest hold comment, found however many comments follow it, so
- * a restart does not repeat it. Returns true when the reason is on the issue
+ * Foreman's own latest hold comment OF THIS KIND, found however many comments
+ * follow it, so a restart does not repeat it and a readiness hold never hides an
+ * acceptance hold (or the reverse). Returns true when the reason is on the issue
  * (already, or just posted); false when it could not be established, so the
  * caller tries again next cycle. Throws never.
  */
-export function announceReadinessHold(config: RepoConfig, num: number, unmet: string[]): boolean {
+export function announceHold(config: RepoConfig, num: number, kind: HoldKind, reasons: string[]): boolean {
   try {
     const self = foremanLogin(config.repoPath)?.toLowerCase();
     const lastHold = self
       ? findLatest<CommentNode, string>(config, num, COMMENTS_QUERY, "comments", (c) =>
-          c.author?.login?.toLowerCase() === self && c.body?.includes(MARKER_PREFIX) ? c.body : undefined)
+          c.author?.login?.toLowerCase() === self && c.body?.includes(MARKER_PREFIX) && kindOf(c.body) === kind ? c.body : undefined)
       : undefined;
-    if (announcesReason(lastHold, unmet)) return true;
+    if (announcesReason(lastHold, reasons, kind)) return true;
     const approver = findLatest<LabeledNode, string>(config, num, LABELED_QUERY, "timelineItems", (e) =>
       e.label?.name === config.triggerLabel && e.actor?.login ? e.actor.login : undefined) ?? "unknown";
-    commentOnIssue(config, num, readinessHoldComment(unmet, approver));
+    commentOnIssue(config, num, holdComment(kind, reasons, approver));
     return true;
   } catch {
     return false;
   }
+}
+
+/** Announce a readiness hold (see `announceHold`). */
+export function announceReadinessHold(config: RepoConfig, num: number, unmet: string[]): boolean {
+  return announceHold(config, num, "readiness", unmet);
 }
 
 /** The issue body, live. Throws on a gh failure. */

@@ -14,7 +14,8 @@ import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
 import { laterStageLabels } from "./github/lifecycle-scan.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
-import { announceReadinessHold, parseReadiness, readIssueBody, unmetReadiness } from "./github/readiness.js";
+import { acceptanceVerdict } from "./github/acceptance-gate.js";
+import { announceHold, parseReadiness, type HoldKind, readIssueBody, unmetReadiness } from "./github/readiness.js";
 import { holdReasons, issueStates, recentlyClosed } from "./github/cards.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
@@ -87,8 +88,8 @@ const coveredSkipAnnounced = new Map<string, string>();
 /** `repo#issue` → the hold last logged for it, so a held issue is announced once, not every cycle. */
 const blockerHoldAnnounced = new Map<string, string>();
 
-/** `repo#issue` → the readiness reason already on the issue as a comment, so GitHub is read for it once per run, not every cycle. */
-const readinessCommented = new Map<string, string>();
+/** `repo#issue|kind` → the reason of that kind already on the issue as a comment, so GitHub is read for it once per run, not every cycle. */
+const holdCommented = new Map<string, string>();
 
 /**
  * GitHub issues as a work source — the first `WorkSourceAdapter` connector.
@@ -604,7 +605,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   private waitsOnBlocker(config: RepoConfig, num: number, logger: Logger): boolean {
     const key = `${config.githubRepo}#${num}`;
     let hold: string | null;
-    let readinessUnmet: string[] = [];
+    let announce: { kind: HoldKind; reasons: string[] } | null = null;
     try {
       const unmet = unmetBlockers(blockersOf(config.githubRepo, num, config.repoPath), config.lifecycleLabels);
       hold = unmet.length ? `blocked by ${unmet.map((b) => blockerRef(b, config.githubRepo)).join(", ")} until it merges` : null;
@@ -613,19 +614,33 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     }
     if (hold === null) {
       try {
-        readinessUnmet = unmetReadiness(parseReadiness(readIssueBody(config, num)), (args) => gh(args, config.repoPath));
-        hold = readinessUnmet.length ? `Pre-Flight readiness not met: ${readinessUnmet.join("; ")}` : null;
+        const body = readIssueBody(config, num);
+        const readinessUnmet = unmetReadiness(parseReadiness(body), (args) => gh(args, config.repoPath));
+        if (readinessUnmet.length) {
+          hold = `Pre-Flight readiness not met: ${readinessUnmet.join("; ")}`;
+          announce = { kind: "readiness", reasons: readinessUnmet };
+        } else {
+          const verdict = acceptanceVerdict(body);
+          if (!verdict.ok) {
+            hold = `no acceptance script: ${verdict.reason}`;
+            announce = { kind: "acceptance", reasons: [verdict.reason ?? "no acceptance"] };
+          }
+        }
       } catch (err) {
         hold = `its Pre-Flight could not be read (${err instanceof Error ? err.message : String(err)})`;
       }
     }
     if (hold === null) {
       blockerHoldAnnounced.delete(key);
-      readinessCommented.delete(key);
+      holdCommented.delete(`${key}|readiness`);
+      holdCommented.delete(`${key}|acceptance`);
       return false;
     }
-    if (readinessUnmet.length && readinessCommented.get(key) !== hold && announceReadinessHold(config, num, readinessUnmet)) {
-      readinessCommented.set(key, hold);
+    if (announce) {
+      const memo = `${key}|${announce.kind}`;
+      if (holdCommented.get(memo) !== hold && announceHold(config, num, announce.kind, announce.reasons)) {
+        holdCommented.set(memo, hold);
+      }
     }
     if (blockerHoldAnnounced.get(key) !== hold) {
       blockerHoldAnnounced.set(key, hold);

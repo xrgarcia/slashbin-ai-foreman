@@ -14,7 +14,7 @@ import { configureIssueCache } from "../dist/github.js";
 import { createLogger } from "../dist/logger.js";
 
 const logger = createLogger({ format: "text", level: "error" });
-const block = (...lines) => ["## Pre-Flight", "```readiness", ...lines, "```", "", "## Acceptance", "- x"].join("\n");
+const block = (...lines) => ["## Pre-Flight", "```readiness", ...lines, "```", "", "## Acceptance", "- **Script:** `scripts/x/x-acceptance.mjs`"].join("\n");
 
 // ---- parser ----
 
@@ -225,7 +225,7 @@ test("an invalid line holds the issue and the comment names it", async () => {
 });
 
 test("no block, or informational Pre-Flight text, leaves the issue eligible, with no comment", async () => {
-  reset(["approved"], "## Pre-Flight\n- None external.\n");
+  reset(["approved"], "## Pre-Flight\n- None external.\n\n## Acceptance\n- **Script:** `scripts/x/x-acceptance.mjs`\n");
   assert.deepEqual(await eligible(await connector("d")), [7]);
   assert.equal(posted().length, 0);
 });
