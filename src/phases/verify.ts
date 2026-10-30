@@ -69,8 +69,20 @@ export const SRE_TOOLING_HOLDS: readonly string[] = [
   "visual-qa-review-unavailable",
   "visual-qa-sha-unproven",
 ];
-/** The Foreman's own checkers that could not run: its QA gate (slashbin-ai-foreman#137). */
-export const FOREMAN_TOOLING_HOLDS: readonly string[] = ["qa-errored"];
+/**
+ * The Foreman's own checkers that could not run: its QA gate (slashbin-ai-foreman#137), and the
+ * QA holds that mean QA could not check, not that the page is wrong. The SRE's `visual-qa-*` twins
+ * above are free; charging these let a dev outage exhaust a card. `unsafe-host`, `browser-crashed`
+ * and `nothing-captured` stay charged: the same page does it again.
+ */
+export const FOREMAN_TOOLING_HOLDS: readonly string[] = [
+  "qa-errored",
+  "qa-held-dev-unreachable",
+  "qa-held-sign-in-failed",
+  "qa-held-review-unavailable",
+  "qa-held-pr-unreadable",
+  "qa-held-baseline-unreadable",
+];
 export const TOOLING_HOLDS: readonly string[] = [...SRE_TOOLING_HOLDS, ...FOREMAN_TOOLING_HOLDS];
 export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes(reason);
 
