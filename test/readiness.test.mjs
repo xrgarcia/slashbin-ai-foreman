@@ -138,9 +138,19 @@ else if (a[0] === "issue" && a[1] === "comment") {
   fs.writeFileSync(${JSON.stringify(stateFile())}, JSON.stringify(S));
 }
 else if (a[0] === "api" && a[1] === "user") out("foreman-bot");
-else if (a[0] === "api" && a[1] === "graphql") out({ data: { repository: { issue: {
-  comments: { nodes: S.comments },
-  timelineItems: { nodes: S.labeled } } } } });
+else if (a[0] === "api" && a[1] === "graphql") {
+  const q = a[a.indexOf("-f") + 1];
+  const field = q.includes("timelineItems") ? "timelineItems" : "comments";
+  const all = field === "comments" ? S.comments : S.labeled;
+  const ci = a.findIndex((x) => /^c=/.test(x));
+  const end = ci < 0 ? all.length : Number(a[ci].slice(2));
+  const start = Math.max(0, end - 100);
+  S.calls = (S.calls || 0) + 1;
+  fs.writeFileSync(${JSON.stringify(stateFile())}, JSON.stringify(S));
+  out({ data: { repository: { issue: { [field]: {
+    pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+    nodes: all.slice(start, end) } } } } });
+}
 else if (a[0] === "api" && /\\/dependencies\\/blocked_by$/.test(a[1])) out("[]");
 else if (a[0] === "api" && /^repos\\/example\\/repo\\/issues\\/\\d+$/.test(a[1])) out(S.body);
 else if (a[0] === "api" && a[1].startsWith("repos/o/m/contents/")) {
@@ -263,4 +273,31 @@ test("the approved label is never touched", async () => {
   reset();
   await eligible(await connector("j"));
   assert.deepEqual(fileState().board[0].labels, [{ name: "approved" }]);
+});
+
+test("R1: 30+ human comments after the hold marker, then a restart: no repeat", async () => {
+  reset();
+  await eligible(await connector("k"));
+  assert.equal(posted().length, 1);
+  const humans = Array.from({ length: 130 }, (_, i) => ({ body: `chat ${i}`, author: { login: "ray" } }));
+  setState({ comments: [...fileState().comments, ...humans] });
+  await eligible(await connector("k-restarted"));
+  assert.equal(posted().length, 1, "marker found across pages");
+});
+
+test("R2/R4: 50+ label events after the approval: the announcement names the approver", async () => {
+  reset();
+  const noise = Array.from({ length: 230 }, (_, i) => ({ label: { name: `l${i}` }, actor: { login: "someone" } }));
+  setState({ labeled: [{ label: { name: "approved" }, actor: { login: "ray" } }, ...noise] });
+  await eligible(await connector("l"));
+  assert.equal(posted().length, 1);
+  assert.match(posted()[0].body, /@ray/);
+  assert.doesNotMatch(posted()[0].body, /@unknown/);
+});
+
+test("a failed history read posts nothing", async () => {
+  reset();
+  setState({ comments: [{ body: "x", author: { login: "ray" } }], labeled: null });
+  await eligible(await connector("m"));
+  assert.equal(posted().length, 0);
 });

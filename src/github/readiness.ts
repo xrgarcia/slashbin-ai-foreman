@@ -175,37 +175,63 @@ export function announcesReason(comment: string | undefined, unmet: string[]): b
   return comment?.includes(`${MARKER_PREFIX}${reasonKey(unmet.join("\n"))} -->`) ?? false;
 }
 
-const ANNOUNCE_QUERY = `query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){
-comments(last:30){nodes{body author{login}}}
-timelineItems(last:50,itemTypes:[LABELED_EVENT]){nodes{... on LabeledEvent{label{name} actor{login}}}}}}}`;
+const COMMENTS_QUERY = `query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){issue(number:$n){
+comments(last:100,before:$c){pageInfo{hasPreviousPage startCursor} nodes{body author{login}}}}}}`;
+const LABELED_QUERY = `query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){issue(number:$n){
+timelineItems(last:100,before:$c,itemTypes:[LABELED_EVENT]){pageInfo{hasPreviousPage startCursor} nodes{... on LabeledEvent{label{name} actor{login}}}}}}}`;
 
-interface AnnounceReads {
-  comments: { body: string; author?: { login?: string } | null }[];
-  labeled: { label?: { name?: string }; actor?: { login?: string } | null }[];
-}
+interface Page<T> { nodes: T[]; hasPrev: boolean; cursor: string | null }
 
-/** The issue's recent comments and `labeled` events, one read. Throws on a gh failure. */
-function readAnnounceContext(config: RepoConfig, num: number): AnnounceReads {
+/** One page (newest 100 before `cursor`) of a connection. Throws on a gh failure or a malformed answer. */
+function readPage<T>(config: RepoConfig, num: number, query: string, field: "comments" | "timelineItems", cursor: string | null): Page<T> {
   const [o, r] = config.githubRepo.split("/");
-  const raw = gh(["api", "graphql", "-f", `query=${ANNOUNCE_QUERY}`, "-F", `o=${o}`, "-F", `r=${r}`, "-F", `n=${num}`], config.repoPath);
-  const issue = JSON.parse(raw)?.data?.repository?.issue;
-  return { comments: issue?.comments?.nodes ?? [], labeled: issue?.timelineItems?.nodes ?? [] };
+  const args = ["api", "graphql", "-f", `query=${query}`, "-F", `o=${o}`, "-F", `r=${r}`, "-F", `n=${num}`];
+  if (cursor) args.push("-F", `c=${cursor}`);
+  const conn = JSON.parse(gh(args, config.repoPath))?.data?.repository?.issue?.[field];
+  if (!conn || !Array.isArray(conn.nodes)) throw new Error(`unreadable ${field} for ${config.githubRepo}#${num}`);
+  return { nodes: conn.nodes, hasPrev: conn.pageInfo?.hasPreviousPage === true, cursor: conn.pageInfo?.startCursor ?? null };
 }
 
 /**
+ * Walk a connection newest to oldest, a page at a time, and return the first
+ * item `pick` accepts; undefined when history is exhausted. Stops as soon as
+ * it finds one, so cost is bounded by the distance to the answer. Throws on a
+ * read failure: a caller must not act on a partial history.
+ */
+function findLatest<T, R>(config: RepoConfig, num: number, query: string, field: "comments" | "timelineItems", pick: (item: T) => R | undefined): R | undefined {
+  let cursor: string | null = null;
+  for (;;) {
+    const page: Page<T> = readPage<T>(config, num, query, field, cursor);
+    for (let i = page.nodes.length - 1; i >= 0; i--) {
+      const hit = pick(page.nodes[i]);
+      if (hit !== undefined) return hit;
+    }
+    if (!page.hasPrev) return undefined;
+    if (!page.cursor || page.cursor === cursor) throw new Error(`${field} pagination did not advance`);
+    cursor = page.cursor;
+  }
+}
+
+type CommentNode = { body?: string; author?: { login?: string } | null };
+type LabeledNode = { label?: { name?: string }; actor?: { login?: string } | null };
+
+/**
  * Say, once, on the issue why it is held. The dedupe is the marker in the
- * Foreman's own latest comment, so a restart does not repeat it. Returns true
- * when the reason is on the issue (already, or just posted); false when it
- * could not be established, so the caller tries again next cycle. Throws never.
+ * Foreman's own latest hold comment, found however many comments follow it, so
+ * a restart does not repeat it. Returns true when the reason is on the issue
+ * (already, or just posted); false when it could not be established, so the
+ * caller tries again next cycle. Throws never.
  */
 export function announceReadinessHold(config: RepoConfig, num: number, unmet: string[]): boolean {
   try {
-    const { comments, labeled } = readAnnounceContext(config, num);
     const self = foremanLogin(config.repoPath)?.toLowerCase();
-    const mine = self ? comments.filter((c) => c.author?.login?.toLowerCase() === self) : [];
-    if (announcesReason(mine[mine.length - 1]?.body, unmet)) return true;
-    const trigger = labeled.filter((e) => e.label?.name === config.triggerLabel && e.actor?.login);
-    const approver = trigger[trigger.length - 1]?.actor?.login ?? "unknown";
+    const lastHold = self
+      ? findLatest<CommentNode, string>(config, num, COMMENTS_QUERY, "comments", (c) =>
+          c.author?.login?.toLowerCase() === self && c.body?.includes(MARKER_PREFIX) ? c.body : undefined)
+      : undefined;
+    if (announcesReason(lastHold, unmet)) return true;
+    const approver = findLatest<LabeledNode, string>(config, num, LABELED_QUERY, "timelineItems", (e) =>
+      e.label?.name === config.triggerLabel && e.actor?.login ? e.actor.login : undefined) ?? "unknown";
     commentOnIssue(config, num, readinessHoldComment(unmet, approver));
     return true;
   } catch {
