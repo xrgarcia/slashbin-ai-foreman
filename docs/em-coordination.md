@@ -56,7 +56,13 @@ come at 10 minutes, then 20, then the issue goes `blocked` (verify-exhausted).
 | `visual-qa-failed` | rework | files its own `approved` issue "Visual QA rework N for #X", builds it, re-verifies the original when it merges; at most 2 rounds | **none — wait.** Filing your own corrective builds it twice (Slashbin-console#1535). After the last round it is a charged hold → `verify-exhausted` |
 | `qa-held-*`, `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
 | `dev-verify-failed`, `deploy=…` | charged | blocked with owner SRE (`deployFailed`) | route to the SRE |
-| `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked` | after exhaustion: the spec or the build is wrong — edit the spec (`specEdited` releases it) or file the fix. `baseAdvanced` does **not** release this one |
+| `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked` | a wait while it retries — unless the evidence already shows the spec or the build is wrong: then edit the spec (`specEdited` releases it at once) or file the fix as a follow-up (below), without waiting out the attempts. `baseAdvanced` does **not** release this one |
+
+**A fix for a held verification jumps the queue only by its title.** An issue whose title
+contains `follow-up to #N` builds at once, alone, ahead of the repo's queue, while #N's
+verification waits on it (`followUpsOf`, `src/phases/verify.ts`). A corrective the EM files
+for an unmet outcome must end its title `— follow-up to #<parent>`; without it, the fix
+queues behind the very verification it is meant to clear.
 
 Blocks the build and release stages raise (`BlockKind`, `src/unblock.ts`; each releases
 itself when its check turns true):
