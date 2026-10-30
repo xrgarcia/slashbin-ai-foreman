@@ -73,6 +73,16 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    (`github.priorityLabels`), then oldest — and hands it `buildBatchSize` of them
    (default 1). Issues the session declined on purpose are backed off
    (`backoff.skip`). See [skills.md](skills.md) for what the session is told.
+   An `approved` issue is held, not built, while a prerequisite is unmet: a GitHub "blocked by"
+   issue not yet merged, a Pre-Flight `readiness` block not satisfied, or no `## Acceptance`
+   section naming a committed `scripts/...` path or a `**No-Script:**` reason of at least 40
+   characters (the EM's `approved` rule, enforced again here because a customer can apply the
+   label themselves; `src/github/acceptance-gate.ts`). A held issue gets one comment per
+   reason (hidden marker `<!-- foreman:readiness-hold KEY -->`) and becomes eligible by
+   itself once the body is fixed. The acceptance hold is also emitted in the cycle's waiting set (with its
+   reason) every held cycle, so a board shows it; fixing the body clears it. Issues already carrying a
+   lifecycle label are not judged. Generated rework issues state a `**No-Script:**` reason (their parent's
+   dev verification is re-run) so they pass the same rule.
 8. **Branch Sync** — merges the production branch back into the base branch
    (`main` → `develop`) through a sync PR, to keep them aligned after promotions. The
    sync PR is merged under `TECHLEAD_GITHUB_KEY`; without it, the PR opens but does not

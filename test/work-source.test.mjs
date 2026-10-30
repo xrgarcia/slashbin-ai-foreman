@@ -47,6 +47,7 @@ const args = process.argv.slice(2);
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(${JSON.stringify(JSON.stringify(BOARD))});
 else if (args[0] === "pr" && args[1] === "list" && args.includes("--head") && process.env.FAKE_FEATURE_PR) process.stdout.write(process.env.FAKE_FEATURE_PR);
 else if (args[0] === "api" && args[1] === "repos/example/ordered/issues/3/dependencies/blocked_by") process.stdout.write(JSON.stringify([{ number: 2, state: "open", labels: [{ name: "approved" }] }]));
+else if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) { process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs"); }
 else if (args[0] === "ls-files") process.stdout.write(Array.from({ length: 40 }, (_, i) => "f" + i).join("\\n"));
 else process.stdout.write("[]");
 `);

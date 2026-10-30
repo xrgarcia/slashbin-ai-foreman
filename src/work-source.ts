@@ -1,5 +1,5 @@
 import { GitHubIssueConnector } from "./github-work-source.js";
-import type { WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
+import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
@@ -141,6 +141,11 @@ export async function selectWork(
   logger: Logger,
 ): Promise<WorkItem[]> {
   return workSourceFor(repoConfig).selectWork(repoConfig, config, logger);
+}
+
+/** What the last `selectWork` held back for a reason about the item itself, for the waiting set. */
+export function heldWork(repoConfig: RepoConfig): ReadonlyArray<WaitingItem> {
+  return workSourceFor(repoConfig).heldWork?.(repoConfig) ?? [];
 }
 
 /**

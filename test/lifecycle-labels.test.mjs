@@ -45,6 +45,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(GH_LOG)}, JSON.stringify(args) + "\\n");
 if (args[0] === "issue" && args[1] === "list") { process.stdout.write(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")); process.exit(0); }
+if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) { process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs"); process.exit(0); }
 process.stdout.write("[]");
 `);
 writeFileSync(join(binDir, "claude"), `#!/usr/bin/env node
