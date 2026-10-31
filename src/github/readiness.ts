@@ -272,6 +272,11 @@ export function announceReadinessHold(config: RepoConfig, num: number, unmet: st
   return announceHold(config, num, "readiness", unmet);
 }
 
+/** The issue body and its GitHub sub-issue parent's API URL ("" when none), live. Throws on a gh failure. */
+export function readIssueLinks(config: RepoConfig, num: number): { body: string; parent: string } {
+  return JSON.parse(gh(["api", `repos/${config.githubRepo}/issues/${num}`, "--jq", "{body: (.body // \"\"), parent: (.parent_issue_url // \"\")}"], config.repoPath));
+}
+
 /** The issue body, live. Throws on a gh failure. */
 export function readIssueBody(config: RepoConfig, num: number): string {
   return gh(["api", `repos/${config.githubRepo}/issues/${num}`, "--jq", ".body // \"\""], config.repoPath);

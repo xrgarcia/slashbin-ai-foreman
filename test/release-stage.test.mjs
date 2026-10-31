@@ -100,7 +100,7 @@ if (a[0] === "api") {
   if (method === "POST" && (m = /issues\\/(\\d+)\\/comments$/.exec(path))) { comment(m[1], fields().body); save(); out(""); }
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
   if (/\\/commits\\//.test(path)) out(st.prodHead);
-  if (method === "GET" && (m = /issues\\/(\\d+)$/.exec(path))) out((st.issues[m[1]] || {}).body || "");
+  if (method === "GET" && (m = /issues\\/(\\d+)$/.exec(path))) { const is = st.issues[m[1]] || {}; out((flag("--jq") || "").includes("parent") ? JSON.stringify({ body: is.body || "", parent: is.parent || "" }) : is.body || ""); }
   if (/\\/compare\\//.test(path) && st.compareCommits && (flag("--jq") || "").includes("headline")) {
     out(st.compareCommits.map((c) => JSON.stringify(c)).join("\\n"));
   }
@@ -345,6 +345,19 @@ test("closing an epic's child in production asks the EM whether the epic is read
   assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
   assert.equal(await run(2), false);
   assert.equal(epicEntries().length, 1, "a later cycle adds nothing");
+});
+
+test("a child linked only as a GitHub sub-issue of the epic asks the EM too", async () => {
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
+  const g = gh();
+  g.issues[5].parent = "https://api.github.com/repos/xrgarcia/slashbin-engineering-manager/issues/880";
+  g.issues[6].parent = "https://api.github.com/repos/other/elsewhere/issues/12";
+  writeFileSync(GH_STATE, JSON.stringify(g));
+  assert.equal(await run(), true);
+  assertClosedVerified(5);
+  const e = epicEntries();
+  assert.equal(e.length, 1, "only the parent that is an engineering-manager epic");
+  assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
 });
 
 test("the soak runs once, 30 minutes on: a pass ends the release", async () => {
