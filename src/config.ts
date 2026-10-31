@@ -275,6 +275,13 @@ export const configSchema = z.object({
   // FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card
   // like an SRE hold. Needs `qaPath`. A config flip, reversible.
   qaGate: z.boolean().default(false),
+  // QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA
+  // fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs
+  // `bin/qa.mjs check --local` on the approved head (it boots the PR itself, no secret), and only
+  // a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder.
+  // Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged.
+  // Needs `qaPath` and `techLeadPath`. A config flip, reversible.
+  qaBeforeMerge: z.boolean().default(false),
   // The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex
   // run and a prod-verification Codex run of up to 40 min each, plus the merge
   // and the deploy wait. The Foreman kills the deploy only past this; a deploy
@@ -519,6 +526,8 @@ export interface AgentConfig {
   qaRepos: string[];
   /** QA gates the advance to prApproved (see configSchema). */
   qaGate: boolean;
+  /** QA runs on the PR head before the Tech Lead merges it (see configSchema). */
+  qaBeforeMerge: boolean;
   /** Ceiling on one SRE deploy run (the release stage). */
   sreDeployMaxDurationMs: number;
   /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
@@ -678,6 +687,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
     qaRepos: fileConfig.qaRepos,
     qaGate: fileConfig.qaGate,
+    qaBeforeMerge: fileConfig.qaBeforeMerge,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
     reviewEnabled: fileConfig.reviewEnabled,
     reviewSkillPath: fileConfig.reviewSkillPath,
@@ -875,6 +885,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaRepos: [...parsed.qaRepos],
     qaGate: parsed.qaGate,
+    qaBeforeMerge: parsed.qaBeforeMerge,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
     reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,

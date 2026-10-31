@@ -184,3 +184,14 @@ export function returnedToReviewSinceVerdict(
     return false;
   }
 }
+
+/** The PR's head commit sha, or null when GitHub cannot say. */
+export function readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string | null {
+  try {
+    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "headRefOid"], config.repoPath) || "{}") as { headRefOid?: string };
+    return data.headRefOid || null;
+  } catch (err) {
+    logger.debug(`readPrHeadSha lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}

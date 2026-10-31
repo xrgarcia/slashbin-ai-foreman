@@ -25,6 +25,8 @@ export {
   hasPendingRevisions,
   type ReviewCandidate,
   findPRsNeedingReview,
+  type QaPendingPr,
+  findQaPendingPr,
 } from "./github/review-queue.js";
 export {
   type MergedIssueRef,

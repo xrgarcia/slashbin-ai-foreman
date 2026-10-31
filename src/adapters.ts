@@ -272,6 +272,8 @@ export interface SessionEvent {
   readonly items: ReadonlyArray<WorkItem>;
   readonly pr?: number;
   readonly reviewer?: string;
+  /** On a `qa` session: it runs before the merge (config.qaBeforeMerge), so the card's fallback is review, not `merged`. */
+  readonly qaBeforeMerge?: boolean;
   readonly detail?: string;
   /**
    * On an implement end: the items the session actually worked — built,

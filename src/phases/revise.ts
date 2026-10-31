@@ -7,6 +7,7 @@ import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, hasObservers } from "../work-source.js";
 import { findPendingRevisions, readRulingState, type PendingRevisionInfo } from "../github.js";
 import { revisePRFeedback } from "../agent.js";
+import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { type BlockKind } from "../unblock.js";
 import {
@@ -132,9 +133,11 @@ export async function tryRevision(
 
   try {
     await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
+    // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
+    const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
     const result = await revisePRFeedback(
       repoConfig, revLogger, runAbort.signal,
-      pending.pr.number, pending.issueNumbers,
+      pending.pr.number, pending.issueNumbers, qaFeedback,
     ).catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success

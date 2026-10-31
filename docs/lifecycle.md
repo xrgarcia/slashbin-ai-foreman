@@ -49,7 +49,7 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `revising` | — (a session holds it) | A revise session is addressing the review. |
 | `merged` | `pr merged` | Merged to the base branch; waiting for dev verification. |
 | `verifying` | — (a session holds it) | A verify session is checking it in dev. |
-| `qaReviewing` | — (a session holds it) | The QA gate (qaGate on) is running its visual and behaviour checks on dev, after the SRE passed it and before it advances. |
+| `qaReviewing` | — (a session holds it) | QA is running its visual and behaviour checks. qaBeforeMerge on: on the Tech Lead-approved PR, run locally, before it merges (a PASS merges it, a FAIL goes back to the builder, the SRE never sees it). qaGate on: on dev, after the SRE passed it and before it advances. |
 | `pendingVerification` | `pr approved` | Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization. |
 | `releaseAuthorized` | `ready for prod release` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
 | `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
@@ -71,8 +71,8 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `alreadyApproved` | new | approved | `pendingVerification` | Implement found the work already merged and there is no verify stage. |
 | `alreadyMerged` | new | merged | `merged` | Implement found the work already merged; dev verification is next. |
 | `reviewApproved` | inReview | approved | `pendingVerification` | The review approved and merged, and there is no verify stage. |
-| `reviewMerged` | inReview | merged | `merged` | The review approved and merged; dev verification is next. |
-| `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, or a stranded changes-requested verdict is caught up. |
+| `reviewMerged` | inReview | merged | `merged` | The review approved and merged (qaBeforeMerge on: after QA passed the approved head); dev verification is next. |
+| `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, QA failed the approved head (qaBeforeMerge on), or a stranded changes-requested verdict is caught up. |
 | `revised` | changesRequested | inReview | `inReview` | A revise session pushed changes; back to review. |
 | `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`. |
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |

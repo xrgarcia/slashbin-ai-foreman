@@ -87,14 +87,18 @@ export type RulingState = {
   rulingAt: string | null;
 };
 
-/** Pure: a PR's reviews and comments → its ruling state. */
+/** A QA FAIL report (qaGateBody): the marker line carries the verdict, inside the first 140 characters. */
+const QA_FAIL_PATTERN = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=FAIL -->/;
+
+/** Pure: a PR's reviews and comments → its ruling state. A QA FAIL sends the PR back like a CHANGES_REQUESTED review. */
 export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: ReadonlyArray<CommentFact>): RulingState {
   const rulings = comments.filter((c) => EM_RULING_PATTERN.test(c.head)).map((c) => c.at).sort();
   const rulingAt = rulings.length ? rulings[rulings.length - 1]! : null;
   const after = reviews.filter((r) => r.at && (rulingAt === null || r.at > rulingAt));
   const latest = [...reviews].filter((r) => r.at).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id - b.id)).pop();
   return {
-    roundsSinceRuling: after.filter((r) => r.state === "CHANGES_REQUESTED").length,
+    roundsSinceRuling: after.filter((r) => r.state === "CHANGES_REQUESTED").length
+      + comments.filter((c) => QA_FAIL_PATTERN.test(c.head) && (rulingAt === null || c.at > rulingAt)).length,
     latestReviewId: latest?.id ?? null,
     escalateRequested: !!latest && latest.state === "CHANGES_REQUESTED" && latest.escalate && (rulingAt === null || latest.at > rulingAt),
     rulingAt,
@@ -108,7 +112,7 @@ export function readRulingState(repo: string, pr: number, cwd: string, logger: L
     const reviews = lines(gh(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
       `.[] | {id, state, at: (.submitted_at // ""), escalate: ((.body // "") | contains("${TECH_LEAD_ESCALATE_MARKER}"))} | @json`], cwd)) as ReviewFact[];
     const comments = lines(gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
-      `.[] | {at: .created_at, head: ((.body // "") | .[0:80])} | @json`], cwd)) as CommentFact[];
+      `.[] | {at: .created_at, head: ((.body // "") | .[0:140])} | @json`], cwd)) as CommentFact[];
     return rulingState(reviews, comments);
   } catch (err) {
     logger.debug(`readRulingState: PR #${pr} failed: ${formatGhError(err).message}`);

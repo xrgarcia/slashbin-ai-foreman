@@ -14,7 +14,7 @@ import {
   type PaperclipConfig,
   type PaperclipStage,
 } from "./config.js";
-import type { SESSION_STAGE } from "../lifecycle.js";
+import type { SESSION_STAGE, Stage } from "../lifecycle.js";
 import type { PaperclipClient } from "./client.js";
 
 /** A Paperclip status bucket; `statusMap` may rename each one. */
@@ -76,7 +76,7 @@ export function foremanOwnsCard(
 }
 
 /** The lease: the cards a running session holds in progress, renewed while any runs. */
-export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE }> };
+export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE; fallback?: Stage }> };
 
 /** The board settings a mapping needs; missing ones take the defaults. */
 type BoardConfig = Pick<PaperclipConfig, "agentId"> & Partial<Pick<PaperclipConfig, "board" | "roles" | "stageLabels" | "statusMap" | "humanUserId">>;
