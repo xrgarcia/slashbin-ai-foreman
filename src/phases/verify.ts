@@ -70,10 +70,6 @@ export const SRE_TOOLING_HOLDS: readonly string[] = [
   "tooling-unavailable",
   "evidence-check-failed",
   "no-evidence-comment",
-  "visual-qa-dev-unreachable",
-  "visual-qa-sign-in-failed",
-  "visual-qa-review-unavailable",
-  "visual-qa-sha-unproven",
 ];
 /**
  * The Foreman's own checkers that could not run: its QA gate (slashbin-ai-foreman#137), and the

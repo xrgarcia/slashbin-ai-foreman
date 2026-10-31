@@ -189,7 +189,7 @@ test("followUpsOf matches a follow-up title for its parent only", () => {
 
 test("verifyHoldPlan: every SRE tooling hold defers; verdict holds do not", () => {
   for (const r of TOOLING_HOLDS) assert.deepEqual(verifyHoldPlan(r), { kind: "defer" }, r);
-  for (const r of ["registry-unavailable", "visual-qa-review-unavailable", "visual-qa-sign-in-failed", "visual-qa-dev-unreachable", "visual-qa-sha-unproven"]) assert.ok(TOOLING_HOLDS.includes(r), r);
+  for (const r of ["registry-unavailable", "evidence-check-failed"]) assert.ok(TOOLING_HOLDS.includes(r), r);
   assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "decide" });
   assert.deepEqual(verifyHoldPlan("acceptance-failed"), { kind: "charge" });
 });
