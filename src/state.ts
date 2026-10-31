@@ -212,7 +212,10 @@ const EMPTY_REPO_STATE: RepoState = {
   failed: {},
 };
 
-let statePath = ".agent-state.json";
+// FOREMAN_STATE_DIR is set by `npm test` only. Without it a test run in the live checkout
+// read and wrote the daemon's own .agent-state.json: on 2026-10-30 a test recorded a
+// skip for its fake repo "ws" there, and acceptance-gate R2 failed on it from then on.
+let statePath = process.env.FOREMAN_STATE_DIR ? join(process.env.FOREMAN_STATE_DIR, ".agent-state.json") : ".agent-state.json";
 
 export function setStatePath(dir: string): void {
   statePath = join(dir, ".agent-state.json");
