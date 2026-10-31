@@ -1,13 +1,13 @@
 // The QA report: after the SRE's dev verify passes, run `qa.mjs check` once for the
 // merged PR and say what it found on the PR. Report-only: nothing here moves a label,
 // holds a card or waits (the caller does not await `reportQaAfterVerify`'s work).
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { buildQaEnv, runAgentCli, type CliRun, type VerifyResult } from "./agent.js";
-import { hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
+import { commentBodies, hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
 
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
@@ -133,6 +133,14 @@ export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger
 /** Whether QA applies to `repoConfig` on this install. */
 export function qaApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
   return Boolean(agentConfig.qaPath) && agentConfig.qaRepos.includes(repoConfig.githubRepo);
+}
+
+/**
+ * Whether QA runs BEFORE the merge for `repoConfig` (config.qaBeforeMerge): the flag, a QA repo, and the
+ * Tech Lead that does the merge. When true the post-merge QA (gate and report-only) does not run for it.
+ */
+export function qaBeforeMergeApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
+  return agentConfig.qaBeforeMerge && Boolean(agentConfig.techLeadPath) && qaApplies(repoConfig, agentConfig);
 }
 
 /**
@@ -277,4 +285,100 @@ export async function applyQaGate(
   if (m.verdict === "FAIL" && exitCode === 1) return hold("visual-qa-failed", qaFailSummary(m));
   if (m.verdict === "HELD" && exitCode === 3) return hold(`qa-held-${m.hold ?? "unknown"}`, `QA could not check: ${m.reason ?? ""}`);
   return hold("qa-inconsistent", `QA exit ${exitCode} disagrees with verdict ${m.verdict}`);
+}
+
+// --- QA before the merge (config.qaBeforeMerge) ---
+
+/**
+ * The local run: `qa.mjs check --local` boots the PR itself and generates its own mint key, so it
+ * takes no secret and does not go through doppler-run (the gate's `run` above does). It needs git,
+ * npm, the network and GH_TOKEN, all in `buildQaEnv`.
+ */
+export function realQaLocalDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger): QaDeps {
+  return {
+    ...realQaDeps(repoConfig, agentConfig, logger),
+    async run({ repo, pr, out }) {
+      const qa = agentConfig.qaPath;
+      if (!qa) return { kind: "errored", detail: "qaPath must be set" };
+      // A manifest left by an earlier run must never be read as this one's.
+      rmSync(join(out, "manifest.json"), { force: true });
+      const args = ["check", "--local", "--repo", repo, "--pr", String(pr), "--out", out];
+      const r: CliRun = await runAgentCli(qa, "bin/qa.mjs", args, buildQaEnv(agentConfig), agentConfig, QA_MAX_DURATION_MS);
+      return readOutcome(r, out, logger);
+    },
+  };
+}
+
+/** The marker a gating report for `verdict` on head `sha` carries (see qaGateMarker). */
+export const qaVerdictMarker = (sha: string, verdict: "PASS" | "FAIL"): string => `<!-- foreman-qa sha=${sha} verdict=${verdict} -->`;
+
+/** What the review phase acts on after QA looked at an approved head. */
+export type QaPreMergeDecision =
+  /** QA passed this exact head: the Tech Lead may merge. `reused`: a report for it was already on the PR. */
+  | { kind: "pass"; reused: boolean }
+  /** QA failed the head: back to the builder. `summary` is QA's regression lines. */
+  | { kind: "fail"; summary: string; reused: boolean }
+  /** No verdict on the head (held, errored, inconsistent): nothing merges. `reason` is a hold slug. */
+  | { kind: "hold"; reason: string; summary: string };
+
+const sameSha = (a: string, b: string): boolean => a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
+
+/**
+ * Run QA once for head `headSha` of PR `pr` and say what to do. One run per head: a PASS or FAIL report
+ * for this sha already on the PR (the hidden marker) is the answer, so a restart neither reruns nor
+ * re-posts. A PASS counts only when the manifest names this head; any other reading of exit and
+ * manifest is a hold, never a merge. Never throws.
+ */
+export async function runQaBeforeMerge(repo: string, pr: number, headSha: string, deps: QaDeps, logger: Logger): Promise<QaPreMergeDecision> {
+  const has = deps.hasMarker ?? (async () => false);
+  try {
+    if (await has(pr, qaVerdictMarker(headSha, "PASS"))) return { kind: "pass", reused: true };
+    if (await has(pr, qaVerdictMarker(headSha, "FAIL"))) {
+      return { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true };
+    }
+  } catch (e) {
+    logger.warn(`QA: PR #${pr} marker lookup failed (${String(e).slice(0, 200)}); running QA`);
+  }
+  let outcome: QaOutcome;
+  try {
+    const out = join(homedir(), ".cache", "foreman-qa", repo.replace("/", "__"), String(pr));
+    mkdirSync(out, { recursive: true });
+    outcome = await deps.run({ repo, pr, out });
+  } catch (e) {
+    outcome = { kind: "errored", detail: `the run threw (${String(e).slice(0, 200)})` };
+  }
+  await postGateReport(pr, outcome, deps, has, logger);
+  if (outcome.kind === "errored") {
+    logger.warn(`QA: PR #${pr} errored: ${outcome.detail}`);
+    return { kind: "hold", reason: "qa-errored", summary: `QA errored: ${outcome.detail}` };
+  }
+  const { manifest: m, exitCode } = outcome;
+  if (m.verdict === "PASS" && exitCode === 0) {
+    if (m.sha && sameSha(m.sha, headSha)) return { kind: "pass", reused: false };
+    return { kind: "hold", reason: "qa-inconsistent", summary: `QA passed ${m.sha ?? "no sha"}, but the approved head is ${headSha}` };
+  }
+  if (m.verdict === "FAIL" && exitCode === 1) return { kind: "fail", summary: qaFailSummary(m), reused: false };
+  if (m.verdict === "HELD" && exitCode === 3) return { kind: "hold", reason: `qa-held-${m.hold ?? "unknown"}`, summary: `QA could not check: ${m.reason ?? ""}` };
+  return { kind: "hold", reason: "qa-inconsistent", summary: `QA exit ${exitCode} disagrees with verdict ${m.verdict}` };
+}
+
+const QA_FAIL_REPORT = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=FAIL -->/;
+
+/** A QA FAIL report's verdict, reason and failing findings (everything above "Pages checked:"). Pure. */
+export function qaFailLines(body: string): string {
+  const lines = body.split("\n").slice(3);
+  const end = lines.findIndex((l) => l.startsWith("Pages checked:"));
+  return (end === -1 ? lines : lines.slice(0, end)).join("\n").trim();
+}
+
+/** The newest QA FAIL report on PR `pr`, reduced to its failing lines; undefined when there is none or GitHub cannot say. */
+export async function latestQaFailLines(repoConfig: RepoConfig, pr: number, logger: Logger): Promise<string | undefined> {
+  try {
+    const fails = (await commentBodies(repoConfig, pr)).filter((b) => QA_FAIL_REPORT.test(b));
+    const last = fails[fails.length - 1];
+    return last ? qaFailLines(last) : undefined;
+  } catch (e) {
+    logger.warn(`QA: PR #${pr} report not read for the revise session: ${String(e).slice(0, 200)}`);
+    return undefined;
+  }
 }

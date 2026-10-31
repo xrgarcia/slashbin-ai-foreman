@@ -253,7 +253,7 @@ test("the review's end comment carries the whole checklist, final check complete
 test("the review phase hands the relay to the Tech Lead and closes it before the end comment", async () => {
   const { orchestratorSource } = await import("./source-text.mjs");
   const src = orchestratorSource();
-  assert.match(src, /reviewViaTechLead\([^)]*transcriptPath, onProgress\)/);
+  assert.match(src, /reviewViaTechLead\([^)]*transcriptPath, onProgress(, noMerge)?\)/);
   const close = src.indexOf("progress.close();");
   const end = src.indexOf('await emit({ kind: "session", session: { ...session, ...ended, reviewer');
   assert.ok(close > 0 && end > close, "closed first, so no stage post lands after the end comment");

@@ -7,7 +7,7 @@ import { emit, advance } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { reconcileRepo } from "../reconciler.js";
 import { findStuckMergedIssues, findIssuesMergedToBase, findOrphanedLifecycleIssues } from "../github.js";
-import type { ReviewTrailer } from "../agent.js";
+import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import {
   CycleEvent,
@@ -75,7 +75,8 @@ export async function reconcileReviewOutcomeLabels(
       unresolved.push(issueNumber);
       continue;
     }
-    if (trailer.hold) {
+    // `qa-pending` is the Tech Lead waiting for QA, not a hold on the issue: the merge it precedes is QA's pass.
+    if (trailer.hold && trailer.hold !== QA_PENDING_HOLD) {
       held.push({ issue: issueNumber, reason: trailer.hold, pr: ref.prNumber });
       continue;
     }

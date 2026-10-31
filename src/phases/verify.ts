@@ -7,7 +7,7 @@ import type { SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { verifyViaSre, type VerifyResult } from "../agent.js";
-import { applyQaGate, qaApplies, realQaDeps, runQaReport } from "../qa-report.js";
+import { applyQaGate, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
 import { getOpenIssues } from "../github/cache.js";
@@ -88,6 +88,12 @@ export const FOREMAN_TOOLING_HOLDS: readonly string[] = [
   "qa-held-review-unavailable",
   "qa-held-pr-unreadable",
   "qa-held-baseline-unreadable",
+  // QA before the merge (`check --local`): QA's own boot failed, the Console's seed is missing, or the
+  // data QA reads was unreachable. None is a verdict on the PR (qa-local-seed-missing is the Console's to fix).
+  "qa-held-qa-local-boot-failed",
+  "qa-held-qa-local-seed-missing",
+  "qa-held-worker-data-unavailable",
+  "qa-held-attribution-unavailable",
 ];
 export const TOOLING_HOLDS: readonly string[] = [...SRE_TOOLING_HOLDS, ...FOREMAN_TOOLING_HOLDS];
 export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes(reason);
@@ -325,8 +331,10 @@ export async function tryVerify(
     if (sre.kind === "verdict" && sre.unrelated) noteUnrelated(repoName, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
+    // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.
+    const qaBeforeMerge = qaBeforeMergeApplies(repoConfig, config);
     let r: VerifyResult = sre;
-    if (sre.kind === "verdict" && sre.pass && config.qaGate && qaApplies(repoConfig, config)) {
+    if (sre.kind === "verdict" && sre.pass && config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
       const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
       await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
@@ -344,7 +352,7 @@ export async function tryVerify(
       }
       saveRepoState(repoName, { ...after, verifyHeld: kept });
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
-      if (!config.qaGate && qaApplies(repoConfig, config)) {
+      if (!config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
         void runQaReport(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };

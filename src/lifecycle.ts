@@ -38,7 +38,7 @@ export const STAGE_MEANING: Readonly<Record<StageOrDone, string>> = Object.freez
   revising: "A revise session is addressing the review.",
   merged: "Merged to the base branch; waiting for dev verification.",
   verifying: "A verify session is checking it in dev.",
-  qaReviewing: "The QA gate (qaGate on) is running its visual and behaviour checks on dev, after the SRE passed it and before it advances.",
+  qaReviewing: "QA is running its visual and behaviour checks. qaBeforeMerge on: on the Tech Lead-approved PR, run locally, before it merges (a PASS merges it, a FAIL goes back to the builder, the SRE never sees it). qaGate on: on dev, after the SRE passed it and before it advances.",
   pendingVerification: "Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization.",
   releaseAuthorized: "The EM verified it and authorized production; the promote stage puts it in a release PR next.",
   awaitingRelease: "In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran).",
@@ -73,8 +73,8 @@ export const MOVES = Object.freeze({
   alreadyApproved: { from: "new", to: "approved", why: "Implement found the work already merged and there is no verify stage." },
   alreadyMerged: { from: "new", to: "merged", why: "Implement found the work already merged; dev verification is next." },
   reviewApproved: { from: "inReview", to: "approved", why: "The review approved and merged, and there is no verify stage." },
-  reviewMerged: { from: "inReview", to: "merged", why: "The review approved and merged; dev verification is next." },
-  changesRequested: { from: "inReview", to: "changesRequested", why: "The review asked for changes, its CI is red, or a stranded changes-requested verdict is caught up." },
+  reviewMerged: { from: "inReview", to: "merged", why: "The review approved and merged (qaBeforeMerge on: after QA passed the approved head); dev verification is next." },
+  changesRequested: { from: "inReview", to: "changesRequested", why: "The review asked for changes, its CI is red, QA failed the approved head (qaBeforeMerge on), or a stranded changes-requested verdict is caught up." },
   revised: { from: "changesRequested", to: "inReview", why: "A revise session pushed changes; back to review." },
   verifyPassed: { from: "merged", to: "approved", why: "Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`." },
   recoverPassed: { from: "unknown", to: "approved", why: "Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed." },
@@ -128,6 +128,17 @@ export const SESSION_FALLBACK_STAGE = Object.freeze({
   qa: "merged",
   revise: "changesRequested",
 } as const satisfies Record<SessionStagePhase, Stage>);
+
+/**
+ * `qa`'s fallback when it runs before the merge (config.qaBeforeMerge): the PR is still open and unmerged,
+ * so a QA session that ends with nothing newer leaves the card in review, not at `merged`.
+ */
+export const QA_BEFORE_MERGE_FALLBACK_STAGE = "inReview" as const satisfies Stage;
+
+/** The stage a session of `phase` returns its items to; `qaBeforeMerge` only changes `qa`. */
+export function sessionFallbackStage(phase: SessionStagePhase, qaBeforeMerge = false): Stage {
+  return phase === "qa" && qaBeforeMerge ? QA_BEFORE_MERGE_FALLBACK_STAGE : SESSION_FALLBACK_STAGE[phase];
+}
 
 /**
  * Where a release event leaves its items: in an open release PR, or in production. A closed PR moves nothing.
