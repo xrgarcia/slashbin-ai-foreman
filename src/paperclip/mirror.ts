@@ -69,6 +69,7 @@ import {
 } from "./board.js";
 import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFacts, type HandoffLabels, type HandoffVariant } from "./handoff.js";
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment, type PaperclipIssue } from "./client.js";
+import { registerPaperclipTeam } from "./agent.js";
 import { commentsOf, finishComment, redactComment, reviewProgressComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
 import type { ReviewMilestone } from "../review-progress.js";
 
@@ -409,6 +410,37 @@ export class PaperclipMirror implements WorkObserver {
   ) {
     this.comments = commentsOf(cfg);
     this.labels = { ...DEFAULT_HANDOFF_LABELS, ...labels };
+  }
+
+  /** Role key -> agent id, for roles the config names without an id: found or created at startup (registerSeats). */
+  private seatIds: Record<string, string> = {};
+
+  /** `cfg` with the registered seat ids filled into the roles that carry none; a configured id wins. */
+  private withSeats(cfg: PaperclipConfig): PaperclipConfig {
+    if (Object.keys(this.seatIds).length === 0) return cfg;
+    const roles = Object.fromEntries(Object.entries(cfg.roles ?? {}).map(([k, r]) => [k, r.id || !this.seatIds[k] ? r : { ...r, id: this.seatIds[k] }]));
+    return { ...cfg, roles };
+  }
+
+  /**
+   * Give every configured role without an id its seat: find or create its agent (registerPaperclipTeam, the
+   * same call `npm run paperclip:register` makes) and hold the id in memory, so a role added to the config
+   * takes its seat on restart with no registering step. Never throws: on failure the role keeps resolving
+   * to the Foreman, as before, and a warning says why.
+   */
+  async registerSeats(): Promise<void> {
+    const missing = Object.entries(this.cfg.roles ?? {}).filter(([, r]) => !r.id);
+    if (missing.length === 0) return;
+    try {
+      const team = await registerPaperclipTeam(this.client, this.cfg);
+      for (const [key] of missing) {
+        const id = team.roles[key]?.agent.id;
+        if (id) this.seatIds[key] = id;
+      }
+      this.cfg = this.withSeats(this.cfg);
+    } catch (e) {
+      this.logger.warn(`paperclip: could not register the role seats (${missing.map(([k]) => k).join(", ")}): ${String(e)}; those cards stay with the Foreman`);
+    }
   }
 
   /**
@@ -1022,7 +1054,7 @@ export class PaperclipMirror implements WorkObserver {
       this.logger.warn(`paperclip: config reload changes ${changed.join(", ")}; restart the Foreman to apply it. The mirror keeps the config it started with.`);
       return false;
     }
-    this.cfg = next;
+    this.cfg = this.withSeats(next);
     this.comments = commentsOf(next);
     this.stageLabelIds = null;
     this.issueLabelId = undefined;
