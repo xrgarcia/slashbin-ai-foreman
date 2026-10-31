@@ -191,6 +191,12 @@ export interface ReviewResult {
  * acted on:
  *   FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS
  */
+/** The SRE's `Not caused by this release, needs triage:` lines (verify.mjs), distinct, in order. Pure, exported for tests. */
+export function parseUnrelatedErrors(stdout: string): string[] {
+  const found = [...stdout.matchAll(/^Not caused by this release, needs triage: (.+)$/gm)].map((m) => m[1]!.trim()).filter(Boolean);
+  return [...new Set(found)];
+}
+
 export function parseReviewTrailerRecords(stdout: string): ReviewTrailer[] {
   // Each field uses a bounded token alphabet ([\w/-]+) so it cannot bleed into
   // surrounding characters when the trailer is emitted inside a single-line
@@ -1659,7 +1665,7 @@ export const SRE_VERIFY_MAX_DURATION_MS = 90 * 60_000;
 /** What a verify hand-off came back with. */
 export type VerifyResult =
   /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
-  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA" }
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: string[] }
   /** No verdict: an error or a timeout. Nothing was written. */
   | { kind: "error"; error: string };
 
@@ -1731,7 +1737,8 @@ export async function verifyViaSre(
   if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
   const v = verifyVerdict(trailer);
   logger.info(`SRE verification of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
-  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
+  const unrelated = parseUnrelatedErrors(out.stdout);
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated.length ? { unrelated } : {}) };
 }
 
 // --- The release stage's hand-offs (EM#578) ---
@@ -1978,7 +1985,8 @@ export async function verifyProdViaSre(
   if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
   const v = verifyVerdict(trailer);
   logger.info(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
-  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT) };
+  const unrelated = parseUnrelatedErrors(r.stdout);
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated.length ? { unrelated } : {}) };
 }
 
 /**

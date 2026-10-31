@@ -92,12 +92,17 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage runs `em.mjs unstick` for each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
 hold hands over to `verify-exhausted` when its retries run out. The Foreman never decides the fix itself.
 `release-gate` fires on any open `pr approved` issue without `ready for prod release`.
+`unrelated-error` fires when a dev or prod verification prints `Not caused by this release, needs triage:`
+(the SRE passed the release and excluded the error). It is repo-level (issue 0), once per distinct signature
+(numbers and long hex folded), never again for that signature from any PR, and it never holds the release.
+The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
+fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
 `dead-zone` is an issue in a state reconcile cannot recover; a reviewer-declared hold is
 never auto-recovered and goes to the EM as a message.
 

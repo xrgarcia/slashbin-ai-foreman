@@ -12,6 +12,7 @@ import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
 import { getOpenIssues } from "../github/cache.js";
 import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
+import { noteUnrelated } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
 
@@ -320,6 +321,8 @@ export async function tryVerify(
     await emit({ kind: "session", session: { ...session, status: "started" } }, null, vlog);
     const sre = await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
+    // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
+    if (sre.kind === "verdict" && sre.unrelated) noteUnrelated(repoName, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     const r: VerifyResult = sre.kind === "verdict" && sre.pass && config.qaGate && qaApplies(repoConfig, config)
