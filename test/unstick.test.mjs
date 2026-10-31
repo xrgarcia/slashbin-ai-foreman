@@ -9,7 +9,7 @@ import { join } from "node:path";
 import {
   UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, openEntry, unstickKey,
 } from "../dist/unstick.js";
-import { unstickViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS } from "../dist/agent.js";
+import { unstickViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS, emUnstickMaxDurationMs } from "../dist/agent.js";
 import { unstickStageReady } from "../dist/config.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
@@ -25,6 +25,8 @@ test("the kinds are the EM contract, verbatim", () => {
     "epic-ready-to-close",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
+  assert.equal(emUnstickMaxDurationMs("skip"), 20 * 60_000);
+  assert.equal(emUnstickMaxDurationMs("rework-decision"), 40 * 60_000);
 });
 
 test("a hold with retries left is not stuck; one at its cap is, by kind", () => {
