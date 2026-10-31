@@ -258,5 +258,11 @@ test("a follow-up corrective releases the hold: it builds, its merge advances ba
   assert.equal(reopensOnBaseAdvance("visual-qa-failed"), true, "the corrective merging into base reopens the held verification");
   const { UNBLOCK_CHECKS } = await import("../dist/unblock.js");
   assert.ok(UNBLOCK_CHECKS["verify-exhausted"].includes("specEdited") && UNBLOCK_CHECKS["verify-exhausted"].includes("baseAdvanced"));
-  assert.equal(devVerifyHolding([1538, 1543], vqaHold, VERIFY_MAX_ATTEMPTS), 1543, "the cap frees the repo, so the corrective builds");
+  assert.equal(devVerifyHolding([1538, 1543], vqaHold, VERIFY_MAX_ATTEMPTS), 1543, "the cap frees the repo");
+  // ... and the corrective still builds before unrelated queued work (Tech Lead R1): implement looks up the follow-up of the FAIL.
+  const { visualDecisionHolder } = await import("../dist/phases/verify.js");
+  assert.equal(visualDecisionHolder([1538, 1539], vqaHold, VERIFY_MAX_ATTEMPTS), 1538);
+  assert.equal(visualDecisionHolder([1538], { 1538: { ...vqaHold[1538], reason: "acceptance-not-verified" } }, VERIFY_MAX_ATTEMPTS), null);
+  const titles = new Map([[1539, "Older unrelated"], [1543, "Header row: fix phone layout — follow-up to #1538"]]);
+  assert.deepEqual(followUpsToBuild(1538, [1539], [1539, 1543], titles), [1543]);
 });
