@@ -66,7 +66,8 @@ import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
-import { noteUnrelated } from "../unstick.js";
+import { noteUnrelated, noteEpicChildClosed, epicRefs } from "../unstick.js";
+import { readIssueBody } from "../github/readiness.js";
 
 /** The SRE's soak window: it runs once this long after the merge. */
 export const SOAK_DELAY_MS = 30 * 60_000;
@@ -206,6 +207,23 @@ function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): num
   return rel.issues.filter((n) => !blocked.has(n));
 }
 
+/**
+ * The epics a closed issue belongs to: those its body names, or for a
+ * "follow-up to #N" those #N names. A read failure never touches the release.
+ */
+function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger: Logger): void {
+  try {
+    let epics = epicRefs(readIssueBody(repoConfig, n));
+    const parent = /follow-up to #(\d+)/i.exec(title);
+    if (!epics.length && parent) epics = epicRefs(readIssueBody(repoConfig, Number(parent[1])));
+    if (noteEpicChildClosed(repoConfig.name, repoConfig.githubRepo, n, epics) > 0) {
+      logger.info(`#${n} closed in production; asking the EM whether engineering-manager ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
+    }
+  } catch (err) {
+    logger.warn(`#${n}: could not read its epic references (${err instanceof Error ? err.message : String(err)}); the EM is not told`);
+  }
+}
+
 /** A pass: close every issue with one line of evidence, record it, and queue the soak. */
 async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move, evidence: string | undefined, logger: Logger): Promise<void> {
   tagRelease(repoConfig, rel, logger);
@@ -213,10 +231,12 @@ async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move,
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
     `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.`;
   // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
-  const open = new Set(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => i.number));
+  const openIssues = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const open = new Set(openIssues.map((i) => i.number));
   for (const n of writable(repoConfig, rel, logger).filter((i) => open.has(i))) {
     comment(repoConfig, n, line, logger);
     await advance(itemOf(repoConfig, n), move, repoConfig, logger);
+    noteEpicClose(repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
   }
   const at = iso(now());
   save(repoConfig, (st) => {
