@@ -59,8 +59,13 @@ export interface VerifyHold {
   attempts: number;
   /** ISO time the SRE said the criterion becomes observable (`hold=wait-until-…`); not retried before it. */
   retryAt?: string;
-  /** Set when a visual QA FAIL sent the issue back to the Foreman: the follow-up fix issue, and whether it has merged. */
+  /** Legacy: holds written before 2026-10-31, when the Foreman filed its own rework issue. Read so they finish; never written. */
   rework?: { issue: number | null; landed: boolean };
+  /**
+   * What the EM is shown on the first failure (`rework-decision`): the files the PR touched, the evidence links
+   * and the verdict tail. Set by a visual QA FAIL or a charged verification failure that returned a verdict.
+   */
+  decision?: { files: string[]; evidence: string[]; verdict: string };
 }
 
 /**

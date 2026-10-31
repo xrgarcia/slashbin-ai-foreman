@@ -9,7 +9,7 @@ import { emit, advance } from "../work-source.js";
 import { verifyViaSre, type VerifyResult } from "../agent.js";
 import { applyQaGate, qaApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import { findIssuesMergedToBase, findIssuesAwaitingVerify, gh } from "../github.js";
+import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
 import { getOpenIssues } from "../github/cache.js";
 import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
@@ -39,6 +39,11 @@ import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, re
  */
 export function isDeployFailureHold(reason: string): boolean {
   return reason === "dev-verify-failed" || reason.startsWith("deploy=");
+}
+
+/** The files a PR touched, for the EM's call; empty when unreadable (best effort, never throws). */
+function prFilesTouched(repoConfig: RepoConfig, pr: number, vlog: Logger): string[] {
+  return prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog).slice(0, 40);
 }
 
 export function reopensOnBaseAdvance(reason: string): boolean {
@@ -94,19 +99,23 @@ export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes
  * - `wait`: the SRE verified what it could and named the time the rest becomes
  *   observable (`wait-until-YYYYMMDDTHHMMZ`) — not a failure, so no attempt is
  *   charged; the PR is not picked again before that time.
- * - `rework`: a visual QA FAIL (`hold=visual-qa-failed`, EM#485, 2026-10-24) —
- *   the Foreman owns the next step: it files and builds a fix issue, and the
- *   PR re-verifies once that merges. Counts one attempt (rework rounds are capped).
+ * - `decide`: a visual QA FAIL (`hold=visual-qa-failed`). The fix is a technical
+ *   decision, so it is the EM's (Ray, 2026-10-31; Slashbin-console#1538, where an
+ *   automatic rework touched files that were not the cause and held the release
+ *   queue ~24h): the Foreman files nothing. The hold is placed at its cap at once
+ *   (nothing retries unchanged code), the EM is called on this first FAIL
+ *   (`rework-decision`), and the PR re-verifies when the EM's follow-up merges or
+ *   the spec is edited.
  * - `charge`: a real hold or error — one attempt spent.
  */
-export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wait"; retryAt: string } | { kind: "rework" } | { kind: "charge" } {
+export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wait"; retryAt: string } | { kind: "decide" } | { kind: "charge" } {
   if (isToolingHold(reason)) return { kind: "defer" };
   const m = /^wait-until-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z$/.exec(reason);
   if (m) {
     const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z`);
     if (Number.isFinite(t)) return { kind: "wait", retryAt: new Date(t).toISOString() };
   }
-  if (reason === "visual-qa-failed") return { kind: "rework" };
+  if (reason === "visual-qa-failed") return { kind: "decide" };
   return { kind: "charge" };
 }
 /**
@@ -156,50 +165,10 @@ export function followUpsToBuild(holder: number, batch: readonly number[], handO
   return followUpsOf(holder, [...new Set([...batch, ...handOff])], titles);
 }
 
-/** Title of round `round`'s rework issue for `n`; "follow-up to #n" is what followUpsOf matches. Pure, exported for tests. */
-export function reworkIssueTitle(round: number, n: number): string {
-  return `Visual QA rework ${round} for #${n} — follow-up to #${n}`;
-}
-
-/**
- * The body of the rework issue for `n`; `summary` is the SRE's (redacted) output, or, with
- * `by: "QA"`, QA's regression lines and shot names. Pure, exported for tests.
- */
-export function reworkIssueBody(n: number, pr: number, summary: string, by: "SRE" | "QA" = "SRE"): string {
-  const qa = by === "QA";
-  return [
-    qa
-      ? `QA of PR #${pr} found regressions for #${n} on dev: pages this PR made worse than the stored baseline. The QA Report comment on the PR carries the verdict and the pages.`
-      : `Dev visual QA of PR #${pr} failed for #${n} at the SHA the SRE captured. The SRE's evidence comment on #${n} and on the PR carries the images and the per-criterion verdicts.`,
-    ``,
-    qa ? `Fix the regressions named below, without changing scope. Defects that were already there before the PR are not part of this.` : `Fix the layout defects named there, without changing scope.`,
-    ``,
-    `## Pre-Flight`,
-    ``,
-    `Dev is the only target; the parent #${n}'s dev-safety and sign-in apply unchanged.`,
-    ``,
-    `## Acceptance`,
-    ``,
-    // One rule: pickup holds an \`approved\` issue with no script or No-Script reason (EM#99), so a generated
-    // repair states one. Its verification is the parent's own, re-run after this merges.
-    `- **No-Script:** this repair is verified by re-running parent #${n}'s dev verification at the new dev SHA, not by a committed script of its own.`,
-    ``,
-    qa
-      ? `QA re-checks #${n}'s pages at the new dev SHA and its verdict is PASS (no regression against the baseline). A FAIL files the next rework; a HELD run holds as before.`
-      : `The SRE re-captures #${n}'s screens at the new dev SHA and the visual QA verdict is PASS. A FAIL files the next rework; infrastructure or sign-in failures hold as before.`,
-    ``,
-    qa ? `## QA output` : `## SRE verification output`,
-    ``,
-    "```",
-    qa ? summary.slice(0, 3500) : summary.slice(-1500),
-    "```",
-    ``,
-  ].join("\n");
-}
-
-/** The argv that files a rework issue, carrying the repo's trigger label. Pure, exported for tests. */
-export function reworkIssueArgs(repo: string, title: string, body: string, label: string): string[] {
-  return ["issue", "create", "--repo", repo, "--title", title, "--body", body, "--label", label];
+/** The evidence links (comment and image URLs) in the SRE's or QA's output, distinct, in order, at most `max`. Pure, exported for tests. */
+export function evidenceLinks(summary: string, max = 8): string[] {
+  const urls = summary.match(/https?:\/\/[^\s<>()"'`\]\[]+/g) ?? [];
+  return [...new Set(urls.map((u) => u.replace(/[.,;:]+$/, "")))].slice(0, max);
 }
 
 /** Per repo: the verify stage waiting after the SRE could not run at all (backoff.agentUnavailable). */
@@ -387,44 +356,29 @@ export async function tryVerify(
       for (const n of target.issueNumbers) await emit({ kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       return false;
     }
+    // The EM decides every post-merge fix (Ray, 2026-10-31): the Foreman files nothing. A visual QA FAIL is held at
+    // its cap at once (retrying unchanged code cannot pass), and the unstick stage calls the EM on this first FAIL
+    // (`rework-decision`) with the PR, the files it touched, the verdict and the evidence links. A charged hold
+    // keeps its retries and is also shown to the EM on its first failure.
     let attempts = 0;
     for (const n of target.issueNumbers) {
       attempts = Math.max(attempts, (kept[n]?.attempts ?? 0) + 1);
     }
-    if (plan.kind === "rework" && attempts < verifyRetry.maxAttempts) {
-      const fixes: number[] = [];
-      for (const n of target.issueNumbers) {
-        const title = reworkIssueTitle(attempts, n);
-        let issue: number | null = null;
-        try {
-          issue = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog).find((i) => i.title === title)?.number ?? null;
-          if (issue === null) {
-            const out = gh(reworkIssueArgs(repoConfig.githubRepo, title, reworkIssueBody(n, target.prNumber, r.kind === "verdict" ? r.summary : r.error, r.kind === "verdict" ? r.by : undefined), repoConfig.triggerLabel), repoConfig.repoPath);
-            const m = /\/issues\/(\d+)/.exec(out);
-            issue = m ? parseInt(m[1], 10) : null;
-          }
-        } catch (err) {
-          vlog.warn(`#${n}: could not file the visual QA rework issue: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        if (issue !== null) fixes.push(issue);
-        kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts, rework: { issue, landed: false } };
-      }
-      saveRepoState(repoName, { ...after, verifyHeld: kept });
-      const fixRef = fixes.length > 0 ? fixes.map((m) => `#${m}`).join(", ") : "(not filed)";
-      const why = `dev visual QA of PR #${target.prNumber} failed — the Foreman is building the fix ${fixRef} (rework ${attempts}/${verifyRetry.maxAttempts}); ${issues} re-verifies once it merges`;
-      for (const n of target.issueNumbers) await emit({ kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
-      ended = { status: "failed", detail: why };
-      vlog.warn(`${repoName}: ${why}`);
-      events?.push({ message: `🎨 ${repoConfig.githubRepo} ${issues}: ${why}`, level: "warn" });
-      return false;
-    }
+    if (plan.kind === "decide") attempts = verifyRetry.maxAttempts;
+    const summary = r.kind === "verdict" ? r.summary : "";
+    const decision = r.kind === "verdict" && !isDeployFailureHold(reason)
+      ? { files: prFilesTouched(repoConfig, target.prNumber, vlog), evidence: evidenceLinks(summary), verdict: summary.trim().slice(-600) }
+      : undefined;
     for (const n of target.issueNumbers) {
-      kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts };
+      // The same failure keeps its first evidence, so a retry that fails the same way is not a new question for the EM.
+      const prior = kept[n]?.reason === reason ? kept[n]?.decision : undefined;
+      const d = prior ?? decision;
+      kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts, ...(d ? { decision: d } : {}) };
     }
     saveRepoState(repoName, { ...after, verifyHeld: kept });
     const final = attempts >= verifyRetry.maxAttempts;
     const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${verifyRetry.maxAttempts}` +
-      (final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
+      (plan.kind === "decide" ? "; the EM decides the fix (a follow-up issue or a spec edit releases it)" : final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
     for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, ...(isDeployFailureHold(reason) ? { owner: "sre" as const } : {}) }, repoConfig, vlog);
     ended = { status: "failed", detail: why };
     vlog.warn(`${repoName}: ${why}`);
