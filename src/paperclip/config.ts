@@ -30,6 +30,7 @@ const stageLabelsSchema = z.object({
   inReview: stageLabel("In code review", "#2563eb"),
   changesRequested: stageLabel("Changes requested", "#d97706"),
   merged: stageLabel("Dev verification", "#0891b2"),
+  qaReviewing: stageLabel("QA review", "#db2777"),
   pendingVerification: stageLabel("Awaiting EM verification", "#7c3aed"),
   releaseAuthorized: stageLabel("Release authorized", "#4f46e5"),
   awaitingRelease: stageLabel("Awaiting release", "#059669"),
@@ -56,6 +57,8 @@ const boardStagesSchema = z.object({
   // Merged, waiting for the verify stage; then its live session.
   merged: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "merged"),
   verifying: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "merged"),
+  // The QA gate (qaGate on) running after the SRE passed it: set `owner` to a QA role to give it a seat.
+  qaReviewing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "qaReviewing"),
   // Dev-verified (`pr approved`): waiting on the EM's verification and `ready for prod release`.
   pendingVerification: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "pendingVerification"),
   // The EM authorized the release (`ready for prod release`); promote puts it in the release PR next.
