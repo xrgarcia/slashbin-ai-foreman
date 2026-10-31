@@ -1839,6 +1839,14 @@ export async function approvePromotionViaTechLead(
 
 /** How long one `em.mjs unstick` call may run before it is killed (#103). */
 export const EM_UNSTICK_MAX_DURATION_MS = 20 * 60_000;
+/**
+ * A rework decision files and approves a corrective, so the EM gives it a 38-minute session
+ * (`sessionBudget`, bin/em.mjs). 20 minutes killed Slashbin-console#1552's on 2026-10-31.
+ */
+export const EM_UNSTICK_REWORK_MAX_DURATION_MS = 40 * 60_000;
+export function emUnstickMaxDurationMs(kind: string): number {
+  return kind === "rework-decision" ? EM_UNSTICK_REWORK_MAX_DURATION_MS : EM_UNSTICK_MAX_DURATION_MS;
+}
 
 /** How the EM answered an unstick call. The Foreman never clears a block on any of them. */
 export type UnstickOutcome =
@@ -1871,7 +1879,7 @@ export async function unstickViaEm(
   logger.info(`Asking the EM to unstick ${repoConfig.githubRepo}#${issue} (${kind})`);
   const r = await runAgentCli(em, "bin/em.mjs",
     ["unstick", "--repo", repoConfig.githubRepo, "--issue", String(issue), "--kind", kind, "--reason", reason],
-    buildEmEnv(agentConfig), agentConfig, EM_UNSTICK_MAX_DURATION_MS, abortSignal, transcriptPath);
+    buildEmEnv(agentConfig), agentConfig, emUnstickMaxDurationMs(kind), abortSignal, transcriptPath);
   if (r.timedOut) return { kind: "failed", detail: "EM unstick timed out" };
   const last = r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
   if (r.code === 0) return { kind: "invoked", detail: last };
