@@ -110,6 +110,13 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
     why: "the Foreman started the verify session",
     done: "the verification's result is on {pr}",
   },
+  qaReviewing: {
+    act: false,
+    todo: "QA is checking {pr} on dev now (visual and behaviour). Nothing to do from this card.",
+    next: "nothing; QA of {pr} on dev is running",
+    why: "the SRE passed dev verification and the QA gate started",
+    done: "QA passes (`{prApproved}`; the card moves to EM verification) or holds (the card moves to Blocked)",
+  },
   pendingVerification: {
     act: true,
     todo: "Run the EM release gate (`/deliver-to-prod` step 3a) for {issue} and, if it passes, apply `{readyForProd}` to the issue. The prod release does not start until you do.",

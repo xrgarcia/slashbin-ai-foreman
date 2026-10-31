@@ -1256,6 +1256,22 @@ export class PaperclipMirror implements WorkObserver {
     for (const item of event.items) {
       const id = await this.resolve(item, false);
       if (!id) continue;
+      if (phase === "qa") {
+        // The QA gate runs inside the verify session that holds the card: its start re-places that hold at
+        // `qaReviewing` (the seat the board gives QA); its end changes nothing, the verify session's end
+        // releases the hold. No hold (mirror restarted mid-gate) = nothing to move.
+        const h = this.holds.get(id);
+        if (event.status === "started" && h) {
+          h.phase = "qa";
+          h.placed = await this.move(id, SESSION_STAGE.qa, true);
+          if (this.comments.enabled) {
+            await this.note(id, `**QA reviewing ${event.pr === undefined ? "the PR" : `PR #${event.pr}`} on dev** (visual and behaviour checks)`,
+              { ...opts, handoff: handoffTo("qaReviewing", item) });
+          }
+          leaseChanged = true;
+        }
+        continue;
+      }
       const retry = event.phase === "implement" && event.status === "started" && this.retrying.has(this.keyOf(item));
       // The step notes speak for the item worked; an untouched one gets none.
       const text = this.comments.enabled ? sessionComment(event, item, this.comments, retry) : untouched(event, item) ? undefined : legacy;
