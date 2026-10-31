@@ -81,10 +81,10 @@ export async function tryUnstick(
 
     // Event-kind entries are candidates for as long as they stand.
     for (const e of Object.values(state.unstick ?? {})) {
-      if (EVENT_KINDS.has(e.kind)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason });
+      if (EVENT_KINDS.has(e.kind)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
     }
 
-    const live = new Set(candidates.map((c) => unstickKey(c.issue, c.kind)));
+    const live = new Set(candidates.map((c) => unstickKey(c.issue, c.kind, c.tag)));
     const now = new Date().toISOString();
     mutate(repoName, (table) => {
       for (const [key, e] of Object.entries(table)) {
@@ -94,7 +94,7 @@ export async function tryUnstick(
         if (derivedGone || closed) delete table[key];
       }
       for (const c of candidates) {
-        const key = unstickKey(c.issue, c.kind);
+        const key = unstickKey(c.issue, c.kind, c.tag);
         const next = openEntry(table[key], c, now);
         table[key] = next;
       }
@@ -102,7 +102,7 @@ export async function tryUnstick(
 
     let calls = 0;
     for (const c of candidates) {
-      const key = unstickKey(c.issue, c.kind);
+      const key = unstickKey(c.issue, c.kind, c.tag);
       const entry = loadRepoState(repoName).unstick?.[key];
       if (!entry || !needsCall(entry, c)) continue;
       const ac = new AbortController();

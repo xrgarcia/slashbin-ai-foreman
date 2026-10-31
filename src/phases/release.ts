@@ -66,6 +66,7 @@ import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
+import { noteUnrelated } from "../unstick.js";
 
 /** The SRE's soak window: it runs once this long after the merge. */
 export const SOAK_DELAY_MS = 30 * 60_000;
@@ -124,6 +125,8 @@ function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): string
 
 function fromVerifyResult(r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger): Verdict {
   if (r.kind === "error") return { kind: "defer", reason: r.error };
+  // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
+  if (r.unrelated) noteUnrelated(repoConfig.name, r.unrelated, `${repoConfig.githubRepo} PR #${pr} (prod)`);
   const evidence = evidenceFor(repoConfig, pr, logger);
   if (r.pass) return { kind: "pass", ...(evidence ? { evidence } : {}) };
   return holdVerdict(r.reason ?? "prod-verify-held", evidence);
@@ -693,6 +696,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   }
   const merged: ProdRelease = { ...rel, phase: "merged", mergedAt: iso(now()), ...(mergeSha ? { mergeSha } : {}) };
   putRelease(repoConfig, merged);
+  if (r.unrelated) noteUnrelated(repoConfig.name, r.unrelated, `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)`);
   logger.info(`Release PR #${pr.number} merged by the SRE as ${short(mergeSha ?? undefined)} (verify=${tr.verify}${tr.hold ? `, hold=${tr.hold}` : ""})`);
   await followRelease(repoConfig, logger, true);
   tagRelease(repoConfig, merged, logger);

@@ -294,6 +294,41 @@ test("approve → deploy → pass: tagged, every issue closed with one comment, 
   assert.equal(agentCalls().length, 2);
 });
 
+// foreman#148: an error the SRE excluded during a production verification reaches the EM, and the release still ships.
+const unrelatedEntries = () => Object.values(loadRepoState("rel").unstick ?? {}).filter((e) => e.kind === "unrelated-error");
+const TRIAGE = (prefix) => [`${prefix}Evidence: https://example.test/pv-ev`, `${prefix}Not caused by this release, needs triage: billing: Expired API Key provided: rk_test_1234`].join("\n");
+
+test("the first prod deploy's excluded error reaches the EM with its evidence; the release still closes", async () => {
+  const d = DEPLOYED("pass", " evidence=https://example.test/pv");
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `${TRIAGE("verify: ")}\n${d.out}` } });
+  assert.equal(await run(), true);
+  assertClosedVerified(5);
+  const u = unrelatedEntries();
+  assert.equal(u.length, 1);
+  assert.equal(u[0].issue, 0);
+  assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-ev/);
+});
+
+test("a prod deploy whose evidence is only on its SRE_DEPLOY trailer still hands that link to the EM", async () => {
+  const d = DEPLOYED("pass", " evidence=https://example.test/pv-trailer");
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `verify: Not caused by this release, needs triage: billing: Expired API Key provided: rk_test_1234\n${d.out}` } });
+  assert.equal(await run(), true);
+  assertClosedVerified(5);
+  const u = unrelatedEntries();
+  assert.equal(u.length, 1);
+  assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-trailer/);
+});
+
+test("a prod verification's excluded error reaches the EM once; the release still closes", async () => {
+  const v = VERIFY(90);
+  world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: { ...v, out: `${TRIAGE("")}\n${v.out}` } });
+  assert.equal(await run(), true);
+  assertClosedVerified(7);
+  const u = unrelatedEntries();
+  assert.equal(u.length, 1);
+  assert.match(u[0].reason, /PR #90 \(prod\).*Evidence: https:\/\/example\.test\/pv-ev/);
+});
+
 test("the soak runs once, 30 minutes on: a pass ends the release", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
   await run();
