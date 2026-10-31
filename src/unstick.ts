@@ -39,6 +39,7 @@ export const UNSTICK_KINDS = [
   "release-gate",
   "rework-decision",
   "unrelated-error",
+  "epic-ready-to-close",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -99,7 +100,7 @@ export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): stri
 
 /** The kinds only an event can report: there is no persisted condition to read them from. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
-  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error",
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close",
 ]);
 
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
@@ -242,4 +243,32 @@ export function clearUnstick(repoName: string, issue: number): void {
   const keep = Object.fromEntries(Object.entries(table).filter(([, e]) => e.issue !== issue));
   if (Object.keys(keep).length === Object.keys(table).length) return;
   saveRepoState(repoName, { ...state, unstick: keep });
+}
+
+/** The EM epics an issue body names (`engineering-manager #N`, the `## References` convention). */
+export function epicRefs(body: string): number[] {
+  return [...new Set([...body.matchAll(/\bengineering-manager #(\d+)/gi)].map((m) => Number(m[1])))];
+}
+
+/**
+ * foreman#151: a child closed in production may have been its epic's last, and
+ * closing a delivered epic is the EM's hand-off to the PO that nothing else makes.
+ * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
+ * CLOSE check decides whether it was the last. Returns the entries added.
+ */
+export function noteEpicChildClosed(repoName: string, githubRepo: string, issue: number, epics: readonly number[]): number {
+  const state = loadRepoState(repoName);
+  const table = { ...(state.unstick ?? {}) };
+  const now = new Date().toISOString();
+  let added = 0;
+  for (const epic of epics) {
+    const tag = `${epic}-${issue}`;
+    const key = unstickKey(0, "epic-ready-to-close", tag);
+    if (table[key]) continue;
+    const reason = `${githubRepo}#${issue} was closed as completed after its production verification; it belongs to engineering-manager #${epic}. Close the epic if this was its last open child.`;
+    table[key] = openEntry(undefined, { issue: 0, kind: "epic-ready-to-close", reason, tag }, now);
+    added++;
+  }
+  if (added > 0) saveRepoState(repoName, { ...state, unstick: table });
+  return added;
 }

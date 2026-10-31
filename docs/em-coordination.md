@@ -93,7 +93,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage runs `em.mjs unstick` for each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -105,6 +105,11 @@ the repo and PR it was first seen on, and the SRE's evidence links. It is repo-l
 (numbers and long hex folded), never again for that signature from any PR, and it never holds the release.
 The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
 fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
+`epic-ready-to-close` fires when the release stage closes an issue after its production verification and that issue
+names an epic (`engineering-manager #N` in its body, or in the body of the issue a "follow-up to #N" title names).
+It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
+CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
+else makes it (foreman#151).
 `dead-zone` is an issue in a state reconcile cannot recover; a reviewer-declared hold is
 never auto-recovered and goes to the EM as a message.
 
