@@ -86,7 +86,7 @@ export {
   mergedPrNumber,
   resetReleaseCarry,
 } from "./github/release-carry.js";
-export { issueTitles, readPrDigest, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
+export { issueTitles, readPrDigest, prChangedFiles, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
 export {
   checkPRHasChanges,
   getRemoteBranchSha,

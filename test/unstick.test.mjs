@@ -20,7 +20,7 @@ const held = (reason, attempts, prNumber = 5) => ({ heldAt: "2026-10-20T10:00:00
 test("the kinds are the EM contract, verbatim", () => {
   assert.deepEqual([...UNSTICK_KINDS], [
     "skip", "divergence", "verify-held", "verify-exhausted", "verify-no-pr", "revision-exhausted",
-    "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate",
+    "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate", "rework-decision",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
 });

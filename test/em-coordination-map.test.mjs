@@ -45,8 +45,8 @@ test("docs/em-coordination.md names every pipeline stage the EM can be handed", 
   assert.deepEqual(missing(BUILTIN_STAGES.filter((s) => s === "unstick")), []);
 });
 
-test("the rework hold the map tells the EM to wait on is still the rework path", () => {
-  assert.equal(verifyHoldPlan("visual-qa-failed").kind, "rework");
+test("the visual QA hold the map hands to the EM is still the EM-decides path", () => {
+  assert.equal(verifyHoldPlan("visual-qa-failed").kind, "decide");
   assert.ok(map.includes("`visual-qa-failed`"));
 });
 
