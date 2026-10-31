@@ -205,11 +205,3 @@ test("every waiting emit in the implement stage carries the acceptance holds", (
   assert.match(src, /const waitingSet = \(block[^\n]*\n\s*\.\.\.acceptanceHolds/);
 });
 
-test("a generated rework issue (SRE or QA) passes the gate, naming its parent", async () => {
-  const { reworkIssueBody } = await import("../dist/phases/verify.js");
-  for (const by of ["SRE", "QA"]) {
-    const body = reworkIssueBody(7, 70, "diagnostic text", by);
-    assert.equal(acceptanceVerdict(body).ok, true, by);
-    assert.match(body, /\*\*No-Script:\*\*[^\n]*#7/, by);
-  }
-});

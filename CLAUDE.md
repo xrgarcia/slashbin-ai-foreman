@@ -24,10 +24,10 @@ Verify runs only when `srePath` is set: the SRE checks each merged PR in dev. Re
 only when both `srePath` and `techLeadPath` are set (skipped with a startup warning
 otherwise; an explicit `release` without both is refused).
 
-A dev visual QA FAIL (`hold=visual-qa-failed`) goes back to the Foreman, not a timer retry: it files an
-`approved` "Visual QA rework K for #N — follow-up to #N", builds it first (the verifying issue holds the
-repo), and re-verifies #N once it merges. Rounds count against `verifyRetry.maxAttempts`; every other
-hold (infrastructure, sign-in) is unchanged. (EM#485, PO decision 2026-10-24.)
+A dev visual QA FAIL (`hold=visual-qa-failed`) is the EM's decision: the Foreman files nothing, holds the
+issue at its cap and raises unstick kind `rework-decision` that cycle (PR, touched files, verdict, evidence).
+A charged failure with a verdict calls the EM the same way on its first failure, retries still running. The
+EM's "— follow-up to #N" issue or a spec edit releases the hold. (Ray, 2026-10-31; replaces EM#485.)
 
 A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
 one Claude session on that skill against the open feature PR. A custom stage that

@@ -38,6 +38,17 @@ export function readPrDigest(
   }
 }
 
+/** The paths a PR changed. Empty when it could not be read. */
+export function prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): string[] {
+  try {
+    const j = JSON.parse(gh(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
+    return Array.isArray(j.files) ? j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean) : [];
+  } catch (err) {
+    logger.debug(`prChangedFiles: gh pr view ${pr} failed: ${formatGhError(err).message}`);
+    return [];
+  }
+}
+
 /**
  * The body of the newest review posted on `pr` at or after `since` (ISO), the
  * one a review session just wrote. Null when there is none or the read failed.

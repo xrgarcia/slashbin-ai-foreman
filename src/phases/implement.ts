@@ -28,7 +28,7 @@ import { findIssuesMergedToBase } from "../github.js";
 import { announceDeadBlocker, closeAlreadyLanded, holdBlocker, isDeadBlockerReason } from "../github/dead-blocker.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
-import { devVerifyHolding, followUpsToBuild } from "./verify.js";
+import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
 import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import {
   escalatedReason,
@@ -524,10 +524,12 @@ export async function tryBatchImplementation(
   // It builds now, alone. Looked for in all of `handOff`, not the trimmed batch:
   // a rework issue outside the batch starved while the verification waited on
   // it (Slashbin-console #1440 behind #1431, 2026-10-27).
-  const fixes = !featurePr && verifying !== null ? followUpsToBuild(verifying, actionableIssues, handOff, titles) : [];
+  // A visual QA FAIL is capped at once (the EM decides), so it no longer holds the repo; its follow-up still goes first.
+  const followUpOf = verifying ?? visualDecisionHolder(merged, loadRepoState(repoName).verifyHeld ?? {}, config.backoff.verifyRetry.maxAttempts);
+  const fixes = !featurePr && followUpOf !== null ? followUpsToBuild(followUpOf, actionableIssues, handOff, titles) : [];
   if (fixes.length > 0) {
     actionableIssues.splice(0, actionableIssues.length, ...fixes);
-    repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the follow-up to #${verifying}, whose dev verification is waiting on it`);
+    repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the follow-up to #${followUpOf}, whose dev verification is waiting on it`);
   }
   const holder = featurePr ? `open feature PR #${featurePr.number}` : verifying !== null && fixes.length === 0 ? `#${verifying}'s dev verification` : null;
   const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : holder ? actionableIssues : [];

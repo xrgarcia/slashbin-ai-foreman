@@ -53,10 +53,10 @@ come at 10 minutes, then 20, then the issue goes `blocked` (verify-exhausted).
 |---|---|---|---|
 | `codex-unavailable`, `em-mirror-unavailable`, `registry-unavailable`, `tooling-unavailable`, `evidence-check-failed`, `no-evidence-comment`, `visual-qa-dev-unreachable`, `visual-qa-sign-in-failed`, `visual-qa-review-unavailable`, `visual-qa-sha-unproven`, `qa-errored`, `qa-held-dev-unreachable`, `qa-held-sign-in-failed`, `qa-held-review-unavailable`, `qa-held-pr-unreadable`, `qa-held-baseline-unreadable` | defer (tooling) | retries on `backoff.agentUnavailable` (2 → 30 min), no attempt charged, silent | none — wait. Persisting for hours is a tooling defect: file it on the SRE or Foreman |
 | `wait-until-YYYYMMDDTHHMMZ` | wait | retries at that time, no charge | none — wait |
-| `visual-qa-failed` | rework | files its own `approved` issue "Visual QA rework N for #X", builds it, re-verifies the original when it merges; at most 2 rounds | **none — wait.** Filing your own corrective builds it twice (Slashbin-console#1535). After the last round it is a charged hold → `verify-exhausted` |
+| `visual-qa-failed` | decide | **files nothing and builds nothing.** Holds at its cap at once (retrying unchanged code cannot pass) and raises the unstick kind `rework-decision` in the same cycle, with the PR, the files it touched, the verdict and the evidence links (Ray, 2026-10-31; Slashbin-console#1538: an automatic rework changed `JourneyBar.tsx` while the cause was in `DashboardLayout.tsx`, and the release queue was held ~24h) | **yours — decide the fix, on the first FAIL.** Read the evidence, find the component that owns the defect (it may lie outside the PR's files), and file the corrective titled "… — follow-up to #N" or edit the spec. The follow-up merging into base (`baseAdvanced`) or a spec edit (`specEdited`) releases the hold and re-verifies |
 | every other `qa-held-*` (`unsafe-host`, `browser-crashed`, `nothing-captured`), `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
 | `dev-verify-failed`, `deploy=…` | charged | blocked with owner SRE (`deployFailed`) | route to the SRE |
-| `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked` | a wait while it retries — unless the evidence already shows the spec or the build is wrong: then edit the spec (`specEdited` releases it at once) or file the fix as a follow-up (below), without waiting out the attempts. `baseAdvanced` does **not** release this one |
+| `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked`; the retries keep running, but the first failure also raises `rework-decision` (§3) | **yours — decide the fix, on the first failure; do not wait out the attempts.** Read the evidence and the touched files: edit the spec (`specEdited` releases it at once) or file the fix as a follow-up (below). `baseAdvanced` does **not** release this one. Deploy failures (`dev-verify-failed`, `deploy=…`) and runs that returned no verdict raise nothing early; they stay with the SRE and `verify-exhausted` |
 
 **A fix for a held verification jumps the queue only by its title.** An issue whose title
 contains `follow-up to #N` builds at once, alone, ahead of the repo's queue, while #N's
@@ -92,7 +92,11 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage runs `em.mjs unstick` for each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`. Verify holds become candidates only after their attempts are spent.
+`release-gate`, `rework-decision`. Verify holds become candidates only after their attempts are spent,
+except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
+verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
+the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
+hold hands over to `verify-exhausted` when its retries run out. The Foreman never decides the fix itself.
 `release-gate` fires on any open `pr approved` issue without `ready for prod release`.
 `dead-zone` is an issue in a state reconcile cannot recover; a reviewer-declared hold is
 never auto-recovered and goes to the EM as a message.
@@ -118,7 +122,7 @@ first Ray hears of a stuck card.
 
 | Loop | Limit, then |
 |---|---|
-| visual-QA rework | 2 rounds, then charged → `verify-exhausted` |
+| visual-QA FAIL | no loop: held at once, the EM decides (`rework-decision`) |
 | dev-verify retries | 10 min, 20 min, then `blocked` |
 | revise | 2 failures → `revision-exhausted`; 3 review rounds → `needsRuling` |
 | skip hold | 3 attempts → `blocked` |
