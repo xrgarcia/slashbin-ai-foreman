@@ -256,12 +256,6 @@ export function epicRefs(body: string): number[] {
  * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
  * CLOSE check decides whether it was the last. Returns the entries added.
  */
-/** An issue's epics: those its body names, and its sub-issue parent when that is an engineering-manager issue. */
-export function epicsOf(links: { body: string; parent: string }): number[] {
-  const parent = /\/repos\/[^/]+\/slashbin-engineering-manager\/issues\/(\d+)$/.exec(links.parent);
-  return [...new Set([...epicRefs(links.body), ...(parent ? [Number(parent[1])] : [])])];
-}
-
 export function noteEpicChildClosed(repoName: string, githubRepo: string, issue: number, epics: readonly number[]): number {
   const state = loadRepoState(repoName);
   const table = { ...(state.unstick ?? {}) };
