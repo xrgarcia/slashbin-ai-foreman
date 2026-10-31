@@ -265,6 +265,12 @@ Type: boolean · Default: `false`
 
 Whether QA gates delivery. false (default) = report-only: the card advances on the SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances, FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card like an SRE hold. Needs `qaPath`. A config flip, reversible.
 
+### `qaBeforeMerge`
+
+Type: boolean · Default: `false`
+
+QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs `bin/qa.mjs check --local` on the approved head (it boots the PR itself, no secret), and only a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder. Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged. Needs `qaPath` and `techLeadPath`. A config flip, reversible.
+
 ### `sreDeployMaxDurationMs`
 
 Type: integer · Default: `7200000` (2 h) · Env: `AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS`
