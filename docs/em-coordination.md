@@ -98,8 +98,9 @@ verdict, is called in the same cycle, with the PR, the files it touched, the ver
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
 hold hands over to `verify-exhausted` when its retries run out. The Foreman never decides the fix itself.
 `release-gate` fires on any open `pr approved` issue without `ready for prod release`.
-`unrelated-error` fires when a dev or prod verification prints `Not caused by this release, needs triage:`
-(the SRE passed the release and excluded the error). It is repo-level (issue 0), once per distinct signature
+`unrelated-error` fires when a dev verification, a prod verification or the first prod deploy prints `Not caused by
+this release, needs triage:` (the SRE passed the release and excluded the error). The reason carries the signature,
+the repo and PR it was first seen on, and the SRE's evidence links. It is repo-level (issue 0), once per distinct signature
 (numbers and long hex folded), never again for that signature from any PR, and it never holds the release.
 The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
 fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
