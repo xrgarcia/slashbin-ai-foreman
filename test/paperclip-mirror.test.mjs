@@ -1536,3 +1536,36 @@ test("qa stage: a QA event with no verify hold moves nothing and leaves no hold 
   await mirror.onSession({ phase: "qa", status: "failed", repo: "example/r", items: [item], pr: 9, reviewer: "QA" }, logger());
   assert.equal(fake.rows[0].status, "in_review");
 });
+
+test("qa stage: a role added to the config without an id takes its seat on startup, and the QA gate hands the card to it", async () => {
+  // Reviewer finding on #150: the role never got an id, so the card stayed with the Foreman.
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: AGENT, description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const agents = [{ id: AGENT, name: "Foreman" }];
+  const fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const method = init.method ?? "GET";
+    if (u.pathname === `/api/companies/${CID}/agents`) {
+      if (method === "GET") return new Response(JSON.stringify(agents), { status: 200 });
+      const made = { id: "agent-qa-new", ...JSON.parse(init.body) };
+      agents.push(made);
+      return new Response(JSON.stringify(made), { status: 201 });
+    }
+    if (method === "PATCH" && u.pathname === "/api/agents/agent-qa-new") return new Response(JSON.stringify({ id: "agent-qa-new" }), { status: 200 });
+    return fake.fetch(url, init);
+  };
+  const cfg = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
+    identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false },
+    roles: { qa: { name: "QA", title: "QA (visual and behaviour checks on dev)", role: "engineer" } },
+    board: { verifying: { owner: "foreman", status: "in_progress", label: "merged" }, qaReviewing: { owner: "qa", status: "in_progress", label: "qaReviewing" } } };
+  const mirror = new PaperclipMirror(new PaperclipClient({ url: cfg.url, companyId: CID, fetch }), cfg, [SECRET], logger());
+  await mirror.registerSeats();
+  assert.ok(agents.some((a) => a.name === "QA"), "the QA agent was created");
+  await mirror.onSession(verifySession("started"), logger());
+  await mirror.onSession(verifySession("started", { phase: "qa", reviewer: "QA" }), logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-qa-new");
+  assert.equal(fake.rows[0].status, "in_progress");
+  // A reload that carries no id keeps the seat.
+  mirror.reconfigure({ ...cfg });
+  await mirror.registerSeats();
+  assert.equal(agents.filter((a) => a.name === "QA").length, 1, "never a second QA agent");
+});

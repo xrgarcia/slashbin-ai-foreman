@@ -186,6 +186,7 @@ async function main(): Promise<void> {
         logger,
         config.lifecycleLabels,
       );
+      await mirror.registerSeats();
       addObserver(mirror);
       // Housekeeping off the observer queue: project backfill, retiring the old live task.
       mirror.start();
