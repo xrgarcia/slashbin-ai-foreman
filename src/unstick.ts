@@ -17,6 +17,7 @@
 //    `stuck` kind and `noteStuck` records it. Those entries live until an
 //    `unblocked` event, the issue closing, or a new reason replaces them.
 
+import { createHash } from "node:crypto";
 import { loadRepoState, saveRepoState, type BranchBlock, type RepoState, type VerifyHold } from "./state.js";
 import { escalatedReason } from "./github/skip-hold.js";
 
@@ -37,6 +38,7 @@ export const UNSTICK_KINDS = [
   "deploy-failed",
   "release-gate",
   "rework-decision",
+  "unrelated-error",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -81,6 +83,8 @@ export interface UnstickEntry {
   lastCallAt?: string;
   /** The tail of the last failure, for the log and for a person reading the state. */
   detail?: string;
+  /** Tells apart questions that share an issue and kind (`unrelated-error`: one per signature). */
+  tag?: string;
 }
 
 /** Something stuck right now, as read this pass. */
@@ -88,13 +92,14 @@ export interface UnstickCandidate {
   issue: number;
   kind: UnstickKind;
   reason: string;
+  tag?: string;
 }
 
-export const unstickKey = (issue: number, kind: UnstickKind): string => `${issue}:${kind}`;
+export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): string => `${issue}:${kind}${tag ? `:${tag}` : ""}`;
 
 /** The kinds only an event can report: there is no persisted condition to read them from. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
-  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held",
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error",
 ]);
 
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
@@ -178,7 +183,7 @@ export function needsCall(entry: UnstickEntry | undefined, c: UnstickCandidate, 
 /** Record a fresh question (or keep the standing one if the reason is unchanged). */
 export function openEntry(prior: UnstickEntry | undefined, c: UnstickCandidate, now: string): UnstickEntry {
   if (prior && prior.reason === c.reason) return prior;
-  return { issue: c.issue, kind: c.kind, reason: c.reason, status: "pending", attempts: 0, since: now };
+  return { issue: c.issue, kind: c.kind, reason: c.reason, status: "pending", attempts: 0, since: now, ...(c.tag ? { tag: c.tag } : {}) };
 }
 
 /** An event reported work stuck: remember it for the stage's next pass. */
@@ -190,6 +195,43 @@ export function noteStuck(repoName: string, issue: number, kind: UnstickKind, re
   if (next === table[key]) return;
   table[key] = next;
   saveRepoState(repoName, { ...state, unstick: table });
+}
+
+/**
+ * An error the SRE saw during a verification and excluded as not caused by the
+ * release (its `Not caused by this release, needs triage:` lines). Nothing read
+ * those lines, so a real defect outside the PR went unowned: the dev Stripe key
+ * expired 2026-10-23 and every dev check excluded it for 8 days (SRE#369, #148).
+ *
+ * The signature with its numbers and long hex folded, so one error seen with a
+ * different id, count or timestamp is the same signature. Pure, exported for tests.
+ */
+export function unrelatedSignature(error: string): string {
+  return error.trim().replace(/\s+/g, " ").replace(/\b[0-9a-f]{8,}\b/gi, "#").replace(/\d+/g, "#").slice(0, 300);
+}
+
+/**
+ * Raise `unrelated-error` once per distinct signature per repo, with the PR and the SRE's evidence links, never again for
+ * a signature it has already raised, from any PR. Repo-level (issue 0), so it
+ * outlives the issue it was seen on and never holds a release. Returns how many
+ * were new.
+ */
+export function noteUnrelated(repoName: string, seen: { errors: readonly string[]; evidence: readonly string[] }, seenOn: string): number {
+  const state = loadRepoState(repoName);
+  const table = { ...(state.unstick ?? {}) };
+  const now = new Date().toISOString();
+  let added = 0;
+  const evidence = seen.evidence.length ? ` Evidence: ${seen.evidence.slice(0, 4).join(" ")}` : "";
+  for (const error of seen.errors) {
+    const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
+    const key = unstickKey(0, "unrelated-error", tag);
+    if (table[key]) continue;
+    const reason = `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${evidence}`;
+    table[key] = openEntry(undefined, { issue: 0, kind: "unrelated-error", reason, tag }, now);
+    added++;
+  }
+  if (added > 0) saveRepoState(repoName, { ...state, unstick: table });
+  return added;
 }
 
 /** The block on `issue` was released (`unblocked`): its questions are over. */
