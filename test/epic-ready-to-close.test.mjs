@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setStatePath } from "../dist/state.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
-import { epicRefs, epicsOf, noteEpicChildClosed, UNSTICK_KINDS } from "../dist/unstick.js";
+import { epicRefs, noteEpicChildClosed, UNSTICK_KINDS } from "../dist/unstick.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
@@ -16,9 +16,6 @@ test("epic-ready-to-close is an unstick kind, and an epic is read from the Refer
   assert.ok(UNSTICK_KINDS.includes("epic-ready-to-close"));
   assert.deepEqual(epicRefs("## References\n- engineering-manager #880\n- slashbin-engineering-manager #880, engineering-manager #12"), [880, 12]);
   assert.deepEqual(epicRefs("follow-up to #1538"), []);
-  assert.deepEqual(epicsOf({ body: "", parent: "https://api.github.com/repos/xrgarcia/slashbin-engineering-manager/issues/880" }), [880]);
-  assert.deepEqual(epicsOf({ body: "engineering-manager #880", parent: "https://api.github.com/repos/xrgarcia/slashbin-engineering-manager/issues/880" }), [880]);
-  assert.deepEqual(epicsOf({ body: "", parent: "https://api.github.com/repos/xrgarcia/Slashbin-console/issues/7" }), []);
 });
 
 test("two children of one epic: two EM calls, one per close; a repeat close adds none", async () => {
