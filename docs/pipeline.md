@@ -105,7 +105,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
     --repo <owner/name> --issue <N> --kind <kind> --reason <text>` (cwd `emRepoPath`,
     `EM_GITHUB_TOKEN`, killed after 20 minutes). Kinds: skip, divergence, verify-held,
     verify-exhausted, verify-no-pr, revision-exhausted, revision-stalemate,
-    needs-ruling, dead-zone, deploy-failed, release-gate (`src/unstick.ts`). A hold with
+    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision (`src/unstick.ts`). A hold with
     retries left is not called for. Divergence is repo-level, so it is called once per
     issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes
     are kept in `RepoState.unstick`, keyed `<issue>:<kind>`: exit 0 `invoked`, 2

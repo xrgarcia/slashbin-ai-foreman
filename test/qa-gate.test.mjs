@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { applyQaGate, qaGateBody, qaGateMarker, qaFailSummary, QA_GATE_HEADING, qaApplies, QA_MAX_DURATION_MS, readOutcome, qaStepOf } from "../dist/qa-report.js";
 import { passingCheck } from "../dist/unblock.js";
-import { verifyHoldPlan, reworkIssueBody } from "../dist/phases/verify.js";
+import { verifyHoldPlan } from "../dist/phases/verify.js";
 import { configSchema } from "../dist/config.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
@@ -36,19 +36,14 @@ test("PASS: the SRE result goes through untouched, so the card advances", async 
   assert.equal(out, sre);
 });
 
-test("FAIL: not a pass; the visual-qa-failed rework hold carries QA's regressions and shot names", async () => {
+test("FAIL: not a pass; the visual-qa-failed hold (the EM decides) carries QA's regressions and shot names", async () => {
   const out = await applyQaGate(sre, REPO, 5, deps(result("FAIL", 1)), logger);
   assert.equal(out.pass, false);
   assert.equal(out.reason, "visual-qa-failed");
-  assert.deepEqual(verifyHoldPlan(out.reason), { kind: "rework" });
+  assert.deepEqual(verifyHoldPlan(out.reason), { kind: "decide" });
   assert.match(out.summary, /`\/a` ipad: clipping_overflow \(badge spills\)/);
   assert.match(out.summary, /a-phone\.png, a-ipad\.png/);
   assert.doesNotMatch(out.summary, /\/old/, "pre-existing defects are not rework");
-  const body = reworkIssueBody(7, 70, out.summary, out.by);
-  assert.match(body, /clipping_overflow/);
-  assert.match(body, /## Pre-Flight/);
-  assert.match(body, /## Acceptance/);
-  assert.match(body, /## QA output/);
 });
 
 test("a HELD QA could re-run by itself is free; a deterministic HELD and an inconsistent exit charge; never a pass", async () => {
@@ -125,14 +120,14 @@ test("#137: an SRE pass then three errored QA runs never spends an attempt, so i
   let attempts = 0;
   for (let i = 0; i < 3; i++) {
     const out = await applyQaGate(sre, REPO, 5, deps({ kind: "errored", detail: "timed out after 90 minutes during the review step" }), logger);
-    if (verifyHoldPlan(out.reason).kind === "charge" || verifyHoldPlan(out.reason).kind === "rework") attempts++;
+    if (verifyHoldPlan(out.reason).kind === "charge" || verifyHoldPlan(out.reason).kind === "decide") attempts++;
   }
   assert.equal(attempts, 0);
 });
 
-test("#137: a QA FAIL still takes the rework path, as before", async () => {
+test("#137: a QA FAIL is the EM's decision (no Foreman rework)", async () => {
   const out = await applyQaGate(sre, REPO, 5, deps(result("FAIL", 1)), logger);
-  assert.deepEqual(verifyHoldPlan(out.reason), { kind: "rework" });
+  assert.deepEqual(verifyHoldPlan(out.reason), { kind: "decide" });
 });
 
 test("#137: an exhausted hold on a reason that no longer charges reopens; a charged one does not", () => {

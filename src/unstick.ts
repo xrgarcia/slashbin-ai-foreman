@@ -17,7 +17,7 @@
 //    `stuck` kind and `noteStuck` records it. Those entries live until an
 //    `unblocked` event, the issue closing, or a new reason replaces them.
 
-import { loadRepoState, saveRepoState, type BranchBlock, type RepoState } from "./state.js";
+import { loadRepoState, saveRepoState, type BranchBlock, type RepoState, type VerifyHold } from "./state.js";
 import { escalatedReason } from "./github/skip-hold.js";
 
 /**
@@ -36,6 +36,7 @@ export const UNSTICK_KINDS = [
   "dead-zone",
   "deploy-failed",
   "release-gate",
+  "rework-decision",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -100,6 +101,20 @@ export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
 export const RELEASE_GATE_REASON = "at `pr approved` — dev verification passed, awaiting the EM outcome gate (`ready for prod release`)";
 
 /**
+ * What the EM is told about a post-merge verification failure. Stable for one failure (no attempt count, and the
+ * evidence is kept from the first run), so the same failure is one call. Pure, exported for tests.
+ */
+export function reworkDecisionReason(h: Pick<VerifyHold, "prNumber" | "reason" | "decision">): string {
+  const d = h.decision ?? { files: [], evidence: [], verdict: "" };
+  return [
+    `Dev verification failed for PR #${h.prNumber}: ${h.reason}. The Foreman files no fix; the technical decision is yours.`,
+    `Files the PR touched: ${d.files.length > 0 ? d.files.join(", ") : "(unreadable)"}.`,
+    `Evidence: ${d.evidence.length > 0 ? d.evidence.join(" ") : "none in the output (read the evidence comments on the issue and the PR)"}.`,
+    `Verdict: ${d.verdict.replace(/\s+/g, " ").trim() || "(none)"}`,
+  ].join(" ");
+}
+
+/**
  * The stuck work persisted state shows. Pure.
  *
  * A verify hold is stuck only once its attempts are spent: until then the stage
@@ -125,6 +140,10 @@ export function derivedCandidates(
     const issue = Number(key);
     if (h.reason === "no-merged-pr") {
       out.push({ issue, kind: "verify-no-pr", reason: "labelled merged, but no merged PR into the base branch closes it" });
+    } else if (h.decision && !opts.isDeployFailureHold(h.reason) && (h.reason === "visual-qa-failed" || h.attempts < opts.verifyMaxAttempts)) {
+      // The first failure calls the EM, not the spent retries: the fix is the EM's decision. A visual QA FAIL is held at
+      // its cap and stays this kind; a charged hold hands over to verify-exhausted when its retries run out.
+      out.push({ issue, kind: "rework-decision", reason: reworkDecisionReason(h) });
     } else if (h.attempts >= opts.verifyMaxAttempts) {
       const pr = h.prNumber ? ` (PR #${h.prNumber})` : "";
       out.push({
