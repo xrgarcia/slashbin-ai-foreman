@@ -13,7 +13,7 @@ import {
   bounceForRedCI,
   findOpenPromotionPR,
 } from "../github.js";
-import { reviewViaTechLead } from "../agent.js";
+import { reviewViaTechLead, type ReviewTrailer } from "../agent.js";
 import { REVIEW_MILESTONES, ReviewProgressRelay } from "../review-progress.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { BackoffTracker, formatWait } from "../backoff.js";
@@ -37,6 +37,8 @@ import {
   stoppedReason,
 } from "./common.js";
 import { reconcileReviewOutcomeLabels } from "./reconcile.js";
+import { tryQaBeforeMerge } from "./qa-before-merge.js";
+import { qaBeforeMergeApplies } from "../qa-report.js";
 
 /** Per repo: the review waiting after the Tech Lead could not take a PR (backoff.agentUnavailable). */
 export const reviewDefer = new BackoffTracker();
@@ -47,6 +49,28 @@ export async function tryReview(
   logger: Logger,
   cycleNumber: number,
   events?: CycleEvent[],
+): Promise<boolean> {
+  // QA before the merge (config.qaBeforeMerge): the Tech Lead approves without merging, QA runs on the
+  // approved head, and only a PASS merges. An approved PR waiting on QA is QA's, never offered to the
+  // Tech Lead again; and the QA that follows an approval runs in the same pass.
+  const qaFirst = qaBeforeMergeApplies(repoConfig, config) && repoConfig.reviewEnabled && !reviewDefer.waiting(repoConfig.name);
+  if (qaFirst) {
+    const waiting = await tryQaBeforeMerge(repoConfig, config, logger, cycleNumber, events);
+    if (waiting === "handled") return true;
+    if (waiting === "waiting") return false;
+  }
+  const reviewed = await reviewPass(repoConfig, config, logger, cycleNumber, events, qaFirst);
+  if (reviewed && qaFirst) await tryQaBeforeMerge(repoConfig, config, logger, cycleNumber, events);
+  return reviewed;
+}
+
+async function reviewPass(
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  logger: Logger,
+  cycleNumber: number,
+  events: CycleEvent[] | undefined,
+  noMerge: boolean,
 ): Promise<boolean> {
   if (!repoConfig.reviewEnabled) return false;
 
@@ -159,7 +183,7 @@ export async function tryReview(
     // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
     // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
     // failure is charged and the repo asks again after a backoff.agentUnavailable wait.
-    const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress)
+    const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress, noMerge)
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
@@ -180,60 +204,7 @@ export async function tryReview(
       reviewFailurePause.clear(repoName);
       reviewLogger.info(`Review run completed for ${repoName}`);
 
-      // --- Post-condition check ------------------------------------------
-      // The trailer is the agent's CLAIM about what it did. The labels are the
-      // STATE. Verify the claim against the state before believing it: a run
-      // that says `merged=yes` must have left the issue somewhere other than
-      // `pr under review`, because that is where the next phase reads from.
-      //
-      // Checked only for PRs the run claims to have merged — an unmerged PR is
-      // SUPPOSED to still be `pr under review`, so including those would flag
-      // every REQUEST_CHANGES round as an orphan.
-      //
-      // This catches the case the trailer gate cannot: a run that emits a
-      // well-formed trailer but never actually moved the labels. Detection
-      // only; the repair runs in Phase 0 on the next pass (≈1 cycle later),
-      // where it can re-verify first. Alerting here rather than waiting for the
-      // dead-zone sweep skips that path's 15-minute grace window, so a broken
-      // run surfaces in the same cycle that produced it.
-      await reportReviewOutcomes(repoConfig, candidate.issueNumbers, reviewLogger);
-      const trailers = result.trailers ?? [];
-      const mergedPrs = trailers.filter((t) => t.merged).map((t) => t.pr);
-      if (mergedPrs.includes(candidate.prNumber)) {
-        await notifyOnce("merged", repoConfig, candidate.issueNumbers, reviewLogger);
-      }
-      if (mergedPrs.length > 0) {
-        const stuck = findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger);
-        if (stuck.length > 0) {
-          reviewLogger.warn(
-            `Review post-condition: PR(s) #${mergedPrs.join(", #")} reported merged, but issue(s) #${stuck.join(", #")} are still "${repoConfig.lifecycleLabels.prUnderReview}" — the run merged without completing the label transition`,
-            { mergedPrs, stuckIssues: stuck },
-          );
-
-          // Set the label from the run's own trailer. The verdict is not missing
-          // — it is right here, already parsed. Waiting a cycle to re-derive it
-          // from a fresh deploy poll was spending minutes to recompute an answer
-          // we were holding.
-          const unresolved = config.reviewLabelReconcile
-            ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, reviewLogger, events, Boolean(config.srePath))
-            : stuck;
-
-          if (!config.reviewLabelReconcile && stuck.length > 0) {
-            reviewLogger.info("Label reconciliation disabled (reviewLabelReconcile=false) — leaving the dead zone for recovery");
-          }
-
-          if (unresolved.length > 0) {
-            reviewLogger.error(
-              `Review post-condition UNRESOLVED on ${repoName}: issue(s) #${unresolved.join(", #")} could not be reconciled from the run's trailers — dead-zone recovery will re-verify`,
-              { mergedPrs, unresolved },
-            );
-            events?.push({
-              message: `⚠️ ${repoConfig.githubRepo} — review merged PR #${mergedPrs.join(", #")} but left issue(s) #${unresolved.join(", #")} at "${repoConfig.lifecycleLabels.prUnderReview}" and the trailer could not settle it. Dead-zone recovery will re-verify next cycle.`,
-              level: "warn",
-            });
-          }
-        }
-      }
+      await settleReviewOutcome(repoConfig, config, candidate.issueNumbers, candidate.prNumber, result.trailers ?? [], reviewLogger, events);
 
       // Prefer the structured per-PR status (includes deploy SUCCESS/FAILURE);
       // fall back to the summary's first line when no trailer was emitted.
@@ -368,3 +339,71 @@ export async function tryReview(
   }
 }
 
+/**
+ * What the review phase does with a run's trailers once the Tech Lead has finished: move the cards the
+ * labels say moved, tell observers of a merge, and settle any issue a merging run left at `pr under
+ * review`. Shared by the review run and by the merge QA's PASS hands the Tech Lead (qa-before-merge.ts).
+ */
+export async function settleReviewOutcome(
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  issueNumbers: number[],
+  prNumber: number,
+  trailers: ReviewTrailer[],
+  logger: Logger,
+  events?: CycleEvent[],
+): Promise<void> {
+  // --- Post-condition check ------------------------------------------
+  // The trailer is the agent's CLAIM about what it did. The labels are the
+  // STATE. Verify the claim against the state before believing it: a run
+  // that says `merged=yes` must have left the issue somewhere other than
+  // `pr under review`, because that is where the next phase reads from.
+  //
+  // Checked only for PRs the run claims to have merged — an unmerged PR is
+  // SUPPOSED to still be `pr under review`, so including those would flag
+  // every REQUEST_CHANGES round as an orphan.
+  //
+  // This catches the case the trailer gate cannot: a run that emits a
+  // well-formed trailer but never actually moved the labels. Detection
+  // only; the repair runs in Phase 0 on the next pass (≈1 cycle later),
+  // where it can re-verify first. Alerting here rather than waiting for the
+  // dead-zone sweep skips that path's 15-minute grace window, so a broken
+  // run surfaces in the same cycle that produced it.
+  await reportReviewOutcomes(repoConfig, issueNumbers, logger);
+  const mergedPrs = trailers.filter((t) => t.merged).map((t) => t.pr);
+  if (mergedPrs.includes(prNumber)) {
+    await notifyOnce("merged", repoConfig, issueNumbers, logger);
+  }
+  if (mergedPrs.length > 0) {
+    const stuck = findIssuesStillUnderReview(repoConfig, issueNumbers, logger);
+    if (stuck.length > 0) {
+      logger.warn(
+        `Review post-condition: PR(s) #${mergedPrs.join(", #")} reported merged, but issue(s) #${stuck.join(", #")} are still "${repoConfig.lifecycleLabels.prUnderReview}" — the run merged without completing the label transition`,
+        { mergedPrs, stuckIssues: stuck },
+      );
+
+      // Set the label from the run's own trailer. The verdict is not missing
+      // — it is right here, already parsed. Waiting a cycle to re-derive it
+      // from a fresh deploy poll was spending minutes to recompute an answer
+      // we were holding.
+      const unresolved = config.reviewLabelReconcile
+        ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, logger, events, Boolean(config.srePath))
+        : stuck;
+
+      if (!config.reviewLabelReconcile && stuck.length > 0) {
+        logger.info("Label reconciliation disabled (reviewLabelReconcile=false) — leaving the dead zone for recovery");
+      }
+
+      if (unresolved.length > 0) {
+        logger.error(
+          `Review post-condition UNRESOLVED on ${repoConfig.name}: issue(s) #${unresolved.join(", #")} could not be reconciled from the run's trailers — dead-zone recovery will re-verify`,
+          { mergedPrs, unresolved },
+        );
+        events?.push({
+          message: `⚠️ ${repoConfig.githubRepo} — review merged PR #${mergedPrs.join(", #")} but left issue(s) #${unresolved.join(", #")} at "${repoConfig.lifecycleLabels.prUnderReview}" and the trailer could not settle it. Dead-zone recovery will re-verify next cycle.`,
+          level: "warn",
+        });
+      }
+    }
+  }
+}

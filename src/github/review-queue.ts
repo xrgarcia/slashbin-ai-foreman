@@ -8,7 +8,7 @@ import { findOpenPrs, getOpenIssues, hasLabel, issueCacheTtlMs } from "./cache.j
 import { gh, isBackoffRefusal } from "./gh.js";
 import { extractImplementedIssues } from "./discovery.js";
 import { BackoffTracker, backoffSettings } from "../backoff.js";
-import { currentApprovalMs, currentVerdictRequestsChanges, hasFreshReview, returnedToReviewSinceVerdict } from "./review-freshness.js";
+import { currentApprovalMs, currentVerdictRequestsChanges, hasFreshReview, readPrHeadSha, returnedToReviewSinceVerdict } from "./review-freshness.js";
 
 
 // --- Revision Gate ---
@@ -233,6 +233,51 @@ export function findPRsNeedingReview(
     logger.error("Failed to check for PRs needing review", {
       error: err instanceof Error ? err.message : String(err),
     });
+    return null;
+  }
+}
+
+/** An approved, unmerged feature PR whose head QA has yet to pass (config.qaBeforeMerge). */
+export interface QaPendingPr {
+  prNumber: number;
+  issueNumbers: number[];
+  /** The head commit the approval covers; QA's PASS must name this sha. */
+  headSha: string;
+}
+
+/**
+ * The open feature PR the Tech Lead has approved at its current head and that QA has not yet merged
+ * through (qaBeforeMerge): the review phase runs QA on it instead of offering it to the Tech Lead again.
+ * Null when there is none, when the approval is not at the head (a new push goes back to the Tech Lead
+ * first), when a build or a revise owns the PR, or when GitHub cannot say (unknown never runs QA).
+ */
+export function findQaPendingPr(
+  config: RepoConfig,
+  reviewerLogin: string | undefined,
+  logger: Logger,
+): QaPendingPr | null {
+  try {
+    const { prUnderReview, prPendingActions } = config.lifecycleLabels;
+    const prs: { number: number }[] = findOpenPrs(config.githubRepo, config.repoPath, {
+      head: config.featureBranch,
+      base: config.baseBranch,
+      limit: 1,
+    });
+    if (prs.length === 0 || isBuildInFlight(config.name)) return null;
+    const pr = prs[0];
+    const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
+    if (open.some((i) => hasLabel(i, prPendingActions))) return null; // the revise phase owns the PR
+    if (!hasFreshReview(config, pr.number, reviewerLogin, logger)) return null;
+    if (currentApprovalMs(config, pr.number, reviewerLogin, logger) === null) return null;
+    const headSha = readPrHeadSha(config, pr.number, logger);
+    if (!headSha) return null;
+    return {
+      prNumber: pr.number,
+      issueNumbers: open.filter((i) => hasLabel(i, prUnderReview)).map((i) => i.number),
+      headSha,
+    };
+  } catch (err) {
+    logger.debug(`findQaPendingPr failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }

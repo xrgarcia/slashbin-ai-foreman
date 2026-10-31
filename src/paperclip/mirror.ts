@@ -61,7 +61,7 @@ import type {
 import { createHash } from "node:crypto";
 import { redactAll } from "../redact.js";
 import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./config.js";
-import { STATE_STAGE } from "../lifecycle.js";
+import { QA_BEFORE_MERGE_FALLBACK_STAGE, STATE_STAGE, type Stage } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {
   BACKLOG_STATUS, CONFIG_KEY, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withIssueLabel, withStage,
@@ -339,7 +339,7 @@ export class PaperclipMirror implements WorkObserver {
    * in To-do while the Tech Lead reviewed PR #90 (2026-10-05).
    */
   private recovery: Promise<void> = Promise.resolve();
-  private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove; placed: boolean }>();
+  private readonly holds = new Map<string, { count: number; phase: SessionPhase; restore: PaperclipStepMove; placed: boolean; fallback?: Stage }>();
   /** Task id → the last lifecycle stage the mirror placed it in, so a resumed card goes back there. */
   private readonly rowStage = new Map<string, PaperclipStage>();
   /** Task id → why the Foreman blocked it, the unblock descriptor's action when it moves to `blocked`. */
@@ -981,7 +981,7 @@ export class PaperclipMirror implements WorkObserver {
       if (!r?.id || this.holds.has(r.id) || !(r.phase in SESSION_FALLBACK_STAGE)) continue;
       const row = await this.safeCall("read task", () => this.client.getIssue(r.id), r.id);
       if (!row.ok || row.value?.status !== inProgress) continue;
-      await this.move(r.id, SESSION_FALLBACK_STAGE[r.phase]);
+      await this.move(r.id, r.fallback ?? SESSION_FALLBACK_STAGE[r.phase]);
     }
     await this.writeLease();
   }
@@ -1002,7 +1002,7 @@ export class PaperclipMirror implements WorkObserver {
     this.agentMetadata = config === undefined ? rest : { ...rest, [CONFIG_KEY]: config };
     const lease: LiveLease = {
       leaseAt: new Date().toISOString(),
-      rows: [...this.holds].map(([id, h]) => ({ id, phase: h.phase })),
+      rows: [...this.holds].map(([id, h]) => ({ id, phase: h.phase, ...(h.fallback ? { fallback: h.fallback } : {}) })),
     };
     const r = await this.safeCall("update agent", () =>
       this.client.updateAgent(this.cfg.agentId!, { metadata: { ...(this.agentMetadata ?? {}), [LIVE_LEASE_KEY]: lease } }));
@@ -1263,9 +1263,11 @@ export class PaperclipMirror implements WorkObserver {
         const h = this.holds.get(id);
         if (event.status === "started" && h) {
           h.phase = "qa";
+          // Before the merge (qaBeforeMerge) the PR is still in review: a QA that ends with nothing newer returns there.
+          if (event.qaBeforeMerge) h.fallback = QA_BEFORE_MERGE_FALLBACK_STAGE;
           h.placed = await this.move(id, SESSION_STAGE.qa, true);
           if (this.comments.enabled) {
-            await this.note(id, `**QA reviewing ${event.pr === undefined ? "the PR" : `PR #${event.pr}`} on dev** (visual and behaviour checks)`,
+            await this.note(id, `**QA reviewing ${event.pr === undefined ? "the PR" : `PR #${event.pr}`} ${event.qaBeforeMerge ? "locally, before the merge" : "on dev"}** (visual and behaviour checks)`,
               { ...opts, handoff: handoffTo("qaReviewing", item) });
           }
           leaseChanged = true;
@@ -1305,8 +1307,9 @@ export class PaperclipMirror implements WorkObserver {
         const h = this.holds.get(id);
         if (h && --h.count <= 0) {
           this.holds.delete(id);
-          await this.move(id, h.restore ?? SESSION_FALLBACK_STAGE[h.phase]);
-          if (h.restore === null) handoff = handoffTo(SESSION_FALLBACK_STAGE[h.phase], item);
+          const fallback = h.fallback ?? SESSION_FALLBACK_STAGE[h.phase];
+          await this.move(id, h.restore ?? fallback);
+          if (h.restore === null) handoff = handoffTo(fallback, item);
           leaseChanged = true;
           released = true;
         }
