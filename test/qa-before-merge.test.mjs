@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewViaTechLead, QA_PENDING_HOLD } from "../dist/agent.js";
-import { runQaBeforeMerge, qaBeforeMergeApplies, qaVerdictMarker, qaFailLines, qaGateBody } from "../dist/qa-report.js";
+import { reviewViaTechLead, QA_PENDING_HOLD, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD, parseReviewTrailerRecords } from "../dist/agent.js";
+import { runQaBeforeMerge, qaBeforeMergeApplies, qaVerdictMarker, qaFailLines, qaGateBody, runQaReport, applyQaGate, executeQa } from "../dist/qa-report.js";
 import { rulingState } from "../dist/github/reports.js";
 import { sessionFallbackStage, MOVES, STAGE_MEANING, SESSION_FALLBACK_STAGE } from "../dist/lifecycle.js";
 import { TOOLING_HOLDS, verifyHoldPlan } from "../dist/phases/verify.js";
@@ -86,7 +86,7 @@ test("3: PASS posts the QA Report with the head's marker; the post-merge gate do
   assert.ok(d.posted[0].includes(qaVerdictMarker(SHA, "PASS")));
   const phase = src("phases/qa-before-merge.ts");
   assert.ok(phase.indexOf("runQaBeforeMerge(") < phase.indexOf("reviewViaTechLead("), "QA first, then the merge call");
-  assert.match(phase, /reviewViaTechLead\(repoConfig, config, prNumber, qlog, runAbort\.signal, transcriptPath\)/, "plain review-pr merges");
+  assert.match(phase, /reviewViaTechLead\(repoConfig, config, prNumber, qlog, runAbort\.signal, transcriptPath, undefined, false, headSha\)/, "the merge is pinned to the head QA passed");
   assert.match(phase, /settleReviewOutcome\(/);
   assert.match(src("phases/verify.ts"), /config\.qaGate && !qaBeforeMerge && qaApplies\(/);
   assert.match(src("phases/verify.ts"), /!config\.qaGate && !qaBeforeMerge && qaApplies\(/);
@@ -161,4 +161,111 @@ test("7: flag-off parity: the review call appends --no-merge only on request, an
   assert.match(src("phases/review.ts"), /const qaFirst = qaBeforeMergeApplies\(/);
   assert.match(src("agent.ts"), /noMerge \? \["--no-merge"\] : \[\]/);
   assert.ok(MOVES.reviewMerged && MOVES.changesRequested);
+});
+
+// --- Tech Lead review of EM#923 (PR #154) ---
+
+// Finding 1: the merge is bound to the head QA passed.
+test("F1: the PASS merge calls the Tech Lead with --merge-approved <full sha>, and only that call merges", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fake-tl-"));
+  mkdirSync(join(dir, "bin"));
+  const argsFile = join(dir, "args.json");
+  writeFileSync(join(dir, "bin/tech-lead.mjs"), `
+    import { writeFileSync } from "node:fs";
+    writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+    console.log("FOREMAN_REVIEW pr=#5 verdict=NONE merged=no deploy=NA hold=head-moved");
+  `);
+  const cfg = { techLeadPath: dir, emRepoPath: "/em", reviewMaxDurationMs: 30_000 };
+  const r = await reviewViaTechLead({ name: "r", githubRepo: "o/r" }, cfg, 5, logger, undefined, undefined, undefined, false, SHA);
+  assert.deepEqual(JSON.parse(readFileSync(argsFile, "utf8")), ["review-pr", "--repo", "o/r", "--pr", "5", "--merge-approved", SHA]);
+  assert.deepEqual([r.trailers[0].verdict, r.trailers[0].merged, r.trailers[0].hold], ["NONE", false, HEAD_MOVED_HOLD]);
+  const phase = src("phases/qa-before-merge.ts");
+  assert.ok(!/reviewViaTechLead\([^)]*transcriptPath\)/.test(phase), "no plain review-pr call is left in the QA phase");
+  assert.match(phase, /\^\[0-9a-f\]\{40\}\$/, "a head that is not a full sha is never handed over");
+});
+
+test("F1: head-moved is no merge and no charge, and the card stays in review; not-approved is a hold", () => {
+  const [moved, none] = parseReviewTrailerRecords("FOREMAN_REVIEW pr=#5 verdict=NONE merged=no deploy=NA hold=head-moved\nFOREMAN_REVIEW pr=#6 verdict=NONE merged=no deploy=NA hold=not-approved");
+  assert.equal(moved.hold, HEAD_MOVED_HOLD);
+  assert.equal(none.hold, NOT_APPROVED_HOLD);
+  const phase = src("phases/qa-before-merge.ts");
+  const movedAt = phase.indexOf("HEAD_MOVED_HOLD", phase.indexOf("--merge-approved"));
+  const block = phase.slice(movedAt, phase.indexOf("NOT_APPROVED_HOLD", movedAt + 10));
+  assert.match(block, /reviewFailureCount\.set\(repoName, 0\)/, "not charged");
+  assert.doesNotMatch(block, /emit\(\{ kind: "blocked"/, "not blocked");
+  assert.doesNotMatch(block, /settleReviewOutcome/, "not settled as a review outcome");
+  const notApproved = phase.slice(phase.indexOf("result.success && own?.hold === NOT_APPROVED_HOLD"));
+  assert.match(notApproved.slice(0, 900), /kind: "blocked"/);
+});
+
+// Finding 2: only a consistent verdict is cached.
+test("F2 R1/R3: PASS with exit 1 holds, posts no PASS marker, and stays a hold on every retry (and after a restart)", async () => {
+  const posted = [];
+  const mk = () => deps(ran("PASS", 1), { post: async (_pr, b) => { posted.push(b); }, hasMarker: async (_pr, m) => posted.some((b) => b.includes(m)) });
+  for (let i = 0; i < 3; i++) {
+    const d = mk();   // a fresh module-equivalent each time: only the posted comments persist
+    const out = await runQaBeforeMerge(REPO, 5, SHA, d, logger);
+    assert.deepEqual([out.kind, out.reason], ["hold", "qa-inconsistent"], `attempt ${i}`);
+    assert.equal(d.runs, 1, "QA runs again; an inconsistent run is never a cached verdict");
+  }
+  assert.ok(posted.length >= 1);
+  assert.ok(!posted.some((b) => b.includes(qaVerdictMarker(SHA, "PASS"))), "no PASS marker");
+  assert.ok(posted.every((b) => !b.includes("verdict=PASS") && !b.includes("verdict=FAIL")), "no verdict marker at all");
+  assert.ok(posted.some((b) => b.includes(`sha=${SHA} verdict=INCONSISTENT`)));
+});
+
+test("F2 R2/R4: FAIL with exit 0 holds, never becomes a cached FAIL, and is not a QA FAIL review round", async () => {
+  const posted = [];
+  const mk = () => deps(ran("FAIL", 0), { post: async (_pr, b) => { posted.push(b); }, hasMarker: async (_pr, m) => posted.some((b) => b.includes(m)) });
+  for (let i = 0; i < 3; i++) {
+    const out = await runQaBeforeMerge(REPO, 5, SHA, mk(), logger);
+    assert.deepEqual([out.kind, out.reason], ["hold", "qa-inconsistent"], `attempt ${i}`);
+  }
+  const heads = posted.map((b) => ({ at: "2026-10-31T10:00:00Z", head: b.slice(0, 140) }));
+  assert.equal(rulingState([], heads).roundsSinceRuling, 0, "an inconsistent report is not a review round");
+  const real = await runQaBeforeMerge(REPO, 5, SHA, deps(ran("FAIL", 1), { post: async (_p, b) => { posted.push(b); } }), logger);
+  assert.equal(real.kind, "fail");
+  assert.equal(rulingState([], posted.slice(-1).map((b) => ({ at: "2026-10-31T10:00:00Z", head: b.slice(0, 140) }))).roundsSinceRuling, 1, "a consistent FAIL counts once");
+});
+
+test("F2 R5/F3: a short manifest sha is accepted, the marker carries the full head sha, and the retry reuses it", async () => {
+  const posted = [];
+  const mk = () => deps(ran("PASS", 0, { sha: SHA.slice(0, 7) }), { post: async (_pr, b) => { posted.push(b); }, hasMarker: async (_pr, m) => posted.some((b) => b.includes(m)) });
+  const first = mk();
+  assert.deepEqual(await runQaBeforeMerge(REPO, 5, SHA, first, logger), { kind: "pass", reused: false });
+  assert.ok(posted[0].includes(qaVerdictMarker(SHA, "PASS")), "the marker is the full sha, not the manifest's");
+  assert.ok(!posted[0].includes(`sha=${SHA.slice(0, 7)} `));
+  for (let i = 0; i < 2; i++) {
+    const again = mk();
+    assert.deepEqual(await runQaBeforeMerge(REPO, 5, SHA, again, logger), { kind: "pass", reused: true });
+    assert.equal(again.runs, 0, "QA is not run again");
+  }
+  assert.equal(posted.length, 1, "one report, once");
+});
+
+test("F2: a valid PASS/0 and FAIL/1 for the head keep their decisions and are cached by the full sha", async () => {
+  const p = deps(ran("PASS", 0));
+  assert.equal((await runQaBeforeMerge(REPO, 5, SHA, p, logger)).kind, "pass");
+  assert.ok(p.posted[0].includes(qaVerdictMarker(SHA, "PASS")));
+  const f = deps(ran("FAIL", 1));
+  assert.equal((await runQaBeforeMerge(REPO, 5, SHA, f, logger)).kind, "fail");
+  assert.ok(f.posted[0].includes(qaVerdictMarker(SHA, "FAIL")));
+  const other = await runQaBeforeMerge(REPO, 5, SHA, deps(ran("PASS", 0, { sha: "e".repeat(40) })), logger);
+  assert.equal(other.kind, "hold", "a PASS naming another head is not this head's PASS");
+});
+
+// Finding 3: one QA execution path.
+test("F3: runQaReport, applyQaGate and runQaBeforeMerge share one run helper; a throw is `errored` in all three", async () => {
+  const boom = () => deps(new Error("dummy boom"));
+  assert.deepEqual(await executeQa(REPO, 5, boom()), { kind: "errored", detail: "the run threw (Error: dummy boom)" });
+  const gate = await applyQaGate({ kind: "verdict", pass: true, trailer: {}, summary: "" }, REPO, 5, boom(), logger);
+  assert.equal(gate.reason, "qa-errored");
+  const pre = await runQaBeforeMerge(REPO, 5, SHA, boom(), logger);
+  assert.deepEqual([pre.kind, pre.reason], ["hold", "qa-errored"]);
+  const d = boom();
+  await runQaReport(REPO, 9, d, logger);
+  assert.match(d.posted[0], /errored|did not|could not|no verdict/i, "report-only still posts an errored note");
+  const code = src("qa-report.ts");
+  assert.equal(code.split("mkdirSync(out, { recursive: true })").length - 1, 1, "cache setup exists once (the helper)");
+  assert.equal(code.split("await deps.run(").length - 1, 1, "deps.run is called once (the helper)");
 });

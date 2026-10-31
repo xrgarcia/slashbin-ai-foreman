@@ -96,6 +96,20 @@ export function qaReportBody(pr: number, outcome: QaOutcome): string {
 const inFlight = new Set<string>();
 
 /**
+ * The one way every QA caller runs it: make the cache directory, run, and turn a throw into an `errored`
+ * outcome (the checker failing, never a verdict). Each caller keeps its own posting and decision.
+ */
+export async function executeQa(repo: string, pr: number, deps: Pick<QaDeps, "run">): Promise<QaOutcome> {
+  try {
+    const out = join(homedir(), ".cache", "foreman-qa", repo.replace("/", "__"), String(pr));
+    mkdirSync(out, { recursive: true });
+    return await deps.run({ repo, pr, out });
+  } catch (e) {
+    return { kind: "errored", detail: `the run threw (${String(e).slice(0, 200)})` };
+  }
+}
+
+/**
  * Check PR `pr` once and post the report. Never throws and never rejects: a failed
  * read, run, parse or post is a log line (and, where the PR can still be told, an
  * "errored" comment). At most one report per PR: an existing comment with the heading,
@@ -112,14 +126,7 @@ export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger
       logger.info(`QA: ${key} already has a report; not running again`);
       return;
     }
-    const out = join(homedir(), ".cache", "foreman-qa", repo.replace("/", "__"), String(pr));
-    let outcome: QaOutcome;
-    try {
-      mkdirSync(out, { recursive: true });
-      outcome = await deps.run({ repo, pr, out });
-    } catch (e) {
-      outcome = { kind: "errored", detail: `the run threw (${String(e).slice(0, 200)})` };
-    }
+    const outcome = await executeQa(repo, pr, deps);
     if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
     else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
     await deps.post(pr, qaReportBody(pr, outcome));
@@ -203,8 +210,8 @@ export function qaGateMarker(outcome: QaOutcome): string {
 }
 
 /** The gating report: regressions first, then what was already there. Pure. */
-export function qaGateBody(pr: number, outcome: QaOutcome): string {
-  const head = `${QA_GATE_HEADING}\n${qaGateMarker(outcome)}\n\n`;
+export function qaGateBody(pr: number, outcome: QaOutcome, marker: string = qaGateMarker(outcome)): string {
+  const head = `${QA_GATE_HEADING}\n${marker}\n\n`;
   if (outcome.kind === "errored") {
     return `${head}**QA errored** on PR #${pr}: ${outcome.detail}. No verdict was produced, so the card is held and the check retries.`;
   }
@@ -238,13 +245,13 @@ export function qaFailSummary(m: QaManifest): string {
  * is already there, so a re-run after a restart does not double-post. A failed
  * lookup or post is logged and never changes the gate's decision.
  */
-async function postGateReport(pr: number, outcome: QaOutcome, deps: QaDeps, check: (pr: number, marker: string) => Promise<boolean>, logger: Logger): Promise<void> {
+async function postGateReport(pr: number, marker: string, body: string, deps: QaDeps, check: (pr: number, marker: string) => Promise<boolean>, logger: Logger): Promise<void> {
   try {
-    if (await check(pr, qaGateMarker(outcome))) {
+    if (await check(pr, marker)) {
       logger.info(`QA: PR #${pr} already has this report; not posting again`);
       return;
     }
-    await deps.post(pr, qaGateBody(pr, outcome));
+    await deps.post(pr, body);
   } catch (e) {
     logger.warn(`QA: PR #${pr} report not posted: ${String(e).slice(0, 300)}`);
   }
@@ -266,15 +273,8 @@ export async function applyQaGate(
   deps: QaDeps,
   logger: Logger,
 ): Promise<VerifyResult> {
-  let outcome: QaOutcome;
-  try {
-    const out = join(homedir(), ".cache", "foreman-qa", repo.replace("/", "__"), String(pr));
-    mkdirSync(out, { recursive: true });
-    outcome = await deps.run({ repo, pr, out });
-  } catch (e) {
-    outcome = { kind: "errored", detail: `the run threw (${String(e).slice(0, 200)})` };
-  }
-  await postGateReport(pr, outcome, deps, deps.hasMarker ?? (async () => false), logger);
+  const outcome = await executeQa(repo, pr, deps);
+  await postGateReport(pr, qaGateMarker(outcome), qaGateBody(pr, outcome), deps, deps.hasMarker ?? (async () => false), logger);
   const hold = (reason: string, summary: string): VerifyResult => ({ ...sre, pass: false, reason, summary, by: "QA" });
   if (outcome.kind === "errored") {
     logger.warn(`QA gate: PR #${pr} errored: ${outcome.detail}`);
@@ -339,27 +339,34 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
   } catch (e) {
     logger.warn(`QA: PR #${pr} marker lookup failed (${String(e).slice(0, 200)}); running QA`);
   }
-  let outcome: QaOutcome;
-  try {
-    const out = join(homedir(), ".cache", "foreman-qa", repo.replace("/", "__"), String(pr));
-    mkdirSync(out, { recursive: true });
-    outcome = await deps.run({ repo, pr, out });
-  } catch (e) {
-    outcome = { kind: "errored", detail: `the run threw (${String(e).slice(0, 200)})` };
-  }
-  await postGateReport(pr, outcome, deps, has, logger);
-  if (outcome.kind === "errored") {
-    logger.warn(`QA: PR #${pr} errored: ${outcome.detail}`);
-    return { kind: "hold", reason: "qa-errored", summary: `QA errored: ${outcome.detail}` };
-  }
+  const outcome = await executeQa(repo, pr, deps);
+  const decision = decideQaBeforeMerge(outcome, headSha);
+  // Only a consistent verdict carries a verdict marker (the one the lookup above reuses), and always with the
+  // full head sha passed in, never the manifest's. Anything else is keyed so it can never be reused as a verdict.
+  const marker = decision.kind === "pass" ? qaVerdictMarker(headSha, "PASS")
+    : decision.kind === "fail" ? qaVerdictMarker(headSha, "FAIL")
+    : outcome.kind === "errored" ? qaGateMarker(outcome)
+    : `<!-- foreman-qa sha=${headSha} verdict=${decision.reason === "qa-inconsistent" ? "INCONSISTENT" : "HELD"} -->`;
+  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, has, logger);
+  if (decision.kind === "hold") logger.warn(`QA: PR #${pr} held: ${decision.reason}: ${decision.summary}`);
+  return decision;
+}
+
+/**
+ * What a QA outcome means for the approved head. Pure. A PASS needs exit 0 and a manifest naming this head; a
+ * FAIL needs exit 1 and the same; HELD needs exit 3. Every other combination is `qa-inconsistent`, a hold.
+ */
+export function decideQaBeforeMerge(outcome: QaOutcome, headSha: string): QaPreMergeDecision {
+  if (outcome.kind === "errored") return { kind: "hold", reason: "qa-errored", summary: `QA errored: ${outcome.detail}` };
   const { manifest: m, exitCode } = outcome;
-  if (m.verdict === "PASS" && exitCode === 0) {
-    if (m.sha && sameSha(m.sha, headSha)) return { kind: "pass", reused: false };
-    return { kind: "hold", reason: "qa-inconsistent", summary: `QA passed ${m.sha ?? "no sha"}, but the approved head is ${headSha}` };
-  }
-  if (m.verdict === "FAIL" && exitCode === 1) return { kind: "fail", summary: qaFailSummary(m), reused: false };
+  const named = Boolean(m.sha) && sameSha(m.sha!, headSha);
+  if (m.verdict === "PASS" && exitCode === 0 && named) return { kind: "pass", reused: false };
+  if (m.verdict === "FAIL" && exitCode === 1 && named) return { kind: "fail", summary: qaFailSummary(m), reused: false };
   if (m.verdict === "HELD" && exitCode === 3) return { kind: "hold", reason: `qa-held-${m.hold ?? "unknown"}`, summary: `QA could not check: ${m.reason ?? ""}` };
-  return { kind: "hold", reason: "qa-inconsistent", summary: `QA exit ${exitCode} disagrees with verdict ${m.verdict}` };
+  const why = (m.verdict === "PASS" || m.verdict === "FAIL") && !named && (exitCode === (m.verdict === "PASS" ? 0 : 1))
+    ? `QA ${m.verdict} names ${m.sha ?? "no sha"}, but the approved head is ${headSha}`
+    : `QA exit ${exitCode} disagrees with verdict ${m.verdict}`;
+  return { kind: "hold", reason: "qa-inconsistent", summary: why };
 }
 
 const QA_FAIL_REPORT = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=FAIL -->/;
