@@ -258,7 +258,7 @@ export interface ReleaseEvent {
 }
 
 /** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */
-export type SessionPhase = "implement" | "revise" | "review" | "verify";
+export type SessionPhase = "implement" | "revise" | "review" | "verify" | "qa";
 
 /**
  * A session's lifecycle. `handoff` is a review passing from one reviewer to

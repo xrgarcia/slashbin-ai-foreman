@@ -142,6 +142,7 @@ const STAGE_WHEN = {
   revising: "A revision session is running on it.",
   merged: "Merged to the base branch; waiting for dev verification.",
   verifying: "A dev-verification session is running on it.",
+  qaReviewing: "The QA gate (qaGate on) is running its checks on dev, after the SRE passed it.",
   pendingVerification: "Dev-verified (`pr approved`); waiting for the EM's verification and `ready for prod release`.",
   releaseAuthorized: "The EM authorized the release (`ready for prod release`); promote puts it in the release pull request next.",
   awaitingRelease: "In an open release pull request a person merges (the release stage is off); waiting for the release to merge.",

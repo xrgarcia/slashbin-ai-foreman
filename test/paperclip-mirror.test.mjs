@@ -492,7 +492,7 @@ test("each step hands the card to its configured agent with exactly one stage la
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
-  assert.equal(fake.labels.length, 12, "the ten stage labels and the issue label created once");
+  assert.equal(fake.labels.length, 13, "the eleven stage labels and the issue label created once");
   assert.equal(hasIssue(fake, r), true, "the issue label stays through done");
   assert.equal(r.labelIds.filter((id) => fake.labels.find((l) => l.id === id)?.name === "issue").length, 1, "never twice");
 });
@@ -1503,4 +1503,36 @@ test("no run on the card: the move is not deferred; a move that leaves it in_pro
   await mirror.onSession({ phase: "implement", status: "started", repo: "example/r", items: [item] }, logger());
   assert.equal(fake.rows[0].status, "in_progress", "the session's stage is in_progress: not deferred");
   assert.equal(fake.rows[0].assigneeAgentId, AGENT, "and it was written through the run");
+});
+
+// --- QA review stage (EM#923): the QA gate has its own column and seat inside the verify session ---
+
+test("qa stage: the QA gate moves the held card to qaReviewing's seat, and a pass leaves it at EM verification", async () => {
+  const seats = {
+    roles: { ...SEATS.roles, qa: { name: "QA", id: "agent-qa" } },
+    board: { ...SEATS.board, qaReviewing: { owner: "qa", status: "in_progress", label: "qaReviewing" } },
+  };
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: "agent-sre", description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const { mirror } = mirrorOn(fake, { ...seats, ...rich() });
+  await mirror.onSession(verifySession("started"), logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-sre");
+  const qa = (status) => verifySession(status, { phase: "qa", reviewer: "QA" });
+  await mirror.onSession(qa("started"), logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-qa");
+  assert.equal(fake.rows[0].status, "in_progress");
+  assert.ok(fake.comments.r1283.some((n) => n.includes("QA reviewing PR #1291 on dev")));
+  await mirror.onState(console1283, "merged", "approved", repoConfig, logger());
+  await mirror.onSession(qa("finished"), logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-qa", "QA's end alone moves nothing; the verify session's end does");
+  await mirror.onSession(verifySession("finished"), logger());
+  assert.equal(fake.rows[0].assigneeAgentId, "agent-em");
+});
+
+test("qa stage: a QA event with no verify hold moves nothing and leaves no hold behind", async () => {
+  const fake = fakePaperclip([row("r7", 7, { status: "in_review" })]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onSession({ phase: "qa", status: "started", repo: "example/r", items: [item], pr: 9, reviewer: "QA" }, logger());
+  assert.equal(fake.rows[0].status, "in_review");
+  await mirror.onSession({ phase: "qa", status: "failed", repo: "example/r", items: [item], pr: 9, reviewer: "QA" }, logger());
+  assert.equal(fake.rows[0].status, "in_review");
 });

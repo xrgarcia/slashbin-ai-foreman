@@ -325,9 +325,14 @@ export async function tryVerify(
     if (sre.kind === "verdict" && sre.unrelated) noteUnrelated(repoName, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
-    const r: VerifyResult = sre.kind === "verdict" && sre.pass && config.qaGate && qaApplies(repoConfig, config)
-      ? await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog)
-      : sre;
+    let r: VerifyResult = sre;
+    if (sre.kind === "verdict" && sre.pass && config.qaGate && qaApplies(repoConfig, config)) {
+      // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
+      const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
+      await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
+      r = await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
+      await emit({ kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed" } }, null, vlog);
+    }
 
     if (r.kind === "verdict" && r.pass) {
       verifyDefer.clear(repoName);

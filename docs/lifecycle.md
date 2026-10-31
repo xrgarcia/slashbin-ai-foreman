@@ -49,6 +49,7 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `revising` | — (a session holds it) | A revise session is addressing the review. |
 | `merged` | `pr merged` | Merged to the base branch; waiting for dev verification. |
 | `verifying` | — (a session holds it) | A verify session is checking it in dev. |
+| `qaReviewing` | — (a session holds it) | The QA gate (qaGate on) is running its visual and behaviour checks on dev, after the SRE passed it and before it advances. |
 | `pendingVerification` | `pr approved` | Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization. |
 | `releaseAuthorized` | `ready for prod release` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
 | `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
@@ -117,6 +118,7 @@ While a session runs it holds its items in a stage; when it ends with nothing ne
 | implement | `implementing` | `approved` |
 | review | `reviewing` | `inReview` |
 | verify | `verifying` | `merged` |
+| qa | `qaReviewing` | `merged` |
 | revise | `revising` | `changesRequested` |
 
 ## Releases
