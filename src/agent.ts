@@ -191,10 +191,19 @@ export interface ReviewResult {
  * acted on:
  *   FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS
  */
-/** The SRE's `Not caused by this release, needs triage:` lines (verify.mjs), distinct, in order. Pure, exported for tests. */
-export function parseUnrelatedErrors(stdout: string): string[] {
-  const found = [...stdout.matchAll(/^Not caused by this release, needs triage: (.+)$/gm)].map((m) => m[1]!.trim()).filter(Boolean);
-  return [...new Set(found)];
+/** Errors the SRE excluded from a verification, with the evidence links it printed beside them. */
+export interface UnrelatedErrors { errors: string[]; evidence: string[] }
+
+const distinctLines = (stdout: string, re: RegExp): string[] =>
+  [...new Set([...stdout.matchAll(re)].map((m) => m[1]!.trim()).filter(Boolean))];
+
+/**
+ * The SRE's `Not caused by this release, needs triage:` lines and its `Evidence:` links (verify.mjs), distinct,
+ * in order; `sre.mjs deploy` prints the same lines prefixed `verify: `. Undefined when there are none. Pure, exported for tests.
+ */
+export function parseUnrelatedErrors(stdout: string): UnrelatedErrors | undefined {
+  const errors = distinctLines(stdout, /^(?:verify: )?Not caused by this release, needs triage: (.+)$/gm);
+  return errors.length ? { errors, evidence: distinctLines(stdout, /^(?:verify: )?Evidence: (\S+)$/gm) } : undefined;
 }
 
 export function parseReviewTrailerRecords(stdout: string): ReviewTrailer[] {
@@ -1665,7 +1674,7 @@ export const SRE_VERIFY_MAX_DURATION_MS = 90 * 60_000;
 /** What a verify hand-off came back with. */
 export type VerifyResult =
   /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
-  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: string[] }
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: UnrelatedErrors }
   /** No verdict: an error or a timeout. Nothing was written. */
   | { kind: "error"; error: string };
 
@@ -1738,7 +1747,7 @@ export async function verifyViaSre(
   const v = verifyVerdict(trailer);
   logger.info(`SRE verification of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
   const unrelated = parseUnrelatedErrors(out.stdout);
-  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated.length ? { unrelated } : {}) };
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: out.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}) };
 }
 
 // --- The release stage's hand-offs (EM#578) ---
@@ -1907,7 +1916,7 @@ export function parseDeployTrailer(stdout: string, prNumber: number): DeployTrai
 
 /** What a deploy hand-off came back with. */
 export type DeployResult =
-  | { kind: "trailer"; trailer: DeployTrailer }
+  | { kind: "trailer"; trailer: DeployTrailer; unrelated?: UnrelatedErrors }
   /**
    * Exit 1: the SRE refused a precondition (PR not open, head moved, no Tech
    * Lead approval at that head); nothing ran. The release stage re-reads the
@@ -1942,7 +1951,8 @@ export async function deployViaSre(
   const trailer = parseDeployTrailer(r.stdout, prNumber);
   // A merge the trailer reports is the truth whatever the exit: it must never
   // be read as "nothing happened".
-  if (trailer?.merged) return { kind: "trailer", trailer };
+  const unrelated = parseUnrelatedErrors(r.stdout);
+  if (trailer?.merged) return { kind: "trailer", trailer, ...(unrelated ? { unrelated } : {}) };
   // Exit 3 prints a trailer too (hold=codex-unavailable / em-mirror-unavailable),
   // but it means "could not run, nothing merged": retry, whatever it says.
   if (r.code === 3) return { kind: "retry", reason: `the SRE could not run (${trailer?.hold ?? tail(r)})` };
@@ -1986,7 +1996,7 @@ export async function verifyProdViaSre(
   const v = verifyVerdict(trailer);
   logger.info(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
   const unrelated = parseUnrelatedErrors(r.stdout);
-  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated.length ? { unrelated } : {}) };
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}) };
 }
 
 /**

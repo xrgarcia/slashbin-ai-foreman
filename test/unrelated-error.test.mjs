@@ -40,8 +40,11 @@ test("unrelated-error is an unstick kind", () => {
 
 test("the triage lines are parsed from the SRE output, distinct, and the release still passes", () => {
   const out = sreOut(5, [stripe("a1"), stripe("a1"), "worker: redis timeout"]);
-  assert.deepEqual(parseUnrelatedErrors(out), [stripe("a1"), "worker: redis timeout"]);
-  assert.deepEqual(parseUnrelatedErrors("Verified (dev) o/ue#5: passed.\nFOREMAN_REVIEW pr=#5 verdict=APPROVE merged=yes deploy=SUCCESS"), []);
+  assert.deepEqual(parseUnrelatedErrors(out), { errors: [stripe("a1"), "worker: redis timeout"], evidence: ["https://github.com/o/ue/pull/5#issuecomment-1"] });
+  assert.equal(parseUnrelatedErrors("Verified (dev) o/ue#5: passed.\nFOREMAN_REVIEW pr=#5 verdict=APPROVE merged=yes deploy=SUCCESS"), undefined);
+  // sre.mjs deploy prints the verification's lines prefixed `verify: `.
+  const deploy = sreOut(5, [stripe("a1")]).split("\n").map((l) => `verify: ${l}`).join("\n");
+  assert.deepEqual(parseUnrelatedErrors(deploy), { errors: [stripe("a1")], evidence: ["https://github.com/o/ue/pull/5#issuecomment-1"] });
   const t = parseReviewTrailerRecords(out).pop();
   assert.equal(verifyVerdict(t).pass, true);
 });
@@ -64,11 +67,12 @@ test("two PRs with the same signature plus one distinct: exactly two EM calls, n
     assert.equal(argv[argv.indexOf("--kind") + 1], "unrelated-error");
     assert.equal(argv[argv.indexOf("--issue") + 1], "0");
   }
-  assert.match(made[0][made[0].indexOf("--reason") + 1], /first seen on o\/ue PR #5 \(dev\).*Expired API Key/);
+  assert.match(made[0][made[0].indexOf("--reason") + 1], /first seen on o\/ue PR #5 \(dev\).*Expired API Key.*Evidence: https:\/\/github\.com\/o\/ue\/pull\/5#issuecomment-1/);
+  assert.match(made[1][made[1].indexOf("--reason") + 1], /first seen on o\/ue PR #6 \(dev\).*redis timeout.*Evidence: https:\/\/github\.com\/o\/ue\/pull\/6#issuecomment-1/);
 
   // Nothing holds the release, and a later PR seeing either error again calls no one.
   assert.deepEqual(loadRepoState("ue").verifyHeld ?? {}, {});
-  assert.equal(noteUnrelated("ue", [stripe("3333"), "worker: redis timeout"], "o/ue PR #7 (dev)"), 0);
+  assert.equal(noteUnrelated("ue", { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, "o/ue PR #7 (dev)"), 0);
   assert.equal(await tryUnstick(repo, config, logger, 2, {}), 0);
   assert.equal(calls().length, 2);
 });

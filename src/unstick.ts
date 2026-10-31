@@ -211,21 +211,22 @@ export function unrelatedSignature(error: string): string {
 }
 
 /**
- * Raise `unrelated-error` once per distinct signature per repo, never again for
+ * Raise `unrelated-error` once per distinct signature per repo, with the PR and the SRE's evidence links, never again for
  * a signature it has already raised, from any PR. Repo-level (issue 0), so it
  * outlives the issue it was seen on and never holds a release. Returns how many
  * were new.
  */
-export function noteUnrelated(repoName: string, errors: readonly string[], seenOn: string): number {
+export function noteUnrelated(repoName: string, seen: { errors: readonly string[]; evidence: readonly string[] }, seenOn: string): number {
   const state = loadRepoState(repoName);
   const table = { ...(state.unstick ?? {}) };
   const now = new Date().toISOString();
   let added = 0;
-  for (const error of errors) {
+  const evidence = seen.evidence.length ? ` Evidence: ${seen.evidence.slice(0, 4).join(" ")}` : "";
+  for (const error of seen.errors) {
     const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
     const key = unstickKey(0, "unrelated-error", tag);
     if (table[key]) continue;
-    const reason = `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}`;
+    const reason = `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${evidence}`;
     table[key] = openEntry(undefined, { issue: 0, kind: "unrelated-error", reason, tag }, now);
     added++;
   }
