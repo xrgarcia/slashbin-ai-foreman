@@ -8,7 +8,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent } from "../adapters.js";
 import { emit, advance } from "../work-source.js";
-import { reviewViaTechLead } from "../agent.js";
+import { reviewViaTechLead, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../agent.js";
 import { findQaPendingPr, getPRCheckVerdict, countCiBouncesSinceReview, bounceForRedCI } from "../github.js";
 import { qaBeforeMergeApplies, realQaLocalDeps, runQaBeforeMerge, type QaDeps, type QaPreMergeDecision } from "../qa-report.js";
 import { isToolingHold } from "./verify.js";
@@ -120,15 +120,41 @@ export async function tryQaBeforeMerge(
       return "handled";
     }
 
-    // PASS on this exact head: the Tech Lead merges on its existing approval (plain `review-pr`).
+    // PASS on this exact head: the Tech Lead merges THAT head on its existing approval (`--merge-approved <sha>`,
+    // merge-only). A head pushed since, or no approval of that head, writes nothing and merges nothing.
+    if (!/^[0-9a-f]{40}$/.test(headSha)) {
+      ended = { status: "failed", detail: `QA passed PR #${prNumber}, but its head ${headSha} is not a full sha — not merging` };
+      return "handled";
+    }
     const transcriptPath = resolve(process.cwd(), "logs", "review", `${repoName}-cycle${cycleNumber}-${new Date().toISOString().replace(/[:.]/g, "-")}-merge.log`);
-    const result = await reviewViaTechLead(repoConfig, config, prNumber, qlog, runAbort.signal, transcriptPath)
+    const result = await reviewViaTechLead(repoConfig, config, prNumber, qlog, runAbort.signal, transcriptPath, undefined, false, headSha)
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(qaDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `QA passed PR #${prNumber}; the Tech Lead could not take the merge (${result.reason}) — retried in ${wait}` };
       const why = `waiting on the Tech Lead: QA passed PR #${prNumber} but it could not take the merge (${result.reason}) — retries automatically in ${wait}`;
       for (const n of issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
+      return "handled";
+    }
+    const own = (result.trailers ?? []).find((t) => t.pr === prNumber);
+    if (result.success && own?.hold === HEAD_MOVED_HOLD) {
+      // The head moved after QA passed it: nothing merged, nothing charged. The card stays in review, and the
+      // new head goes back through the Tech Lead and QA (findQaPendingPr sees no approval of it).
+      reviewFailureCount.set(repoName, 0);
+      ended = { status: "finished", detail: `QA passed ${headSha.slice(0, 7)} but PR #${prNumber} has a new head; it goes back to review` };
+      events?.push({ message: `↩️ ${repoConfig.githubRepo} PR #${prNumber}: a new head was pushed after QA passed ${headSha.slice(0, 7)} — back to review, nothing merged`, level: "info" });
+      return "handled";
+    }
+    if (result.success && own?.hold === NOT_APPROVED_HOLD) {
+      const n = failures + 1;
+      reviewFailureCount.set(repoName, n);
+      const wait = n >= repoFailure.maxFailures
+        ? `paused ${formatWait(reviewFailurePause.start(repoName, repoFailure))}, then retries`
+        : `retries next cycle (${n}/${repoFailure.maxFailures})`;
+      const why = `held: QA passed ${headSha.slice(0, 7)} on PR #${prNumber}, but the Tech Lead has no approval of that head — nothing merges; ${wait}`;
+      for (const i of issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, i), reason: why }, repoConfig, qlog);
+      ended = { status: "failed", detail: why };
+      events?.push({ message: `⏸️ ${repoConfig.githubRepo} PR #${prNumber}: ${why}`, level: "warn" });
       return "handled";
     }
     if (!result.success) {

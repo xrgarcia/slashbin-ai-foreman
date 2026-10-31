@@ -152,6 +152,9 @@ const REVISION_NO_COMMIT = /FOREMAN_REVISION\s+no-commit\s+reason=(.+)/i;
  * QA runs next and a PASS merges it (EM#923). A wait the Foreman itself owns, not a reviewer's hold.
  */
 export const QA_PENDING_HOLD = "qa-pending";
+/** `--merge-approved` wrote nothing: the PR's head is no longer the sha QA passed (`verdict=NONE`), or the Tech Lead has no APPROVE on it. */
+export const HEAD_MOVED_HOLD = "head-moved";
+export const NOT_APPROVED_HOLD = "not-approved";
 
 export interface ReviewTrailer {
   pr: number;
@@ -1599,13 +1602,15 @@ export async function reviewViaTechLead(
   onProgress?: (m: ReviewMilestone) => void,
   /** `--no-merge`: approve and stop; the merge is a later plain call (qaBeforeMerge). */
   noMerge = false,
+  /** `--merge-approved <sha>`: merge only this exact head, on the Tech Lead's own APPROVE of it; never judges (qaBeforeMerge). */
+  mergeApprovedSha?: string,
 ): Promise<ReviewResult | { fallback: true; reason: string }> {
   const techLead = agentConfig.techLeadPath;
   if (!techLead) return { fallback: true, reason: "techLeadPath not configured" };
   if (!process.env.TECHLEAD_GITHUB_KEY) {
     return { success: false, error: "TECHLEAD_GITHUB_KEY not set — refusing to run review without Tech Lead attribution" };
   }
-  const args = [join(techLead, "bin/tech-lead.mjs"), "review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), ...(noMerge ? ["--no-merge"] : [])];
+  const args = [join(techLead, "bin/tech-lead.mjs"), "review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), ...(noMerge ? ["--no-merge"] : []), ...(mergeApprovedSha ? ["--merge-approved", mergeApprovedSha] : [])];
   logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead (Codex)`);
 
   // Redacted at every sink, as in spawnClaudeWithOptions: the transcript as it
