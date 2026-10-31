@@ -143,6 +143,19 @@ export function devVerifyHolding(
 }
 
 /**
+ * The merged issue whose visual QA FAIL is waiting on the EM's decision, or null. It does not hold the repo
+ * (the cap frees it), but the EM's follow-up to it must still build before unrelated queued work, so
+ * implement looks its follow-ups up too. Pure, exported for tests.
+ */
+export function visualDecisionHolder(merged: readonly number[], held: Readonly<Record<number, VerifyHold>>, maxAttempts: number): number | null {
+  for (const n of [...merged].sort((a, b) => a - b)) {
+    const h = held[n];
+    if (h && h.reason === "visual-qa-failed" && h.attempts >= maxAttempts) return n;
+  }
+  return null;
+}
+
+/**
  * The issues in `batch` filed as the follow-up to `holder` — the fix its dev
  * verification is waiting on — by the title's "follow-up to #N". Pure,
  * exported for tests.
@@ -367,7 +380,8 @@ export async function tryVerify(
     if (plan.kind === "decide") attempts = verifyRetry.maxAttempts;
     const summary = r.kind === "verdict" ? r.summary : "";
     const decision = r.kind === "verdict" && !isDeployFailureHold(reason)
-      ? { files: prFilesTouched(repoConfig, target.prNumber, vlog), evidence: evidenceLinks(summary), verdict: summary.trim().slice(-600) }
+      // The PR link leads: the QA Report and the SRE's evidence comments are on it even when the output names no URL.
+      ? { files: prFilesTouched(repoConfig, target.prNumber, vlog), evidence: [`https://github.com/${repoConfig.githubRepo}/pull/${target.prNumber}`, ...evidenceLinks(summary)].slice(0, 8), verdict: summary.trim().slice(-600) }
       : undefined;
     for (const n of target.issueNumbers) {
       // The same failure keeps its first evidence, so a retry that fails the same way is not a new question for the EM.
