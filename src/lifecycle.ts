@@ -20,7 +20,7 @@ import type { PriorState, WorkState } from "./adapters.js";
 /** Where a work item can be, in the order an item meets them. */
 export const STAGES = [
   "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising",
-  "merged", "verifying", "pendingVerification", "releaseAuthorized", "awaitingRelease", "releasing",
+  "merged", "verifying", "qaReviewing", "pendingVerification", "releaseAuthorized", "awaitingRelease", "releasing",
   "prodVerifyHeld", "needsRuling", "blocked",
 ] as const;
 export type Stage = (typeof STAGES)[number];
@@ -38,6 +38,7 @@ export const STAGE_MEANING: Readonly<Record<StageOrDone, string>> = Object.freez
   revising: "A revise session is addressing the review.",
   merged: "Merged to the base branch; waiting for dev verification.",
   verifying: "A verify session is checking it in dev.",
+  qaReviewing: "The QA gate (qaGate on) is running its visual and behaviour checks on dev, after the SRE passed it and before it advances.",
   pendingVerification: "Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization.",
   releaseAuthorized: "The EM verified it and authorized production; the promote stage puts it in a release PR next.",
   awaitingRelease: "In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran).",
@@ -114,6 +115,7 @@ export const SESSION_STAGE = Object.freeze({
   implement: "implementing",
   review: "reviewing",
   verify: "verifying",
+  qa: "qaReviewing",
   revise: "revising",
 } as const satisfies Record<string, Stage>);
 export type SessionStagePhase = keyof typeof SESSION_STAGE;
@@ -123,6 +125,7 @@ export const SESSION_FALLBACK_STAGE = Object.freeze({
   implement: "approved",
   review: "inReview",
   verify: "merged",
+  qa: "merged",
   revise: "changesRequested",
 } as const satisfies Record<SessionStagePhase, Stage>);
 

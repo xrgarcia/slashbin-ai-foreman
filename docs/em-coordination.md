@@ -32,6 +32,7 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 | `revising` | `pr pending actions` | pushes a revision, back to review | none — wait |
 | `merged` | `pr merged` | starts SRE dev verification | none — wait |
 | `verifying` | `pr merged` | SRE dev verification (and visual QA on QA repos) running | none — wait |
+| `qaReviewing` | `pr merged` | QA gate (`qaGate` on) running visual and behaviour checks after the SRE passed; pass advances, FAIL/HELD holds | none — wait |
 | `pendingVerification` | `pr approved` | posts "Waiting on EM verification" hourly if develop is ahead and nothing is authorized; unstick raises `release-gate` | **yours:** run the release gate (`/deliver-to-prod` 3a) and apply `ready for prod release`. Nothing reaches production until you do |
 | `releaseAuthorized` | `ready for prod release` | puts it in the release PR on the next promote pass, moves it to `release pending` | none — wait |
 | `awaitingRelease` | — | nothing: the release PR is not one the release stage owns | **yours:** get that PR merged or close it |
