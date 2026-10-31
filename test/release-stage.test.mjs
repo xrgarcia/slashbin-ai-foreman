@@ -100,6 +100,7 @@ if (a[0] === "api") {
   if (method === "POST" && (m = /issues\\/(\\d+)\\/comments$/.exec(path))) { comment(m[1], fields().body); save(); out(""); }
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
   if (/\\/commits\\//.test(path)) out(st.prodHead);
+  if (method === "GET" && (m = /issues\\/(\\d+)$/.exec(path))) out((st.issues[m[1]] || {}).body || "");
   if (/\\/compare\\//.test(path) && st.compareCommits && (flag("--jq") || "").includes("headline")) {
     out(st.compareCommits.map((c) => JSON.stringify(c)).join("\\n"));
   }
@@ -327,6 +328,23 @@ test("a prod verification's excluded error reaches the EM once; the release stil
   const u = unrelatedEntries();
   assert.equal(u.length, 1);
   assert.match(u[0].reason, /PR #90 \(prod\).*Evidence: https:\/\/example\.test\/pv-ev/);
+});
+
+// foreman#151: a prod close tells the EM the epic may be ready to close, once per epic and issue.
+const epicEntries = () => Object.values(loadRepoState("rel").unstick ?? {}).filter((e) => e.kind === "epic-ready-to-close");
+const setBodies = (bodies) => { const g = gh(); for (const [n, b] of Object.entries(bodies)) { g.issues[n].body = b; } writeFileSync(GH_STATE, JSON.stringify(g)); };
+
+test("closing an epic's child in production asks the EM whether the epic is ready to close; the release still closes", async () => {
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
+  setBodies({ 5: "## References\n- engineering-manager #880" });
+  assert.equal(await run(), true);
+  assertClosedVerified(5);
+  const e = epicEntries();
+  assert.equal(e.length, 1, "only the issue that names an epic");
+  assert.equal(e[0].issue, 0);
+  assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
+  assert.equal(await run(2), false);
+  assert.equal(epicEntries().length, 1, "a later cycle adds nothing");
 });
 
 test("the soak runs once, 30 minutes on: a pass ends the release", async () => {

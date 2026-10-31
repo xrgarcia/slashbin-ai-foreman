@@ -22,6 +22,7 @@ test("the kinds are the EM contract, verbatim", () => {
     "skip", "divergence", "verify-held", "verify-exhausted", "verify-no-pr", "revision-exhausted",
     "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate", "rework-decision",
     "unrelated-error",
+    "epic-ready-to-close",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
 });
