@@ -66,8 +66,8 @@ import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
-import { noteUnrelated, noteEpicChildClosed, epicRefs } from "../unstick.js";
-import { readIssueBody } from "../github/readiness.js";
+import { noteUnrelated, noteEpicChildClosed, epicsOf } from "../unstick.js";
+import { readIssueLinks } from "../github/readiness.js";
 
 /** The SRE's soak window: it runs once this long after the merge. */
 export const SOAK_DELAY_MS = 30 * 60_000;
@@ -208,14 +208,14 @@ function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): num
 }
 
 /**
- * The epics a closed issue belongs to: those its body names, or for a
- * "follow-up to #N" those #N names. A read failure never touches the release.
+ * The epics a closed issue belongs to: those its body names or its sub-issue
+ * parent, or for a "follow-up to #N" those of #N. A read failure never touches the release.
  */
 function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger: Logger): void {
   try {
-    let epics = epicRefs(readIssueBody(repoConfig, n));
+    let epics = epicsOf(readIssueLinks(repoConfig, n));
     const parent = /follow-up to #(\d+)/i.exec(title);
-    if (!epics.length && parent) epics = epicRefs(readIssueBody(repoConfig, Number(parent[1])));
+    if (!epics.length && parent) epics = epicsOf(readIssueLinks(repoConfig, Number(parent[1])));
     if (noteEpicChildClosed(repoConfig.name, repoConfig.githubRepo, n, epics) > 0) {
       logger.info(`#${n} closed in production; asking the EM whether engineering-manager ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
     }
