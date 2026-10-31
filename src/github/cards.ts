@@ -195,7 +195,10 @@ export function holdReasons(repo: string, cwd: string, label: string, numbers: r
  * 25 to a request. Not the open-issue view: a full read of it carried
  * cmneb_data_receiver#218, closed minutes before, with its old labels, and
  * the card went done → in_review (2026-10-15). A number that cannot be read
- * (a failed request, a missing issue) is left out, so nothing is guessed.
+ * (a missing issue, a number that is not a positive integer) is left out, so
+ * nothing is guessed. One unresolvable number makes `gh` fail its whole
+ * request, so a batch that throws is re-read one number per request and only
+ * the numbers that still throw are left out. A healthy batch stays one request.
  * Never throws. `query` is the GraphQL call (tests inject one).
  */
 export function issueStates(
@@ -203,19 +206,30 @@ export function issueStates(
   query: (q: string, cwd: string) => Record<string, unknown> = graphql,
 ): Map<number, ItemState> {
   const out = new Map<number, ItemState>();
-  const want = [...new Set(numbers)];
+  const want = [...new Set(numbers)].filter((n) => Number.isInteger(n) && n > 0);
+  const read = (batch: readonly number[]): void => {
+    const d = query(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `s${j}: issue(number: ${n}) { state stateReason }`).join(" ")} } }`, cwd);
+    const r = d.repository as Record<string, { state?: string; stateReason?: string | null } | null> | null;
+    batch.forEach((n, j) => {
+      const st = r?.[`s${j}`]?.state;
+      if (st === "OPEN") out.set(n, "open");
+      else if (st === "CLOSED") out.set(n, r?.[`s${j}`]?.stateReason === "NOT_PLANNED" ? "not_planned" : "completed");
+    });
+  };
+  const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
   for (let i = 0; i < want.length; i += STATES_PER_REQUEST) {
     const batch = want.slice(i, i + STATES_PER_REQUEST);
     try {
-      const d = query(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `s${j}: issue(number: ${n}) { state stateReason }`).join(" ")} } }`, cwd);
-      const r = d.repository as Record<string, { state?: string; stateReason?: string | null } | null> | null;
-      batch.forEach((n, j) => {
-        const st = r?.[`s${j}`]?.state;
-        if (st === "OPEN") out.set(n, "open");
-        else if (st === "CLOSED") out.set(n, r?.[`s${j}`]?.stateReason === "NOT_PLANNED" ? "not_planned" : "completed");
-      });
+      read(batch);
     } catch (err) {
-      logger.warn(`cards: ${repo} issue states not read: ${err instanceof Error ? err.message : String(err)}`);
+      logger.warn(`cards: ${repo} issue states not read: ${message(err)}`);
+      for (const n of batch) {
+        try {
+          read([n]);
+        } catch (e) {
+          logger.warn(`cards: ${repo} issue state #${n} not read: ${message(e)}`);
+        }
+      }
     }
   }
   return out;
