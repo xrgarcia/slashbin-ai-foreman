@@ -309,6 +309,16 @@ test("the first prod deploy's excluded error reaches the EM with its evidence; t
   assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-ev/);
 });
 
+test("a prod deploy whose evidence is only on its SRE_DEPLOY trailer still hands that link to the EM", async () => {
+  const d = DEPLOYED("pass", " evidence=https://example.test/pv-trailer");
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `verify: Not caused by this release, needs triage: billing: Expired API Key provided: rk_test_1234\n${d.out}` } });
+  assert.equal(await run(), true);
+  assertClosedVerified(5);
+  const u = unrelatedEntries();
+  assert.equal(u.length, 1);
+  assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-trailer/);
+});
+
 test("a prod verification's excluded error reaches the EM once; the release still closes", async () => {
   const v = VERIFY(90);
   world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: { ...v, out: `${TRIAGE("")}\n${v.out}` } });

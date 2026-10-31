@@ -1952,6 +1952,8 @@ export async function deployViaSre(
   // A merge the trailer reports is the truth whatever the exit: it must never
   // be read as "nothing happened".
   const unrelated = parseUnrelatedErrors(r.stdout);
+  // The deploy may carry its evidence link only on the trailer.
+  if (unrelated && trailer?.evidence && !unrelated.evidence.includes(trailer.evidence)) unrelated.evidence.push(trailer.evidence);
   if (trailer?.merged) return { kind: "trailer", trailer, ...(unrelated ? { unrelated } : {}) };
   // Exit 3 prints a trailer too (hold=codex-unavailable / em-mirror-unavailable),
   // but it means "could not run, nothing merged": retry, whatever it says.
