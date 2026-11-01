@@ -8,6 +8,7 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { buildQaEnv, runAgentCli, type CliRun, type VerifyResult } from "./agent.js";
 import { commentBodies, hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
+import { prChangedFiles } from "./github/reports.js";
 
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
@@ -70,6 +71,10 @@ export interface QaDeps {
   run(args: { repo: string; pr: number; out: string }): Promise<QaOutcome>;
   hasReport(pr: number): Promise<boolean>;
   post(pr: number, body: string): Promise<void>;
+  /** The files PR `pr` changes. Absent: the zero-shot rule (`withVoidPassHeld`) is not applied. */
+  changedFiles?(pr: number): Promise<string[]>;
+  /** The newest comment on `pr` carrying `marker`, or undefined: how a reused PASS is checked for shots. */
+  reportBody?(pr: number, marker: string): Promise<string | undefined>;
 }
 
 const NOT_A_GATE =
@@ -159,6 +164,8 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
     hasMarker: (pr, marker) => hasCommentContaining(repoConfig, pr, marker),
     hasReport: (pr) => hasCommentStartingWith(repoConfig, pr, QA_HEADING),
     post: (pr, body) => commentOnPr(repoConfig, pr, body),
+    changedFiles: async (pr) => prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
+    reportBody: async (pr, marker) => (await commentBodies(repoConfig, pr)).filter((b) => b.includes(marker)).pop(),
     async run({ repo, pr, out }) {
       const em = agentConfig.emRepoPath;
       const qa = agentConfig.qaPath;
@@ -240,6 +247,73 @@ export function qaFailSummary(m: QaManifest): string {
   return out.join("\n");
 }
 
+// --- A PASS that checked nothing (slashbin-ai-foreman#158) ---
+
+/** The hold a zero-shot PASS on a client change becomes: QA's `page-unplaced`, the Foreman-side twin of its fail-closed fix. */
+export const PAGE_UNPLACED_HOLD = "page-unplaced";
+const isClientCode = (f: string): boolean => f.startsWith("client/");
+
+/**
+ * The one rule: a PASS with no shots on a PR that changes `client/` code checked no page, so it is not a verdict
+ * (Slashbin-console#1589: a PASS with 0 pages, 0 shots on `client/src/App.tsx` was reused forever). Pure.
+ */
+export function isVoidPass(shots: number, files: readonly string[]): boolean {
+  return shots === 0 && files.some(isClientCode);
+}
+
+/** The shot count a posted gating report states (`Shots: N`), or undefined when it states none. Pure. */
+export function reportShots(body: string): number | undefined {
+  const m = /^Shots: (\d+)\s*$/m.exec(body);
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * `outcome`, with a void PASS (see `isVoidPass`) turned into the HELD `page-unplaced` that QA would now report,
+ * so the decision, the posted report and its marker all say HELD. Anything else is returned unchanged. Pure.
+ */
+export function withVoidPassHeld(outcome: QaOutcome, files: readonly string[]): QaOutcome {
+  if (outcome.kind !== "manifest" || outcome.manifest.verdict !== "PASS" || outcome.exitCode !== 0) return outcome;
+  if (!isVoidPass((outcome.manifest.shots ?? []).length, files)) return outcome;
+  const changed = files.filter(isClientCode).slice(0, 5).join(", ");
+  return {
+    kind: "manifest",
+    exitCode: 3,
+    manifest: {
+      ...outcome.manifest,
+      verdict: "HELD",
+      hold: PAGE_UNPLACED_HOLD,
+      reason: `QA passed with 0 shots, but the PR changes client code (${changed}): no page was checked, so this is not a PASS`,
+    },
+  };
+}
+
+/** `executeQa`, then `withVoidPassHeld` over the PR's changed files when the deps can name them. */
+async function executeQaChecked(repo: string, pr: number, deps: QaDeps): Promise<QaOutcome> {
+  const outcome = await executeQa(repo, pr, deps);
+  if (!deps.changedFiles || outcome.kind !== "manifest" || outcome.manifest.verdict !== "PASS") return outcome;
+  return withVoidPassHeld(outcome, await deps.changedFiles(pr).catch(() => []));
+}
+
+// --- The EM's QA rerun on a merged PR (slashbin-ai-foreman#158) ---
+
+/** A PR comment that opens with this is the EM's request for a fresh QA run on the merged PR. */
+export const QA_RERUN_PATTERN = /^\s*\*\*EM QA rerun/;
+const QA_REPORT_SHA = /^## QA Report\n<!-- foreman-qa sha=(\S+) verdict=\S+ -->/;
+
+/**
+ * Whether a rerun request on a merged PR is still unanswered: its newest `**EM QA rerun` comment comes after the
+ * newest `## QA Report` keyed to `mergeSha`. `bodies` are the PR's comments, oldest first. Pure.
+ */
+export function pendingQaRerun(bodies: readonly string[], mergeSha: string): boolean {
+  const asked = bodies.map((b, i) => (QA_RERUN_PATTERN.test(b) ? i : -1)).filter((i) => i >= 0).pop();
+  if (asked === undefined) return false;
+  const answered = bodies.map((b, i) => {
+    const sha = QA_REPORT_SHA.exec(b)?.[1];
+    return sha && sameSha(sha, mergeSha) ? i : -1;
+  }).filter((i) => i >= 0).pop();
+  return answered === undefined || answered < asked;
+}
+
 /**
  * Post the gating report unless a comment with the same marker (head SHA + verdict)
  * is already there, so a re-run after a restart does not double-post. A failed
@@ -272,9 +346,14 @@ export async function applyQaGate(
   pr: number,
   deps: QaDeps,
   logger: Logger,
+  opts: { markerSha?: string } = {},
 ): Promise<VerifyResult> {
-  const outcome = await executeQa(repo, pr, deps);
-  await postGateReport(pr, qaGateMarker(outcome), qaGateBody(pr, outcome), deps, deps.hasMarker ?? (async () => false), logger);
+  const outcome = await executeQaChecked(repo, pr, deps);
+  // `markerSha`: a rerun on a merged PR keys its report to the merge sha, whatever sha QA names.
+  const marker = opts.markerSha && outcome.kind === "manifest"
+    ? `<!-- foreman-qa sha=${opts.markerSha} verdict=${outcome.manifest.verdict} -->`
+    : qaGateMarker(outcome);
+  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, deps.hasMarker ?? (async () => false), logger);
   const hold = (reason: string, summary: string): VerifyResult => ({ ...sre, pass: false, reason, summary, by: "QA" });
   if (outcome.kind === "errored") {
     logger.warn(`QA gate: PR #${pr} errored: ${outcome.detail}`);
@@ -331,15 +410,24 @@ const sameSha = (a: string, b: string): boolean => a.length >= 7 && b.length >= 
  */
 export async function runQaBeforeMerge(repo: string, pr: number, headSha: string, deps: QaDeps, logger: Logger): Promise<QaPreMergeDecision> {
   const has = deps.hasMarker ?? (async () => false);
+  let voidReused = false;
   try {
-    if (await has(pr, qaVerdictMarker(headSha, "PASS"))) return { kind: "pass", reused: true };
-    if (await has(pr, qaVerdictMarker(headSha, "FAIL"))) {
+    if (await has(pr, qaVerdictMarker(headSha, "PASS"))) {
+      // A reused PASS must have checked something: its posted report states the shots (slashbin-ai-foreman#158).
+      const body = await deps.reportBody?.(pr, qaVerdictMarker(headSha, "PASS"));
+      const shots = body === undefined ? undefined : reportShots(body);
+      const files = shots === 0 && deps.changedFiles ? await deps.changedFiles(pr).catch(() => []) : [];
+      if (shots === undefined || !isVoidPass(shots, files)) return { kind: "pass", reused: true };
+      logger.warn(`QA: PR #${pr} has a PASS for ${headSha.slice(0, 7)} with 0 shots on a client change; not reusing it, running QA again`);
+      voidReused = true;
+    }
+    if (!voidReused && await has(pr, qaVerdictMarker(headSha, "FAIL"))) {
       return { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true };
     }
   } catch (e) {
     logger.warn(`QA: PR #${pr} marker lookup failed (${String(e).slice(0, 200)}); running QA`);
   }
-  const outcome = await executeQa(repo, pr, deps);
+  const outcome = await executeQaChecked(repo, pr, deps);
   const decision = decideQaBeforeMerge(outcome, headSha);
   // Only a consistent verdict carries a verdict marker (the one the lookup above reuses), and always with the
   // full head sha passed in, never the manifest's. Anything else is keyed so it can never be reused as a verdict.
@@ -347,7 +435,8 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
     : decision.kind === "fail" ? qaVerdictMarker(headSha, "FAIL")
     : outcome.kind === "errored" ? qaGateMarker(outcome)
     : `<!-- foreman-qa sha=${headSha} verdict=${decision.reason === "qa-inconsistent" ? "INCONSISTENT" : "HELD"} -->`;
-  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, has, logger);
+  // The earlier void PASS carries the PASS marker; a fresh PASS must still post, or the next look reads the old zero.
+  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, voidReused ? async () => false : has, logger);
   if (decision.kind === "hold") logger.warn(`QA: PR #${pr} held: ${decision.reason}: ${decision.summary}`);
   return decision;
 }
@@ -356,7 +445,9 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
  * What a QA outcome means for the approved head. Pure. A PASS needs exit 0 and a manifest naming this head; a
  * FAIL needs exit 1 and the same; HELD needs exit 3. Every other combination is `qa-inconsistent`, a hold.
  */
-export function decideQaBeforeMerge(outcome: QaOutcome, headSha: string): QaPreMergeDecision {
+export function decideQaBeforeMerge(rawOutcome: QaOutcome, headSha: string, changedFiles?: readonly string[]): QaPreMergeDecision {
+  // A zero-shot PASS on a client change is HELD page-unplaced, never a PASS (slashbin-ai-foreman#158).
+  const outcome = changedFiles ? withVoidPassHeld(rawOutcome, changedFiles) : rawOutcome;
   if (outcome.kind === "errored") return { kind: "hold", reason: "qa-errored", summary: `QA errored: ${outcome.detail}` };
   const { manifest: m, exitCode } = outcome;
   const named = Boolean(m.sha) && sameSha(m.sha!, headSha);

@@ -101,7 +101,7 @@ test("verify wiring: the gate runs before the advance; report-only runs only wit
   const gateAt = src.indexOf("applyQaGate(sre");
   const advanceAt = src.indexOf('"verifyPassed"');
   assert.ok(gateAt > 0 && gateAt < advanceAt, "QA is decided before pr approved");
-  assert.match(src, /config\.qaGate && !qaBeforeMerge && qaApplies\(/);
+  assert.match(src, /config\.qaGate && !qaBeforeMerge\)\) && qaApplies\(/);
   assert.match(src, /!config.qaGate && !qaBeforeMerge && qaApplies\(/, "gate off keeps the unawaited report-only run");
   assert.ok(!/await\s+runQaReport/.test(src));
 });

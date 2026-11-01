@@ -75,6 +75,7 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, QA failed the approved head (qaBeforeMerge on), or a stranded changes-requested verdict is caught up. |
 | `revised` | changesRequested | inReview | `inReview` | A revise session pushed changes; back to review. |
 | `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`. |
+| `qaRerun` | unknown | merged | `merged` | The EM asked for a fresh QA run on the merged PR (a PR comment opening `**EM QA rerun`): back to verification, which runs QA on dev and holds or passes it again. |
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |
 | `recoverFailed` | unknown | changesRequested | `changesRequested` | Dead-zone recovery: a fresh verification failed. |
 | `recoverMerged` | unknown | merged | `merged` | Dead-zone recovery with a verify stage: the merge is recorded and verification follows. |
@@ -97,6 +98,7 @@ stateDiagram-v2
   inReview --> changesRequested: changesRequested
   changesRequested --> inReview: revised
   merged --> approved: verifyPassed
+  unknown --> merged: qaRerun
   unknown --> approved: recoverPassed
   unknown --> changesRequested: recoverFailed
   unknown --> merged: recoverMerged

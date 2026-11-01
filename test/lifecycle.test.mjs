@@ -80,6 +80,8 @@ const LABELS = [
   ["revised", "pr merged", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
   ["verifyPassed", "pr under review", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
   ["verifyPassed", "pr merged", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
+  ["qaRerun", "pr under review", true, ["--remove-label", "pr approved", "--add-label", "pr merged"]],
+  ["qaRerun", "pr merged", true, ["--remove-label", "pr approved", "--add-label", "pr merged"]],
   ["recoverPassed", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr approved"]],
   ["recoverPassed", "pr merged", true, ["--add-label", "pr approved"]],
   ["recoverFailed", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr pending actions"]],

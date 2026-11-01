@@ -70,6 +70,7 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
   changesRequested: (c, cfg, n, log) => c.reviewOutcome(cfg, n, "prPendingActions", log),
   revised: (c, cfg, n, log) => c.revisionDone(cfg, n, log),
   verifyPassed: (c, cfg, n, log) => c.verifyPassed(cfg, n, log),
+  qaRerun: (c, cfg, n, log) => c.reopenForQaRerun(cfg, n, log),
   recoverPassed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "pass", log),
   recoverFailed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "fail", log),
   recoverMerged: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "merged", log),
@@ -310,6 +311,31 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         "--add-label", prApproved,
       ], config.repoPath);
       logger.info(`Transitioned issue #${issueNumber} labels: "${prMerged}" → "${prApproved}" (dev verification passed)`);
+      return true;
+    } catch (err) {
+      logger.warn(
+        `Failed to transition labels on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * The EM asked for a fresh QA run on a merged PR (`**EM QA rerun`, slashbin-ai-foreman#158): `prApproved`
+   * → `prMerged`, so the verify stage picks the card up again. The reverse of `verifyPassed`.
+   *
+   * @internal
+   */
+  reopenForQaRerun(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+    const { prMerged, prApproved } = config.lifecycleLabels;
+    try {
+      gh([
+        "issue", "edit", String(issueNumber),
+        "--repo", config.githubRepo,
+        "--remove-label", prApproved,
+        "--add-label", prMerged,
+      ], config.repoPath);
+      logger.info(`Transitioned issue #${issueNumber} labels: "${prApproved}" → "${prMerged}" (EM asked for a QA rerun)`);
       return true;
     } catch (err) {
       logger.warn(
