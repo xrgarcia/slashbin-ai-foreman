@@ -7,7 +7,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { contractBlock, contractReaderPath, CONTRACT_READER_ENV } from "../dist/handoff-contract.js";
-import { buildTechLeadEnv, buildSreEnv } from "../dist/agent.js";
+import { buildTechLeadEnv } from "../dist/plugins/tech-lead.js";
+import { buildSreEnv } from "../dist/plugins/sre.js";
 
 const em = mkdtempSync(join(tmpdir(), "em-"));
 const reader = join(em, "scripts", "process", "handoff-contract-snapshot.mjs");

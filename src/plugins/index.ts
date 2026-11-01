@@ -1,5 +1,9 @@
 import { registerPlugin, registeredPlugins } from "./registry.js";
 import { PaperclipPlugin } from "./paperclip.js";
+import { TechLeadPlugin } from "./tech-lead.js";
+import { SrePlugin } from "./sre.js";
+import { QaPlugin } from "./qa.js";
+import { EmPlugin } from "./em.js";
 
 /**
  * The composition root (EM#1150): the only file that names a plugin. The CLI
@@ -9,4 +13,8 @@ import { PaperclipPlugin } from "./paperclip.js";
 export function registerBuiltinPlugins(): void {
   if (registeredPlugins().length > 0) return;
   registerPlugin(new PaperclipPlugin());
+  registerPlugin(new TechLeadPlugin());
+  registerPlugin(new SrePlugin());
+  registerPlugin(new QaPlugin());
+  registerPlugin(new EmPlugin());
 }

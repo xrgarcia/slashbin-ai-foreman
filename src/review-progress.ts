@@ -13,7 +13,7 @@
 //
 // It writes nothing to Paperclip itself: its Paperclip seat has no heartbeat
 // runs, so its keys are refused there. The Foreman reads the lines as they
-// stream (agent.ts reviewViaTechLead) and relays them with its own.
+// stream (plugins/tech-lead.ts reviewViaTechLead) and relays them with its own.
 //
 // HOW MANY COMMENTS. Paperclip has no comment edit (its routes offer GET and
 // DELETE on a comment, no PATCH), so the checklist cannot be one comment

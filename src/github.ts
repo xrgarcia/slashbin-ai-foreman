@@ -2,6 +2,7 @@
 // this file is the public surface the rest of the Foreman imports, unchanged by the split.
 
 export { isBackoffRefusal, gh } from "./github/gh.js";
+export { hasCommentContaining } from "./github/pr-comments.js";
 export {
   type IssueSnapshot,
   configureIssueCache,

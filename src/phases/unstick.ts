@@ -12,9 +12,10 @@
 // (invoked / escalated / declined) is final until the reason changes.
 
 import { resolve } from "node:path";
-import { unstickStageReady, type AgentConfig, type RepoConfig } from "../config.js";
+import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { unstickViaEm, type UnstickOutcome } from "../agent.js";
+import { roleFor } from "../plugins/registry.js";
+import type { UnstickOutcome } from "../plugins/contract.js";
 import { commentOnIssue, getOpenIssues, hasLabel } from "../github.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
@@ -48,7 +49,8 @@ export async function tryUnstick(
   cycleNumber: number,
   deps: { comment?: typeof commentOnIssue } = {},
 ): Promise<number> {
-  if (!unstickStageReady(config)) return 0;
+  const unsticker = roleFor("unstick", config);
+  if (!unsticker) return 0;
   const repoName = repoConfig.name;
   const log = base.child({ cycle: cycleNumber, repo: repoName, phase: "unstick" });
   try {
@@ -109,7 +111,7 @@ export async function tryUnstick(
       activeRuns.set(ac, repoName);
       let outcome: UnstickOutcome;
       try {
-        outcome = await unstickViaEm(repoConfig, config, c.issue, c.kind, c.reason, log, ac.signal,
+        outcome = await unsticker.unstick(repoConfig, config, c.issue, c.kind, c.reason, log, ac.signal,
           transcript(repoConfig, `${c.kind}-${c.issue}`, cycleNumber));
       } finally {
         activeRuns.delete(ac);

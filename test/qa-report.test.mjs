@@ -3,7 +3,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { QA_HEADING, QA_MAX_DURATION_MS, qaApplies, qaReportBody, readOutcome, runQaReport } from "../dist/qa-report.js";
+import { QA_HEADING, qaApplies, qaReportBody, runQaReport } from "../dist/qa-report.js";
+import { QA_MAX_DURATION_MS, readOutcome } from "../dist/plugins/qa.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const logs = [];
 const logger = { info: (m) => logs.push(m), warn: (m) => logs.push(m), error() {}, debug() {}, child() { return this; } };

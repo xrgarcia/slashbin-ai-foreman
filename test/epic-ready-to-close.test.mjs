@@ -8,6 +8,9 @@ import { join } from "node:path";
 import { setStatePath } from "../dist/state.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { epicRefs, noteEpicChildClosed, UNSTICK_KINDS } from "../dist/unstick.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";

@@ -26,6 +26,8 @@ if (!existsSync(built)) {
   process.exit(1);
 }
 const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning, requiredLabels } = await import(built);
+// The release-stage checks judge roles (reviewer, deployer), so the built-in plugins must be registered.
+(await import(join(root, "dist", "plugins", "index.js"))).registerBuiltinPlugins();
 const { claudeConfigPath, claudeTrustStatus } = await import(join(root, "dist", "claude-trust.js"));
 const { readGolden, skillsFor, driftAt, describeDrift } = await import(join(root, "dist", "skill-sync.js"));
 

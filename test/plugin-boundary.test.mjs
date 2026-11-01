@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBoundary, countViolations, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
+import { checkBoundary, countViolations, isAgentPlugin, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = join(root, "src");
@@ -93,8 +93,20 @@ test("ratchet: core importing plugins/registry.js or plugins/contract.js is allo
 
 test("ratchet: core importing plugins/paperclip.js fails; plugins/index.ts may", () => {
   const problems = checkBoundary({ "orchestrator.ts": ["./plugins/paperclip.js"] }, {});
-  assert.equal(problems.length, 1);
-  assert.match(problems[0], /src\/orchestrator\.ts imports plugin code directly/);
+  assert.equal(problems.length, 2);
+  assert.ok(problems.some((p) => /src\/orchestrator\.ts imports plugin code directly/.test(p)), problems.join("\n"));
   assert.deepEqual(checkBoundary({ "plugins/index.ts": ["./paperclip.js"] }, {}), []);
   assert.ok(isPlugin("plugins/paperclip.ts") && !isPlugin("plugins/registry.ts"));
+});
+
+test("ratchet forbids core importing an agent plugin, even a file the allowlist covers", () => {
+  for (const agent of ["tech-lead", "sre", "qa", "em", "agent-cli"]) {
+    assert.ok(isAgentPlugin(`plugins/${agent}.ts`), agent);
+    const problems = checkBoundary({ "phases/review.ts": [`../plugins/${agent}.js`] }, { "phases/review.ts": 1 });
+    assert.equal(problems.length, 1, agent);
+    assert.match(problems[0], new RegExp(`src/phases/review\\.ts imports the plugin src/plugins/${agent}\\.ts directly`));
+  }
+  // The plugins themselves, and the composition root, may.
+  assert.deepEqual(checkBoundary({ "plugins/index.ts": ["./tech-lead.js"], "plugins/sre.ts": ["./agent-cli.js"] }, {}), []);
+  assert.ok(!isAgentPlugin("plugins/registry.ts") && !isAgentPlugin("plugins/contract.ts"));
 });

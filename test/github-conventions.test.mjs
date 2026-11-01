@@ -14,7 +14,9 @@ import { issueStage } from "../dist/github-work-source.js";
 import { buildDependencyBatchIssue, findDependencyPRs, findOpenDependencyBatchIssue } from "../dist/github/dependencies.js";
 import { createPromotionPR } from "../dist/github/promotion.js";
 import { createSyncPR } from "../dist/github/branch.js";
-import { buildSessionEnv, buildTechLeadEnv, buildSreEnv } from "../dist/agent.js";
+import { buildSessionEnv } from "../dist/agent.js";
+import { buildTechLeadEnv } from "../dist/plugins/tech-lead.js";
+import { buildSreEnv } from "../dist/plugins/sre.js";
 
 const L = {
   prUnderReview: "pr under review", prMerged: "pr merged", prPendingActions: "pr pending actions",
