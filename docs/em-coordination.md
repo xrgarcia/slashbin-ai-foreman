@@ -38,8 +38,8 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 | `awaitingRelease` | — | nothing: the release PR is not one the release stage owns | **yours:** get that PR merged or close it |
 | `releasing` | `release pending` | Tech Lead approves the release PR, SRE merges, deploys, prod-verifies, soaks, closes the issue | none — wait. If the PR shows a failing EM sign-off status, an issue it carries lacks your label (§4) |
 | `prodVerifyHeld` | `prod verification held` | re-verifies on 10 min → 6 h back-off, uncapped; re-checks at once when production's head moves | **sort it:** read the newest prod-verification comment. A wait needs nothing. A check that cannot observe the outcome → file the verifier defect. Production broken → file a corrective issue. Never re-verify by hand |
-| `needsRuling` | — | paused | **yours:** `/rule-on-scope <repo> <pr>` and a PR comment opening `**EM scope ruling`; or, for a skip that spent its attempts, change the issue |
-| `blocked` | `blocked` | paused: no build, and no review, QA-before-merge or revise of its open PR (foreman#167); the unstick stage calls the EM wrapper (§3) | read the reason, fix what it names, then lift `blocked` or edit the issue — **on the issue, never the board** |
+| `needsRuling` | — | paused; the card stays Blocked on the EM, through a later "changes requested" update and a restart, until the ruling's revise starts | **yours:** `/rule-on-scope <repo> <pr>` and a PR comment opening `**EM scope ruling`; or, for a skip that spent its attempts, change the issue |
+| `blocked` | `blocked` | paused: no build, and no review, QA-before-merge or revise of its open PR (foreman#167); the unstick stage calls the EM wrapper (§3). The card's block (reason, holder, stage) survives a restart; a block a person or a seat's escalation put on the card is never undone while the issue stays at that stage | read the reason, fix what it names, then lift `blocked` or edit the issue — **on the issue, never the board** |
 
 **QA before the merge (`qaBeforeMerge`, default off, EM#923).** For a `qaRepos` repo with the flag on, the order is review, QA, then SRE: the Tech Lead approves without merging (trailer `merged=no hold=qa-pending`, not a failure), QA runs `check --local` on that head (no secret, it boots the PR itself), and only a PASS has the Tech Lead merge before the SRE's dev verify. The merge is `review-pr --merge-approved <the full sha QA passed>`: merge only, never a new judgment. Trailer `hold=head-moved` (the PR head changed after QA) means no merge, nothing charged, and the card goes back to review for the new head; `hold=not-approved` is a charged hold. Only a consistent result is remembered (PASS with exit 0, FAIL with exit 1, marker keyed by the full head sha); an inconsistent one posts `verdict=INCONSISTENT`, holds on every retry, and is not a review round. The card stays `inReview` and shows `qaReviewing` while QA runs. A QA FAIL moves it to `changesRequested`, counts as a review round toward the review-rounds alert (a FAIL that stands on an unmoved head posts a `foreman-qa-fail-stands` comment, so each send-back is a round), and the revise session is handed QA's failing lines; the SRE never sees it. Holds `qa-held-qa-local-boot-failed` and `qa-held-qa-local-seed-missing` (owner QA / Console), `qa-held-worker-data-unavailable`, `qa-held-attribution-unavailable` and `qa-errored` are tooling holds: deferred, nothing charged, nothing merged. Flag off or repo outside `qaRepos`: unchanged.
 
@@ -47,6 +47,16 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 
 Variant: **`deployFailed`** (a `blocked` card whose dev deploy failed) is the SRE's, not the
 EM's: route it to the SRE, then release the hold.
+
+**The card follows GitHub on its own (EM#1150 feature 6).** Each pass, the Foreman's mirror
+places every card from GitHub: the column and the holder the stage calls for (a hand-off lost
+to a Paperclip outage is re-made next pass), a card for any lifecycle issue that has none,
+created at its stage, and done or cancelled, with no agent or person on it, for every card whose
+issue is closed or released. A closed issue's card is terminal: no late or deferred stage update
+moves it or assigns anyone, until GitHub reads the issue open again. A hold a person or a seat
+put on the card after the last pass is read live before any stage move, so it is kept, and a
+ruling block a Paperclip outage lost is re-delivered on the next pass. Never fix a card by hand
+that the next pass would place: fix the issue.
 
 ## 2. Holds by code
 

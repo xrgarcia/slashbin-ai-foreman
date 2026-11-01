@@ -215,6 +215,41 @@ export interface BranchBlock {
 interface PersistedState {
   version: number;
   repos: Record<string, RepoState>;
+  /** Blocks an observer put on its cards, by card id (`CardBlockRecord`). Optional. */
+  cardBlocks?: Record<string, CardBlockRecord>;
+}
+
+/**
+ * A block an observer (the Paperclip mirror) put on one of its cards: why
+ * (`reason`, the card's unblock action), whose it is when not the stage's
+ * owner (`owner`, a role key), the stage its issue was at when it was blocked
+ * (`at`; null: not yet known), and whether it waits on an EM scope ruling
+ * (`ruling`). Kept here so a restart re-reads them instead of guessing: a
+ * restarted mirror took a needs-ruling card back to the Foreman and a failed
+ * deploy's card off the SRE (EM#1150 f6).
+ */
+export interface CardBlockRecord {
+  reason?: string;
+  owner?: string;
+  at?: string | null;
+  ruling?: boolean;
+}
+
+/** Every persisted card block, by card id. */
+export function loadCardBlocks(): Record<string, CardBlockRecord> {
+  const blocks = loadRaw().cardBlocks;
+  return blocks && typeof blocks === "object" ? { ...blocks } : {};
+}
+
+/** Record `block` for card `id`, or forget it (null). Best-effort, like every state write. */
+export function saveCardBlock(id: string, block: CardBlockRecord | null): void {
+  const state = loadRaw();
+  const blocks = { ...(state.cardBlocks ?? {}) };
+  if (block) blocks[id] = block;
+  else if (id in blocks) delete blocks[id];
+  else return;
+  state.cardBlocks = blocks;
+  saveRaw(state);
 }
 
 const EMPTY_REPO_STATE: RepoState = {
