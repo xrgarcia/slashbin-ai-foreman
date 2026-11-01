@@ -491,7 +491,7 @@ test("each step hands the card to its configured agent with exactly one stage la
   await mirror.onRelease(release("open", 12, [7]), logger());
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
-  assert.deepEqual(at(), ["done", "agent-lead", ["bug"]], "done keeps the last holder and drops the stage label");
+  assert.deepEqual(at(), ["done", null, ["bug"]], "done is nobody's (Foreman #112) and drops the stage label");
   assert.equal(fake.labels.length, 13, "the eleven stage labels and the issue label created once");
   assert.equal(hasIssue(fake, r), true, "the issue label stays through done");
   assert.equal(r.labelIds.filter((id) => fake.labels.find((l) => l.id === id)?.name === "issue").length, 1, "never twice");
@@ -1151,7 +1151,7 @@ test("ownsCards: title and description follow the issue; an unapproved card held
   assert.equal(r.assigneeUserId, null);
 });
 
-test("ownsCards: a closed issue's card is done, or cancelled when not planned; its holder kept", async () => {
+test("ownsCards: a closed issue's card is done, or cancelled when not planned, and nobody's", async () => {
   const fake = fakePaperclip([
     ownedRow("in_review"),
     { id: "r8", title: "r#8 issue 8", status: "todo", assigneeAgentId: AGENT, description: "source: example/r#8\nGitHub: closed not_planned\n\nhttps://github.com/example/r/issues/8" },
@@ -1159,7 +1159,7 @@ test("ownsCards: a closed issue's card is done, or cancelled when not planned; i
   const { mirror } = mirrorOn(fake, OWNED);
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8, { state: "not_planned" })] }, logger());
   assert.equal(fake.rows[0].status, "done");
-  assert.equal(fake.rows[0].assigneeAgentId, AGENT);
+  assert.equal(fake.rows[0].assigneeAgentId, null, "a holder left on a closed issue's card is told to act on finished work");
   assert.equal(fake.rows[0].description.split("\n")[1], "GitHub: closed completed");
   assert.equal(fake.rows[1].status, "cancelled");
 });
