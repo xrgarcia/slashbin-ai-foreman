@@ -3,6 +3,7 @@ import { secretValues } from "../agent.js";
 import { PaperclipClient } from "../paperclip/client.js";
 import { PaperclipMirror } from "../paperclip/mirror.js";
 import { runDoctor } from "../paperclip/doctor.js";
+import { loadCardBlocks, saveCardBlock } from "../state.js";
 import type { ForemanPlugin, PluginContext } from "./contract.js";
 
 /**
@@ -76,6 +77,8 @@ export class PaperclipPlugin implements ForemanPlugin {
       mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
       logger,
       config.lifecycleLabels,
+      // A card's block (reason, holder, stage, ruling) outlives a restart, in the Foreman's state file.
+      { load: loadCardBlocks, save: saveCardBlock },
     );
     // Housekeeping off the observer queue: project backfill, retiring the old live task.
     this.stopMirror = this.mirror.start();

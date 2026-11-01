@@ -814,10 +814,23 @@ test("snapshot: leaves a session-held card, a waiting hold, a cancelled card and
   assert.equal(statusPatches(fake).length, before);
 });
 
-test("snapshot: an issue with no card gets none", async () => {
+test("snapshot: a lifecycle issue with no card gets one, at its stage (Foreman #113)", async () => {
   const fake = fakePaperclip([]);
   const { mirror } = mirrorOn(fake);
-  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  assert.equal(fake.rows.length, 1);
+  assert.match(fake.rows[0].description, /^source: example\/r#7\n/);
+  assert.equal(fake.rows[0].status, "in_review");
+  // Seen again, it is the same card, not another.
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  assert.equal(fake.rows.length, 1);
+});
+
+test("snapshot: an issue with no card gets none while GitHub cannot say it is open", async () => {
+  const fake = fakePaperclip([]);
+  const { mirror } = mirrorOn(fake);
+  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: snap([{ number: 7, labels: ["approved"] }]), states: async () => new Map([[7, "completed"]]) }, logger());
+  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: snap([{ number: 7, labels: ["approved"] }]), states: async () => new Map() }, logger());
   assert.equal(fake.rows.length, 0);
 });
 
