@@ -57,6 +57,7 @@ export async function reconfigurePlugins(config: AgentConfig, ctx: PluginContext
       } else if (on) {
         action = "reconfigure";
         await p.reconfigure?.(config, ctx);
+        syncObserver(p);
       } else if (want) {
         await startOne(p, config, ctx);
         ctx.logger.info(`plugin ${p.id} switched on by config reload`);
@@ -74,6 +75,26 @@ async function startOne(p: ForemanPlugin, config: AgentConfig, ctx: PluginContex
   if (o) {
     observerList.push(o);
     startedObservers.set(p, o);
+  }
+}
+
+/**
+ * A reconfigure may replace the plugin's observer (Paperclip restarts its mirror
+ * when the company, agent, URL or identity changes). The fan-out follows: the new
+ * observer takes the old one's place in delivery order, and the old one hears nothing more.
+ */
+function syncObserver(p: ForemanPlugin): void {
+  const before = startedObservers.get(p);
+  const now = p.roles.includes("observer") ? p.observer : undefined;
+  if (before === now) return;
+  const i = before ? observerList.indexOf(before) : -1;
+  if (now) {
+    if (i >= 0) observerList[i] = now;
+    else observerList.push(now);
+    startedObservers.set(p, now);
+  } else {
+    if (i >= 0) observerList.splice(i, 1);
+    startedObservers.delete(p);
   }
 }
 
