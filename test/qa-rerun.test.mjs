@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   runQaBeforeMerge, decideQaBeforeMerge, applyQaGate, qaVerdictMarker, isVoidPass, reportShots, withVoidPassHeld,
-  pendingQaRerun, QA_RERUN_PATTERN,
+  postMergeQaRequirement, QA_RERUN_PATTERN,
 } from "../dist/qa-report.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
@@ -83,37 +83,77 @@ test("the post-merge gate holds a void PASS too, rather than returning the SRE's
 // --- The re-run input ---
 
 const ask = "**EM QA rerun: QA's route parser was fixed (slashbin_ai_qa#15, #16)";
-const report = (sha, v = "PASS") => `## QA Report\n<!-- foreman-qa sha=${sha} verdict=${v} -->\n**Verdict: ${v}**`;
+let n = 100;
+const c = (body) => ({ id: ++n, body, at: new Date(1e12 + n * 1000).toISOString() });
+const report = (sha, v, req) => c(`## QA Report\n<!-- foreman-qa sha=${sha} verdict=${v}${req ? ` req=${req}` : ""} -->\n**Verdict: ${v}**`);
+const req = (comments) => comments.filter((x) => QA_RERUN_PATTERN.test(x.body)).pop().id;
 
-test("`**EM QA rerun` is pending until a QA Report keyed to the merge sha comes after it", () => {
-  assert.ok(QA_RERUN_PATTERN.test(ask));
-  const void0 = report("dc3a2dd346c1b179e7432a41ed26a1eee259d905");
-  assert.equal(pendingQaRerun([void0], MERGE), false, "no request: nothing to do");
-  assert.equal(pendingQaRerun([void0, ask], MERGE), true, "the old PASS keyed to the head does not answer it");
-  assert.equal(pendingQaRerun([void0, ask, report(MERGE)], MERGE), false, "answered by a report on the merge sha");
-  assert.equal(pendingQaRerun([void0, ask, report(MERGE), ask], MERGE), true, "asking again is a fresh request");
-  assert.equal(pendingQaRerun([ask, report(MERGE.slice(0, 9), "FAIL")], MERGE), false, "an abbreviated sha answers it too");
+test("postMergeQaRequirement: one owner for 'is post-merge QA satisfied'", () => {
+  const old = report("dc3a2dd346c1b179e7432a41ed26a1eee259d905", "PASS");
+  assert.deepEqual(postMergeQaRequirement([old], MERGE).required, false, "no request: nothing owed");
+  const a = c(ask);
+  let cs = [old, a];
+  assert.deepEqual([postMergeQaRequirement(cs, MERGE).required, postMergeQaRequirement(cs, MERGE).fresh], [true, true], "the old PASS answers nothing");
+  // R1/R2: a HELD report keeps the request open and QA required.
+  cs = [...cs, report(MERGE, "HELD", a.id)];
+  assert.deepEqual([postMergeQaRequirement(cs, MERGE).required, postMergeQaRequirement(cs, MERGE).fresh], [true, true]);
+  // R3: a FAIL answers the request (no rerun) but QA stays required.
+  cs = [...cs, report(MERGE, "FAIL", a.id)];
+  assert.deepEqual([postMergeQaRequirement(cs, MERGE).required, postMergeQaRequirement(cs, MERGE).fresh], [true, false]);
+  cs = [...cs, report(MERGE, "PASS", a.id)];
+  assert.deepEqual([postMergeQaRequirement(cs, MERGE).required, postMergeQaRequirement(cs, MERGE).fresh], [false, false]);
+  // A second request with the same verdict history needs its own report, and stops after it.
+  const b = c(ask);
+  cs = [...cs, b];
+  assert.deepEqual([postMergeQaRequirement(cs, MERGE).required, postMergeQaRequirement(cs, MERGE).fresh], [true, true], "the earlier PASS does not answer the new request");
+  assert.equal(postMergeQaRequirement([...cs, report(MERGE, "PASS", a.id)], MERGE).required, true, "a report for the old request id does not either");
+  cs = [...cs, report(MERGE.slice(0, 9), "PASS", b.id)];
+  assert.deepEqual([postMergeQaRequirement(cs, MERGE).required, postMergeQaRequirement(cs, MERGE).fresh], [false, false]);
 });
 
-test("the rerun produces a fresh run keyed to the merge sha, posted even when a report with that verdict is already there; a FAIL takes visual-qa-failed", async () => {
+test("the report is keyed to the request: a second request with the same verdict gets its own report (not deduped against the first)", async () => {
   const sre = { kind: "verdict", pass: true, trailer: {}, summary: "" };
-  const marker = `<!-- foreman-qa sha=${MERGE} verdict=PASS -->`;
-  // An earlier rerun's PASS marker is on the PR; hasMarker says so, but the rerun posts regardless of it (verify.ts passes the real deps; a rerun is a new question).
+  const first = deps(ran(24));
+  await applyQaGate(sre, REPO, 1589, first, logger, { markerSha: MERGE, reqId: 111 });
+  assert.ok(first.posted[0].includes(`<!-- foreman-qa sha=${MERGE} verdict=PASS req=111 -->`));
+  const second = deps(ran(24), { markers: [`<!-- foreman-qa sha=${MERGE} verdict=PASS req=111 -->`] });
+  await applyQaGate(sre, REPO, 1589, second, logger, { markerSha: MERGE, reqId: 222 });
+  assert.equal(second.posted.length, 1, "request 222 is a new identity");
+  assert.ok(second.posted[0].includes("req=222"));
+  const again = deps(ran(24), { markers: [`<!-- foreman-qa sha=${MERGE} verdict=PASS req=222 -->`] });
+  await applyQaGate(sre, REPO, 1589, again, logger, { markerSha: MERGE, reqId: 222 });
+  assert.equal(again.posted.length, 0, "the same request is reported once");
+});
+
+test("a zero-shot rerun is HELD page-unplaced, keyed to the request, and leaves QA required", async () => {
+  const sre = { kind: "verdict", pass: true, trailer: {}, summary: "" };
+  const a = c(ask);
+  const d = deps(ran(0));
+  const out = await applyQaGate(sre, REPO, 1589, d, logger, { markerSha: MERGE, reqId: a.id });
+  assert.deepEqual([out.pass, out.reason], [false, "qa-held-page-unplaced"]);
+  const posted = { id: ++n, body: d.posted[0], at: "" };
+  const need = postMergeQaRequirement([a, posted], MERGE);
+  assert.deepEqual([need.required, need.fresh], [true, true]);
+});
+
+test("the rerun produces a fresh run keyed to the merge sha; a FAIL takes visual-qa-failed", async () => {
+  const sre = { kind: "verdict", pass: true, trailer: {}, summary: "" };
   const d = deps(ran(24));
-  const out = await applyQaGate(sre, REPO, 1589, d, logger, { markerSha: MERGE });
+  assert.equal(await applyQaGate(sre, REPO, 1589, d, logger, { markerSha: MERGE, reqId: 5 }), sre);
   assert.equal(d.runs, 1);
-  assert.equal(out, sre);
-  assert.ok(d.posted[0].includes(marker), "keyed to the merge sha");
   const fail = deps({ kind: "manifest", exitCode: 1, manifest: { ...manifest(24), verdict: "FAIL", regressions: [{ route: "/dlq", viewport: "phone", items: [{ criterion: "clipping_overflow" }] }] } });
-  const f = await applyQaGate(sre, REPO, 1589, fail, logger, { markerSha: MERGE });
+  const f = await applyQaGate(sre, REPO, 1589, fail, logger, { markerSha: MERGE, reqId: 5 });
   assert.deepEqual([f.pass, f.reason], [false, "visual-qa-failed"]);
-  assert.ok(fail.posted[0].includes(`sha=${MERGE} verdict=FAIL`));
+  assert.ok(fail.posted[0].includes(`sha=${MERGE} verdict=FAIL req=5`));
 });
 
 test("verify wiring: a request is staged before the targets are read, runs QA without the SRE, and moves an approved card back", () => {
   const src = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf-8");
   assert.ok(src.indexOf("stageQaReruns(repoConfig, held") < src.indexOf("findIssuesAwaitingVerify(repoConfig, vlog)"));
-  assert.match(src, /rerunSha\s*\?\s*\{ kind: "verdict", pass: true/);
+  assert.match(src, /owed\?\.fresh\s*\?\s*\{ kind: "verdict", pass: true/);
   assert.match(src, /"qaRerun"/);
-  assert.match(src, /markerSha: rerunSha/);
+  assert.match(src, /markerSha: owed\.sha, reqId: owed\.reqId/);
+  // The qaBeforeMerge skip never applies while QA is owed: the gate condition is `owed || ...`, and the SRE pass alone cannot advance.
+  assert.match(src, /\(owed \|\| \(config\.qaGate && !qaBeforeMerge\)\) && qaApplies/);
+  assert.ok(src.indexOf("postMergeQaRequirement(comments") > 0 && !src.includes("pendingQaRerun"));
 });

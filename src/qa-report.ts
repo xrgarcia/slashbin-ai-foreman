@@ -298,20 +298,37 @@ async function executeQaChecked(repo: string, pr: number, deps: QaDeps): Promise
 
 /** A PR comment that opens with this is the EM's request for a fresh QA run on the merged PR. */
 export const QA_RERUN_PATTERN = /^\s*\*\*EM QA rerun/;
-const QA_REPORT_SHA = /^## QA Report\n<!-- foreman-qa sha=(\S+) verdict=\S+ -->/;
+const QA_REPORT_KEY = /^## QA Report\n<!-- foreman-qa sha=(\S+) verdict=(\S+?)(?: req=(\d+))? -->/;
+
+/** A PR comment as the requirement reads it, oldest first. */
+export interface QaComment { id: number; body: string; at: string }
+
+/** What a merged PR's EM rerun requests demand of its card. */
+export interface QaRequirement {
+  /** A request exists and no PASS answers the newest one: post-merge QA must pass before the card may be `pr approved`. */
+  required: boolean;
+  /** The newest request has no terminal verdict (PASS or FAIL) yet: it needs a fresh QA run. A HELD report keeps it open. */
+  fresh: boolean;
+  /** The newest request's comment id and time (keys the report and tells a hold older than the request). */
+  reqId: number | null;
+  reqAt: string | null;
+}
 
 /**
- * Whether a rerun request on a merged PR is still unanswered: its newest `**EM QA rerun` comment comes after the
- * newest `## QA Report` keyed to `mergeSha`. `bodies` are the PR's comments, oldest first. Pure.
+ * The one owner of "is post-merge QA satisfied for this card" (slashbin-ai-foreman#158). Once a merged PR carries any
+ * `**EM QA rerun` request, QA is required: only a PASS keyed to `mergeSha` and to the newest request, posted after it,
+ * satisfies it. A FAIL answers the request (no automatic rerun) but leaves QA required, so a released hold still needs
+ * a fresh PASS; a HELD or errored run answers nothing. Reports carry `req=<comment id>`. Pure.
  */
-export function pendingQaRerun(bodies: readonly string[], mergeSha: string): boolean {
-  const asked = bodies.map((b, i) => (QA_RERUN_PATTERN.test(b) ? i : -1)).filter((i) => i >= 0).pop();
-  if (asked === undefined) return false;
-  const answered = bodies.map((b, i) => {
-    const sha = QA_REPORT_SHA.exec(b)?.[1];
-    return sha && sameSha(sha, mergeSha) ? i : -1;
-  }).filter((i) => i >= 0).pop();
-  return answered === undefined || answered < asked;
+export function postMergeQaRequirement(comments: readonly QaComment[], mergeSha: string): QaRequirement {
+  const asked = comments.map((c, i) => (QA_RERUN_PATTERN.test(c.body) ? i : -1)).filter((i) => i >= 0).pop();
+  if (asked === undefined) return { required: false, fresh: false, reqId: null, reqAt: null };
+  const req = comments[asked]!;
+  const verdicts = comments.slice(asked + 1).flatMap((c) => {
+    const m = QA_REPORT_KEY.exec(c.body);
+    return m && sameSha(m[1]!, mergeSha) && m[3] === String(req.id) ? [m[2]!] : [];
+  });
+  return { required: !verdicts.includes("PASS"), fresh: !verdicts.some((v) => v === "PASS" || v === "FAIL"), reqId: req.id, reqAt: req.at };
 }
 
 /**
@@ -346,12 +363,13 @@ export async function applyQaGate(
   pr: number,
   deps: QaDeps,
   logger: Logger,
-  opts: { markerSha?: string } = {},
+  opts: { markerSha?: string; reqId?: number } = {},
 ): Promise<VerifyResult> {
   const outcome = await executeQaChecked(repo, pr, deps);
-  // `markerSha`: a rerun on a merged PR keys its report to the merge sha, whatever sha QA names.
+  // `markerSha`/`reqId`: a rerun on a merged PR keys its report to the merge sha and the request's comment id, so each
+  // request gets exactly one fresh report per verdict, whatever sha QA names and whatever earlier requests said.
   const marker = opts.markerSha && outcome.kind === "manifest"
-    ? `<!-- foreman-qa sha=${opts.markerSha} verdict=${outcome.manifest.verdict} -->`
+    ? `<!-- foreman-qa sha=${opts.markerSha} verdict=${outcome.manifest.verdict}${opts.reqId !== undefined ? ` req=${opts.reqId}` : ""} -->`
     : qaGateMarker(outcome);
   await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, deps.hasMarker ?? (async () => false), logger);
   const hold = (reason: string, summary: string): VerifyResult => ({ ...sre, pass: false, reason, summary, by: "QA" });

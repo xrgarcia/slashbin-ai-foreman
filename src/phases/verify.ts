@@ -7,8 +7,8 @@ import type { SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { verifyViaSre, type VerifyResult } from "../agent.js";
-import { applyQaGate, pendingQaRerun, QA_RERUN_PATTERN, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
-import { commentBodies } from "../github/pr-comments.js";
+import { applyQaGate, postMergeQaRequirement, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
+import { commentFacts } from "../github/pr-comments.js";
 import { gh } from "../github/gh.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
@@ -225,15 +225,19 @@ export function pickVerifyTarget(
   return null;
 }
 
+/** A merged PR whose card owes post-merge QA (see `postMergeQaRequirement`). */
+export interface QaOwed { sha: string; reqId: number; /** The newest request has no PASS or FAIL yet: skip the SRE, run QA. */ fresh: boolean }
+
 /**
  * The EM's QA rerun input (slashbin-ai-foreman#158): a PR comment opening `**EM QA rerun` on a merged PR whose
- * card is `pr merged` or `pr approved` (and not yet `ready for prod release`) asks for a fresh QA `check` on dev.
- * A request is answered when a `## QA Report` keyed to the merge sha comes after it. For each unanswered one this
- * moves an approved card back to `pr merged` (`qaRerun`) and drops its verify hold, so the stage below picks the PR
- * up with a fresh attempt count. Returns PR number → merge sha for every unanswered request. Never throws.
+ * card is `pr merged` or `pr approved` (not `ready for prod release`). From the first request on, post-merge QA is
+ * required for that card, `qaBeforeMerge` or not: the returned map (PR number to what is owed) makes tryVerify run
+ * the QA gate before the card may advance, however the SRE did. An approved card owing QA moves back to
+ * `pr merged` (`qaRerun`). A verify hold older than a fresh request is dropped so the request runs now; a hold the
+ * request has already produced (HELD, FAIL) keeps its back-off. Never throws.
  */
-async function stageQaReruns(repoConfig: RepoConfig, held: Record<number, VerifyHold>, vlog: Logger): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
+async function stageQaReruns(repoConfig: RepoConfig, held: Record<number, VerifyHold>, vlog: Logger): Promise<Map<number, QaOwed>> {
+  const out = new Map<number, QaOwed>();
   try {
     const { prMerged, prApproved, readyForProd } = repoConfig.lifecycleLabels;
     const cards = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)
@@ -241,19 +245,22 @@ async function stageQaReruns(repoConfig: RepoConfig, held: Record<number, Verify
     if (cards.length === 0) return out;
     const refs = findIssuesMergedToBase(repoConfig, cards.map((i) => i.number), vlog);
     for (const pr of new Set(refs.map((r) => r.prNumber))) {
-      const bodies = await commentBodies(repoConfig, pr);
-      if (!bodies.some((b) => QA_RERUN_PATTERN.test(b))) continue;
+      const comments = await commentFacts(repoConfig, pr);
+      if (!comments.some((c) => /^\s*\*\*EM QA rerun/.test(c.body))) continue;
       const sha = (JSON.parse(gh(["pr", "view", String(pr), "--repo", repoConfig.githubRepo, "--json", "mergeCommit"], repoConfig.repoPath) || "{}").mergeCommit?.oid ?? "") as string;
-      if (!sha || !pendingQaRerun(bodies, sha)) continue;
-      out.set(pr, sha);
+      if (!sha) continue;
+      const need = postMergeQaRequirement(comments, sha);
+      if (!need.required || need.reqId === null) continue;
+      out.set(pr, { sha, reqId: need.reqId, fresh: need.fresh });
       for (const r of refs.filter((x) => x.prNumber === pr)) {
         const card = cards.find((i) => i.number === r.issueNumber);
         if (card && hasLabel(card, prApproved)) {
-          vlog.info(`#${r.issueNumber}: the EM asked for a QA rerun on merged PR #${pr} — back to verification`);
+          vlog.info(`#${r.issueNumber}: merged PR #${pr} owes a QA pass (EM rerun request) — back to verification`);
           await advance(itemOf(repoConfig, r.issueNumber), "qaRerun", repoConfig, vlog);
           dropIssueSnapshot(repoConfig.githubRepo);
         }
-        delete held[r.issueNumber];
+        const h = held[r.issueNumber];
+        if (need.fresh && h && need.reqAt && Date.parse(h.heldAt) < Date.parse(need.reqAt)) delete held[r.issueNumber];
       }
     }
   } catch (e) {
@@ -290,7 +297,7 @@ export async function tryVerify(
   const state = loadRepoState(repoName);
   const held: Record<number, VerifyHold> = { ...(state.verifyHeld ?? {}) };
   // The EM's QA rerun requests first: they move approved cards back to `pr merged` and clear their holds.
-  const reruns = qaApplies(repoConfig, config) ? await stageQaReruns(repoConfig, held, vlog) : new Map<number, string>();
+  const reruns = qaApplies(repoConfig, config) ? await stageQaReruns(repoConfig, held, vlog) : new Map<number, QaOwed>();
   if (reruns.size > 0) saveRepoState(repoName, { ...state, verifyHeld: held });
   const waiting = findIssuesAwaitingVerify(repoConfig, vlog);
   // A hold outlives its label only by mistake: a person relabelled the issue,
@@ -363,9 +370,10 @@ export async function tryVerify(
 
   try {
     await emit({ kind: "session", session: { ...session, status: "started" } }, null, vlog);
-    // A QA rerun the EM asked for: the SRE already passed this merge, so only QA runs, as the gate would (applyQaGate).
-    const rerunSha = reruns.get(target.prNumber);
-    const sre: VerifyResult = rerunSha
+    // A merged PR the EM asked to re-run QA on owes a QA pass before the card advances, whatever qaBeforeMerge says.
+    // A fresh request skips the SRE (it already passed this merge); a released hold runs the SRE, then QA again.
+    const owed = reruns.get(target.prNumber);
+    const sre: VerifyResult = owed?.fresh
       ? { kind: "verdict", pass: true, trailer: { pr: target.prNumber, verdict: "APPROVE", merged: true, deploy: "NA" }, summary: "EM-requested QA rerun" }
       : await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
@@ -376,11 +384,11 @@ export async function tryVerify(
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.
     const qaBeforeMerge = qaBeforeMergeApplies(repoConfig, config);
     let r: VerifyResult = sre;
-    if (sre.kind === "verdict" && sre.pass && (rerunSha || (config.qaGate && !qaBeforeMerge)) && qaApplies(repoConfig, config)) {
+    if (sre.kind === "verdict" && sre.pass && (owed || (config.qaGate && !qaBeforeMerge)) && qaApplies(repoConfig, config)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
       const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
       await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
-      r = await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog, rerunSha ? { markerSha: rerunSha } : {});
+      r = await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog, owed ? { markerSha: owed.sha, reqId: owed.reqId } : {});
       await emit({ kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed" } }, null, vlog);
     }
 
@@ -394,7 +402,7 @@ export async function tryVerify(
       }
       saveRepoState(repoName, { ...after, verifyHeld: kept });
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
-      if (!rerunSha && !config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
+      if (!owed && !config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
         void runQaReport(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };

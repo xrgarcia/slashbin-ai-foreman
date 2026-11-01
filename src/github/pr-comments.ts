@@ -12,6 +12,18 @@ export async function commentBodies(config: RepoConfig, num: number): Promise<st
   return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as string);
 }
 
+/** A comment with the id and time GitHub gave it. */
+export interface CommentFact { id: number; body: string; at: string }
+
+/** Every comment on issue-or-PR `num`, oldest first, with id and creation time. Throws on a failed read. */
+export async function commentFacts(config: RepoConfig, num: number): Promise<CommentFact[]> {
+  const out = await ghAsync([
+    "api", `repos/${config.githubRepo}/issues/${num}/comments?per_page=100`, "--paginate",
+    "--jq", ".[] | {id, body, at: .created_at} | @json",
+  ], config.repoPath);
+  return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as CommentFact);
+}
+
 /** True when any comment body on `num`, across all pages, satisfies `match`. */
 export async function anyCommentMatches(config: RepoConfig, num: number, match: (body: string) => boolean): Promise<boolean> {
   return (await commentBodies(config, num)).some(match);
