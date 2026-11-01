@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 import {
-  paperclipConfigSchema, mergePaperclip, resolvePaperclipConfig, type PaperclipConfig,
+  paperclipConfigSchema, mergePaperclip, leniencyForDisabled, resolvePaperclipConfig, type PaperclipConfig,
 } from "./paperclip/config.js";
 import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./github/conventions.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
@@ -701,7 +701,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels: fileConfig.lifecycleLabels,
     stages: fileConfig.stages,
     github: fileConfig.github,
-    paperclip: mergePaperclip(fileConfig.paperclip),
+    paperclip: leniencyForDisabled(mergePaperclip(fileConfig.paperclip)),
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
   };

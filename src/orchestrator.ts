@@ -1,7 +1,7 @@
 import { releaseStageReady, type AgentConfig, type RepoConfig } from "./config.js";
 import { configureBackoff } from "./backoff.js";
 import type { Logger } from "./logger.js";
-import { publishSnapshot, hasObservers, workSourceFor } from "./work-source.js";
+import { publishSnapshot, wantsSnapshot, workSourceFor } from "./work-source.js";
 import { pruneClosedHolds } from "./closed-holds.js";
 import { type ImplementationResult } from "./agent.js";
 import { dispatchStages, hasStage, isCustomStage, type StageEntry, type StageResult } from "./stages.js";
@@ -210,7 +210,7 @@ async function publishBoard(repoConfig: RepoConfig, log: Logger): Promise<void> 
   } catch (err) {
     log.debug(`Closed-issue holds not cleared: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (!hasObservers()) return;
+  if (!wantsSnapshot()) return;
   try {
     await publishSnapshot(repoConfig, log);
   } catch (err) {

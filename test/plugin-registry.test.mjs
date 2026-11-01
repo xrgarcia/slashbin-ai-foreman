@@ -95,15 +95,15 @@ test("reconfigure: an async rejection is caught and logged too", async () => {
   resetRegistryForTests();
 });
 
-test("reconfigure: a plugin that becomes enabled on reload is NOT started (startup decides); one disabled on reload is still reconfigured", async () => {
+test("reconfigure: a plugin the reload enables starts, one it disables stops and is not reconfigured", async () => {
   resetRegistryForTests();
   const calls = [];
   let on = { late: false, early: true };
-  registerPlugin({ id: "early", roles: [], enabled: () => on.early, start: () => calls.push("start early"), reconfigure: () => calls.push("reconf early") });
+  registerPlugin({ id: "early", roles: [], enabled: () => on.early, start: () => calls.push("start early"), stop: () => calls.push("stop early"), reconfigure: () => calls.push("reconf early") });
   registerPlugin({ id: "late", roles: [], enabled: () => on.late, start: () => calls.push("start late"), reconfigure: () => calls.push("reconf late") });
   await startPlugins({}, ctx);
   on = { late: true, early: false }; // the reloaded config flips both
   await reconfigurePlugins({}, ctx);
-  assert.deepEqual(calls, ["start early", "reconf early"]);
+  assert.deepEqual(calls, ["start early", "stop early", "start late"]);
   resetRegistryForTests();
 });

@@ -420,6 +420,15 @@ export class PaperclipMirror implements WorkObserver {
     return this.cfg.ownsCards === true;
   }
 
+  /** The mirror turns a session's report into the card's comment, and the snapshot into card moves. */
+  wantsSessionReports(): boolean {
+    return true;
+  }
+
+  wantsSnapshot(): boolean {
+    return true;
+  }
+
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
     if (!this.mirrors(event)) {
       // A claim outside `repos` is still the one build running: forget the last

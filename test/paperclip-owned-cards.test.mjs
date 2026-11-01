@@ -79,7 +79,7 @@ test("publishSnapshot: the cards are read and carried only while an observer own
   });
   const seen = [];
   let owns = false;
-  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsCards: () => owns });
+  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsSnapshot: () => true, wantsCards: () => owns });
   const repoConfig = { name: "r", githubRepo: "o/r" };
   try {
     assert.equal(wantsCards(), false);

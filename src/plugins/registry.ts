@@ -9,6 +9,8 @@ import type { ForemanPlugin, PluginCommand, PluginContext, PluginRole } from "./
  */
 const registered: ForemanPlugin[] = [];
 const started: ForemanPlugin[] = [];
+/** The observer each started plugin contributed, so stopping it can take it back out. */
+const startedObservers = new Map<ForemanPlugin, WorkObserver>();
 
 /** Observers in delivery order: started plugins' and directly added ones, as they arrived. */
 const observerList: WorkObserver[] = [];
@@ -33,28 +35,63 @@ export async function startPlugins(config: AgentConfig, ctx: PluginContext): Pro
       if (why) ctx.logger.info(why);
       continue;
     }
-    await p.start?.(config, ctx);
-    started.push(p);
-    if (p.roles.includes("observer") && p.observer) observerList.push(p.observer);
+    await startOne(p, config, ctx);
   }
   return started;
 }
 
-/** Hand a reloaded config to every started plugin. One plugin's failure never stops the rest. */
+/**
+ * Apply a reloaded config (EM#1150): a plugin it newly enables starts, one it
+ * disables stops and leaves the fan-out, one that stays on is reconfigured.
+ * One plugin's failure never stops the rest.
+ */
 export async function reconfigurePlugins(config: AgentConfig, ctx: PluginContext): Promise<void> {
-  for (const p of started) {
+  for (const p of registered) {
+    let action = "reload";
     try {
-      await p.reconfigure?.(config, ctx);
+      const on = started.includes(p);
+      const want = p.enabled(config);
+      if (on && !want) {
+        await stopOne(p);
+        ctx.logger.info(`plugin ${p.id} switched off by config reload`);
+      } else if (on) {
+        action = "reconfigure";
+        await p.reconfigure?.(config, ctx);
+      } else if (want) {
+        await startOne(p, config, ctx);
+        ctx.logger.info(`plugin ${p.id} switched on by config reload`);
+      }
     } catch (err) {
-      ctx.logger.warn(`plugin ${p.id} reconfigure failed: ${err instanceof Error ? err.message : String(err)}`);
+      ctx.logger.warn(`plugin ${p.id} ${action} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
 
+async function startOne(p: ForemanPlugin, config: AgentConfig, ctx: PluginContext): Promise<void> {
+  await p.start?.(config, ctx);
+  started.push(p);
+  const o = p.roles.includes("observer") ? p.observer : undefined;
+  if (o) {
+    observerList.push(o);
+    startedObservers.set(p, o);
+  }
+}
+
+async function stopOne(p: ForemanPlugin): Promise<void> {
+  started.splice(started.indexOf(p), 1);
+  const o = startedObservers.get(p);
+  startedObservers.delete(p);
+  if (o) {
+    const i = observerList.indexOf(o);
+    if (i >= 0) observerList.splice(i, 1);
+  }
+  await p.stop?.();
+}
+
 export async function stopPlugins(): Promise<void> {
-  for (const p of started.splice(0).reverse()) {
+  for (const p of [...started].reverse()) {
     try {
-      await p.stop?.();
+      await stopOne(p);
     } catch {
       // stopping is best-effort
     }
@@ -89,6 +126,26 @@ export function observers(): readonly WorkObserver[] {
   return observerList;
 }
 
+function anyObserver(ask: (o: WorkObserver) => boolean | undefined): boolean {
+  return observerList.some((o) => {
+    try {
+      return ask(o) === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Does any enabled observer want a session's report (goals, PR digest, review progress)? */
+export function observersWantSessionReports(): boolean {
+  return anyObserver((o) => o.wantsSessionReports?.());
+}
+
+/** Does any enabled observer want the board snapshot each pass? */
+export function observersWantSnapshot(): boolean {
+  return anyObserver((o) => o.wantsSnapshot?.() || o.wantsCards?.());
+}
+
 export function setWorkSource(adapter: WorkSourceAdapter | null): void {
   workSourceOverride = adapter;
 }
@@ -102,6 +159,7 @@ export function activeWorkSource(): WorkSourceAdapter | null {
 export function resetRegistryForTests(): void {
   registered.length = 0;
   started.length = 0;
+  startedObservers.clear();
   observerList.length = 0;
   workSourceOverride = null;
 }
