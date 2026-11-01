@@ -109,7 +109,7 @@ test("stuck work goes to the registered unstick plugin, never the EM CLI", async
 
 const REPO = {
   name: "hm", githubRepo: "o/hm", repoPath: "/nonexistent", baseBranch: "develop", productionBranch: "main", featureBranch: "develop",
-  lifecycleLabels: { prMerged: "pr merged", prApproved: "pr approved", readyForProd: "ready for prod release", releasePending: "release pending", prodVerifyHeld: "prod verification held", readyToClose: "ready to close" },
+  lifecycleLabels: { prUnderReview: "pr under review", prPendingActions: "pr pending actions", prMerged: "pr merged", prApproved: "pr approved", readyForProd: "ready for prod release", releasePending: "release pending", prodVerifyHeld: "prod verification held", readyToClose: "ready to close" },
   github: { blockedLabel: "blocked" },
 };
 /** A work source that records each move; a move named in `fail` is refused (written nothing) once per entry. */

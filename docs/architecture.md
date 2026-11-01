@@ -65,7 +65,9 @@ share. Phases resolve them only through `roleFor` / `qaFor`, and startup warning
 With no reviewer enabled, a person reviews and merges; once the PR is on the base branch,
 Reconcile moves the issue to `pr merged`, then (no verifier) `pr approved`, then (no
 deployer and no promote path) comments and closes it, each a lifecycle move
-(`humanMerged`, `humanMergedApproved`, `closedNoRelease`).
+(`humanMerged`, `humanMergedApproved`, `closedNoRelease`). Each pass re-reads the open
+issues' labels and the recently merged PRs, so this works in any branch layout and resumes
+where a failed write stopped; it never closes without its completion comment.
 
 The move is in progress. `test/plugin-boundary.test.mjs` lists each core file that still
 imports GitHub or Paperclip code directly, with its exact count. The list may only shrink:

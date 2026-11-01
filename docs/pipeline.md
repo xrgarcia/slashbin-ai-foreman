@@ -34,7 +34,8 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    [review.md](review.md). With no reviewer plugin enabled the PR is left for a person;
    once it is merged to the base branch, Reconcile moves the issue to `pr merged`, on to
    `pr approved` when no verifier is enabled, and comments and closes it when no deployer
-   or promote path is left to release it.
+   or promote path is left to release it. It works in any branch layout and resumes on
+   the next pass if a write fails.
 3. **Verify** *(on when `srePath` is set)* — once review has merged a PR (issue at
    `pr merged`), the SRE (`bin/sre.mjs verify`) checks the merged work in the dev
    environment and moves its issues to `pr approved`. A failed verification is retried
