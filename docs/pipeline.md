@@ -37,7 +37,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    or promote path is left to release it. It works in any branch layout and resumes on
    the next pass if a write fails.
 3. **Verify** *(on when `srePath` is set)* — once review has merged a PR (issue at
-   `pr merged`), the SRE (`bin/sre.mjs verify`) checks the merged work in the dev
+   `pr merged`), the SRE plugin (`src/plugins/sre.ts`, running `bin/sre.mjs verify`) checks the merged work in the dev
    environment and moves its issues to `pr approved`. A failed verification is retried
    on the `backoff.verifyRetry` schedule (3 attempts by default, then it waits on a
    person). Unset, there is no verify stage and the review run verifies and labels as
@@ -45,11 +45,11 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    its last merge has passed dev verification, so one issue is in flight per repo from
    build to verified on dev.
    **QA report (report-only, on when `qaPath` is set):** after a pass on a `qaRepos` repo
-   (the Console), the Foreman runs `qa.mjs check` once for that PR, in the background, and
+   (none by default; the Console in the `slashbin` profile), the QA plugin (`src/plugins/qa.ts`) runs `qa.mjs check` once for that PR, in the background, and
    posts `## QA Report (report-only)` on it. Nothing waits on it and it never holds or
    reworks the card; a crash or a 90-minute timeout (`QA_MAX_DURATION_MS`) becomes an "errored" comment. Once per
    PR: an existing comment with the heading ends it. `DEV_SESSION_MINT_KEY` reaches only
-   the QA child, through the EM checkout's `doppler-run.mjs` (needs `emRepoPath`).
+   the QA child, through `qaSecretsRunner` in the EM checkout (needs `emRepoPath`; unset, a dev QA run reports errored).
    **With `qaGate: true`** QA runs *before* the advance: PASS advances; FAIL (a regression,
    or a defect with no baseline) takes the visual-QA rework path (`hold=visual-qa-failed`,
    the rework issue carrying QA's regression lines and shot names); HELD or an
@@ -100,16 +100,15 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    PRs are left alone — not batched, merged or closed. If the alerts API cannot be read (404 when
    alerts are disabled, a network error) the cycle batches nothing. `dependabot.securityOnly: false`
    restores batching every Dependabot PR. It is
-   filed with the trigger label when the repo sets `dependencyPreApproved` (the owner's standing authorization, 2026-10-24,
-   covers every Foreman-managed repo for slashbin.io, jerky.com and cmneb; the flag stays
-   opt-in per repo and default off, so a newly onboarded repo needs a deliberate edit). Renovate
+   filed with the trigger label when the repo sets `dependencyPreApproved` (opt-in per repo, default off, so a newly onboarded repo needs a deliberate edit). Renovate
    instead of Dependabot: `github.dependencyBranchPrefixes: ["renovate/"]`.
 10. **Unstick** *(on when `emRepoPath` is set; independent of `paperclip.enabled`)* — no
-    Claude session. For each stuck issue it runs `node <emRepoPath>/bin/em.mjs unstick
+    Claude session. For each stuck issue the EM plugin (`src/plugins/em.ts`) runs `node <emRepoPath>/bin/em.mjs unstick
     --repo <owner/name> --issue <N> --kind <kind> --reason <text>` (cwd `emRepoPath`,
-    `EM_GITHUB_TOKEN`, killed after 20 minutes). Kinds: skip, divergence, verify-held,
+    `EM_GITHUB_TOKEN`, killed after 20 minutes, 40 for `rework-decision`). Kinds: skip, divergence, verify-held,
     verify-exhausted, verify-no-pr, revision-exhausted, revision-stalemate,
-    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision (`src/unstick.ts`). A hold with
+    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision, unrelated-error,
+    epic-ready-to-close (`UNSTICK_KINDS`, `src/unstick.ts`). A hold with
     retries left is not called for. Divergence is repo-level, so it is called once per
     issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes
     are kept in `RepoState.unstick`, keyed `<issue>:<kind>`: exit 0 `invoked`, 2

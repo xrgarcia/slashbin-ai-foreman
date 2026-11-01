@@ -150,7 +150,7 @@ sessions for larger features in that repo only.
 
 1. Per-repo entry value (most specific)
 2. Top-level `.ai-agent.json` value (or `AI_AGENT_*` env var, which overrides the file value)
-3. Built-in default
+3. The profile's value, if it sets the key ([Profiles](#profiles)), else the built-in default
 
 Existing configs that don't specify per-repo overrides continue to behave identically —
 the top-level values still apply to every repo. Per-repo overrides are additive and
@@ -167,8 +167,9 @@ key:
 { "profile": "slashbin" }
 ```
 
-Each value resolves as **neutral default < profile < explicit `.ai-agent.json` value**
-(env vars still beat all three), and nested objects such as `paperclip` merge key by key.
+Each value resolves as **neutral default < profile < `.ai-agent.json` < env var**
+(`applyProfile` in `src/profiles/index.ts`, called by `loadConfig` in `src/config.ts`), and
+nested objects such as `paperclip` merge key by key.
 An unknown name stops startup with the list of valid profiles, and the daemon logs the
 active profile once when it starts.
 
