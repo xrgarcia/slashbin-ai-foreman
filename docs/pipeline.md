@@ -31,7 +31,10 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    (approve → `pr approved`; request changes → `pr pending actions`) feed the Promote
    and Revise stages, and the Foreman reconciles the outcome label from the run's
    trailer if the reviewer merged without setting it. Off by default — see
-   [review.md](review.md).
+   [review.md](review.md). With no reviewer plugin enabled the PR is left for a person;
+   once it is merged to the base branch, Reconcile moves the issue to `pr merged`, on to
+   `pr approved` when no verifier is enabled, and comments and closes it when no deployer
+   or promote path is left to release it.
 3. **Verify** *(on when `srePath` is set)* — once review has merged a PR (issue at
    `pr merged`), the SRE (`bin/sre.mjs verify`) checks the merged work in the dev
    environment and moves its issues to `pr approved`. A failed verification is retried

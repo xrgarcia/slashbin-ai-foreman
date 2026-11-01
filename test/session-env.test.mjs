@@ -9,15 +9,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import {
-  SESSION_ENV_ESSENTIALS,
-  buildSessionEnv,
-  buildTechLeadEnv,
-  buildSreEnv,
-  secretValues,
-  redactAll,
-  createStreamRedactor,
-} from "../dist/agent.js";
+import { SESSION_ENV_ESSENTIALS, buildSessionEnv, secretValues, redactAll, createStreamRedactor } from "../dist/agent.js";
+import { buildTechLeadEnv } from "../dist/plugins/tech-lead.js";
+import { buildSreEnv } from "../dist/plugins/sre.js";
 import { loadConfig } from "../dist/config.js";
 
 const FOREMAN = "dummyforeman_0123456789abcdef";

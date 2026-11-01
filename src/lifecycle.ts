@@ -46,7 +46,7 @@ export const STAGE_MEANING: Readonly<Record<StageOrDone, string>> = Object.freez
   prodVerifyHeld: "Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off.",
   needsRuling: "Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue (an agent's edit or label buys one session; its comment releases nothing).",
   blocked: "Needs a person: blocked on the source, or the Foreman declined it or ran out of retries.",
-  done: "Closed by the Foreman after the SRE's prod verification passed.",
+  done: "Closed by the Foreman after the SRE's prod verification passed (or, with no reviewer, verifier, deployer or promote stage, once a person merged it).",
 });
 
 /** The stage each state the Foreman reports puts an item in. */
@@ -81,6 +81,9 @@ export const MOVES = Object.freeze({
   recoverPassed: { from: "unknown", to: "approved", why: "Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed." },
   recoverFailed: { from: "unknown", to: "changesRequested", why: "Dead-zone recovery: a fresh verification failed." },
   recoverMerged: { from: "unknown", to: "merged", why: "Dead-zone recovery with a verify stage: the merge is recorded and verification follows." },
+  humanMerged: { from: "unknown", to: "merged", why: "No reviewer is enabled, so a person reviewed and merged the PR: the merge is recorded, and dev verification follows when a verifier is enabled." },
+  humanMergedApproved: { from: "merged", to: "approved", why: "A person merged it, and there is no verifier: it goes straight on." },
+  closedNoRelease: { from: "approved", to: "released", why: "A person merged it, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed." },
   release: { from: "unknown", to: "queued", why: "An orphan: in review with no open PR; released back to the queue." },
   releaseQueued: { from: "releaseAuthorized", to: "releasing", why: "The promote stage put an EM-authorized item in the release PR (opened, updated, or already listing it), or found its work already in production with no prod verification on record." },
   alreadyReleased: { from: "releaseAuthorized", to: "released", why: "Authorized, its work already in production, and a passed prod verification on record for it: closed." },

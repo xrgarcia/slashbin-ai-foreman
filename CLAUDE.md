@@ -20,9 +20,9 @@ in this order, so labels set in one phase are consumed by the right phase next c
 Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release → Unstick
 ```
 
-Verify runs only when `srePath` is set: the SRE checks each merged PR in dev. Release runs
-only when both `srePath` and `techLeadPath` are set (skipped with a startup warning
-otherwise; an explicit `release` without both is refused).
+Agents are plugin roles (`src/plugins/registry.ts`). Verify needs `srePath`; Release needs
+`techLeadPath` and `srePath` (else skipped with a warning; an explicit `release` is refused).
+With no reviewer a person merges, and Reconcile closes the issue if nothing releases it.
 
 A dev visual QA FAIL (`hold=visual-qa-failed`) is the EM's decision: the Foreman files nothing, holds the
 issue at its cap and raises unstick kind `rework-decision` that cycle (PR, touched files, verdict, evidence).
@@ -61,8 +61,8 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
    naming the issues; it clears itself once the EM signs them (foreman#128). Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
    Discord. See docs/lifecycle.md.
 9. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
-   `emRepoPath`, Paperclip or not) — calls `bin/em.mjs unstick` in the EM checkout for each stuck
-   issue; the outcome is `RepoState.unstick`. See docs/pipeline.md.
+   `emRepoPath`) — the EM plugin's `bin/em.mjs unstick` takes each stuck issue; the outcome is
+   `RepoState.unstick`. See docs/pipeline.md.
 
 Priority within a cycle is encoded by stage order. Only one Claude session runs at a
 time (`implementing` mutex) for git-state safety.

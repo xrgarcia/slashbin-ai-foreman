@@ -6,7 +6,8 @@ import type { Logger } from "../logger.js";
 import type { SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
-import { verifyViaSre, type VerifyResult } from "../agent.js";
+import { roleFor } from "../plugins/registry.js";
+import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
@@ -266,7 +267,8 @@ export async function tryVerify(
   cycleNumber: number,
   events?: CycleEvent[],
 ): Promise<boolean> {
-  if (!config.srePath) return false;
+  const verifier = roleFor("verifier", config);
+  if (!verifier) return false;
   if (isUpstreamBlocked("github")) return false;
   const repoName = repoConfig.name;
   if (verifyDefer.waiting(repoName)) return false;
@@ -347,7 +349,7 @@ export async function tryVerify(
 
   try {
     await emit({ kind: "session", session: { ...session, status: "started" } }, null, vlog);
-    const sre = await verifyViaSre(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
+    const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
     if (sre.kind === "verdict" && sre.unrelated) noteUnrelated(repoName, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`);

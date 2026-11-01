@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewViaTechLead } from "../dist/agent.js";
+import { reviewViaTechLead } from "../dist/plugins/tech-lead.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 const repo = { name: "r", githubRepo: "o/r" };

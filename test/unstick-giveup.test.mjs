@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { UNSTICK_MAX_ATTEMPTS } from "../dist/unstick.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";

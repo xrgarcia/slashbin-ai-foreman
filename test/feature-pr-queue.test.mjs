@@ -12,6 +12,9 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { orchestratorSource } from "./source-text.mjs";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = orchestratorSource();
@@ -54,7 +57,7 @@ test("a merge awaiting dev verification queues the next build, the same way", ()
   assert.match(block, /devVerifyHolding\(merged, loadRepoState\(repoName\)\.verifyHeld/,
     "the gate must read the persisted verify holds, not a snapshot from before the cycle");
   assert.match(block, /lifecycleLabels\.prMerged/, "a merge awaiting verification is the `pr merged` label");
-  assert.match(block, /config\.srePath && config\.buildWaitsForDevVerify/,
-    "no SRE means no verify stage, so nothing would ever free the queue");
+  assert.match(block, /roleFor\("verifier", config\) !== undefined && config\.buildWaitsForDevVerify/,
+    "no verifier means no verify stage, so nothing would ever free the queue");
   assert.match(block, /: holder \? actionableIssues : \[\]/, "behind a verification, every candidate is queued");
 });
