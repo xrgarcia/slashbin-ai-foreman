@@ -238,6 +238,14 @@ export interface WorkObserver {
   onEvent(event: WorkEvent, logger: Logger): Promise<void>;
   /** True when this observer writes every card itself and needs a snapshot's `cards`. */
   wantsCards?(): boolean;
+  /**
+   * Declared interests. Each costs the Foreman GitHub reads that serve no one
+   * else, so an observer that omits one (or answers false) is never given it:
+   * `wantsSessionReports` is a session's goals, PR digest and review progress;
+   * `wantsSnapshot` is the board snapshot each pass (`wantsCards` implies it).
+   */
+  wantsSessionReports?(): boolean;
+  wantsSnapshot?(): boolean;
 }
 
 /**
