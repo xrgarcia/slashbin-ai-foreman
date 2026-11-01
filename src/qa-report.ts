@@ -249,12 +249,14 @@ export function qaFailSummary(m: QaManifest): string {
 
 /**
  * Post the gating report unless a comment with the same marker (head SHA + verdict)
- * is already there, so a re-run after a restart does not double-post. A failed
- * lookup or post is logged and never changes the gate's decision.
+ * is already there, so a re-run after a restart does not double-post. With the comments
+ * edge, only a report that still answers counts (reportAlreadyPosted, slashbin-ai-foreman#158).
+ * A failed lookup or post is logged and never changes the gate's decision.
  */
-async function postGateReport(pr: number, marker: string, body: string, deps: QaDeps, check: (pr: number, marker: string) => Promise<boolean>, logger: Logger): Promise<void> {
+async function postGateReport(pr: number, marker: string, body: string, deps: QaDeps, check: (pr: number, marker: string) => Promise<boolean>, logger: Logger, changed: readonly string[] = []): Promise<void> {
   try {
-    if (await check(pr, marker)) {
+    const posted = deps.comments ? reportAlreadyPosted(await deps.comments(pr), marker, changed) : await check(pr, marker);
+    if (posted) {
       logger.info(`QA: PR #${pr} already has this report; not posting again`);
       return;
     }
@@ -281,13 +283,18 @@ export async function applyQaGate(
   logger: Logger,
 ): Promise<VerifyResult> {
   const outcome = await executeQa(repo, pr, deps);
-  await postGateReport(pr, qaGateMarker(outcome), qaGateBody(pr, outcome), deps, deps.hasMarker ?? (async () => false), logger);
+  const changed = await changedOf(pr, deps);
+  // A void PASS (no shot of a client change) is keyed HELD, so it never reads as a PASS report.
+  const isVoid = outcome.kind === "manifest" && outcome.manifest.verdict === "PASS" && outcome.exitCode === 0 && isVoidQaPass((outcome.manifest.shots ?? []).length, changed);
+  const marker = isVoid && outcome.kind === "manifest" ? `<!-- foreman-qa sha=${outcome.manifest.sha ?? "unknown"} verdict=HELD -->` : qaGateMarker(outcome);
+  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, deps.hasMarker ?? (async () => false), logger, changed);
   const hold = (reason: string, summary: string): VerifyResult => ({ ...sre, pass: false, reason, summary, by: "QA" });
   if (outcome.kind === "errored") {
     logger.warn(`QA gate: PR #${pr} errored: ${outcome.detail}`);
     return hold("qa-errored", `QA errored: ${outcome.detail}`);
   }
   const { manifest: m, exitCode } = outcome;
+  if (isVoid) return hold("qa-held-page-unplaced", `QA passed without a shot, but the PR changed client code: ${m.reason ?? ""}`);
   if (m.verdict === "PASS" && exitCode === 0) return sre;
   if (m.verdict === "FAIL" && exitCode === 1) return hold("visual-qa-failed", qaFailSummary(m));
   if (m.verdict === "HELD" && exitCode === 3) return hold(`qa-held-${m.hold ?? "unknown"}`, `QA could not check: ${m.reason ?? ""}`);
@@ -349,14 +356,15 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
     logger.warn(`QA: PR #${pr} marker lookup failed (${String(e).slice(0, 200)}); running QA`);
   }
   const outcome = await executeQa(repo, pr, deps);
-  const decision = decideQaBeforeMerge(outcome, headSha, await changedOf(pr, deps));
+  const changed = await changedOf(pr, deps);
+  const decision = decideQaBeforeMerge(outcome, headSha, changed);
   // Only a consistent verdict carries a verdict marker (the one the lookup above reuses), and always with the
   // full head sha passed in, never the manifest's. Anything else is keyed so it can never be reused as a verdict.
   const marker = decision.kind === "pass" ? qaVerdictMarker(headSha, "PASS")
     : decision.kind === "fail" ? qaVerdictMarker(headSha, "FAIL")
     : outcome.kind === "errored" ? qaGateMarker(outcome)
     : `<!-- foreman-qa sha=${headSha} verdict=${decision.reason === "qa-inconsistent" ? "INCONSISTENT" : "HELD"} -->`;
-  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, has, logger);
+  await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, has, logger, changed);
   if (decision.kind === "hold") logger.warn(`QA: PR #${pr} held: ${decision.reason}: ${decision.summary}`);
   return decision;
 }
@@ -387,7 +395,7 @@ export type PrComment = { at: string; body: string };
  */
 export function postMergeQaState(comments: readonly PrComment[], changed: readonly string[]): { rerunRequested: boolean; realPass: boolean } {
   const newest = (cs: readonly PrComment[]): string | null => cs.reduce<string | null>((a, c) => (a === null || c.at > a ? c.at : a), null);
-  const request = newest(comments.filter((c) => EM_QA_RERUN_PATTERN.test(c.body)));
+  const request = newestRequest(comments);
   const reports = comments.filter((c) => c.body.startsWith(QA_GATE_HEADING));
   const report = newest(reports);
   return {
@@ -396,14 +404,40 @@ export function postMergeQaState(comments: readonly PrComment[], changed: readon
   };
 }
 
-const changedOf = async (pr: number, deps: QaDeps): Promise<string[]> => (deps.changedFiles ? deps.changedFiles(pr) : []);
+const newestRequest = (comments: readonly PrComment[]): string | null =>
+  comments.filter((c) => EM_QA_RERUN_PATTERN.test(c.body)).reduce<string | null>((a, c) => (a === null || c.at > a ? c.at : a), null);
+const isVoidPassReport = (body: string, changed: readonly string[]): boolean => QA_PASS_REPORT.test(body) && isVoidQaPass(reportShots(body), changed);
 
-/** The PASS report already on the PR for this head is void. False when the edges to read it are missing. */
+/**
+ * Whether a report carrying `marker` already answers, so posting again would duplicate it. Pure. It must be
+ * newer than the EM's last re-run request (an older one answered an earlier question), and a void PASS never
+ * answers (its fresh replacement with shots carries the same marker and must be posted).
+ */
+export function reportAlreadyPosted(comments: readonly PrComment[], marker: string, changed: readonly string[]): boolean {
+  const request = newestRequest(comments);
+  return comments.some((c) => c.body.includes(marker) && (request === null || c.at > request) && !isVoidPassReport(c.body, changed));
+}
+
+/**
+ * The PR's changed files, never throwing. Unreadable: QA's client root stands in, so a 0-shot PASS is held
+ * rather than trusted (never an advance on an unknown).
+ */
+async function changedOf(pr: number, deps: QaDeps): Promise<string[]> {
+  if (!deps.changedFiles) return [];
+  try {
+    return await deps.changedFiles(pr);
+  } catch {
+    return [CLIENT_PREFIX];
+  }
+}
+
+/** Every PASS report on the PR for this head is void (none has shots). False when the edges to read it are missing. */
 async function reusedPassIsVoid(pr: number, headSha: string, deps: QaDeps): Promise<boolean> {
   if (!deps.comments || !deps.changedFiles) return false;
   const marker = qaVerdictMarker(headSha, "PASS");
-  const report = (await deps.comments(pr)).find((c) => c.body.includes(marker));
-  return report !== undefined && isVoidQaPass(reportShots(report.body), await deps.changedFiles(pr));
+  const reports = (await deps.comments(pr)).filter((c) => c.body.includes(marker));
+  const changed = await changedOf(pr, deps);
+  return reports.length > 0 && reports.every((r) => isVoidPassReport(r.body, changed));
 }
 
 /**

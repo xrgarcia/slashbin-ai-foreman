@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { decideQaBeforeMerge, isVoidQaPass, postMergeQaNeeded, postMergeQaState, qaVerdictMarker, runQaBeforeMerge } from "../dist/qa-report.js";
+import { applyQaGate, decideQaBeforeMerge, isVoidQaPass, reportAlreadyPosted, postMergeQaNeeded, postMergeQaState, qaVerdictMarker, runQaBeforeMerge } from "../dist/qa-report.js";
 import { MOVES } from "../dist/lifecycle.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
@@ -81,4 +81,64 @@ test("wiring: the re-run move goes pr approved -> pr merged, verify takes reques
   assert.match(v, /\|\| qaAgain\)\) \{/);
   assert.match(v, /!hasLabel\(i, readyForProd\)/, "an authorized issue is never sent back");
   assert.match(src("../docs/em-coordination.md"), /`\*\*EM QA re-run`/);
+});
+
+// A PR whose comments live in memory: post appends with a later time, so the gate reads back what it wrote.
+const livePr = (initial, outcome, changed = async () => CLIENT) => {
+  const d = {
+    list: [...initial], runs: 0,
+    comments: async () => d.list,
+    changedFiles: changed,
+    hasMarker: async (_pr, m) => d.list.some((c) => c.body.includes(m)),
+    hasReport: async () => false,
+    run: async () => { d.runs++; return outcome; },
+    post: async (_pr, body) => { d.list.push({ at: at(10 + d.list.length), body }); },
+  };
+  return d;
+};
+const sre = { kind: "verdict", pass: true, trailer: {}, summary: "" };
+const request = { at: at(2), body: "**EM QA re-run** — the pre-merge QA checked no page" };
+
+test("after the merge, a fresh 0-shot PASS on a client change holds page-unplaced and is keyed HELD, never PASS", async () => {
+  const d = livePr([{ at: at(1), body: report("PASS", 0) }, request], ran("PASS", 0, 0));
+  const out = await applyQaGate(sre, REPO, 1589, d, logger);
+  assert.equal(out.pass, false);
+  assert.equal(out.reason, "qa-held-page-unplaced");
+  assert.match(d.list.at(-1).body, /verdict=HELD -->/);
+  assert.equal(postMergeQaState(d.list, CLIENT).realPass, false, "the issue stays at pr merged and the gate runs again next cycle");
+  assert.equal(await postMergeQaNeeded(1589, d, logger), true);
+});
+
+test("the re-run's fresh PASS is posted even when an older report has the same sha and verdict, and answers the request", async () => {
+  for (const old of [report("PASS", 0), report("PASS", 24)]) {
+    const d = livePr([{ at: at(1), body: old }, request], ran("PASS", 0, 24));
+    assert.equal((await applyQaGate(sre, REPO, 1589, d, logger)).pass, true);
+    assert.equal(d.list.length, 3, "a report newer than the request was posted");
+    assert.deepEqual(postMergeQaState(d.list, CLIENT), { rerunRequested: false, realPass: true });
+    // The next cycle repeats nothing: the answered report is not posted twice.
+    await applyQaGate(sre, REPO, 1589, d, logger);
+    assert.equal(d.list.length, 3);
+  }
+});
+
+test("before the merge, replacing a void cached PASS posts the fresh report with shots, and the next call reuses it", async () => {
+  const d = livePr([{ at: at(1), body: report("PASS", 0) }], ran("PASS", 0, 12));
+  assert.deepEqual(await runQaBeforeMerge(REPO, 1589, SHA, d, logger), { kind: "pass", reused: false });
+  assert.match(d.list.at(-1).body, /Shots: 12$/);
+  assert.deepEqual(await runQaBeforeMerge(REPO, 1589, SHA, d, logger), { kind: "pass", reused: true });
+  assert.equal(d.runs, 1);
+});
+
+test("reportAlreadyPosted: a report counts only after the last request and only when it is not a void PASS", () => {
+  const m = qaVerdictMarker(SHA, "PASS");
+  assert.equal(reportAlreadyPosted([{ at: at(1), body: report("PASS", 24) }], m, CLIENT), true);
+  assert.equal(reportAlreadyPosted([{ at: at(1), body: report("PASS", 24) }, request], m, CLIENT), false);
+  assert.equal(reportAlreadyPosted([{ at: at(1), body: report("PASS", 0) }], m, CLIENT), false);
+  assert.equal(reportAlreadyPosted([{ at: at(1), body: report("PASS", 0) }], m, ["server/a.ts"]), true, "no client change: a 0-shot PASS is a verdict");
+});
+
+test("unreadable changed files hold a 0-shot PASS instead of trusting it", async () => {
+  const d = livePr([], ran("PASS", 0, 0), async () => { throw new Error("gh down"); });
+  assert.equal((await applyQaGate(sre, REPO, 1589, d, logger)).reason, "qa-held-page-unplaced");
+  assert.equal((await runQaBeforeMerge(REPO, 1589, SHA, livePr([], ran("PASS", 0, 0), async () => { throw new Error("gh down"); }), logger)).reason, "qa-held-page-unplaced");
 });
