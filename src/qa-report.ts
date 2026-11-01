@@ -7,7 +7,8 @@ import { homedir } from "node:os";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { buildQaEnv, runAgentCli, type CliRun, type VerifyResult } from "./agent.js";
-import { commentBodies, hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
+import { commentBodies, commentsWithTimes, hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
+import { prChangedFiles } from "./github/reports.js";
 
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
@@ -70,6 +71,10 @@ export interface QaDeps {
   run(args: { repo: string; pr: number; out: string }): Promise<QaOutcome>;
   hasReport(pr: number): Promise<boolean>;
   post(pr: number, body: string): Promise<void>;
+  /** The PR's comments with their times (a void PASS and the EM's re-run request are read from them). */
+  comments?(pr: number): Promise<PrComment[]>;
+  /** The paths the PR changed; empty when unreadable. */
+  changedFiles?(pr: number): Promise<string[]>;
 }
 
 const NOT_A_GATE =
@@ -159,6 +164,8 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
     hasMarker: (pr, marker) => hasCommentContaining(repoConfig, pr, marker),
     hasReport: (pr) => hasCommentStartingWith(repoConfig, pr, QA_HEADING),
     post: (pr, body) => commentOnPr(repoConfig, pr, body),
+    comments: (pr) => commentsWithTimes(repoConfig, pr),
+    changedFiles: async (pr) => prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
     async run({ repo, pr, out }) {
       const em = agentConfig.emRepoPath;
       const qa = agentConfig.qaPath;
@@ -332,15 +339,17 @@ const sameSha = (a: string, b: string): boolean => a.length >= 7 && b.length >= 
 export async function runQaBeforeMerge(repo: string, pr: number, headSha: string, deps: QaDeps, logger: Logger): Promise<QaPreMergeDecision> {
   const has = deps.hasMarker ?? (async () => false);
   try {
-    if (await has(pr, qaVerdictMarker(headSha, "PASS"))) return { kind: "pass", reused: true };
-    if (await has(pr, qaVerdictMarker(headSha, "FAIL"))) {
+    if (await has(pr, qaVerdictMarker(headSha, "PASS"))) {
+      if (!(await reusedPassIsVoid(pr, headSha, deps))) return { kind: "pass", reused: true };
+      logger.warn(`QA: PR #${pr} has a PASS for ${headSha.slice(0, 7)} that captured no shot of a client change; running QA again`);
+    } else if (await has(pr, qaVerdictMarker(headSha, "FAIL"))) {
       return { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true };
     }
   } catch (e) {
     logger.warn(`QA: PR #${pr} marker lookup failed (${String(e).slice(0, 200)}); running QA`);
   }
   const outcome = await executeQa(repo, pr, deps);
-  const decision = decideQaBeforeMerge(outcome, headSha);
+  const decision = decideQaBeforeMerge(outcome, headSha, await changedOf(pr, deps));
   // Only a consistent verdict carries a verdict marker (the one the lookup above reuses), and always with the
   // full head sha passed in, never the manifest's. Anything else is keyed so it can never be reused as a verdict.
   const marker = decision.kind === "pass" ? qaVerdictMarker(headSha, "PASS")
@@ -352,14 +361,76 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
   return decision;
 }
 
+// --- A void PASS, and the EM's re-run of a merged PR (slashbin-ai-foreman#158) ---
+
+/** QA's client root (`slashbin_ai_qa/lib/affected-pages.mjs`): a change under it renders on some page. */
+const CLIENT_PREFIX = "client/";
+
+/**
+ * A PASS that captured no shot while the PR changed client code checked nothing, so it is never a verdict
+ * (Slashbin-console PR #1589: QA could not read its lazy routes and passed 0 pages). Pure.
+ */
+export function isVoidQaPass(shots: number, changed: readonly string[]): boolean {
+  return shots === 0 && changed.some((f) => f.startsWith(CLIENT_PREFIX));
+}
+
+/** A PR comment opening with this is the EM's request to re-run QA on that merged PR. */
+export const EM_QA_RERUN_PATTERN = /^\s*\*\*EM QA re-run/;
+const QA_PASS_REPORT = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=PASS -->/;
+const reportShots = (body: string): number => Number(/^Shots: (\d+)$/m.exec(body)?.[1] ?? 0);
+
+export type PrComment = { at: string; body: string };
+
+/**
+ * Where a merged PR stands for QA. Pure. `rerunRequested`: the EM's newest re-run request is newer than every
+ * QA Report. `realPass`: a PASS report that is not void, newer than that request (any PASS when there is none).
+ */
+export function postMergeQaState(comments: readonly PrComment[], changed: readonly string[]): { rerunRequested: boolean; realPass: boolean } {
+  const newest = (cs: readonly PrComment[]): string | null => cs.reduce<string | null>((a, c) => (a === null || c.at > a ? c.at : a), null);
+  const request = newest(comments.filter((c) => EM_QA_RERUN_PATTERN.test(c.body)));
+  const reports = comments.filter((c) => c.body.startsWith(QA_GATE_HEADING));
+  const report = newest(reports);
+  return {
+    rerunRequested: request !== null && (report === null || request > report),
+    realPass: reports.some((r) => QA_PASS_REPORT.test(r.body) && (request === null || r.at > request) && !isVoidQaPass(reportShots(r.body), changed)),
+  };
+}
+
+const changedOf = async (pr: number, deps: QaDeps): Promise<string[]> => (deps.changedFiles ? deps.changedFiles(pr) : []);
+
+/** The PASS report already on the PR for this head is void. False when the edges to read it are missing. */
+async function reusedPassIsVoid(pr: number, headSha: string, deps: QaDeps): Promise<boolean> {
+  if (!deps.comments || !deps.changedFiles) return false;
+  const marker = qaVerdictMarker(headSha, "PASS");
+  const report = (await deps.comments(pr)).find((c) => c.body.includes(marker));
+  return report !== undefined && isVoidQaPass(reportShots(report.body), await deps.changedFiles(pr));
+}
+
+/**
+ * Whether the verify stage must run the QA gate on merged PR `pr` under qaBeforeMerge: it has no real PASS
+ * after the EM's last re-run request. An unreadable PR runs QA (never an advance on an unknown). Never throws.
+ */
+export async function postMergeQaNeeded(pr: number, deps: QaDeps, logger: Logger): Promise<boolean> {
+  try {
+    if (!deps.comments) return false;
+    return !postMergeQaState(await deps.comments(pr), await changedOf(pr, deps)).realPass;
+  } catch (e) {
+    logger.warn(`QA: PR #${pr} comments unreadable (${String(e).slice(0, 200)}); running the QA gate`);
+    return true;
+  }
+}
+
 /**
  * What a QA outcome means for the approved head. Pure. A PASS needs exit 0 and a manifest naming this head; a
  * FAIL needs exit 1 and the same; HELD needs exit 3. Every other combination is `qa-inconsistent`, a hold.
  */
-export function decideQaBeforeMerge(outcome: QaOutcome, headSha: string): QaPreMergeDecision {
+export function decideQaBeforeMerge(outcome: QaOutcome, headSha: string, changed: readonly string[] = []): QaPreMergeDecision {
   if (outcome.kind === "errored") return { kind: "hold", reason: "qa-errored", summary: `QA errored: ${outcome.detail}` };
   const { manifest: m, exitCode } = outcome;
   const named = Boolean(m.sha) && sameSha(m.sha!, headSha);
+  if (m.verdict === "PASS" && exitCode === 0 && isVoidQaPass((m.shots ?? []).length, changed)) {
+    return { kind: "hold", reason: "qa-held-page-unplaced", summary: `QA passed without a shot, but the PR changed client code: ${m.reason ?? ""}` };
+  }
   if (m.verdict === "PASS" && exitCode === 0 && named) return { kind: "pass", reused: false };
   if (m.verdict === "FAIL" && exitCode === 1 && named) return { kind: "fail", summary: qaFailSummary(m), reused: false };
   if (m.verdict === "HELD" && exitCode === 3) return { kind: "hold", reason: `qa-held-${m.hold ?? "unknown"}`, summary: `QA could not check: ${m.reason ?? ""}` };

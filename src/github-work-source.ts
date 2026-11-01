@@ -70,6 +70,7 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
   changesRequested: (c, cfg, n, log) => c.reviewOutcome(cfg, n, "prPendingActions", log),
   revised: (c, cfg, n, log) => c.revisionDone(cfg, n, log),
   verifyPassed: (c, cfg, n, log) => c.verifyPassed(cfg, n, log),
+  qaRerun: (c, cfg, n, log) => c.qaRerun(cfg, n, log),
   recoverPassed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "pass", log),
   recoverFailed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "fail", log),
   recoverMerged: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "merged", log),
@@ -290,6 +291,24 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       logger.warn(
         `Failed to transition labels on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
+    }
+  }
+
+  /**
+   * The EM asked for QA again on the merged PR (slashbin-ai-foreman#158): `prApproved` → `prMerged`, so the
+   * verify stage runs dev verification and the QA gate again.
+   *
+   * @internal
+   */
+  qaRerun(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+    const { prMerged, prApproved } = config.lifecycleLabels;
+    try {
+      gh(["issue", "edit", String(issueNumber), "--repo", config.githubRepo, "--remove-label", prApproved, "--add-label", prMerged], config.repoPath);
+      logger.info(`Transitioned issue #${issueNumber} labels: "${prApproved}" → "${prMerged}" (EM QA re-run)`);
+      return true;
+    } catch (err) {
+      logger.warn(`Failed to transition labels on #${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
   }
