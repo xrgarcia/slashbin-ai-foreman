@@ -22,13 +22,17 @@ import { tmpdir } from "node:os";
 import { tryRelease, resetReleaseStage, SOAK_DELAY_MS } from "../dist/phases/release.js";
 import { tryPromotion } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
-import { parseDeployTrailer } from "../dist/agent.js";
+import { parseDeployTrailer } from "../dist/plugins/sre.js";
 import { readPvResult, resetSignoff, configureIssueCache, productionDriftFiles, mergedPrNumber, resetReleaseCarry } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+import { registerPlugin, startPlugins } from "../dist/plugins/registry.js";
+
+await startAgentPlugins();
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-release-test-"));
 const bin = join(tmp, "bin");
@@ -1249,4 +1253,39 @@ test("signoff: an unreadable merged PR whose number contains 404 is still named 
   assert.equal(await run(), false);
   assert.equal(agentCalls().length, 0);
   assert.match(statuses()[0].description, /#404/);
+});
+
+test("the release reaches its reviewer and deployer through the registry: a fake registered plugin is the one invoked", async () => {
+  const calls = [];
+  const fake = {
+    id: "fake-release-agents",
+    roles: ["reviewer", "deployer", "verifier"],
+    enabled: (c) => c.fakeAgents === true,
+    reviewer: {
+      reviewPr: async () => ({ fallback: true, reason: "not used" }),
+      approvePromotion: async (_r, _c, pr, sha) => { calls.push(["approve", pr, sha]); return { kind: "approved" }; },
+    },
+    deployer: {
+      deploy: async (_r, _c, pr, sha) => {
+        calls.push(["deploy", pr, sha]);
+        const st = gh();
+        Object.assign(st.prs[pr], { state: "MERGED", mergeCommit: { oid: MERGE }, mergedAt: new Date().toISOString() });
+        writeFileSync(GH_STATE, JSON.stringify(st));
+        return { kind: "trailer", trailer: parseDeployTrailer(DEPLOYED("pass").out, 100) };
+      },
+    },
+    verifier: {
+      verifyDev: async () => ({ kind: "error", error: "not used" }),
+      verifyProd: async () => ({ kind: "error", error: "not used" }),
+    },
+  };
+  registerPlugin(fake);
+  const fakeConfig = { ...config, techLeadPath: undefined, srePath: undefined, fakeAgents: true };
+  await startPlugins(fakeConfig, { logger, configText: () => null });
+  world(pending());
+  assert.equal(await tryRelease(repo, fakeConfig, logger, 1), true);
+  assert.deepEqual(calls, [["approve", 100, HEAD], ["deploy", 100, HEAD]], "the fake approved, then deployed, at the PR's head");
+  assert.deepEqual(agentCalls(), [], "neither the Tech Lead nor the SRE CLI ran");
+  assertClosedVerified(5);
+  assertClosedVerified(6);
 });

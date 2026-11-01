@@ -33,10 +33,23 @@ export function countViolations(imports) {
   return out;
 }
 
+/**
+ * A plugin under src/plugins/ (the Tech Lead, SRE, QA, EM, Paperclip plugins and
+ * their shared runner). No allowlist ever covers core importing one (EM#1150 f3):
+ * the agents are reached only through the registry's roleFor/qaFor.
+ */
+export const isAgentPlugin = (rel) => /^plugins\/(?!contract\.ts$|registry\.ts$|index\.ts$)/.test(rel);
+
 /** The ratchet: the problems (empty when clean) of `imports` against the allowlist. */
 export function checkBoundary(imports, allowlist) {
   const now = countViolations(imports);
   const problems = [];
+  for (const [rel, specs] of Object.entries(imports)) {
+    if (isPlugin(rel) || rel === COMPOSITION_ROOT) continue;
+    for (const target of pluginImportsOf(rel, specs).filter(isAgentPlugin)) {
+      problems.push(`src/${rel} imports the plugin src/${target} directly; reach it through src/plugins/registry.ts (roleFor)`);
+    }
+  }
   for (const [file, n] of Object.entries(now)) {
     const allowed = allowlist[file];
     if (allowed === undefined) problems.push(`src/${file} imports plugin code directly (${n}); call it through src/plugins/registry.ts`);

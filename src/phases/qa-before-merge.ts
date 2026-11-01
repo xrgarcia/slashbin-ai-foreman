@@ -8,7 +8,8 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent } from "../adapters.js";
 import { emit, advance } from "../work-source.js";
-import { reviewViaTechLead, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../agent.js";
+import { HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../agent.js";
+import { roleFor } from "../plugins/registry.js";
 import { findQaPendingPr, getPRCheckVerdict, countCiBouncesSinceReview, bounceForRedCI } from "../github.js";
 import { qaBeforeMergeApplies, realQaLocalDeps, runQaBeforeMerge, type QaDeps, type QaPreMergeDecision } from "../qa-report.js";
 import { isToolingHold } from "./verify.js";
@@ -127,7 +128,10 @@ export async function tryQaBeforeMerge(
       return "handled";
     }
     const transcriptPath = resolve(process.cwd(), "logs", "review", `${repoName}-cycle${cycleNumber}-${new Date().toISOString().replace(/[:.]/g, "-")}-merge.log`);
-    const result = await reviewViaTechLead(repoConfig, config, prNumber, qlog, runAbort.signal, transcriptPath, undefined, false, headSha)
+    const reviewer = roleFor("reviewer", config);
+    const result = await (reviewer
+      ? reviewer.reviewPr(repoConfig, config, prNumber, qlog, runAbort.signal, transcriptPath, undefined, false, headSha)
+      : Promise.resolve({ fallback: true as const, reason: "no reviewer is enabled" }))
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(qaDefer.start(repoName, agentUnavailable));

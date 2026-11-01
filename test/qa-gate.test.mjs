@@ -2,7 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { applyQaGate, qaGateBody, qaGateMarker, qaFailSummary, QA_GATE_HEADING, qaApplies, QA_MAX_DURATION_MS, readOutcome, qaStepOf } from "../dist/qa-report.js";
+import { applyQaGate, qaGateBody, qaGateMarker, qaFailSummary, QA_GATE_HEADING, qaApplies } from "../dist/qa-report.js";
+import { QA_MAX_DURATION_MS, readOutcome, qaStepOf } from "../dist/plugins/qa.js";
 import { passingCheck } from "../dist/unblock.js";
 import { verifyHoldPlan } from "../dist/phases/verify.js";
 import { configSchema } from "../dist/config.js";

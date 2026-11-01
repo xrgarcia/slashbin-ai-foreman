@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
+import { enabledFor } from "./plugins/registry.js";
 import {
   paperclipConfigSchema, mergePaperclip, leniencyForDisabled, resolvePaperclipConfig, type PaperclipConfig,
 } from "./paperclip/config.js";
@@ -587,13 +588,14 @@ export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycl
   return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
 }
 
-/** True when the unstick stage can run: it calls the EM checkout's `bin/em.mjs`. Independent of `paperclip.enabled`. */
-export function unstickStageReady(config: Pick<AgentConfig, "emRepoPath">): boolean {
-  return Boolean(config.emRepoPath);
+/** True when the unstick stage can run: an enabled unstick plugin (the EM: `emRepoPath`). Independent of `paperclip.enabled`. */
+export function unstickStageReady(config: AgentConfig): boolean {
+  return enabledFor("unstick", config);
 }
 
-export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLeadPath">): boolean {
-  return Boolean(config.srePath && config.techLeadPath);
+/** True when the release stage can run: it needs an enabled reviewer (approval) and deployer (deploy). */
+export function releaseStageReady(config: AgentConfig): boolean {
+  return enabledFor("deployer", config) && enabledFor("reviewer", config);
 }
 
 /**
@@ -602,9 +604,10 @@ export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLea
  * runs or is not configured. An explicit `release` in `stages` without both
  * paths never gets here: loadConfig refuses it.
  */
-export function releaseStageWarning(config: Pick<AgentConfig, "srePath" | "techLeadPath" | "stages">): string | null {
+export function releaseStageWarning(config: AgentConfig): string | null {
   if (!hasStage(config.stages, "release") || releaseStageReady(config)) return null;
-  const missing = [!config.techLeadPath && "techLeadPath", !config.srePath && "srePath"].filter(Boolean).join(" and ");
+  // Named by the key that turns each built-in agent plugin on: the reviewer (Tech Lead), the deployer (SRE).
+  const missing = [!enabledFor("reviewer", config) && "techLeadPath", !enabledFor("deployer", config) && "srePath"].filter(Boolean).join(" and ");
   return `release stage skipped: ${missing} not set. Promote keeps its pre-release behaviour: it strips the ` +
     `authorization label when it lists an issue, and the release PR waits for a person to merge it and close its issues.`;
 }

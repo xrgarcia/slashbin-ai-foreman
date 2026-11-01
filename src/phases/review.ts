@@ -13,7 +13,8 @@ import {
   bounceForRedCI,
   findOpenPromotionPR,
 } from "../github.js";
-import { reviewViaTechLead, type ReviewTrailer } from "../agent.js";
+import type { ReviewTrailer } from "../agent.js";
+import { roleFor } from "../plugins/registry.js";
 import { REVIEW_MILESTONES, ReviewProgressRelay } from "../review-progress.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { BackoffTracker, formatWait } from "../backoff.js";
@@ -42,6 +43,9 @@ import { qaBeforeMergeApplies } from "../qa-report.js";
 
 /** Per repo: the review waiting after the Tech Lead could not take a PR (backoff.agentUnavailable). */
 export const reviewDefer = new BackoffTracker();
+
+/** `repo#pr` already announced as left for a person (no reviewer), so it is logged once. */
+const leftForHuman = new Set<string>();
 
 export async function tryReview(
   repoConfig: RepoConfig,
@@ -77,11 +81,18 @@ async function reviewPass(
   const repoName = repoConfig.name;
   const reviewLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "review" });
 
-  // The Tech Lead is the only reviewer, on Codex (Ray, 2026-10-10). There is no
-  // Claude review and no EM-account review: without a Tech Lead nothing reviews,
-  // and when it could not take a PR the repo waits (backoff.agentUnavailable).
-  if (!config.techLeadPath) {
-    reviewLogger.warn("review skipped: techLeadPath is not configured, and the Tech Lead is the only reviewer");
+  // The reviewer is a plugin (EM#1150): the Tech Lead, on Codex (Ray, 2026-10-10).
+  // With none enabled the PR is left for a person to review and merge; once it
+  // merges, reconcile advances its issue (settleHumanMerge). When the reviewer
+  // could not take a PR the repo waits (backoff.agentUnavailable).
+  const agent = roleFor("reviewer", config);
+  if (!agent) {
+    const open = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
+    const key = open ? `${repoName}#${open.prNumber}` : "";
+    if (open && !leftForHuman.has(key)) {
+      leftForHuman.add(key);
+      reviewLogger.info(`PR #${open.prNumber} left for a person to review and merge: no reviewer is enabled; its issue advances once it merges`);
+    }
     return false;
   }
   if (reviewDefer.waiting(repoName)) return false;
@@ -183,7 +194,7 @@ async function reviewPass(
     // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
     // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
     // failure is charged and the repo asks again after a backoff.agentUnavailable wait.
-    const result = await reviewViaTechLead(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress, noMerge)
+    const result = await agent.reviewPr(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress, noMerge)
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
@@ -239,7 +250,7 @@ async function reviewPass(
       );
 
       const unresolved = plan.toReconcile.length > 0 && config.reviewLabelReconcile
-        ? await reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events, Boolean(config.srePath))
+        ? await reconcileReviewOutcomeLabels(repoConfig, plan.toReconcile, result.trailers ?? [], reviewLogger, events, roleFor("verifier", config) !== undefined)
         : plan.toReconcile;
 
       if (unresolved.length > 0) {
@@ -387,7 +398,7 @@ export async function settleReviewOutcome(
       // from a fresh deploy poll was spending minutes to recompute an answer
       // we were holding.
       const unresolved = config.reviewLabelReconcile
-        ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, logger, events, Boolean(config.srePath))
+        ? await reconcileReviewOutcomeLabels(repoConfig, stuck, trailers, logger, events, roleFor("verifier", config) !== undefined)
         : stuck;
 
       if (!config.reviewLabelReconcile && stuck.length > 0) {

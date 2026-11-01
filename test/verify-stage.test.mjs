@@ -3,7 +3,8 @@
 // to `pr approved`. These pin the pure decisions the stage is built from.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
+import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
+import { verifyVerdict } from "../dist/plugins/sre.js";
 import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf, followUpsToBuild } from "../dist/orchestrator.js";
 import { TOOLING_HOLDS, SRE_TOOLING_HOLDS } from "../dist/phases/verify.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
