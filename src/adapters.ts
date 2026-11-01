@@ -31,10 +31,11 @@ export type WorkState =
  * tells the connector to read the current state first and move only what is
  * actually there (dead-zone recovery, orphan release). `releaseAuthorized` is
  * the EM's release authorization: a state the Foreman reads, never writes.
- * `released` is a closed item whose 30-minute soak then held (EM#578).
+ * `released` is a closed item whose 30-minute soak then held (EM#578). `approved` is a dev-verified item the
+ * EM sent back for a QA re-run (slashbin-ai-foreman#158).
  */
 export type PriorState =
-  | "new" | "inReview" | "changesRequested" | "merged" | "unknown"
+  | "new" | "inReview" | "changesRequested" | "merged" | "approved" | "unknown"
   | "releaseAuthorized" | "releasing" | "prodVerifyHeld" | "released";
 
 /**
