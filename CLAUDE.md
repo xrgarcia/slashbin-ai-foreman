@@ -200,7 +200,7 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
 - **One state machine, one call.** Every state change is a named move in `src/lifecycle.ts`;
   the orchestrator calls `advance(item, "<move>")` and reports everything else with `emit()`.
   The work source (GitHub labels) records the event; observers (Paperclip, when enabled) get
-  the same event. Only `cli.ts` (the wiring) imports `paperclip/`, plus `config.ts` composing
+  the same event. Only `plugins/paperclip.ts` imports `paperclip/`, plus `config.ts` composing
   the plugin's own block from `paperclip/config.ts`; the connector and the plugin never read
   each other (a test walks every core file and enforces it). A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
 - **One Claude session at a time** — resource + git-state safety.
