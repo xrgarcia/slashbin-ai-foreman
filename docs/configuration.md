@@ -109,6 +109,12 @@ One entry per repo: `{ name, repoPath, ... }` plus any key marked per repo. When
 
 ## Global settings
 
+### `profile`
+
+Type: string · Default: none
+
+A named set of defaults for one operator's fleet (src/profiles/): each key it sets replaces the neutral default below, and a key this file sets still wins. `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name stops startup, naming the valid ones.
+
 ### `pollIntervalMs`
 
 Type: integer · Default: `300000` (5 min) · Env: `AI_AGENT_POLL_INTERVAL_MS`
@@ -233,31 +239,49 @@ The EM checkout. The unstick stage runs `bin/em.mjs unstick` here (cwd) for stuc
 
 Type: string · Default: none · Env: `AI_AGENT_UNSTICK_ESCALATION_OWNER`
 
-GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
+GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105). Unset = no one is mentioned: the hold stays at its failed cap and the log says so.
+
+### `divergenceRulerLogin`
+
+Type: string · Default: none
+
+The GitHub login whose divergence ruling the Foreman carries out (foreman#104): the EM's own account. Unset = no ruling is honoured; a diverged branch stays blocked until a person repairs it.
+
+### `epicRefLabel`
+
+Type: string · Default: none
+
+The name issue bodies give the epic tracker in `<label> #N` references (the `## References` convention). When an issue closes in production, each epic it names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
 
 ### `techLeadPath`
 
 Type: string · Default: none · Env: `AI_AGENT_TECH_LEAD_PATH`
 
-The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each review is offered to it FIRST — Codex judges, its code posts and merges. It exits 3 when Codex cannot take the review and nothing was written; the review phase then runs the Claude /review-all-prs session exactly as before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
+The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each review is offered to it FIRST — Codex judges, its code posts and merges. It exits 3 when Codex cannot take the review and nothing was written; the review phase then runs the Claude /review-all-prs session exactly as before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
 
 ### `srePath`
 
 Type: string · Default: none · Env: `AI_AGENT_SRE_PATH`
 
-The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved. Unset = no verify stage: the review run verifies and labels as before.
+The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved. Unset = no verify stage: the review run verifies and labels as before.
 
 ### `qaPath`
 
 Type: string · Default: none · Env: `AI_AGENT_QA_PATH`
 
-The QA agent (xrgarcia/slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` (its doppler-run.mjs supplies DEV_SESSION_MINT_KEY).
+The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY).
 
 ### `qaRepos`
 
-Type: string[] · Default: `["xrgarcia/Slashbin-console"]`
+Type: string[] · Default: `[]`
 
-GitHub repos (owner/name) QA applies to. QA supports only the Console today.
+GitHub repos (owner/name) QA applies to. Default none.
+
+### `qaSecretsRunner`
+
+Type: string · Default: none
+
+The script in the EM checkout (relative to emRepoPath) that runs QA's dev check with its one secret, DEV_SESSION_MINT_KEY, handed to that child alone. Unset = the dev check reports `errored` instead of running; the local check needs none.
 
 ### `qaGate`
 
@@ -329,9 +353,9 @@ NOT z.coerce.boolean(): env vars arrive as strings and Boolean("false") is true,
 
 ### `reviewAllowedTools`
 
-Type: string[] · Default: see `src/config.ts`
+Type: string[] · Default: `["Read","Write","Edit","Bash","Glob","Grep","WebFetch"]`
 
-Broad tool surface — the skill drives GitHub, Postgres, Redis, Railway, and the knowledge index via MCP, plus shell scripts and file reads.
+The review session's tools: file and shell tools, plus any MCP servers (`mcp__<server>__*`) your fleet's review needs. Default the file and shell tools only.
 
 ### `reviewerLogin`
 

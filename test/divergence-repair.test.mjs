@@ -8,8 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import {
-  repairDivergence, pickRuling, EM_DIVERGENCE_RULER, EM_DIVERGENCE_ISSUE_TITLE, EM_DIVERGENCE_RULING_PATTERN,
+  repairDivergence, pickRuling, EM_DIVERGENCE_ISSUE_TITLE, EM_DIVERGENCE_RULING_PATTERN,
 } from "../dist/divergence-repair.js";
+
+/** The configured `divergenceRulerLogin`: the only author whose ruling counts. */
+const RULER = "the-em";
 import { divergenceNotice, divergenceReason } from "../dist/phases/common.js";
 
 Object.assign(process.env, {
@@ -49,7 +52,7 @@ function fixture({ rejectFeaturePush = false } = {}) {
     chmodSync(hook, 0o755);
   }
   setStatePath(mkdtempSync(join(tmpdir(), "div-state-")));
-  const repo = { name: "dr", githubRepo: "o/dr", repoPath: clone, baseBranch: "develop", featureBranch: "features" };
+  const repo = { name: "dr", githubRepo: "o/dr", repoPath: clone, baseBranch: "develop", featureBranch: "features", divergenceRulerLogin: RULER };
   saveRepoState("dr", { implemented: [], failed: {}, branchBlock: {
     featureBranch: "features", baseBranch: "develop", mergeBase, ahead: 1, behind: 1,
     since: "2026-10-24T00:00:00Z", announced: [7],
@@ -57,7 +60,7 @@ function fixture({ rejectFeaturePush = false } = {}) {
   return { repo, remote, clone, featureHead, baseHead, mergeBase };
 }
 const ruling = (winner, mergeBase, over = {}) => ({
-  id: "comment:1", issue: 7, author: EM_DIVERGENCE_RULER, at: "2026-10-24T01:00:00Z",
+  id: "comment:1", issue: 7, author: RULER, at: "2026-10-24T01:00:00Z",
   body: `Looked at it.\n**EM divergence ruling** winner=${winner} mergeBase=${mergeBase}\n`, ...over,
 });
 const run = (f, cands, extra = {}) => {
@@ -149,8 +152,9 @@ test("a repo-level ruling is read from the body of the EM's titled issue", async
   const f = fixture();
   saveRepoState("dr", { ...loadRepoState("dr"), branchBlock: { ...loadRepoState("dr").branchBlock, announced: [] } });
   const issue = { ...ruling("base", f.mergeBase, { id: "issue:42", issue: 42 }), title: EM_DIVERGENCE_ISSUE_TITLE, body: `**EM divergence ruling** winner=base mergeBase=${f.mergeBase}` };
-  assert.equal(pickRuling([{ ...issue, title: "something else" }], loadRepoState("dr").branchBlock), null, "wrong title");
-  assert.equal(pickRuling([{ ...issue, author: "mallory" }], loadRepoState("dr").branchBlock), null, "wrong author");
+  assert.equal(pickRuling([{ ...issue, title: "something else" }], loadRepoState("dr").branchBlock, RULER), null, "wrong title");
+  assert.equal(pickRuling([{ ...issue, author: "mallory" }], loadRepoState("dr").branchBlock, RULER), null, "wrong author");
+  assert.ok(pickRuling([{ ...issue, author: "The-EM" }], loadRepoState("dr").branchBlock, RULER), "the login matches case-insensitively");
   const { outcome } = await run(f, [issue]);
   assert.equal(outcome, "repaired");
   assert.equal(remoteRef(f, "refs/heads/features"), f.baseHead);
@@ -187,4 +191,17 @@ test("the divergence reason the EM is asked on stays the same as commits pile up
   const first = divergenceReason(block);
   assert.equal(divergenceReason({ ...block, ahead: 5, behind: 9 }), first);
   assert.match(first, /merge base a{40}/);
+});
+
+test("no divergenceRulerLogin: no ruling is read or honoured, the branch is left as it is", async () => {
+  const f = fixture();
+  let read = 0;
+  const { outcome, comments } = await run({ ...f, repo: { ...f.repo, divergenceRulerLogin: undefined } }, [ruling("base", f.mergeBase)], {
+    readCandidates: () => { read++; return [ruling("base", f.mergeBase)]; },
+  });
+  assert.equal(outcome, "none");
+  assert.equal(read, 0, "nothing is read without a ruler");
+  assert.equal(comments.length, 0);
+  assert.equal(remoteRef(f, "refs/heads/features"), f.featureHead);
+  assert.equal(loadRepoState("dr").branchBlock.ruled, undefined);
 });

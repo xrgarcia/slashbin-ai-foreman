@@ -72,6 +72,7 @@ export class PaperclipPlugin implements ForemanPlugin {
         warn: (m) => logger.warn(m),
         // The activity feed names the Foreman for its own writes, not the key's user.
         actingAs: config.paperclip.agentId ? `agent:${config.paperclip.agentId}` : undefined,
+        commentAuthorHeader: config.paperclip.commentAuthorHeader,
       }),
       config.paperclip,
       mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),

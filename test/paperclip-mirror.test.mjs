@@ -8,6 +8,10 @@ import { PaperclipMirror } from "../dist/paperclip/mirror.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
+import { slashbinProfile } from "../dist/profiles/slashbin.js";
+
+/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
+const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
 
 // GitHub reads every issue the existing tests snapshot as open: a card moves
 // only on a confirmed state (the closed-issue cases are in paperclip-closed-cards).
@@ -26,7 +30,7 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
   const agent = { id: AGENT, metadata: {} };
   // The board's agents, as `GET /companies/:id/agents` lists them; each may carry metadata.githubLogin.
   const boardAgents = [];
-  // Who each comment was credited to (x-slashbin-comment-author), in posting order; null = the key's user.
+  // Who each comment was credited to (the HEADER), in posting order; null = the key's user.
   const credits = [];
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -34,7 +38,7 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path: u.pathname, body });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/agents`) return new Response(JSON.stringify(boardAgents), { status: 200 });
-    if (body && ((method === "POST" && u.pathname.endsWith("/comments")) || (method === "PATCH" && "comment" in body))) credits.push(init.headers?.["x-slashbin-comment-author"] ?? null);
+    if (body && ((method === "POST" && u.pathname.endsWith("/comments")) || (method === "PATCH" && "comment" in body))) credits.push(init.headers?.[HEADER] ?? null);
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
@@ -117,7 +121,7 @@ function mirrorOn(fake, extra = {}) {
     // The one-line notes these tests were written against; the summaries have their own tests below.
     identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false }, ...extra };
   const log = logger();
-  const client = new PaperclipClient({ url: cfg.url, companyId: CID, fetch: fake.fetch });
+  const client = new PaperclipClient({ url: cfg.url, companyId: CID, fetch: fake.fetch, commentAuthorHeader: HEADER });
   return { mirror: new PaperclipMirror(client, cfg, [SECRET], log), log };
 }
 

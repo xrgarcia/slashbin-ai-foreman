@@ -23,7 +23,7 @@ import { codeHost } from "./plugins/registry.js";
 
 /**
  * Every `--kind` the EM's `unstick` command accepts. Shared verbatim with the
- * EM side (slashbin-engineering-manager#737): change both or neither.
+ * EM side (EM#737): change both or neither.
  */
 export const UNSTICK_KINDS = [
   "skip",
@@ -48,9 +48,6 @@ export type UnstickStatus = "pending" | "invoked" | "escalated" | "declined" | "
 
 /** Calls spent on one reason before a failing call stops being retried. */
 export const UNSTICK_MAX_ATTEMPTS = 3;
-
-/** Who the give-up comment @-mentions. The same default the EM wrapper escalates to; config `unstickEscalationOwner` overrides it. */
-export const UNSTICK_ESCALATION_OWNER = "xrgarcia";
 
 /** The comment posted once when every EM call for a hold has failed (foreman#105). */
 export function unstickGiveUpComment(owner: string, entry: Pick<UnstickEntry, "kind" | "reason" | "attempts" | "detail">): string {
@@ -245,9 +242,17 @@ export function clearUnstick(repoName: string, issue: number): void {
   saveRepoState(repoName, { ...state, unstick: keep });
 }
 
-/** The EM epics an issue body names (`engineering-manager #N`, the `## References` convention). */
-export function epicRefs(body: string): number[] {
-  return [...new Set([...body.matchAll(/\bengineering-manager #(\d+)/gi)].map((m) => Number(m[1])))];
+/** `label` with every regex metacharacter escaped. */
+const escapeRegex = (label: string) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The epics an issue body names as `<label> #N` (config `epicRefLabel`, the
+ * `## References` convention). No label = no epic parsing: always empty.
+ */
+export function epicRefs(body: string, label: string | undefined): number[] {
+  if (!label) return [];
+  const pattern = new RegExp(`\\b${escapeRegex(label)} #(\\d+)`, "gi");
+  return [...new Set([...body.matchAll(pattern)].map((m) => Number(m[1])))];
 }
 
 /**
@@ -256,7 +261,7 @@ export function epicRefs(body: string): number[] {
  * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
  * CLOSE check decides whether it was the last. Returns the entries added.
  */
-export function noteEpicChildClosed(repoName: string, githubRepo: string, issue: number, epics: readonly number[]): number {
+export function noteEpicChildClosed(repoName: string, githubRepo: string, issue: number, epics: readonly number[], label: string): number {
   const state = loadRepoState(repoName);
   const table = { ...(state.unstick ?? {}) };
   const now = new Date().toISOString();
@@ -265,7 +270,7 @@ export function noteEpicChildClosed(repoName: string, githubRepo: string, issue:
     const tag = `${epic}-${issue}`;
     const key = unstickKey(0, "epic-ready-to-close", tag);
     if (table[key]) continue;
-    const reason = `${githubRepo}#${issue} was closed as completed after its production verification; it belongs to engineering-manager #${epic}. Close the epic if this was its last open child.`;
+    const reason = `${githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`;
     table[key] = openEntry(undefined, { issue: 0, kind: "epic-ready-to-close", reason, tag }, now);
     added++;
   }

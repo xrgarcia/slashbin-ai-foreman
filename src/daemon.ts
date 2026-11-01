@@ -107,6 +107,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   const retired = concurrencyWarning(config);
   if (retired) logger.warn(retired);
 
+  logger.info(config.profile ? `Config profile: ${config.profile}` : "Config profile: none (neutral defaults)");
+
   const repoNames = config.repos.map((r) => r.name).join(", ");
   const startLanes = lanesFor(config.stages);
   logger.info("Daemon starting", {

@@ -2,7 +2,8 @@
 //
 // A diverged feature branch blocks the repo (`RepoState.branchBlock`, announced
 // by phases/common.ts). The unstick stage asks the EM which side wins; the EM
-// answers with a GitHub comment authored by EM_LOGIN containing exactly one line
+// answers with a GitHub comment authored by the configured `divergenceRulerLogin`
+// (the EM's account) containing exactly one line
 //
 //   **EM divergence ruling** winner=<base|branch> mergeBase=<40 hex>
 //
@@ -18,7 +19,8 @@
 // Where a ruling can be: a comment on one of the announced issues, or — when
 // the unstick call was for issue 0 (repo-level, nothing announced) and the EM
 // had no issue to comment on — the BODY of an open issue titled
-// EM_DIVERGENCE_ISSUE_TITLE that the EM created.
+// EM_DIVERGENCE_ISSUE_TITLE that the EM created. With no `divergenceRulerLogin`
+// nobody's ruling is honoured and nothing is read: the block waits for a person.
 
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
@@ -27,8 +29,6 @@ import { loadRepoState, saveRepoState, type BranchBlock } from "./state.js";
 import { codeHost } from "./plugins/registry.js";
 import type { CodeHost } from "./code-host.js";
 
-/** The only author whose ruling is honoured. */
-export const EM_DIVERGENCE_RULER = "slashbin-engineering-manager";
 /** Title of the issue the EM creates for a repo-level (issue 0) call; its body carries the ruling. */
 export const EM_DIVERGENCE_ISSUE_TITLE = "EM unstick (divergence): repo-level ruling";
 export const EM_DIVERGENCE_RULING_PATTERN = /^\*\*EM divergence ruling\*\* winner=(base|branch) mergeBase=([0-9a-f]{40})\s*$/m;
@@ -46,12 +46,13 @@ export interface RulingCandidate {
 }
 export interface Ruling { id: string; issue: number; winner: "base" | "branch" }
 
-/** Pure: the newest unhandled ruling for this episode, or null. */
-export function pickRuling(cands: readonly RulingCandidate[], block: Pick<BranchBlock, "since" | "mergeBase" | "ruled">): Ruling | null {
+/** Pure: the newest unhandled ruling by `ruler` (the only author honoured) for this episode, or null. */
+export function pickRuling(cands: readonly RulingCandidate[], block: Pick<BranchBlock, "since" | "mergeBase" | "ruled">, ruler: string): Ruling | null {
   const since = Date.parse(block.since);
+  const author = ruler.toLowerCase();
   let best: (Ruling & { at: number }) | null = null;
   for (const c of cands) {
-    if (c.author.toLowerCase() !== EM_DIVERGENCE_RULER) continue;
+    if (c.author.toLowerCase() !== author) continue;
     if (c.id.startsWith("issue:") && c.title !== EM_DIVERGENCE_ISSUE_TITLE) continue;
     const at = Date.parse(c.at);
     if (Number.isNaN(at) || Number.isNaN(since) || at <= since) continue;
@@ -64,13 +65,13 @@ export function pickRuling(cands: readonly RulingCandidate[], block: Pick<Branch
 }
 
 /** Read the places a ruling can be. Throws on a failed read (the caller treats that as "no ruling this cycle"). */
-export function readRulingCandidates(repoConfig: RepoConfig, block: BranchBlock): RulingCandidate[] {
+export function readRulingCandidates(repoConfig: RepoConfig, block: BranchBlock, ruler: string): RulingCandidate[] {
   const { githubRepo: repo, repoPath: cwd } = repoConfig;
   const out: RulingCandidate[] = [];
   for (const n of block.announced.filter((x) => x > 0)) {
     out.push(...codeHost().issueCommentRows(repo, n, cwd));
   }
-  out.push(...codeHost().openIssueRowsBy(repo, EM_DIVERGENCE_RULER, cwd));
+  out.push(...codeHost().openIssueRowsBy(repo, ruler, cwd));
   return out;
 }
 
@@ -105,7 +106,7 @@ function carryOut(repoConfig: RepoConfig, winner: "base" | "branch", now: Date, 
 }
 
 export interface RepairDeps {
-  readCandidates?: (repoConfig: RepoConfig, block: BranchBlock) => RulingCandidate[];
+  readCandidates?: (repoConfig: RepoConfig, block: BranchBlock, ruler: string) => RulingCandidate[];
   comment?: CodeHost["commentOnIssue"];
   now?: () => Date;
 }
@@ -121,10 +122,15 @@ export async function repairDivergence(
   deps: RepairDeps = {},
 ): Promise<"none" | "repaired" | "failed"> {
   const block = loadRepoState(repoConfig.name).branchBlock;
+  const ruler = repoConfig.divergenceRulerLogin;
   if (!block) return "none";
+  if (!ruler) {
+    logger.debug(`Divergence on ${repoConfig.name} waits for a person: no divergenceRulerLogin is configured, so no ruling is read`);
+    return "none";
+  }
   let ruling: Ruling | null;
   try {
-    ruling = pickRuling((deps.readCandidates ?? readRulingCandidates)(repoConfig, block), block);
+    ruling = pickRuling((deps.readCandidates ?? readRulingCandidates)(repoConfig, block, ruler), block, ruler);
   } catch (err) {
     logger.debug(`Divergence ruling unreadable on ${repoConfig.name} — trying next cycle: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
     return "none";
