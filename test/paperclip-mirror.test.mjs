@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
+import { createRepoIdentity } from "../dist/paperclip/repo-identity.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
@@ -116,13 +117,13 @@ function logger() {
   return l;
 }
 
-function mirrorOn(fake, extra = {}) {
+function mirrorOn(fake, extra = {}, identity = undefined) {
   const cfg = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
     // The one-line notes these tests were written against; the summaries have their own tests below.
     identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false }, ...extra };
   const log = logger();
   const client = new PaperclipClient({ url: cfg.url, companyId: CID, fetch: fake.fetch, commentAuthorHeader: HEADER });
-  return { mirror: new PaperclipMirror(client, cfg, [SECRET], log), log };
+  return { mirror: new PaperclipMirror(client, cfg, [SECRET], log, {}, undefined, identity), log };
 }
 
 const statusPatches = (fake) => fake.calls.filter((c) => c.method === "PATCH" && c.body && "status" in c.body);
@@ -1552,4 +1553,103 @@ test("qa stage: a QA event with no verify hold moves nothing and leaves no hold 
   assert.equal(fake.rows[0].status, "in_review");
   await mirror.onSession({ phase: "qa", status: "failed", repo: "example/r", items: [item], pr: 9, reviewer: "QA" }, logger());
   assert.equal(fake.rows[0].status, "in_review");
+});
+
+// RepoIdentity (Foreman #173): cards compare on the registry's owner-free key.
+/** The registry's answer for the two Slashbin names these tests use; anything else is its own key. */
+function fakeIdentity() {
+  const f = {
+    calls: [], down: false,
+    beginScan() { f.calls.length = 0; },
+    async keyOf(repo) {
+      if (f.down) throw new Error("registry unreachable");
+      f.calls.push(repo);
+      const m = /^(?:xrgarcia|slashbin-io)\/(slashbin-console|slashbin-web)$/i.exec(repo);
+      return m ? m[1].toLowerCase() : repo;
+    },
+  };
+  return f;
+}
+const MOVED = { issueNumber: 7, repo: "slashbin-io/slashbin-console" };
+const oldCard = (extra = {}) => ({ id: "r7", title: "t", status: "todo", description: "source: xrgarcia/slashbin-console#7\n\nx", ...extra });
+
+test("identity: a card written under the old owner is the card for an item under the new one", async () => {
+  const fake = fakePaperclip([oldCard()]);
+  const { mirror } = mirrorOn(fake, {}, fakeIdentity());
+  await mirror.onClaim(MOVED, repoConfig, logger());
+  assert.equal(fake.rows.length, 1, "no second card");
+  assert.equal(fake.rows[0].status, "in_progress", "the existing card moved");
+  assert.equal(fake.rows[0].description, "source: xrgarcia/slashbin-console#7\n\nx", "its description is not rewritten");
+  assert.equal(fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues")).length, 0);
+});
+
+test("identity: two cards for one issue under different owners are one winner and a reported duplicate", async () => {
+  const fake = fakePaperclip([
+    oldCard({ identifier: "SLA-1", createdAt: "2026-10-15T10:00:00Z" }),
+    { id: "r7b", identifier: "SLA-2", title: "t", status: "in_progress", assigneeAgentId: AGENT, description: "source: slashbin-io/slashbin-console#7\n\nx", createdAt: "2026-10-15T10:00:03Z" },
+  ]);
+  const { mirror } = mirrorOn(fake, { ownsCards: true }, fakeIdentity());
+  await mirror.ensureIndex(true);
+  assert.equal(mirror.index.get("source: slashbin-console#7"), "r7", "the older card wins");
+  assert.deepEqual(mirror.duplicates.map((d) => [d.id, d.winner, d.repo]), [["r7b", "SLA-1", "slashbin-console"]]);
+  await mirror.housekeep();
+  assert.equal(fake.rows[1].status, "cancelled");
+  assert.equal(fake.rows[0].status, "todo");
+});
+
+test("identity: jerky_*, cmneb_* and slashbin-io/jerky_rank merge with no other spelling", async () => {
+  const fake = fakePaperclip([
+    { id: "a", title: "t", status: "todo", description: "source: xrgarcia/jerky_rank#7\n\nx" },
+    { id: "b", title: "t", status: "todo", description: "source: slashbin-io/jerky_rank#7\n\nx" },
+    { id: "c", title: "t", status: "todo", description: "source: xrgarcia/cmneb_data#7\n\nx" },
+    { id: "d", title: "t", status: "todo", description: "source: JerkyDoug/cmneb_data#7\n\nx" },
+  ]);
+  const { mirror } = mirrorOn(fake, { ownsCards: true }, fakeIdentity());
+  await mirror.ensureIndex(true);
+  assert.deepEqual([...mirror.index.values()].sort(), ["a", "b", "c", "d"]);
+  assert.deepEqual(mirror.duplicates, []);
+  await mirror.onClaim({ issueNumber: 7, repo: "slashbin-io/jerky_rank" }, repoConfig, logger());
+  assert.equal(fake.rows.length, 4);
+  assert.equal(fake.rows[1].status, "in_progress", "only its own spelling is its card");
+  assert.equal(fake.rows[0].status, "todo");
+});
+
+test("identity: a registry outage fails the scan and keeps the previous index", async () => {
+  const fake = fakePaperclip([oldCard()]);
+  const id = fakeIdentity();
+  const { mirror, log } = mirrorOn(fake, {}, id);
+  assert.equal(await mirror.ensureIndex(true), true);
+  const before = new Map(mirror.index);
+  id.down = true;
+  fake.rows.push({ id: "r9", title: "t", status: "todo", description: "source: xrgarcia/slashbin-web#9\n\nx" });
+  assert.equal(await mirror.ensureIndex(true), true, "the previous index still serves");
+  assert.deepEqual(mirror.index, before, "the failed scan changed nothing");
+  await mirror.onClaim(MOVED, repoConfig, logger());
+  assert.equal(fake.rows.length, 2, "an outage creates no card");
+  assert.ok(log.lines.some(([lvl]) => lvl === "warn"));
+});
+
+test("identity: the registry client asks once per repo per scan, sends the bearer, and throws on an outage", async () => {
+  const seen = [];
+  let down = false;
+  const f = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    seen.push([body.method, init.headers.authorization, init.headers["mcp-session-id"] ?? null]);
+    if (down) return new Response("", { status: 503 });
+    if (body.method === "initialize") return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "content-type": "application/json", "mcp-session-id": "s1" } });
+    if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+    const repo = body.params.arguments.repo;
+    const ans = repo.endsWith("/slashbin-console") ? { repo, kind: "slashbin", key: "slashbin-console", stored_repo: repo } : { repo, kind: "unknown", key: null, stored_repo: null };
+    return new Response(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: JSON.stringify(ans) }] } })}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const ri = createRepoIdentity({ url: "http://registry.test/mcp", apiKey: "tok-123", fetch: f });
+  assert.equal(await ri.keyOf("slashbin-io/slashbin-console"), "slashbin-console");
+  assert.equal(await ri.keyOf("slashbin-io/slashbin-console"), "slashbin-console");
+  assert.equal(await ri.keyOf("slashbin-io/jerky_rank"), "slashbin-io/jerky_rank", "unknown is itself");
+  assert.deepEqual(seen.map((s) => s[0]), ["initialize", "notifications/initialized", "tools/call", "tools/call"]);
+  assert.ok(seen.every((s) => s[1] === "Bearer tok-123"));
+  assert.equal(seen[2][2], "s1");
+  ri.beginScan();
+  down = true;
+  await assert.rejects(ri.keyOf("xrgarcia/slashbin-console"), /registry answered 503/);
 });

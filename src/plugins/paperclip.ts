@@ -4,6 +4,7 @@ import { PaperclipClient } from "../paperclip/client.js";
 import { PaperclipMirror } from "../paperclip/mirror.js";
 import { runDoctor } from "../paperclip/doctor.js";
 import { loadCardBlocks, saveCardBlock } from "../state.js";
+import { createRepoIdentity } from "../paperclip/repo-identity.js";
 import type { ForemanPlugin, PluginContext } from "./contract.js";
 
 /**
@@ -12,10 +13,13 @@ import type { ForemanPlugin, PluginContext } from "./contract.js";
  * hand it to agent sessions. Same 8-character floor and longest-first order as
  * secretValues.
  */
-export function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | undefined): Array<{ name: string; value: string }> {
+export function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | undefined, registryApiKey?: string): Array<{ name: string; value: string }> {
   const out = secretValues(sessionEnv);
   if (apiKey && apiKey.length >= 8 && !out.some((s) => s.value === apiKey)) {
     out.push({ name: "AI_AGENT_PAPERCLIP_API_KEY", value: apiKey });
+  }
+  if (registryApiKey && registryApiKey.length >= 8 && !out.some((s) => s.value === registryApiKey)) {
+    out.push({ name: "AI_AGENT_PAPERCLIP_REGISTRY_API_KEY", value: registryApiKey });
   }
   return out.sort((a, b) => b.value.length - a.value.length);
 }
@@ -75,11 +79,14 @@ export class PaperclipPlugin implements ForemanPlugin {
         commentAuthorHeader: config.paperclip.commentAuthorHeader,
       }),
       config.paperclip,
-      mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
+      mirrorSecrets(config.sessionEnv, config.paperclip.apiKey, config.paperclip.registryApiKey),
       logger,
       config.lifecycleLabels,
       // A card's block (reason, holder, stage, ruling) outlives a restart, in the Foreman's state file.
       { load: loadCardBlocks, save: saveCardBlock },
+      config.paperclip.registryUrl
+        ? createRepoIdentity({ url: config.paperclip.registryUrl, apiKey: config.paperclip.registryApiKey })
+        : undefined,
     );
     // Housekeeping off the observer queue: project backfill, retiring the old live task.
     this.stopMirror = this.mirror.start();

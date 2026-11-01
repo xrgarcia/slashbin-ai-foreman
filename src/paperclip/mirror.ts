@@ -71,6 +71,7 @@ import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFa
 import { PaperclipClientError, type PaperclipClient, type PaperclipComment, type PaperclipIssue } from "./client.js";
 import { commentsOf, finishComment, redactComment, reviewProgressComment, sessionComment, sessionCommentEvent, untouched, type CommentsConfig } from "./comments.js";
 import type { ReviewMilestone } from "../review-progress.js";
+import type { RepoIdentity } from "./repo-identity.js";
 
 export type { PaperclipBucket } from "./board.js";
 type Bucket = PaperclipBucket;
@@ -322,7 +323,10 @@ export class PaperclipMirror implements WorkObserver {
   /** Task id → what the row shows: `waiting\n<action>` when blocked, else `status:<status>`. */
   private readonly rowState = new Map<string, string>();
   /** Task id → the repo its identity key names, for rows that key an issue. */
+  /** Card id -> the identity key of its repo (not the spelling its description carries). */
   private readonly rowRepo = new Map<string, string>();
+  /** Repo as written -> its identity key, as last answered. Sync readers use it; a repo never asked about is its own key. */
+  private readonly repoKeys = new Map<string, string>();
   /** Task id → its issue number, from the identity line. */
   private readonly rowNumber = new Map<string, number>();
   /** Cards whose issue GitHub reads closed: a hold the Foreman reports later never reopens them. */
@@ -433,6 +437,8 @@ export class PaperclipMirror implements WorkObserver {
     private readonly logger: Logger,
     labels: Partial<HandoffLabels> = {},
     private readonly blockStore?: CardBlockStore,
+    /** Reduces a repo to the key cards are compared on; unset, a repo is its own key. */
+    private readonly identity?: RepoIdentity,
   ) {
     this.comments = commentsOf(cfg);
     this.labels = { ...DEFAULT_HANDOFF_LABELS, ...labels };
@@ -606,6 +612,7 @@ export class PaperclipMirror implements WorkObserver {
   }
 
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
+    await this.warmEvent(event);
     if (!this.mirrors(event)) {
       // A claim outside `repos` is still the one build running: forget the last
       // one, so a back-off note never lands on a card it is not about.
@@ -639,13 +646,70 @@ export class PaperclipMirror implements WorkObserver {
 
   /** Whether `event` is about a repo `repos` mirrors. Daemon-wide events (back-off) always are. */
   private mirrors(event: WorkEvent): boolean {
-    if (!this.cfg.repos) return true;
-    const repo = "item" in event ? event.item.repo
+    const repo = this.eventRepo(event);
+    return repo === null || this.mirrored(repo);
+  }
+
+  private eventRepo(event: WorkEvent): string | null {
+    return "item" in event ? event.item.repo
       : event.kind === "session" ? event.session.repo
       : event.kind === "release" ? event.release.repo
       : "repo" in event ? event.repo
       : null;
-    return repo === null || this.cfg.repos.includes(repo);
+  }
+
+  /** Whether `repo` is one `repos` mirrors, on identity keys: either owner spelling of a configured repo is. */
+  private mirrored(repo: string): boolean {
+    return this.mirroredKey(this.keyNow(repo));
+  }
+
+  /** Whether a repo already reduced to its key is one `repos` mirrors. */
+  private mirroredKey(key: string): boolean {
+    return !this.cfg.repos || this.cfg.repos.some((r) => this.keyNow(r) === key);
+  }
+
+  /** `repo`'s identity key. Throws when the registry cannot answer; with no registry configured, the repo itself. */
+  private async keyFor(repo: string): Promise<string> {
+    if (!this.identity) return repo;
+    const key = await this.identity.keyOf(repo);
+    this.repoKeys.set(repo, key);
+    return key;
+  }
+
+  /** The last answer for `repo`, else the repo itself. Call after `keyFor`/`warm`. */
+  private keyNow(repo: string): string {
+    return this.repoKeys.get(repo) ?? repo;
+  }
+
+  /** Ask for `repo`'s key ahead of a synchronous comparison; an outage is logged and the repo compares as written. */
+  private async warm(...repos: string[]): Promise<void> {
+    for (const repo of repos) {
+      try {
+        await this.keyFor(repo);
+      } catch (e) {
+        this.log("warn", `Paperclip mirror: registry identity for ${repo} unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  private async warmEvent(event: WorkEvent): Promise<void> {
+    if (!this.identity || !this.cfg.repos) return;
+    const repo = this.eventRepo(event);
+    if (repo !== null) await this.warm(repo, ...this.cfg.repos);
+  }
+
+  /** The index key for `item`'s card: `identityKeyFormat` with the repo's identity key. Null when the registry is down. */
+  private async indexKey(item: WorkItem): Promise<string | null> {
+    try {
+      return this.indexLine(await this.keyFor(item.repo), item.issueNumber);
+    } catch (e) {
+      this.log("warn", `Paperclip mirror: registry identity for ${item.repo} unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  private indexLine(repoKey: string, n: number): string {
+    return this.cfg.identityKeyFormat.split("{repo}").join(repoKey).split("{N}").join(String(n));
   }
 
   async onClaim(item: WorkItem, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
@@ -781,7 +845,8 @@ export class PaperclipMirror implements WorkObserver {
    * SRE had given up on it (2026-10-05).
    */
   async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
-    this.snapshotRepos.add(_repo);
+    await this.warm(_repo);
+    this.snapshotRepos.add(this.keyNow(_repo));
     if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
     const cards = read.cards;
@@ -981,7 +1046,7 @@ export class PaperclipMirror implements WorkObserver {
     const now = Date.now();
     const due: Array<[string, number]> = [];
     for (const [id, n] of this.rowNumber) {
-      if (this.rowRepo.get(id) !== repo || open.has(n)) continue;
+      if (this.rowRepo.get(id) !== this.keyNow(repo) || open.has(n)) continue;
       // Already done or cancelled with no open issue behind it: terminal, whatever arrives late (Foreman #112).
       if (this.isClosedCard(id)) { this.markClosed(id); continue; }
       if (due.length >= STALE_CHECKS_PER_SNAPSHOT) continue;
@@ -1289,7 +1354,7 @@ export class PaperclipMirror implements WorkObserver {
    * kept, and false returned.
    */
   reconfigure(next: PaperclipConfig): boolean {
-    const fixed = ["enabled", "url", "companyId", "agentId", "identityKeyFormat"] as const;
+    const fixed = ["enabled", "url", "companyId", "agentId", "identityKeyFormat", "registryUrl", "registryApiKey"] as const;
     const changed = fixed.filter((k) => next[k] !== this.cfg[k]);
     if (changed.length) {
       this.logger.warn(`paperclip: config reload changes ${changed.join(", ")}; a new mirror takes over to apply it.`);
@@ -1364,7 +1429,7 @@ export class PaperclipMirror implements WorkObserver {
       if (left <= 0) return;
       const repo = this.rowRepo.get(id);
       if (!repo || !this.snapshotRepos.has(repo) || dup.has(id)) continue;
-      if (this.cfg.repos && !this.cfg.repos.includes(repo)) continue;
+      if (!this.mirroredKey(repo)) continue;
       if (!(await this.needsIssueLabel(id, have))) continue;
       const labelIds = await this.labelIdsFor(id, undefined);
       if (!labelIds) continue;
@@ -1384,7 +1449,7 @@ export class PaperclipMirror implements WorkObserver {
     let left = RETIRES_PER_PASS;
     for (const d of this.duplicates) {
       if (left-- <= 0) break;
-      if (this.cfg.repos && !this.cfg.repos.includes(d.repo)) continue;
+      if (!this.mirroredKey(d.repo)) continue;
       const tag = `[duplicate of ${d.winner}] `;
       const r = await this.safeCall("retire duplicate", () => this.client.updateIssue(d.id, {
         status: cancelled,
@@ -1462,6 +1527,7 @@ export class PaperclipMirror implements WorkObserver {
    * not touched, however many cycles repeat it.
    */
   async onWaiting(repo: string, waiting: ReadonlyArray<WaitingItem>, _logger: Logger): Promise<void> {
+    await this.warm(repo);
     const cleaned = waiting.map((w) => ({ item: w.item, reason: this.clean(w.reason), skipped: w.skipped === true }));
 
     const keep = new Set<string>();
@@ -1502,7 +1568,7 @@ export class PaperclipMirror implements WorkObserver {
 
     if (await this.ensureIndex()) {
       for (const [id, state] of this.rowState) {
-        if (keep.has(id) || !state.startsWith("waiting\n") || this.rowRepo.get(id) !== repo) continue;
+        if (keep.has(id) || !state.startsWith("waiting\n") || this.rowRepo.get(id) !== this.keyNow(repo)) continue;
         if (!(await this.move(id, this.rowStage.get(id) ?? "approved"))) continue;
         await this.note(id, PAPERCLIP_STEPS.resumed.note, { event: "progress" });
       }
@@ -1646,7 +1712,8 @@ export class PaperclipMirror implements WorkObserver {
    * when there is no row and `create` is false.
    */
   private async resolve(item: WorkItem, create: boolean): Promise<string | null> {
-    const key = this.keyOf(item);
+    const key = await this.indexKey(item);
+    if (!key) return null;
     const cached = this.taskUuidCache.get(key);
     if (cached) return cached;
 
@@ -1677,6 +1744,8 @@ export class PaperclipMirror implements WorkObserver {
   /** Create `item`'s task, filed where every task the Foreman creates goes; its id, or null. */
   private async createTask(item: WorkItem, content: { title: string; description: string; status: string }): Promise<string | null> {
     // An explicit project wins; the Unplaced lookup files nothing until it finds one.
+    const key = await this.indexKey(item);
+    if (!key) return null;
     const unplaced = !this.cfg.projectId && this.cfg.projects;
     const projectId = this.cfg.projectId ?? (unplaced ? await this.unplacedProjectId() : null);
     if (unplaced && !projectId) return null;
@@ -1685,10 +1754,9 @@ export class PaperclipMirror implements WorkObserver {
     );
     if (!made.ok || !made.value?.id) return null;
     const id = made.value.id;
-    const key = this.keyOf(item);
     this.taskUuidCache.set(key, id);
     this.index?.set(key, id);
-    this.rowRepo.set(id, item.repo);
+    this.rowRepo.set(id, this.keyNow(item.repo));
     this.rowNumber.set(id, item.issueNumber);
     this.rowState.set(id, `status:${content.status}`);
     this.rowContent.set(id, { title: content.title, description: content.description, assigneeAgentId: null, assigneeUserId: null });
@@ -1705,7 +1773,11 @@ export class PaperclipMirror implements WorkObserver {
     if (!fresh && this.index && Date.now() - this.indexedAt <= INDEX_TTL_MS) return true;
     const keyRe = this.keyPattern();
     const cancelled = this.statusName("cancelled");
+    // One registry answer per distinct repo per scan. A registry failure throws inside the scan,
+    // so it takes the `!scanned.ok` path below and the previous index stays.
+    this.identity?.beginScan();
     const scanned = await this.safeCall("scan tasks", async () => {
+      for (const r of this.cfg.repos ?? []) await this.keyFor(r);
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
@@ -1713,21 +1785,28 @@ export class PaperclipMirror implements WorkObserver {
       const actions = new Map<string, string>();
       const content = new Map<string, RowContent>();
       const duplicates: Duplicate[] = [];
+      // Cards group by identity line: `identityKeyFormat` with the repo reduced to its key, so one
+      // issue under two owner spellings is one group. A line that is no card line groups as written.
       const byLine = new Map<string, PaperclipIssue[]>();
+      const keyed = new Map<string, string>();
       for await (const row of this.client.listIssues()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
         if (!line) continue;
-        byLine.set(line, [...(byLine.get(line) ?? []), row]);
-      }
-      for (const [line, rows] of byLine) {
-        const row = pickCard(rows, cancelled)!;
-        idx.set(line, row.id);
         const m = keyRe.exec(line);
+        const group = m?.groups ? this.indexLine(await this.keyFor(m.groups.repo), Number(m.groups.N)) : line;
+        keyed.set(row.id, line);
+        byLine.set(group, [...(byLine.get(group) ?? []), row]);
+      }
+      for (const [group, rows] of byLine) {
+        const row = pickCard(rows, cancelled)!;
+        idx.set(group, row.id);
+        const m = keyRe.exec(keyed.get(row.id)!);
         if (!m?.groups) continue;
+        const repoKey = this.keyNow(m.groups.repo);
         for (const r of rows) {
-          if (r !== row) duplicates.push({ id: r.id, key: line, repo: m.groups.repo, winner: row.identifier || row.id, title: String(r.title ?? ""), status: r.status });
+          if (r !== row) duplicates.push({ id: r.id, key: keyed.get(r.id)!, repo: repoKey, winner: row.identifier || row.id, title: String(r.title ?? ""), status: r.status });
         }
-        repoOf.set(row.id, m.groups.repo);
+        repoOf.set(row.id, repoKey);
         numberOf.set(row.id, Number(m.groups.N));
         content.set(row.id, {
           title: String(row.title ?? ""), description: String(row.description ?? ""),
