@@ -17,17 +17,6 @@ import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, re
 import { codeHost } from "../plugins/registry.js";
 
 /**
- * Review phase: invoke the EM /review-all-prs skill, scoped to one repo, when it
- * has an open feature PR awaiting review (`pr under review`, no current EM review).
- *
- * Unlike implement/revise, the orchestrator does NOT transition labels afterward —
- * the skill owns its own merges and label transitions at full fidelity. We just
- * gate, trigger, log, and back off on failure. Every run's full interaction is
- * written to logs/review/<repo>-cycle<N>-<ts>.log for debugging.
- *
- * Returns true when a review run was triggered (regardless of verdict).
- */
-/**
  * Whether new commits on base may reopen an exhausted hold. Not one the SRE
  * could not observe (`acceptance-not-verified`): commits do not give dev the
  * instrument it lacks, so each reopen buys three more runs of the same hold.

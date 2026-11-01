@@ -507,3 +507,40 @@ test("review owner R4: closure of a card held by a person clears the user too", 
   assert.equal(fake.rows[0].status, "done");
   assert.ok(unassigned(fake.rows[0]));
 });
+
+// --- Human holds: an approved-for-human card waits on its person ------------------------
+
+const humanCard = (extra = {}) => ({ item, title: "issue 7", url: "https://github.com/example/r/issues/7", state: "open", stage: null, labels: ["approved-for-human"], ...extra });
+const cardSnap = (mirror, card) => mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], states: allOpen, cards: [card] }, logger());
+
+test("human hold: an approved-for-human card ends with the human's assignee, and closed is nobody's", async () => {
+  const fake = fakePaperclip([row7("backlog", { assigneeAgentId: null })]);
+  const mirror = mirrorOn(fake, { ownsCards: true, humanUserId: "ray-user" });
+  await cardSnap(mirror, humanCard());
+  assert.equal(fake.rows[0].status, "backlog");
+  assert.equal(fake.rows[0].assigneeUserId, "ray-user");
+  assert.equal(fake.rows[0].assigneeAgentId ?? null, null);
+  // The label off: the card is nobody's again.
+  await cardSnap(mirror, humanCard({ labels: [] }));
+  assert.ok(unassigned(fake.rows[0]));
+  // Back on, then the issue closes: Done is unassigned.
+  await cardSnap(mirror, humanCard());
+  assert.equal(fake.rows[0].assigneeUserId, "ray-user");
+  await cardSnap(mirror, humanCard({ state: "completed" }));
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});
+
+test("human hold: a persisted block keeps its owner over the label", async () => {
+  const store = memoryStore();
+  const fake = fakePaperclip([row7("in_review")]);
+  const first = mirrorOn(fake, { humanUserId: "ray-user" }, store);
+  await snapshot(first, ["pr merged"]);
+  await first.onEvent({ kind: "blocked", item, reason: "dev deploy failed", owner: "sre" }, logger());
+  const second = mirrorOn(fake, { ownsCards: true, humanUserId: "ray-user" }, store);
+  // The label lands on an issue still at pr merged: its card carries that stage, and the block holds.
+  await snapshot(second, ["pr merged"], { foremanHeld: true }, { cards: [humanCard({ stage: issueStage(["pr merged", "approved-for-human"], false, LL, "approved") })] });
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, "sre-agent");
+  assert.notEqual(fake.rows[0].assigneeUserId, "ray-user");
+});
