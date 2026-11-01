@@ -1028,7 +1028,7 @@ export class PaperclipMirror implements WorkObserver {
     const fixed = ["enabled", "url", "companyId", "agentId", "identityKeyFormat"] as const;
     const changed = fixed.filter((k) => next[k] !== this.cfg[k]);
     if (changed.length) {
-      this.logger.warn(`paperclip: config reload changes ${changed.join(", ")}; restart the Foreman to apply it. The mirror keeps the config it started with.`);
+      this.logger.warn(`paperclip: config reload changes ${changed.join(", ")}; a new mirror takes over to apply it.`);
       return false;
     }
     this.cfg = next;

@@ -232,3 +232,50 @@ test("Paperclip: a reload that switches it on starts the mirror, one that switch
   assert.equal(wantsSnapshot(), false, "off: no snapshot wanted");
   resetRegistryForTests();
 });
+
+test("reload: a reconfigure that replaces the plugin's observer swaps it in place; the old one hears nothing more", async () => {
+  resetRegistryForTests();
+  const first = { onEvent: async () => {} };
+  const second = { onEvent: async () => {} };
+  const direct = { onEvent: async () => {} };
+  const plugin = {
+    id: "swap", roles: ["observer"], observer: first,
+    enabled: (c) => c.paperclip.enabled,
+    reconfigure() { this.observer = second; },
+  };
+  registerPlugin(plugin);
+  await startPlugins(cfg(true), ctx);
+  addObserver(direct);
+  assert.deepEqual(observers(), [first, direct]);
+  await reconfigurePlugins(cfg(true), ctx);
+  assert.deepEqual(observers(), [second, direct], "the replacement takes the old slot, delivery order kept");
+  await reconfigurePlugins(cfg(false), ctx);
+  assert.deepEqual(observers(), [direct], "switching off removes the replacement, not a stale copy");
+  resetRegistryForTests();
+});
+
+for (const [field, value] of [
+  ["url", "http://127.0.0.1:9/new"],
+  ["companyId", "c-new"],
+  ["agentId", "a-new"],
+  ["identityKeyFormat", "replacement: {repo}#{N}"],
+]) {
+  test(`Paperclip: a reload changing ${field} delivers to the new mirror, which carries the new value`, async () => {
+    resetRegistryForTests();
+    const plugin = new PaperclipPlugin();
+    registerPlugin(plugin);
+    const base = { enabled: true, url: "http://127.0.0.1:9/old", companyId: "c", agentId: "a" };
+    let text = "v1";
+    const live = { ...ctx, configText: () => text };
+    await startPlugins(load({ paperclip: base }), live);
+    const old = plugin.observer;
+    assert.deepEqual(observers(), [old]);
+    text = "v2";
+    await reconfigurePlugins(load({ paperclip: { ...base, [field]: value } }), live);
+    assert.notEqual(plugin.observer, old, "a new mirror took over");
+    assert.deepEqual(observers(), [plugin.observer], "events reach the new mirror only");
+    assert.equal(plugin.observer.cfg[field], value);
+    await reconfigurePlugins(load(), live);
+    resetRegistryForTests();
+  });
+}

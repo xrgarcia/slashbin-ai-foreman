@@ -1019,7 +1019,7 @@ test("publishConfig: false publishes nothing", async () => {
   assert.equal(fake.calls.length, 0);
 });
 
-test("a reload moves the board mapping; one that renames the agent is refused until a restart", async () => {
+test("a reload moves the board mapping; one that renames the agent is refused in place (the plugin starts a new mirror)", async () => {
   const fake = fakePaperclip([row("r7", 7, { status: "todo" })]);
   const base = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
     identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false } };
@@ -1029,7 +1029,7 @@ test("a reload moves the board mapping; one that renames the agent is refused un
   await mirror.onState(item, "new", "inReview", repoConfig, logger());
   assert.equal(fake.rows[0].assigneeAgentId, "agent-lead");
   assert.equal(mirror.reconfigure({ ...leadReviews, agentId: "agent-2" }), false);
-  assert.match(log.lines.find(([lvl]) => lvl === "warn")[1], /changes agentId; restart the Foreman/);
+  assert.match(log.lines.find(([lvl]) => lvl === "warn")[1], /changes agentId; a new mirror takes over/);
 });
 
 // --- One writer per card: `ownsCards` (jerky_ops#11, 2026-10-15) -------------------
