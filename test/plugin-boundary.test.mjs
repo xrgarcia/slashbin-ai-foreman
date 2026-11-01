@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBoundary, countViolations, isAgentPlugin, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
+import { checkBoundary, connectorProblems, countViolations, isAgentPlugin, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = join(root, "src");
@@ -25,19 +25,18 @@ const KNOWN_VIOLATORS = {
   "onboarding.ts": 2,
   "phases/common.ts": 2,
   "phases/custom.ts": 1,
-  "phases/implement.ts": 5,
+  "phases/implement.ts": 4,
   "phases/promote.ts": 2,
   "phases/qa-before-merge.ts": 1,
   "phases/reconcile.ts": 1,
   "phases/release.ts": 3,
-  "phases/review.ts": 3,
+  "phases/review.ts": 2,
   "phases/revise.ts": 1,
   "phases/unstick.ts": 1,
   "phases/verify.ts": 2,
   "qa-report.ts": 2,
   "reconciler.ts": 2,
   "unstick.ts": 1,
-  "work-source.ts": 1,
 };
 
 const importsOf = (file) => [...readFileSync(file, "utf8").matchAll(/^(?:import|export)[^;]*?from "([^"]+)"/gm)].map((m) => m[1]);
@@ -49,6 +48,12 @@ if (process.env.PRINT_PLUGIN_VIOLATIONS) console.log(JSON.stringify(countViolati
 
 test("core imports no plugin beyond the shrinking allowlist", () => {
   assert.deepEqual(checkBoundary(realImports(), KNOWN_VIOLATORS), []);
+});
+
+test("no core file constructs the GitHub work-source connector (EM#1150 f4)", () => {
+  const sources = Object.fromEntries(srcFiles().map((rel) => [rel, readFileSync(join(src, rel), "utf8")]));
+  assert.ok(sources["plugins/github.ts"].includes("new GitHubIssueConnector"), "the GitHub plugin is where it is built");
+  assert.deepEqual(connectorProblems(sources), []);
 });
 
 test("the contract and the registry import no plugin", () => {
@@ -109,4 +114,20 @@ test("ratchet forbids core importing an agent plugin, even a file the allowlist 
   // The plugins themselves, and the composition root, may.
   assert.deepEqual(checkBoundary({ "plugins/index.ts": ["./tech-lead.js"], "plugins/sre.ts": ["./agent-cli.js"] }, {}), []);
   assert.ok(!isAgentPlugin("plugins/registry.ts") && !isAgentPlugin("plugins/contract.ts"));
+});
+
+test("ratchet forbids constructing GitHubIssueConnector in core; the GitHub plugin and src/github* may", () => {
+  for (const rel of ["work-source.ts", "phases/implement.ts", "phases/review.ts", "plugins/paperclip.ts"]) {
+    const problems = connectorProblems({ [rel]: "const s = new GitHubIssueConnector();" });
+    assert.equal(problems.length, 1, rel);
+    assert.match(problems[0], new RegExp(`src/${rel.replace(".", "\\.")} constructs GitHubIssueConnector`));
+  }
+  assert.match(connectorProblems({ "orchestrator.ts": 'import { GitHubIssueConnector } from "./github-work-source.js";' })[0], /imports GitHubIssueConnector/);
+  assert.deepEqual(connectorProblems({
+    "plugins/github.ts": "readonly workSource = new GitHubIssueConnector();",
+    "github-work-source.ts": "new GitHubIssueConnector()",
+    "github/x.ts": "new GitHubIssueConnector()",
+    "adapters.ts": "// (`GitHubIssueConnector` in github-work-source.ts)\n/* new GitHubIssueConnector() */",
+    "index.ts": 'export { GitHubIssueConnector } from "./github-work-source.js";',
+  }), []);
 });

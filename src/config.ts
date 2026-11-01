@@ -384,6 +384,12 @@ export const configSchema = z.object({
   // [GitHub conventions](#github-conventions-github).
   github: githubConventionsSchema,
 
+  // Where the Foreman's work comes from: the id of the work-source plugin that
+  // selects issues and records their moves. `github` (default) is GitHub issues,
+  // the only one today; any other value turns GitHub off, and the Foreman refuses
+  // to start until a plugin of that id is installed.
+  workSource: z.string().min(1).default("github"),
+
   // The optional Paperclip board mirror, off unless `enabled` (docs/paperclip.md).
   // Global, never per repo: one Foreman is one Paperclip agent. prefault for
   // the same reason as above.
@@ -545,6 +551,8 @@ export interface AgentConfig {
   github: GithubConventions;
   /** The stages each repo pass runs, in order. Defaults to the ten built-ins. */
   stages: readonly StageEntry[];
+  /** The work-source plugin's id (default `github`). Optional so a hand-built test config means the default. */
+  workSource?: string;
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
   /** Skill sync settings. Always present; `enabled` is false unless opted in. */
@@ -704,6 +712,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels: fileConfig.lifecycleLabels,
     stages: fileConfig.stages,
     github: fileConfig.github,
+    workSource: fileConfig.workSource,
     paperclip: leniencyForDisabled(mergePaperclip(fileConfig.paperclip)),
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
@@ -901,6 +910,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     stages,
+    workSource: parsed.workSource,
     paperclip,
     skillSync: resolveSkillSync(parsed.skillSync),
     dependabot: globals.dependabot,

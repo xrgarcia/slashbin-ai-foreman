@@ -7,8 +7,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
-import { selectWork, heldWork, emit, advance, wantsSessionReports } from "../work-source.js";
-import { GitHubIssueConnector } from "../github-work-source.js";
+import { selectWork, heldWork, emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
 import {
   discoveryBatch,
   getOpenIssues,
@@ -637,7 +636,7 @@ export async function tryBatchImplementation(
         repoConfig.repoPath,
         repoLogger,
       );
-      const allActionable = (await new GitHubIssueConnector().selectEligible(repoConfig, repoLogger)).map((w) => w.issueNumber);
+      const allActionable = (await workSourceFor(repoConfig).selectEligible?.(repoConfig, repoLogger) ?? []).map((w) => w.issueNumber);
       const labelingCandidates = Array.from(new Set([...actionableIssues, ...allActionable]));
       const matched = referencedAll
         ? labelingCandidates.filter((n) => referencedAll.includes(n))
