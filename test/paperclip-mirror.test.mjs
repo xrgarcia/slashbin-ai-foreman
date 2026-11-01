@@ -1653,3 +1653,15 @@ test("identity: the registry client asks once per repo per scan, sends the beare
   down = true;
   await assert.rejects(ri.keyOf("xrgarcia/slashbin-console"), /registry answered 503/);
 });
+
+test("identity: an owned snapshot for the moved repo leaves the existing card's text unchanged", async () => {
+  const text = "source: xrgarcia/slashbin-console#7\nGitHub: open · not approved\n\nhttps://github.com/xrgarcia/slashbin-console/issues/7";
+  const fake = fakePaperclip([oldCard({ title: "slashbin-console#7 issue 7", description: text })]);
+  const { mirror } = mirrorOn(fake, OWNED, fakeIdentity());
+  const moved = { item: MOVED, title: "issue 7", url: "https://github.com/slashbin-io/slashbin-console/issues/7", state: "open", stage: null };
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: MOVED.repo, items: [], cards: [moved] }, logger());
+  assert.equal(fake.rows.length, 1, "no second card");
+  assert.equal(fake.rows[0].description, text);
+  assert.equal(fake.rows[0].title, "slashbin-console#7 issue 7");
+  assert.equal(fake.calls.filter((c) => c.method === "PATCH" && c.body && ("description" in c.body || "title" in c.body)).length, 0);
+});

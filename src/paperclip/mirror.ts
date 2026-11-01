@@ -1125,10 +1125,23 @@ export class PaperclipMirror implements WorkObserver {
     const line = c.state !== "open" ? `GitHub: closed ${c.state}` : `GitHub: open · ${c.stage ? `stage ${c.stage}` : "not approved"}`;
     const facts = c.state === "open" && c.stage && c.stage !== "done" ? this.handoffFacts(id, c.stage, c.item) : null;
     const next = facts && c.stage && c.stage !== "done" ? `\n${handoffNextLine(c.stage, facts, this.labels)}` : "";
-    return {
+    const out = {
       title: fill(PAPERCLIP_OWNED_TITLE_FORMAT, { repo: c.item.repo, owner, name, N: String(c.item.issueNumber), title: c.title }),
       description: `${this.keyOf(c.item)}\n${line}${next}\n\n${c.url}`,
     };
+    // A card found through the identity key keeps the owner spelling it was written with:
+    // after a move the item names the new owner, and the card's text is not rewritten.
+    const written = id ? this.writtenRepo(id) : null;
+    if (written && written !== c.item.repo) {
+      return { title: out.title.split(c.item.repo).join(written), description: out.description.split(c.item.repo).join(written) };
+    }
+    return out;
+  }
+
+  /** The repo spelling on card `id`'s identity line, as last scanned. */
+  private writtenRepo(id: string): string | null {
+    const first = (this.rowContent.get(id)?.description ?? "").split("\n")[0].trim();
+    return this.keyPattern().exec(first)?.groups?.repo ?? null;
   }
 
   /**
