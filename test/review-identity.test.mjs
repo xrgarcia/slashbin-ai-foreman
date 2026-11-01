@@ -1,10 +1,7 @@
-// Review skill + reviewer identity per repo, with no built-in defaults (EM#425).
+// Reviewer identity per repo, with no built-in defaults (EM#425).
 // Run with `npm test` after `npm run build`.
 //
-// The contract: a review-enabled repo needs a reviewer (techLeadPath), not an EM
-// repo or a review skill; and a relative reviewSkillPath resolves against
-// the directory the review session runs in — emRepoPath when set (unchanged
-// behaviour), else the repo's review checkout.
+// The contract: a review-enabled repo needs a reviewer (techLeadPath), not an EM repo.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";

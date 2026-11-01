@@ -529,8 +529,9 @@ Release the block on GitHub, where the Foreman looks, and the card follows on it
 ### Cards held by a person
 
 A card labelled ${code(HUMAN_HOLD_LABEL)} waits on a person, not on a stage's owner. The plugin
-never reads GitHub labels, so a sync supplies them: \`assigneeFor(cfg, { labels, repo })\` in
-\`board.ts\`, a pure function. The Foreman's own moves never call it, and are unchanged.
+never reads GitHub; the work source's cards carry each open issue's labels, and the card sync
+(\`syncCard\` in \`mirror.ts\`, with \`ownsCards\` on) asks \`assigneeFor(cfg, { labels, repo })\` in
+\`board.ts\` who holds a card that is in no lifecycle stage. A closed card stays nobody's.
 
 | The item | Assignee |
 |---|---|
