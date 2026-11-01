@@ -61,3 +61,25 @@ export function checkBoundary(imports, allowlist) {
   }
   return problems;
 }
+
+/** Files that may construct the GitHub work-source connector (EM#1150 f4): the GitHub plugin and the GitHub code. */
+export const mayConstructConnector = (rel) => rel === "plugins/github.ts" || /^github/.test(rel);
+
+/**
+ * Core files that construct `GitHubIssueConnector` or import it to do so, given
+ * each src-relative file's text. The core gets its work source only from the
+ * registry; no allowlist covers this. Comments are ignored.
+ */
+export function connectorProblems(sources) {
+  const problems = [];
+  for (const [rel, text] of Object.entries(sources)) {
+    if (mayConstructConnector(rel)) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    if (/\bnew\s+GitHubIssueConnector\b/.test(code)) {
+      problems.push(`src/${rel} constructs GitHubIssueConnector; get the work source from the registry (workSourceFor / activeWorkSource)`);
+    } else if (/^import\b[^;]*\bGitHubIssueConnector\b[^;]*from/m.test(code)) {
+      problems.push(`src/${rel} imports GitHubIssueConnector; get the work source from the registry (workSourceFor / activeWorkSource)`);
+    }
+  }
+  return problems;
+}

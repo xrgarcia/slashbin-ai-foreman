@@ -22,13 +22,15 @@ import { runRepoPass, runLanePass, requestShutdown, drainInFlight, getActiveLane
 import { configureIssueCache } from "../dist/github.js";
 import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
 
 const logger = createLogger({ format: "text", level: "error" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let tmp, F, saved;
 
-before(() => {
+before(async () => {
+  await startGitHubWorkSource();
   tmp = mkdtempSync(join(tmpdir(), "foreman-lanes-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);

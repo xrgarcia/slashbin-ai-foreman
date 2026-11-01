@@ -16,4 +16,6 @@ export { reconcileRepo, type ReconciliationResult } from "./reconciler.js";
 export { runCycle, runRepoPass, runLanePass, getState, type OrchestratorState, type CycleResult } from "./orchestrator.js";
 export { lanesFor, type Lane } from "./lanes.js";
 export { startDaemon, type DaemonHandle } from "./daemon.js";
+export { registerBuiltinPlugins } from "./plugins/index.js";
+export { startPlugins } from "./plugins/registry.js";
 export { BridgeClient, type BridgeConfig, type IncomingCommand } from "./bridge-client.js";

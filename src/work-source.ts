@@ -1,4 +1,3 @@
-import { GitHubIssueConnector } from "./github-work-source.js";
 import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
@@ -8,9 +7,9 @@ import { clearUnstick, noteStuck } from "./unstick.js";
 import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
 
 /**
- * The work source each repo selects from and reports to. GitHub issues unless
- * a source has been registered. Kept out of adapters.ts so that module never
- * imports a connector.
+ * The work source each repo selects from and reports to: the one the registry
+ * resolves (the enabled `workSource` plugin, GitHub by default, or one set
+ * directly). The core never constructs a connector itself (EM#1150 f4).
  *
  * Also the one dispatch point for observers (EM#417). The orchestrator reports
  * every event through `emit` (a lifecycle move through `advance`), never
@@ -22,9 +21,22 @@ export function registerWorkSource(adapter: WorkSourceAdapter | null): void {
   setWorkSource(adapter);
 }
 
-/** The active adapter. The orchestrator uses `emit` / `advance` instead. */
+/** The active adapter. The orchestrator uses `emit` / `advance` instead. Throws when none is enabled; startup refuses first. */
 export function workSourceFor(_repoConfig: RepoConfig): WorkSourceAdapter {
-  return activeWorkSource() ?? new GitHubIssueConnector();
+  const source = activeWorkSource();
+  if (!source) throw new Error(workSourceRefusal(undefined) ?? "no work source");
+  return source;
+}
+
+/**
+ * Why the Foreman cannot run, or null: no work-source plugin is started. The CLI
+ * refuses to start on it, and logs it after a reload that switched the source off.
+ */
+export function workSourceRefusal(config: Pick<AgentConfig, "workSource"> | undefined): string | null {
+  if (activeWorkSource()) return null;
+  const id = config ? ` (workSource: "${config.workSource ?? "github"}")` : "";
+  return `no work source is enabled${id}: no plugin of that id is installed and started, ` +
+    `so the Foreman has nothing to select work from. Set "workSource" to "github" (the default) or install the plugin.`;
 }
 
 
