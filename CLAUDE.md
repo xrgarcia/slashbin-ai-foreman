@@ -6,9 +6,9 @@ merged work — across many repos from a single process.
 
 ## Changing this repo
 
-Commit straight to `features` in this checkout; it accumulates the changes we want. When they
-are ready, `features` merges to `develop` as the pre-release. No branch per change and no PR
-into `features` (Ray, 2026-10-18).
+Since 2026-10-29, changes reach `features` only by branch, PR and a Tech Lead `review-pr` run.
+After the merge, restart with `scripts/restart-drained.sh`. `features` merges to `develop` as the
+pre-release.
 
 ## Cycle
 
