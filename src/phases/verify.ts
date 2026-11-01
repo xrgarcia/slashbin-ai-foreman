@@ -7,10 +7,10 @@ import type { SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { verifyViaSre, type VerifyResult } from "../agent.js";
-import { applyQaGate, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
+import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
-import { getOpenIssues } from "../github/cache.js";
+import { getOpenIssues, hasLabel } from "../github/cache.js";
 import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
 import { noteUnrelated } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
@@ -224,6 +224,31 @@ export function pickVerifyTarget(
 }
 
 /**
+ * The EM's QA re-run (slashbin-ai-foreman#158): an issue at `pr approved`, not yet authorized for production,
+ * whose merged PR carries a comment opening `**EM QA re-run` newer than every QA Report, goes back to
+ * `pr merged`, so this stage verifies it again and runs the QA gate on dev. Best effort: a failed read moves nothing.
+ */
+async function takeQaRerunRequests(repoConfig: RepoConfig, config: AgentConfig, vlog: Logger): Promise<void> {
+  const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
+  const approved = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)
+    .filter((i) => hasLabel(i, prApproved) && !hasLabel(i, readyForProd)).map((i) => i.number);
+  if (approved.length === 0) return;
+  const deps = realQaDeps(repoConfig, config, vlog);
+  const byPr = new Map<number, number[]>();
+  for (const r of findIssuesMergedToBase(repoConfig, approved, vlog)) byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
+  for (const [pr, issues] of byPr) {
+    try {
+      if (!postMergeQaState(await deps.comments!(pr), []).rerunRequested) continue;
+    } catch (e) {
+      vlog.warn(`QA re-run: PR #${pr} comments unreadable (${String(e).slice(0, 200)})`);
+      continue;
+    }
+    vlog.info(`QA re-run: the EM asked for QA again on PR #${pr}; ${issues.map((n) => `#${n}`).join(", ")} back to verification`);
+    for (const n of issues) await advance(itemOf(repoConfig, n), "qaRerun", repoConfig, vlog);
+  }
+}
+
+/**
  * The verify stage (EM#440): hand one merged PR to the SRE and move its issues
  * `pr merged` → `pr approved` on a pass. A hold or an error never relabels: the
  * issue stays `pr merged`, its card goes to Blocked with the reason, and the
@@ -248,6 +273,7 @@ export async function tryVerify(
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
+  if (qaApplies(repoConfig, config)) await takeQaRerunRequests(repoConfig, config, vlog);
   const waiting = findIssuesAwaitingVerify(repoConfig, vlog);
   const state = loadRepoState(repoName);
   const held: Record<number, VerifyHold> = { ...(state.verifyHeld ?? {}) };
@@ -329,8 +355,10 @@ export async function tryVerify(
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.
     const qaBeforeMerge = qaBeforeMergeApplies(repoConfig, config);
+    // qaBeforeMerge, but no real PASS since the EM's last re-run request (none, or a void 0-shot one): the gate runs here.
+    const qaAgain = sre.kind === "verdict" && sre.pass && qaBeforeMerge && await postMergeQaNeeded(target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
     let r: VerifyResult = sre;
-    if (sre.kind === "verdict" && sre.pass && config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
+    if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) || qaAgain)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
       const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
       await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);

@@ -8,11 +8,11 @@ source (`src/`), not from the other docs; where they disagree, this file and the
 hold code, unstick kind or deploy stop this file does not name. Adding one means adding its
 row here.
 
-**The EM's whole input surface is six things:** `approved` on an issue · a spec that clears
+**The EM's whole input surface is seven things:** `approved` on an issue · a spec that clears
 `## Pre-Flight` and `## Acceptance` · `ready for prod release` on each dev-verified issue ·
-a PR comment opening `**EM scope ruling` · an issue edit or a lifted `blocked` label · a new
-corrective issue. Everything else the Foreman, Tech Lead and SRE do by themselves. If the
-action you are about to take is not one of these six, you are doing someone else's stage.
+a PR comment opening `**EM scope ruling` · a PR comment opening `**EM QA re-run` · an issue
+edit or a lifted `blocked` label · a new corrective issue. Everything else the Foreman, Tech Lead and SRE do by themselves. If the
+action you are about to take is not one of these seven, you are doing someone else's stage.
 
 `deliver-to-prod` on an epic is **not** a Foreman input: `src/` never reads it. It is the
 EM's own gate (the deliver-to-prod skill) for applying `ready for prod release`.
@@ -33,7 +33,7 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 | `merged` | `pr merged` | starts SRE dev verification | none — wait |
 | `verifying` | `pr merged` | SRE dev verification (and visual QA on QA repos) running | none — wait |
 | `qaReviewing` | `pr merged` | QA running visual and behaviour checks. `qaBeforeMerge` on: locally on the Tech Lead-approved, unmerged PR (PASS merges it, FAIL goes back to the builder, HELD holds it unmerged). `qaGate` on: on dev after the SRE passed; pass advances, FAIL/HELD holds | none — wait |
-| `pendingVerification` | `pr approved` | posts "Waiting on EM verification" hourly if develop is ahead and nothing is authorized; unstick raises `release-gate` | **yours:** run the release gate (`/deliver-to-prod` 3a) and apply `ready for prod release`. Nothing reaches production until you do |
+| `pendingVerification` | `pr approved` | posts "Waiting on EM verification" hourly if develop is ahead and nothing is authorized; unstick raises `release-gate`; a `**EM QA re-run` comment on its merged PR, newer than every QA Report, moves it back to `pr merged` (move `qaRerun`) | **yours:** run the release gate (`/deliver-to-prod` 3a) and apply `ready for prod release`. Nothing reaches production until you do. Its QA evidence is void or stale → post a PR comment opening `**EM QA re-run` on the merged PR, never run `check` yourself |
 | `releaseAuthorized` | `ready for prod release` | puts it in the release PR on the next promote pass, moves it to `release pending` | none — wait |
 | `awaitingRelease` | — | nothing: the release PR is not one the release stage owns | **yours:** get that PR merged or close it |
 | `releasing` | `release pending` | Tech Lead approves the release PR, SRE merges, deploys, prod-verifies, soaks, closes the issue | none — wait. If the PR shows a failing EM sign-off status, an issue it carries lacks your label (§4) |
@@ -42,6 +42,8 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 | `blocked` | `blocked` | paused; the unstick stage calls the EM wrapper (§3) | read the reason, fix what it names, then lift `blocked` or edit the issue — **on the issue, never the board** |
 
 **QA before the merge (`qaBeforeMerge`, default off, EM#923).** For a `qaRepos` repo with the flag on, the order is review, QA, then SRE: the Tech Lead approves without merging (trailer `merged=no hold=qa-pending`, not a failure), QA runs `check --local` on that head (no secret, it boots the PR itself), and only a PASS has the Tech Lead merge before the SRE's dev verify. The merge is `review-pr --merge-approved <the full sha QA passed>`: merge only, never a new judgment. Trailer `hold=head-moved` (the PR head changed after QA) means no merge, nothing charged, and the card goes back to review for the new head; `hold=not-approved` is a charged hold. Only a consistent result is remembered (PASS with exit 0, FAIL with exit 1, marker keyed by the full head sha); an inconsistent one posts `verdict=INCONSISTENT`, holds on every retry, and is not a review round. The card stays `inReview` and shows `qaReviewing` while QA runs. A QA FAIL moves it to `changesRequested`, counts as a review round toward the review-rounds alert, and the revise session is handed QA's failing lines; the SRE never sees it. Holds `qa-held-qa-local-boot-failed` and `qa-held-qa-local-seed-missing` (owner QA / Console), `qa-held-worker-data-unavailable`, `qa-held-attribution-unavailable` and `qa-errored` are tooling holds: deferred, nothing charged, nothing merged. Flag off or repo outside `qaRepos`: unchanged.
+
+**A void PASS is not a verdict (slashbin-ai-foreman#158).** A QA PASS with `Shots: 0` on a PR that changed `client/` code checked nothing. Before the merge it holds as `qa-held-page-unplaced` (charged), and a reused PASS marker of that kind is run again. After the merge, the verify stage runs the QA gate on dev, even with `qaBeforeMerge` on, whenever the PR has no real PASS newer than the EM's last `**EM QA re-run` request: a FAIL is `visual-qa-failed` and goes to `rework-decision` like any other.
 
 Variant: **`deployFailed`** (a `blocked` card whose dev deploy failed) is the SRE's, not the
 EM's: route it to the SRE, then release the hold.
@@ -57,7 +59,7 @@ come at 10 minutes, then 20, then the issue goes `blocked` (verify-exhausted).
 | `codex-unavailable`, `em-mirror-unavailable`, `registry-unavailable`, `tooling-unavailable`, `evidence-check-failed`, `no-evidence-comment`, `qa-errored`, `qa-held-qa-local-boot-failed`, `qa-held-qa-local-seed-missing`, `qa-held-worker-data-unavailable`, `qa-held-attribution-unavailable`, `qa-held-dev-unreachable`, `qa-held-sign-in-failed`, `qa-held-review-unavailable`, `qa-held-pr-unreadable`, `qa-held-baseline-unreadable` | defer (tooling) | retries on `backoff.agentUnavailable` (2 → 30 min), no attempt charged, silent | none — wait. Persisting for hours is a tooling defect: file it on the SRE or Foreman |
 | `wait-until-YYYYMMDDTHHMMZ` | wait | retries at that time, no charge | none — wait |
 | `visual-qa-failed` | decide | **files nothing and builds nothing.** Holds at its cap at once (retrying unchanged code cannot pass) and raises the unstick kind `rework-decision` in the same cycle, with the PR, the files it touched, the verdict and the evidence links (Ray, 2026-10-31; Slashbin-console#1538: an automatic rework changed `JourneyBar.tsx` while the cause was in `DashboardLayout.tsx`, and the release queue was held ~24h) | **yours — decide the fix, on the first FAIL.** Read the evidence, find the component that owns the defect (it may lie outside the PR's files), and file the corrective titled "… — follow-up to #N" or edit the spec. The follow-up merging into base (`baseAdvanced`) or a spec edit (`specEdited`) releases the hold and re-verifies |
-| every other `qa-held-*` (`unsafe-host`, `browser-crashed`, `nothing-captured`), `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
+| every other `qa-held-*` (`unsafe-host`, `browser-crashed`, `nothing-captured`, `page-unplaced`), `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
 | `dev-verify-failed`, `deploy=…` | charged | blocked with owner SRE (`deployFailed`) | route to the SRE |
 | `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked`; the retries keep running, but the first failure also raises `rework-decision` (§3) | **yours — decide the fix, on the first failure; do not wait out the attempts.** Read the evidence and the touched files: edit the spec (`specEdited` releases it at once) or file the fix as a follow-up (below). `baseAdvanced` does **not** release this one. Deploy failures (`dev-verify-failed`, `deploy=…`) and runs that returned no verdict raise nothing early; they stay with the SRE and `verify-exhausted` |
 
