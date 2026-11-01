@@ -53,8 +53,17 @@ The core reaches every outside system through one contract, `src/plugins/contrac
 `reviewer`, `verifier`, `deployer`, `qa`, `unstick`), whether a config enables it, and
 `start` / `reconfigure` / `stop`. `src/plugins/registry.ts` starts the enabled ones once
 at startup, hands them each config reload, and resolves each role; every enabled observer
-hears every event. `src/plugins/index.ts` is the only file that names a plugin. Paperclip
-is an observer (`src/plugins/paperclip.ts`); a plugin can add a CLI command (`paperclip:doctor`).
+hears every event. `src/plugins/index.ts` is the only file that names a plugin. Each
+plugin, its roles and the key that turns it on: [README](../README.md#plugins).
+
+Paperclip is an observer (`src/plugins/paperclip.ts`, delegating to `src/paperclip/mirror.ts`)
+and is optional: off (`paperclip.enabled` false, or no `companyId` / `agentId`) it is never
+started, and the core makes no Paperclip call and no observer-only GitHub read
+(`observersWantSnapshot`, `observersWantSessionReports`). On, it is self-sufficient: each
+pass's snapshot event carries the open issues' stages and live closed states, and the mirror
+creates a missing card, moves each card to its stage, and closes a closed issue's card with
+nobody holding it. A card's block is kept in the state file (`CardBlockStore`) so it survives
+a restart. A plugin can add a CLI command (`paperclip:doctor`).
 
 GitHub issues are the `workSource` plugin (`src/plugins/github.ts`), on unless the config's
 `workSource` names another id. Selection, implement, review and every recorded move reach it
@@ -80,7 +89,7 @@ deployer and no promote path) comments and closes it, each a lifecycle move
 issues' labels and the recently merged PRs, so this works in any branch layout and resumes
 where a failed write stopped; it never closes without its completion comment.
 
-The move is done. `test/plugin-boundary.test.mjs` fails the build when a core file imports
+`test/plugin-boundary.test.mjs` fails the build when a core file imports
 GitHub or Paperclip code directly (its list of exceptions is empty and must stay so) or runs
 `gh`, which only `src/github*` and `src/plugins/github.ts` may.
 
@@ -96,9 +105,10 @@ src/
 ├── work-source.ts     # emit()/advance(): one event → work source + observers
 ├── plugins/           # Plugin contract, registry, composition root, and plugin entries
 ├── code-host.ts       # The CodeHost interface and the PR, issue and branch types it speaks in
+├── profiles/          # Named config defaults (`"profile"`); Slashbin's values live only here
 ├── config-schema/     # The github and paperclip config blocks (core: config.ts reads them)
-├── github.ts          # GitHub API surface (polling, PRs, labels, dual-token ops); code in github/
-├── github-work-source.ts # GitHub issues as the work source: a move → its labels
+├── github.ts          # GitHub plugin code: API surface (PRs, labels, dual-token ops); code in github/
+├── github-work-source.ts # GitHub plugin code: issues as the work source, a move → its labels
 ├── agent.ts           # Claude Code CLI spawner (session env, secret gate, redaction)
 ├── stages.ts          # Stage schema, default order, dispatch loop
 ├── lanes.ts           # Stages grouped into lanes; checkout, lane and session locks
@@ -109,7 +119,7 @@ src/
 ├── redact.ts          # Secret redaction in transcripts, logs and errors
 ├── orchestrator.ts    # Lane pass per (repo, lane), failure cooldowns, shutdown drain
 ├── phases/            # One file per stage (reconcile, review, verify, promote, release, revise, implement, custom)
-├── paperclip/         # Optional Paperclip board plugin (a WorkObserver)
+├── paperclip/         # Paperclip plugin code: the board mirror, client, doctor
 ├── state.ts           # Persistent state management (.agent-state.json)
 ├── daemon.ts          # One poll loop per (repo, lane), config hot-reload, graceful shutdown
 ├── bridge-client.ts   # WebSocket Discord client (exported; unused by the daemon)

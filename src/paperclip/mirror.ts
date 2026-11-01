@@ -64,7 +64,7 @@ import type { PaperclipCommentEvent, PaperclipConfig, PaperclipStage } from "./c
 import { QA_BEFORE_MERGE_FALLBACK_STAGE, STATE_STAGE, type Stage } from "../lifecycle.js";
 import type { Logger } from "../logger.js";
 import {
-  BACKLOG_STATUS, CONFIG_KEY, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withIssueLabel, withStage,
+  assigneeFor, BACKLOG_STATUS, CONFIG_KEY, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX, isHoldComment, LIVE_LEASE_KEY, SESSION_FALLBACK_STAGE, SESSION_STAGE, stageSeat, stageTarget, statusName, withIssueLabel, withStage,
   type LiveLease, type PaperclipBucket,
 } from "./board.js";
 import { DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine, type HandoffFacts, type HandoffLabels, type HandoffVariant } from "./handoff.js";
@@ -1157,8 +1157,8 @@ export class PaperclipMirror implements WorkObserver {
   /**
    * Bring a card the Foreman owns in step with its issue (`ownsCards`): title
    * and description; closed → done, or cancelled when not planned, with no stage
-   * label and nobody's; not approved → backlog, nobody's, no stage
-   * label; a held card's reason as its unblock descriptor, and the holder's
+   * label and nobody's; not approved → backlog, no stage label, held by
+   * nobody, or by `humanUserId` when labelled `approved-for-human` (assigneeFor); a held card's reason as its unblock descriptor, and the holder's
    * comment once. One PATCH, only when something differs. A card a session holds
    * keeps its status; a cancelled card of an open issue and a waiting hold are
    * left as they are, as the lifecycle pass leaves them.
@@ -1189,8 +1189,10 @@ export class PaperclipMirror implements WorkObserver {
       // Closed is nobody's: the last holder comes off too.
       if (have?.assigneeAgentId || have?.assigneeUserId) Object.assign(body, { status: target, assigneeAgentId: null, assigneeUserId: null });
     } else if (free && c.stage === null && status !== this.statusName("cancelled") && !unconfirmed) {
-      if (status !== BACKLOG_STATUS || have?.assigneeAgentId || have?.assigneeUserId) {
-        Object.assign(body, { status: BACKLOG_STATUS, assigneeAgentId: null, assigneeUserId: null });
+      // A human hold waits on its person; a user assignment wakes no agent.
+      const user = assigneeFor(this.cfg, { labels: c.labels ?? [], repo: c.item.repo })?.assigneeUserId ?? null;
+      if (status !== BACKLOG_STATUS || have?.assigneeAgentId || (have?.assigneeUserId ?? null) !== user) {
+        Object.assign(body, { status: BACKLOG_STATUS, assigneeAgentId: null, assigneeUserId: user });
         const labelIds = await this.labelIdsFor(id, null);
         if (labelIds) body.labelIds = labelIds;
       }
@@ -1240,7 +1242,7 @@ export class PaperclipMirror implements WorkObserver {
       title: want.title,
       description: want.description,
       assigneeAgentId: "assigneeAgentId" in body ? null : have?.assigneeAgentId ?? null,
-      assigneeUserId: "assigneeUserId" in body ? null : have?.assigneeUserId ?? null,
+      assigneeUserId: "assigneeUserId" in body ? (body.assigneeUserId as string | null) : have?.assigneeUserId ?? null,
       ...(Array.isArray(body.labelIds) ? { labelIds: body.labelIds as string[] } : have?.labelIds ? { labelIds: have.labelIds } : {}),
     });
   }
