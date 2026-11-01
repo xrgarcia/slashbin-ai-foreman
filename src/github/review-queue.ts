@@ -92,6 +92,17 @@ export function findPendingRevisions(
   }
 }
 
+/**
+ * The issues among `issueNumbers` that carry `github.blockedLabel`. The EM's hold: their PR gets no
+ * review, QA-before-merge or revise until it is lifted (docs/em-coordination.md §1). Throws when the
+ * open issues cannot be read.
+ */
+export function blockedAmong(config: RepoConfig, issueNumbers: ReadonlyArray<number>, logger: Logger): number[] {
+  return getOpenIssues(config.githubRepo, config.repoPath, logger)
+    .filter((i) => issueNumbers.includes(i.number) && hasLabel(i, config.github.blockedLabel))
+    .map((i) => i.number);
+}
+
 /** Backwards-compatible boolean wrapper for the implement-phase gate. */
 export function hasPendingRevisions(
   config: RepoConfig,

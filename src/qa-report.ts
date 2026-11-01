@@ -257,6 +257,16 @@ export function realQaLocalDeps(repoConfig: RepoConfig, agentConfig: AgentConfig
 /** The marker a gating report for `verdict` on head `sha` carries (see qaGateMarker). */
 export const qaVerdictMarker = (sha: string, verdict: "PASS" | "FAIL"): string => `<!-- foreman-qa sha=${sha} verdict=${verdict} -->`;
 
+/**
+ * The comment a reused FAIL leaves when it sends the same head back again. The FAIL report is posted once
+ * per head, so without it a same-head send-back left nothing on the PR and never counted toward
+ * REVIEW_ROUNDS_ALERT (Slashbin-console PR #1597, foreman#167); rulingState counts this marker. Pure.
+ */
+export function qaFailStandsBody(sha: string): string {
+  return `<!-- foreman-qa-fail-stands sha=${sha} -->\nQA's FAIL on \`${sha.slice(0, 7)}\` stands: the head has not moved since its QA Report. ` +
+    "Sent back to the builder again; this counts as a review round.";
+}
+
 /** What the review phase acts on after QA looked at an approved head. */
 export type QaPreMergeDecision =
   /** QA passed this exact head: the Tech Lead may merge. `reused`: a report for it was already on the PR. */

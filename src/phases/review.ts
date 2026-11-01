@@ -30,6 +30,7 @@ import {
   activeRuns,
   itemOf,
   notifyOnce,
+  pausedByBlockedLabel,
   reportReviewOutcomes,
   reviewFailureCount,
   reviewFailurePause,
@@ -114,6 +115,8 @@ async function reviewPass(
     if (failures > 0) reviewFailureCount.set(repoName, 0);
     return false;
   }
+  // The EM's `blocked` label on the PR's issue pauses review (docs/em-coordination.md §1).
+  if (pausedByBlockedLabel(repoConfig, "review", candidate.prNumber, candidate.issueNumbers, reviewLogger)) return false;
   // Stranded behind a verdict: the review already ran and asked for changes;
   // only its label move is missing. Make it, so the revise phase picks them up.
   if (candidate.stranded) {
