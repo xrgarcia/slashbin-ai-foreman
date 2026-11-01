@@ -36,7 +36,7 @@ its own section contents and links back here.
 | [Setup](setup.md) | What tools, accounts, local checkouts, and branches do I need? How do I configure and check an install? |
 | [Repo onboarding](onboarding.md) | What happens when I add a repo, and before its first build? |
 | [Running the daemon](running.md) | How do I start, stop, inspect, and restart it? How do retries and GitHub API use work? |
-| [Repos and labels](config-guide.md) | How do single-repo and multi-repo configs work? How do I use my own labels and branches? |
+| [Repos and labels](config-guide.md) | How do single-repo and multi-repo configs work? How do I use my own labels and branches, or a config profile? |
 | [Configuration reference](configuration.md) *(generated)* | What does each setting mean, what is its default, and which environment variable overrides it? |
 | [Pipeline](pipeline.md) | Which stages run, what do they require, and how do lanes and custom gates work? |
 | [Review](review.md) | How does the Tech Lead review and merge? How are missing outcome labels and deliberate holds handled? |
@@ -46,7 +46,7 @@ its own section contents and links back here.
 | [Skills](skills.md) | What instructions does a session receive? How do built-ins, overlays, prompt variables, and images work? |
 | [Skill sync](skill-sync.md) | How do repo skill copies pick up a shared version as approved work arrives? |
 | [Session security](security.md) | Which credentials and files can a session access? What do the secret gate and log redaction cover? |
-| [Architecture](architecture.md) | How do the work source, observers, and orchestrator fit together? What can I import? |
+| [Architecture](architecture.md) | Which plugin fills which role, how the core reaches GitHub and Paperclip, and what can I import? |
 | [Cache self-heal design](implemented-cache-self-heal.md) | Why was the implemented-work cache changed? This is a historical design note. |
 
 For contributor context, see [CLAUDE.md](../CLAUDE.md). For the included execution
