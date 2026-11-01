@@ -113,6 +113,7 @@ const CARDS = ["done", "in_review", "cancelled"];
  *   - closed, only the stale open view carries it: never out of done or
  *     cancelled; a card the labels would move goes to done (cancelled when
  *     not planned) instead; one they would leave stays until the closed read.
+ *   - closed, in no view at all: the closed sweep reads it live and closes it.
  *   - unreadable: unchanged.
  */
 function expected(owns, gh, label, card) {
@@ -122,7 +123,9 @@ function expected(owns, gh, label, card) {
   if (gh === "unreadable" || card === "cancelled") return card;
   if (gh === "open") return bucket ?? (owns ? "backlog" : card);
   // Closed, carried by the stale view alone: does anything ask GitHub about it?
-  const asks = bucket === null ? owns && card !== "backlog" : bucket !== card;
+  // An issue in no view (labels none, ownsCards off) is a card with no open issue
+  // behind it: the closed sweep asks about it unless it is done or cancelled already.
+  const asks = bucket === null ? (owns ? card !== "backlog" : card !== "done") : bucket !== card;
   return asks ? (gh === "completed" ? "done" : "cancelled") : card;
 }
 
