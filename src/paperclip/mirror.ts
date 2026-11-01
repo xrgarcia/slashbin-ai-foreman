@@ -294,6 +294,24 @@ export function pickCard<T extends { status: string; createdAt?: string }>(rows:
   return ranked[0]?.r;
 }
 
+/**
+ * A block the mirror put on a card, as it is persisted: the unblock action, the
+ * role holding it when not the stage's owner, the stage its issue was at (null:
+ * not known yet), and whether it waits on an EM scope ruling.
+ */
+export interface CardBlock {
+  readonly reason?: string;
+  readonly owner?: string;
+  readonly at?: string | null;
+  readonly ruling?: boolean;
+}
+
+/** Where the mirror keeps its blocks across a restart (the plugin: the Foreman's state file). */
+export interface CardBlockStore {
+  load(): Record<string, CardBlock>;
+  save(id: string, block: CardBlock | null): void;
+}
+
 export class PaperclipMirror implements WorkObserver {
   /** Identity key → Paperclip task id, for every task this mirror has resolved. */
   private readonly taskUuidCache = new Map<string, string>();
@@ -364,6 +382,12 @@ export class PaperclipMirror implements WorkObserver {
   private readonly blockAction = new Map<string, string>();
   /** A card a seat's escalation blocked, and the GitHub stage it was first seen at. */
   private readonly escalatedAt = new Map<string, string>();
+  /** Cards Blocked for an EM scope ruling (`escalated`): no stage update at the hold's stage moves them. */
+  private readonly rulingHeld = new Set<string>();
+  /** Blocks read back from the store at start, not made by this process. */
+  private readonly restoredBlocks = new Set<string>();
+  /** Task id → the block last written to the store, as JSON, so an unchanged one is not rewritten. */
+  private readonly savedBlocks = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The company's `issue` label id, once ensured (undefined until a label write needed it). */
@@ -406,9 +430,110 @@ export class PaperclipMirror implements WorkObserver {
     private readonly secrets: ReadonlyArray<{ name: string; value: string }>,
     private readonly logger: Logger,
     labels: Partial<HandoffLabels> = {},
+    private readonly blockStore?: CardBlockStore,
   ) {
     this.comments = commentsOf(cfg);
     this.labels = { ...DEFAULT_HANDOFF_LABELS, ...labels };
+    this.restoreBlocks();
+  }
+
+  /**
+   * Read back the blocks the last process put on its cards: the reason a re-move
+   * to Blocked writes, the role that holds it, the stage it was made at and
+   * whether it waits on a ruling. Without them a restart moved a needs-ruling
+   * card back to the Foreman (its stage read as moved on), and handed a failed
+   * deploy's card from the SRE to the EM.
+   */
+  private restoreBlocks(): void {
+    let blocks: Record<string, CardBlock> = {};
+    try {
+      blocks = this.blockStore?.load() ?? {};
+    } catch {
+      return;
+    }
+    for (const [id, b] of Object.entries(blocks)) {
+      if (!b || typeof b !== "object") continue;
+      if (typeof b.reason === "string") this.blockedReason.set(id, b.reason);
+      if (typeof b.owner === "string") this.blockedOwner.set(id, b.owner);
+      if ("at" in b) this.blockedAt.set(id, (b.at ?? undefined) as PaperclipStage | "done" | undefined);
+      if (b.ruling === true) this.rulingHeld.add(id);
+      this.restoredBlocks.add(id);
+      this.savedBlocks.set(id, JSON.stringify(b));
+    }
+  }
+
+  /** Write card `id`'s block as the maps now hold it, or forget it; only on a change, never throws. */
+  private persistBlock(id: string): void {
+    if (!this.blockStore) return;
+    const reason = this.blockedReason.get(id);
+    const owner = this.blockedOwner.get(id);
+    const block: CardBlock | null = reason === undefined && owner === undefined && !this.blockedAt.has(id) && !this.rulingHeld.has(id) ? null : {
+      ...(reason !== undefined ? { reason } : {}),
+      ...(owner !== undefined ? { owner } : {}),
+      ...(this.blockedAt.has(id) ? { at: this.blockedAt.get(id) ?? null } : {}),
+      ...(this.rulingHeld.has(id) ? { ruling: true } : {}),
+    };
+    const json = block ? JSON.stringify(block) : null;
+    if ((this.savedBlocks.get(id) ?? null) === json) return;
+    try {
+      this.blockStore.save(id, block);
+      if (json) this.savedBlocks.set(id, json);
+      else this.savedBlocks.delete(id);
+    } catch {
+      // best-effort, like every state write: the block still holds in memory
+    }
+  }
+
+  /** The Foreman's block on `id` is over: forget it, here and in the store. */
+  private clearBlock(id: string): void {
+    this.blockedAt.delete(id);
+    this.blockedReason.delete(id);
+    this.blockedOwner.delete(id);
+    this.rulingHeld.delete(id);
+    this.restoredBlocks.delete(id);
+    this.persistBlock(id);
+  }
+
+  /**
+   * True when a Blocked card's hold is someone else's: a seat's escalation hop
+   * (`process.escalate`) or a person's hold (the deliver-to-prod nudge put
+   * SLA-2591 on Ray). Every block the Foreman or a GitHub label makes names
+   * FOREMAN_BLOCKED_PREFIX, and the receiver's entry text is GitHub's label.
+   */
+  private externalHold(id: string): boolean {
+    if (this.rowState.get(id) !== `status:${this.statusName("blocked")}`) return false;
+    const action = this.blockAction.get(id);
+    if (action === undefined) return false;
+    if (action.startsWith(ESCALATION_ACTION_PREFIX)) return true;
+    return !action.startsWith(FOREMAN_BLOCKED_PREFIX) && !RECEIVER_HOLD_ENTRY.test(action);
+  }
+
+  /**
+   * True when a hold on `id` outranks a stage update to `stage`: a needs-ruling
+   * block made at that stage (the review's "changes requested" landing after
+   * the escalation took SLA-366 back to the Foreman, Foreman #109), or another
+   * seat's or a person's hold first seen at it (Foreman #98). A different stage
+   * is GitHub moving on, which releases either.
+   */
+  private holdOutranks(id: string, stage: PaperclipStage): boolean {
+    if (this.rulingHeld.has(id) && this.blockedAt.get(id) === stage) return true;
+    return this.externalHold(id) && (this.escalatedAt.get(id) ?? this.ghStage.get(id)) === stage;
+  }
+
+  /**
+   * True when the card's holder is the one `stage` calls for, or nothing is
+   * known to compare. A status alone hides a lost hand-off: pendingVerification
+   * shares in_review with inReview, so SLA-2020 sat with the Tech Lead after a
+   * failed PATCH and the EM's release gate never ran (Foreman #100). Blocked
+   * cards are not compared: their holder is whoever the hold names.
+   */
+  private holderMatches(id: string, stage: PaperclipStage | "done"): boolean {
+    if (stage === "done") return true;
+    const t = stageTarget(this.cfg, stage);
+    if (t.bucket === "blocked" || !t.agentId) return true;
+    const have = this.rowContent.get(id);
+    if (!have) return true;
+    return have.assigneeAgentId === t.agentId && !have.assigneeUserId;
   }
 
   /**
@@ -497,6 +622,14 @@ export class PaperclipMirror implements WorkObserver {
     if (to !== "queued") this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
+    // A closed issue's card is terminal: a stage update landing after the close
+    // reopened SLA-2633 as pending verification on the EM (Foreman #112).
+    if (this.closedCards.has(id)) return;
+    // A hold that outranks this update keeps the card where it is; the note still says what happened.
+    if (step.stage !== "done" && this.holdOutranks(id, step.stage)) {
+      await this.note(id, step.note, { event: "progress" });
+      return;
+    }
     await this.move(id, step.stage);
     await this.note(id, step.note, { event: "progress", handoff: handoffTo(step.stage, item) });
   }
@@ -532,6 +665,9 @@ export class PaperclipMirror implements WorkObserver {
     // (slashbin_data_receiver#41, 2026-10-14: the card sat In Review on the
     // Foreman for ten hours with nobody told).
     this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : this.ghStage.get(id));
+    // A needs-ruling hold outranks the stage updates that follow it until the ruling lands (Foreman #109).
+    if (step === PAPERCLIP_STEPS.escalated) this.rulingHeld.add(id); else this.rulingHeld.delete(id);
+    this.persistBlock(id);
     await this.move(id, step.stage);
     await this.note(id, text, { event: "blocked", handoff: role ? { stage: step.stage, item, owner: role, variant: "deployFailed" } : handoffTo(step.stage, item) });
   }
@@ -549,9 +685,7 @@ export class PaperclipMirror implements WorkObserver {
     const text = fill(step.note, { reason: this.clean(reason) });
     if (this.verifyWaitNote.get(id) === text) return;
     this.verifyWaitNote.set(id, text);
-    this.blockedAt.delete(id);
-    this.blockedReason.delete(id);
-    this.blockedOwner.delete(id);
+    this.clearBlock(id);
     await this.move(id, step.stage);
     await this.note(id, text, { event: "progress" });
   }
@@ -567,8 +701,7 @@ export class PaperclipMirror implements WorkObserver {
     if (!id || this.holds.has(id)) return;
     if (this.rowState.get(id) !== `status:${this.statusName("blocked")}`) return;
     this.blockedAt.delete(id);
-    this.blockedReason.delete(id);
-    this.blockedOwner.delete(id);
+    this.clearBlock(id);
     const stage = this.ghStage.get(id) ?? "approved";
     if (!(await this.move(id, stage))) return;
     await this.note(id, this.clean(reason), { event: "progress", handoff: handoffTo(stage, item) });
@@ -614,10 +747,15 @@ export class PaperclipMirror implements WorkObserver {
     const closed = new Map<number, "completed" | "not_planned">();
     for (const c of cards ?? read.closed ?? []) if (c.state !== "open") closed.set(c.item.issueNumber, c.state);
     const movers: Array<{ item: WorkItem; id: string; stage: SnapshotItem["stage"]; detail: string; state: string; want: string }> = [];
+    // Lifecycle issues with no card yet: each gets one at its stage once GitHub reads it open (Foreman #113).
+    const fresh: Array<{ item: WorkItem; stage: PaperclipStage; detail: string }> = [];
     for (const { item, stage, detail, verifyHeld, foremanHeld } of items) {
       if (closed.has(item.issueNumber)) continue;
       const id = await this.resolve(item, false);
-      if (!id) continue;
+      if (!id) {
+        if (stage !== "done") fresh.push({ item, stage, detail });
+        continue;
+      }
       this.ghStage.set(id, stage);
       const state = this.rowState.get(id);
       if (this.holds.has(id)) {
@@ -627,16 +765,18 @@ export class PaperclipMirror implements WorkObserver {
       if (!state || state.startsWith("waiting\n")) continue;
       if (state === `status:${this.statusName("cancelled")}`) continue;
       const want = `status:${this.statusName(stage === "done" ? "done" : stageTarget(this.cfg, stage).bucket)}`;
-      if (state === want) continue;
+      // The holder counts as much as the column: a lost hand-off leaves the status right and the seat wrong (Foreman #100).
+      if (state === want && this.holderMatches(id, stage)) continue;
       // A Foreman block is released by GitHub moving on, not by another writer:
       // the stage owner's own wake checks the card out to in_progress, and
       // matching that to GitHub took SLA-1335 out of the EM's hands (2026-10-14).
       // A block GitHub's label made ends when the label goes, at any stage:
       // read as a Foreman block from before a restart, jerky_service #132/#133
       // sat Blocked for hours after the EM lifted the label (2026-10-14).
-      // A seat's escalation hop holds the card until the hop is resolved, or until
-      // GitHub moves the issue to another stage (Foreman #98).
-      if (state === blocked && this.blockAction.get(id)?.startsWith(ESCALATION_ACTION_PREFIX)) {
+      // A seat's escalation hop, or a person's hold, keeps the card until it is
+      // resolved, or until GitHub moves the issue to another stage (Foreman #98):
+      // undone each cycle, SLA-2591 went back to the EM three times in an hour.
+      if (state === blocked && this.externalHold(id)) {
         if (!this.escalatedAt.has(id) || this.escalatedAt.get(id) === stage) {
           this.escalatedAt.set(id, stage);
           continue;
@@ -646,8 +786,11 @@ export class PaperclipMirror implements WorkObserver {
       if ((state === blocked || this.blockedAt.has(id)) && stage !== "blocked" && !(await this.blockedByLabel(id))) {
         // A block from before this process started stands only while the Foreman's state still holds the issue:
         // jerky_security_testing#398 sat Blocked at `release pending` after every hold was gone (2026-10-26).
-        if (this.blockedAt.has(id) ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : foremanHeld !== false && (stage === "approved" || (stage === "merged" && verifyHeld === true))) {
+        // A block read back from the store is that kind of block too.
+        const anchored = this.blockedAt.has(id) && !(this.restoredBlocks.has(id) && foremanHeld === false);
+        if (anchored ? this.blockedAt.get(id) === stage || this.blockedAt.get(id) === undefined : foremanHeld !== false && (stage === "approved" || (stage === "merged" && verifyHeld === true))) {
           this.blockedAt.set(id, stage);
+          this.persistBlock(id);
           continue;
         }
       }
@@ -661,7 +804,10 @@ export class PaperclipMirror implements WorkObserver {
     // cancelled when not planned, whatever labels it still shows; one whose
     // state cannot be read is left where it is (cmneb_data_receiver#218 went
     // done → in_review on a stale open view, 2026-10-15).
-    const asked = [...movers.map((m) => m.item.issueNumber), ...toBacklog.map(([c]) => c.item.issueNumber)];
+    // A card closed for an issue the cards now show open is asked about too: only a live read reopens it.
+    const reopened = ids.filter(([c, id]) => c.state === "open" && this.closedCards.has(id) && !closed.has(c.item.issueNumber));
+    const asked = [...new Set([...movers.map((m) => m.item.issueNumber), ...toBacklog.map(([c]) => c.item.issueNumber),
+      ...fresh.map((f) => f.item.issueNumber), ...reopened.map(([c]) => c.item.issueNumber)])];
     let live: ReadonlyMap<number, ItemState> = new Map();
     if (asked.length && read.states) {
       try {
@@ -679,11 +825,28 @@ export class PaperclipMirror implements WorkObserver {
         if (!owned) await this.closeCard(id, now, item, logger);
         continue;
       }
+      // Read open live: a card closed for it before is the issue reopened.
+      this.closedCards.delete(id);
       if (!(await this.move(id, stage))) continue;
       this.blockedAt.delete(id);
+      this.persistBlock(id);
       if (stage === "blocked") this.labelBlocked.add(id);
       else this.labelBlocked.delete(id);
-      logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)} to match GitHub`);
+      logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)}${state === want ? ", re-assigned" : ""} to match GitHub`);
+      await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress", handoff: handoffTo(stage, item) });
+    }
+    for (const { item, stage, detail } of fresh) {
+      if (live.get(item.issueNumber) !== "open") continue;
+      if (budget.left <= 0) break;
+      const c = owned?.find((x) => x.item.issueNumber === item.issueNumber && x.item.repo === item.repo);
+      const id = c ? await this.createCard(c) : await this.createTask(item, this.defaultContent(item));
+      if (!id) continue;
+      budget.left--;
+      this.ghStage.set(id, stage);
+      if (c) ids.push([c, id]);
+      if (!(await this.move(id, stage))) continue;
+      if (stage === "blocked") this.labelBlocked.add(id);
+      logger.info(`Paperclip: ${item.repo}#${item.issueNumber} had no card: created at ${stage} to match GitHub`);
       await this.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress", handoff: handoffTo(stage, item) });
     }
     // Without the cards, a card for an issue closed since the last read follows it.
@@ -697,7 +860,10 @@ export class PaperclipMirror implements WorkObserver {
     // down for that write, a hold that put the card back) is never offered
     // again: a card of this repo with no open issue behind it is asked about
     // live, so every closed issue's card reaches done or cancelled.
-    if (owned && read.states) await this.closeStale(_repo, owned, closed, read.states, logger);
+    if (read.states) {
+      const open = new Set(owned ? owned.filter((c) => c.state === "open").map((c) => c.item.issueNumber) : items.map((i) => i.item.issueNumber));
+      await this.closeStale(_repo, open, closed, read.states, logger);
+    }
     const backlogged = new Set(toBacklog.map(([, id]) => id));
     for (const [c, id] of ids) {
       if (budget.left <= 0) {
@@ -707,7 +873,7 @@ export class PaperclipMirror implements WorkObserver {
       const now = live.get(c.item.issueNumber);
       // An issue the open view carries but GitHub reads closed is synced as closed.
       const card: SnapshotCard = c.state === "open" && now !== undefined && now !== "open" ? { ...c, state: now, stage: null } : c;
-      await this.syncCard(id, card, budget, backlogged.has(id) && now !== "open");
+      await this.syncCard(id, card, budget, backlogged.has(id) && now !== "open", now === "open");
     }
   }
 
@@ -719,17 +885,19 @@ export class PaperclipMirror implements WorkObserver {
    */
   private async closeStale(
     repo: string,
-    cards: ReadonlyArray<SnapshotCard>,
+    open: ReadonlySet<number>,
     closed: ReadonlyMap<number, "completed" | "not_planned">,
     states: (issueNumbers: readonly number[]) => Promise<ReadonlyMap<number, ItemState>>,
     logger: Logger,
   ): Promise<void> {
-    const open = new Set(cards.filter((c) => c.state === "open").map((c) => c.item.issueNumber));
     const now = Date.now();
     const due: Array<[string, number]> = [];
     for (const [id, n] of this.rowNumber) {
-      if (due.length >= STALE_CHECKS_PER_SNAPSHOT) break;
-      if (this.rowRepo.get(id) !== repo || open.has(n) || closed.has(n) || this.holds.has(id) || !this.rowState.has(id) || this.isClosedCard(id)) continue;
+      if (this.rowRepo.get(id) !== repo || open.has(n)) continue;
+      // Already done or cancelled with no open issue behind it: terminal, whatever arrives late (Foreman #112).
+      if (this.isClosedCard(id)) { this.closedCards.add(id); continue; }
+      if (due.length >= STALE_CHECKS_PER_SNAPSHOT) continue;
+      if (closed.has(n) || this.holds.has(id) || !this.rowState.has(id)) continue;
       if (now - (this.staleCheckedAt.get(id) ?? 0) < STALE_CHECK_MS) continue;
       due.push([id, n]);
     }
@@ -782,10 +950,8 @@ export class PaperclipMirror implements WorkObserver {
     const labelIds = await this.labelIdsFor(id, null);
     if (!(await this.patch(id, { status: target, ...(labelIds ? { labelIds } : {}) }))) return false;
     this.rowState.set(id, `status:${target}`);
-    this.blockedAt.delete(id);
     this.labelBlocked.delete(id);
-    this.blockedReason.delete(id);
-    this.blockedOwner.delete(id);
+    this.clearBlock(id);
     logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.startsWith("waiting\n") ? "waiting" : state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
     return true;
   }
@@ -825,9 +991,10 @@ export class PaperclipMirror implements WorkObserver {
    * keeps its status; a cancelled card of an open issue and a waiting hold are
    * left as they are, as the lifecycle pass leaves them.
    */
-  private async syncCard(id: string, c: SnapshotCard, budget: { left: number }, unconfirmed = false): Promise<void> {
+  private async syncCard(id: string, c: SnapshotCard, budget: { left: number }, unconfirmed = false, liveOpen = false): Promise<void> {
     const want = this.cardContent(c, id);
-    if (c.state === "open") this.closedCards.delete(id);
+    // Only a live read reopens a closed card: the open view can still carry a closed issue (Foreman #112).
+    if (liveOpen) this.closedCards.delete(id);
     const have = this.rowContent.get(id);
     const state = this.rowState.get(id) ?? "";
     const body: Record<string, unknown> = {};
@@ -1217,6 +1384,7 @@ export class PaperclipMirror implements WorkObserver {
         const text = fill(PAPERCLIP_STEPS.blocked.note, { reason: w.reason });
         this.blockedReason.set(id, text);
         this.blockedOwner.delete(id);
+        this.persistBlock(id);
         if (await this.move(id, PAPERCLIP_STEPS.blocked.stage)) await this.note(id, text, { event: "blocked" });
         continue;
       }
@@ -1231,6 +1399,7 @@ export class PaperclipMirror implements WorkObserver {
       });
       if (!ok) continue;
       this.rowState.set(id, want);
+      this.setHolder(id, this.cfg.agentId ?? null);
       await this.note(id, fill(step.note, { reason: w.reason }), { event: "progress" });
     }
 
@@ -1310,6 +1479,8 @@ export class PaperclipMirror implements WorkObserver {
           const placed = (this.rowStage.get(id) === stage && this.rowState.get(id) === `status:${this.statusName(stageTarget(this.cfg, stage).bucket)}`)
             || await this.move(id, stage);
           this.holds.set(id, { count: 1, phase, restore: null, placed });
+          // The Foreman working the card again (the revision after a ruling) is its block over, persisted one too.
+          if (placed) this.clearBlock(id);
         }
         leaseChanged = true;
       } else if (event.status === "finished" || event.status === "failed") {
@@ -1393,12 +1564,17 @@ export class PaperclipMirror implements WorkObserver {
       return found;
     }
     if (!create) return null;
+    return this.createTask(item, this.defaultContent(item));
+  }
+
+  /** What a task the Foreman creates for `item` says, outside `ownsCards`. */
+  private defaultContent(item: WorkItem): { title: string; description: string; status: string } {
     const [owner = "", name = ""] = item.repo.split("/");
-    return this.createTask(item, {
+    return {
       title: fill(this.cfg.taskTitleFormat ?? PAPERCLIP_TASK_TITLE_FORMAT, { repo: item.repo, owner, name, N: String(item.issueNumber) }),
-      description: `${key}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
+      description: `${this.keyOf(item)}\n\nhttps://github.com/${item.repo}/issues/${item.issueNumber}`,
       status: this.statusName(PAPERCLIP_CREATE_STATUS),
-    });
+    };
   }
 
   /** Create `item`'s task, filed where every task the Foreman creates goes; its id, or null. */
@@ -1529,6 +1705,8 @@ export class PaperclipMirror implements WorkObserver {
 
   private async move(id: string, to: PaperclipStepMove, held = false): Promise<boolean> {
     if (to === null || to === "waiting") return true;
+    // A closed issue's card is terminal; only its close moves it (Foreman #112).
+    if (to !== "done" && this.closedCards.has(id)) return false;
     const h = this.holds.get(id);
     if (h && !held) {
       if (to !== SESSION_STAGE[h.phase]) h.restore = to;
@@ -1562,12 +1740,22 @@ export class PaperclipMirror implements WorkObserver {
       const unblock = holder.unblockDescriptor as { action: string } | undefined;
       if (unblock) this.blockAction.set(id, unblock.action);
       if (to !== "done") this.rowStage.set(id, to);
+      if ("assigneeAgentId" in holder) this.setHolder(id, holder.assigneeAgentId as string);
       if (bucket !== "blocked") {
         this.blockedReason.delete(id);
         this.blockedOwner.delete(id);
+        this.rulingHeld.delete(id);
+        this.restoredBlocks.delete(id);
       }
+      this.persistBlock(id);
     }
     return ok;
+  }
+
+  /** Record that card `id` is now `agentId`'s, so the next pass compares holders on fact. */
+  private setHolder(id: string, agentId: string | null): void {
+    const have = this.rowContent.get(id);
+    if (have) this.rowContent.set(id, { ...have, assigneeAgentId: agentId, assigneeUserId: null });
   }
 
   /**
