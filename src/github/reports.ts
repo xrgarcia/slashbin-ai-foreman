@@ -4,6 +4,8 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { formatGhError, getOpenIssues } from "./cache.js";
 import { gh } from "./gh.js";
+import type { RulingState } from "../code-host.js";
+export type { RulingState } from "../code-host.js";
 
 
 // --- Session reports (observers only) ---
@@ -75,17 +77,6 @@ export const TECH_LEAD_ESCALATE_MARKER = "<!-- tech-lead:escalate";
 
 export type ReviewFact = { id: number; state: string; at: string; escalate: boolean };
 export type CommentFact = { at: string; head: string };
-/** Where a PR stands against its last EM scope ruling. */
-export type RulingState = {
-  /** CHANGES_REQUESTED reviews submitted after the last ruling (all of them when there is none). */
-  roundsSinceRuling: number;
-  /** The newest review's id, null when there is none: an escalation is made once per id. */
-  latestReviewId: number | null;
-  /** The newest review asks for changes, came after the last ruling, and carries the Tech Lead's escalate marker. */
-  escalateRequested: boolean;
-  /** When the last ruling was posted, null when there is none. */
-  rulingAt: string | null;
-};
 
 /** A QA FAIL report (qaGateBody): the marker line carries the verdict, inside the first 140 characters. */
 const QA_FAIL_PATTERN = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=FAIL -->/;

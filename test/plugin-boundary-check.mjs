@@ -83,3 +83,23 @@ export function connectorProblems(sources) {
   }
   return problems;
 }
+
+/** Files that may run the `gh` CLI (EM#1150 f5): the GitHub code and the GitHub plugin. */
+export const maySpawnGh = (rel) => rel === "plugins/github.ts" || /^github/.test(rel);
+
+/**
+ * Core files that run `gh` themselves, given each src-relative file's text. The
+ * core reaches GitHub only through the code host (`codeHost()` in the registry);
+ * no allowlist covers this. Comments are ignored.
+ */
+export function ghSpawnProblems(sources) {
+  const problems = [];
+  for (const [rel, text] of Object.entries(sources)) {
+    if (maySpawnGh(rel)) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    if (/\b(?:execFileSync|execFile|execFileAsync|spawnSync|spawn|execSync|exec)\s*\(\s*["'`]gh\b/.test(code)) {
+      problems.push(`src/${rel} runs gh directly; call the code host instead (codeHost() in src/plugins/registry.ts)`);
+    }
+  }
+  return problems;
+}

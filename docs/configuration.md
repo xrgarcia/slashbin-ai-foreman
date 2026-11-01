@@ -365,6 +365,12 @@ Type: string · Default: `"github"`
 
 Where the Foreman's work comes from: the id of the work-source plugin that selects issues and records their moves. `github` (default) is GitHub issues, the only one today; any other value turns GitHub off, and the Foreman refuses to start until a plugin of that id is installed.
 
+### `codeHost`
+
+Type: string · Default: `"github"`
+
+Where the Foreman's PRs, branches, merges, comments and labels live: the id of the code-host plugin. `github` (default) is the only one today; any other value turns GitHub's code host off, and the Foreman refuses to start until a plugin of that id is installed.
+
 ### `paperclip`
 
 Type: object · Default: see [paperclip.md](paperclip.md)

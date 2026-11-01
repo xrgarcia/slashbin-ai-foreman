@@ -30,27 +30,8 @@ import { gh } from "./gh.js";
 import { hasCommentContaining } from "./pr-comments.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import type { PromotionIssue } from "./promotion.js";
-
-/** One PR merged into the base branch and not yet on production. */
-export interface CarriedMerge {
-  pr: number;
-  sha: string;
-  title: string;
-  /** The issues the PR implements; empty when it names none. */
-  issues: number[];
-  /** A sync or dependency-bot PR: carries no issue and needs none. */
-  exempt: boolean;
-}
-
-/** What a release carries beyond the issues it was authorized for. */
-export interface ReleaseCarry {
-  /** Open issues whose merges are on the base branch and were not authorized: adopted into the release. */
-  adopted: PromotionIssue[];
-  /** The PRs that merged them, by issue number. */
-  prsByIssue: Map<number, number[]>;
-  /** Merges that link to no issue. */
-  unlinked: Array<{ pr: number; title: string }>;
-}
+import type { CarriedMerge, ReleaseCarry } from "../code-host.js";
+export type { CarriedMerge, ReleaseCarry } from "../code-host.js";
 
 export const NO_CARRY: ReleaseCarry = { adopted: [], prsByIssue: new Map(), unlinked: [] };
 

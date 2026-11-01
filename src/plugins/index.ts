@@ -6,6 +6,11 @@ import { SrePlugin } from "./sre.js";
 import { QaPlugin } from "./qa.js";
 import { EmPlugin } from "./em.js";
 
+// The package's GitHub exports (src/index.ts) come through the composition root,
+// the one core file that may name plugin code.
+export { hasPendingRevisions, verifyPRExists } from "../github.js";
+export { GitHubIssueConnector } from "../github-work-source.js";
+
 /**
  * The composition root (EM#1150): the only file that names a plugin. The CLI
  * calls `registerBuiltinPlugins` once; everything else reaches plugins through

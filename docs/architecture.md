@@ -59,8 +59,13 @@ is an observer (`src/plugins/paperclip.ts`); a plugin can add a CLI command (`pa
 GitHub issues are the `workSource` plugin (`src/plugins/github.ts`), on unless the config's
 `workSource` names another id. Selection, implement, review and every recorded move reach it
 only through the registry (`workSourceFor`); the core never constructs `GitHubIssueConnector`,
-which the ratchet enforces. With no work source enabled, startup refuses (exit 78). GitHub's PR,
-branch and merge operations (the `codeHost` role) are not moved yet.
+which the ratchet enforces. With no work source enabled, startup refuses (exit 78).
+
+GitHub is also the `codeHost` plugin, on unless the config's `codeHost` names another id.
+`src/code-host.ts` is the interface: one typed method per PR, branch, merge, comment and
+label operation, with no raw gh escape hatch. Every phase reaches it only through
+`codeHost()` in the registry; the plugin delegates to `src/github/*`. With no code host
+enabled, startup refuses (exit 78) and `npm run doctor` fails, as it does for the work source.
 
 The agents are plugins too, each on when its path key is set: the Tech Lead is the
 `reviewer` (`tech-lead.ts`, `techLeadPath`), the SRE the `verifier` and `deployer`
@@ -75,9 +80,9 @@ deployer and no promote path) comments and closes it, each a lifecycle move
 issues' labels and the recently merged PRs, so this works in any branch layout and resumes
 where a failed write stopped; it never closes without its completion comment.
 
-The move is in progress. `test/plugin-boundary.test.mjs` lists each core file that still
-imports GitHub or Paperclip code directly, with its exact count. The list may only shrink:
-a new import fails the build, and so does a removed one until its line is lowered.
+The move is done. `test/plugin-boundary.test.mjs` fails the build when a core file imports
+GitHub or Paperclip code directly (its list of exceptions is empty and must stay so) or runs
+`gh`, which only `src/github*` and `src/plugins/github.ts` may.
 
 ## Source layout
 
@@ -90,6 +95,8 @@ src/
 ├── adapters.ts        # Data contract: WorkEvent, WorkSourceAdapter, WorkObserver
 ├── work-source.ts     # emit()/advance(): one event → work source + observers
 ├── plugins/           # Plugin contract, registry, composition root, and plugin entries
+├── code-host.ts       # The CodeHost interface and the PR, issue and branch types it speaks in
+├── config-schema/     # The github and paperclip config blocks (core: config.ts reads them)
 ├── github.ts          # GitHub API surface (polling, PRs, labels, dual-token ops); code in github/
 ├── github-work-source.ts # GitHub issues as the work source: a move → its labels
 ├── agent.ts           # Claude Code CLI spawner (session env, secret gate, redaction)

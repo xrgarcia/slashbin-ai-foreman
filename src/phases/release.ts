@@ -36,31 +36,6 @@ import type { Move } from "../lifecycle.js";
 import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import {
-  findOpenPromotionPR,
-  getOpenIssues,
-  hasLabel,
-  commentOnIssue,
-  countBranchDiffFiles,
-  viewIssue,
-  viewReleasePr,
-  recentMergedReleasePrs,
-  findPvComment,
-  readPvResult,
-  findSreSweepHold,
-  RELEASE_STOP_MARK,
-  ensureReleaseTag,
-  addBlockedLabel,
-  removeBlockedLabel,
-  addReleasePrIssues,
-  productionHead,
-  unsignedIssues,
-  unsignedInHead,
-  foremanAppliedOrHold,
-  syncSignoff,
-  type ReleasePrView,
-} from "../github.js";
-import { releaseTagName } from "../github/conventions.js";
 import { releaseIssues } from "../release-tracker.js";
 import { loadRepoState, saveRepoState, type ProdRelease, type RepoState } from "../state.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
@@ -68,7 +43,9 @@ import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
 import { noteUnrelated, noteEpicChildClosed, epicRefs } from "../unstick.js";
-import { readIssueBody } from "../github/readiness.js";
+import { codeHost } from "../plugins/registry.js";
+import { releaseTagName } from "../config-schema/github.js";
+import type { ReleasePrView } from "../code-host.js";
 
 /** The SRE's soak window: it runs once this long after the merge. */
 export const SOAK_DELAY_MS = 30 * 60_000;
@@ -124,7 +101,7 @@ function verifyProd(repoConfig: RepoConfig, config: AgentConfig, pr: number, log
 /** The evidence link for a verification the SRE just posted: its latest Production Verification comment. */
 function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): string | undefined {
   try {
-    return findPvComment(repoConfig, pr)?.url;
+    return codeHost().findPvComment(repoConfig, pr)?.url;
   } catch (err) {
     logger.debug(`Could not read release PR #${pr}'s verification comment: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
@@ -161,7 +138,7 @@ function dropRelease(repoConfig: RepoConfig, pr: number): void {
 
 function comment(repoConfig: RepoConfig, n: number, body: string, logger: Logger): void {
   try {
-    commentOnIssue(repoConfig, n, body);
+    codeHost().commentOnIssue(repoConfig, n, body);
   } catch (err) {
     logger.warn(`Could not comment on #${n}: ${errText(err)}`);
   }
@@ -195,7 +172,7 @@ function tagRelease(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): v
       "Issues:",
       ...rel.issues.map((n) => `- #${n}`),
     ].join("\n");
-    const t = ensureReleaseTag(repoConfig, rel.mergeSha, name, message);
+    const t = codeHost().ensureReleaseTag(repoConfig, rel.mergeSha, name, message);
     rel.tag = t.tag;
     logger.info(`${t.created ? "Tagged" : "Found tag"} ${t.tag} on ${short(rel.mergeSha)} (release PR #${rel.pr})`);
   } catch (err) {
@@ -206,8 +183,8 @@ function tagRelease(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): v
 /** The release's issues a write may touch: not blocked by a person (an SRE sweep hold was already taken over). */
 function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): number[] {
   const blocked = new Set(
-    getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
-      .filter((i) => hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number),
+    codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+      .filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number),
   );
   const skip = rel.issues.filter((n) => blocked.has(n));
   if (skip.length > 0) logger.info(`Release PR #${rel.pr}: leaving ${skip.map((n) => `#${n}`).join(", ")} alone (blocked by a person)`);
@@ -220,9 +197,9 @@ function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): num
  */
 function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger: Logger): void {
   try {
-    let epics = epicRefs(readIssueBody(repoConfig, n));
+    let epics = epicRefs(codeHost().readIssueBody(repoConfig, n));
     const parent = /follow-up to #(\d+)/i.exec(title);
-    if (!epics.length && parent) epics = epicRefs(readIssueBody(repoConfig, Number(parent[1])));
+    if (!epics.length && parent) epics = epicRefs(codeHost().readIssueBody(repoConfig, Number(parent[1])));
     if (noteEpicChildClosed(repoConfig.name, repoConfig.githubRepo, n, epics) > 0) {
       logger.info(`#${n} closed in production; asking the EM whether engineering-manager ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
     }
@@ -238,7 +215,7 @@ async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move,
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
     `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.`;
   // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
-  const openIssues = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const openIssues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const open = new Set(openIssues.map((i) => i.number));
   for (const n of writable(repoConfig, rel, logger).filter((i) => open.has(i))) {
     comment(repoConfig, n, line, logger);
@@ -300,7 +277,7 @@ async function holdRelease(
   let verifiedHead = passHead.get(repoConfig.name) ?? rel.verifiedHead;
   if (!passHead.has(repoConfig.name)) {
     try {
-      verifiedHead = productionHead(repoConfig);
+      verifiedHead = codeHost().productionHead(repoConfig);
       passHead.set(repoConfig.name, verifiedHead);
       lastHeadProbe.set(repoConfig.name, now());
     } catch (err) {
@@ -329,11 +306,11 @@ export const DEPLOY_STOPS: Readonly<Record<string, string>> = {
 
 async function stopRelease(repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger): Promise<void> {
   const body =
-    `${RELEASE_STOP_MARK} ${pr ? `Release PR #${pr}: ` : ""}${reason}${evidence ? ` (${evidence})` : ""}. ` +
+    `${codeHost().RELEASE_STOP_MARK} ${pr ? `Release PR #${pr}: ` : ""}${reason}${evidence ? ` (${evidence})` : ""}. ` +
     `The Foreman will not retry it while this issue carries \`${repoConfig.github.blockedLabel}\`; remove the label to release it again.`;
   for (const n of issues) {
     try {
-      addBlockedLabel(repoConfig, n);
+      codeHost().addBlockedLabel(repoConfig, n);
     } catch (err) {
       logger.warn(`Could not block #${n}: ${errText(err)}`);
     }
@@ -350,8 +327,8 @@ async function stopRelease(repoConfig: RepoConfig, pr: number | null, issues: nu
  * here. Each issue is checked once per process (one comments read).
  */
 async function adoptSweepHolds(repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  const blocked = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
-    .filter((i) => hasLabel(i, repoConfig.github.blockedLabel));
+  const blocked = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel));
   for (const issue of blocked) {
     const key = `${repoConfig.githubRepo}#issue${issue.number}`;
     if (adoptChecked.has(key)) continue;
@@ -359,9 +336,9 @@ async function adoptSweepHolds(repoConfig: RepoConfig, logger: Logger): Promise<
     let hold: { pr: number; url: string } | null;
     let pr: ReleasePrView;
     try {
-      hold = findSreSweepHold(repoConfig, issue.number);
+      hold = codeHost().findSreSweepHold(repoConfig, issue.number);
       if (!hold) continue;
-      pr = viewReleasePr(repoConfig, hold.pr);
+      pr = codeHost().viewReleasePr(repoConfig, hold.pr);
     } catch (err) {
       adoptChecked.delete(key);
       logger.debug(`Could not check #${issue.number} for an SRE sweep hold: ${errText(err)}`);
@@ -372,7 +349,7 @@ async function adoptSweepHolds(repoConfig: RepoConfig, logger: Logger): Promise<
       continue;
     }
     try {
-      removeBlockedLabel(repoConfig, issue.number);
+      codeHost().removeBlockedLabel(repoConfig, issue.number);
     } catch (err) {
       adoptChecked.delete(key);
       logger.warn(`Could not take over the SRE sweep hold on #${issue.number}: ${errText(err)}`);
@@ -409,7 +386,7 @@ function adoptMergedReleases(repoConfig: RepoConfig, st: RepoState, logger: Logg
   const tracked = new Set(Object.values(st.prodReleases ?? {}).flatMap((r) => r.issues));
   let prs: ReleasePrView[];
   try {
-    prs = recentMergedReleasePrs(repoConfig, iso(now() - ADOPT_WINDOW_MS));
+    prs = codeHost().recentMergedReleasePrs(repoConfig, iso(now() - ADOPT_WINDOW_MS));
   } catch (err) {
     logger.debug(`Could not list merged release PRs: ${errText(err)}`);
     return;
@@ -424,7 +401,7 @@ function adoptMergedReleases(repoConfig: RepoConfig, st: RepoState, logger: Logg
     const issues: number[] = [];
     try {
       for (const n of named) {
-        const v = viewIssue(repoConfig, n);
+        const v = codeHost().viewIssue(repoConfig, n);
         if (v?.labels.includes(repoConfig.triggerLabel)) issues.push(n);
       }
     } catch (err) {
@@ -456,12 +433,12 @@ function adoptMergedReleases(repoConfig: RepoConfig, st: RepoState, logger: Logg
 async function blockOrphans(repoConfig: RepoConfig, st: RepoState, logger: Logger): Promise<void> {
   const { releasePending } = repoConfig.lifecycleLabels;
   const tracked = new Set(Object.values(st.prodReleases ?? {}).flatMap((r) => r.issues));
-  const orphans = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
-    .filter((i) => hasLabel(i, releasePending) && !hasLabel(i, repoConfig.github.blockedLabel) && !tracked.has(i.number))
+  const orphans = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => codeHost().hasLabel(i, releasePending) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel) && !tracked.has(i.number))
     .map((i) => i.number);
   if (orphans.length === 0) return;
-  if (findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger)) return;
-  const diff = countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
+  if (codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger)) return;
+  const diff = codeHost().countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   if (diff !== 0) return;  // promote opens a release PR for them next pass
   if (await joinCarryingRelease(repoConfig, st, orphans, logger)) return;
   await stopRelease(repoConfig, null, orphans,
@@ -485,7 +462,7 @@ async function blockOrphans(repoConfig: RepoConfig, st: RepoState, logger: Logge
 async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphans: number[], logger: Logger): Promise<boolean> {
   let head: string;
   try {
-    head = productionHead(repoConfig);
+    head = codeHost().productionHead(repoConfig);
   } catch (err) {
     logger.debug(`Could not read ${repoConfig.productionBranch}'s head: ${errText(err)}`);
     return false;
@@ -500,7 +477,7 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
   const shippedUnlisted = !rel;
   if (!rel) {
     try {
-      const pr = recentMergedReleasePrs(repoConfig, iso(now() - ADOPT_WINDOW_MS)).find((p) => p.mergeSha === head);
+      const pr = codeHost().recentMergedReleasePrs(repoConfig, iso(now() - ADOPT_WINDOW_MS)).find((p) => p.mergeSha === head);
       if (pr) {
         const t = iso(now());
         rel = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: [], phase: "merged", mergeSha: head,
@@ -511,12 +488,12 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
     }
   }
   if (!rel) return false;
-  const titles = new Map(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i.title]));
+  const titles = new Map(codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i.title]));
   try {
-    const pr = viewReleasePr(repoConfig, rel.pr);
+    const pr = codeHost().viewReleasePr(repoConfig, rel.pr);
     const named = new Set(releaseIssues(pr.body));
     const missing = orphans.filter((n) => !named.has(n));
-    if (missing.length) addReleasePrIssues(repoConfig, pr, missing.map((n) => ({ number: n, title: titles.get(n) ?? `#${n}` })));
+    if (missing.length) codeHost().addReleasePrIssues(repoConfig, pr, missing.map((n) => ({ number: n, title: titles.get(n) ?? `#${n}` })));
   } catch (err) {
     logger.warn(`Could not add ${orphans.map((n) => `#${n}`).join(", ")} to release PR #${rel.pr}: ${errText(err)}`);
     return false;
@@ -543,8 +520,8 @@ async function joinCarryingRelease(repoConfig: RepoConfig, st: RepoState, orphan
 async function mergedVerdict(repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, logger: Logger, cycleNumber: number): Promise<Verdict> {
   if (rel.adopted && rel.attempts === 0) {
     try {
-      const pv = findPvComment(repoConfig, rel.pr);
-      const read = pv ? readPvResult(pv.body) : null;
+      const pv = codeHost().findPvComment(repoConfig, rel.pr);
+      const read = pv ? codeHost().readPvResult(pv.body) : null;
       if (pv && read) {
         logger.info(`Release PR #${rel.pr}: reading its existing Production Verification (${pv.url})`);
         return read.pass ? { kind: "pass", evidence: pv.url } : holdVerdict(read.hold, pv.url);
@@ -625,19 +602,19 @@ async function soak(repoConfig: RepoConfig, config: AgentConfig, rel: ProdReleas
  * deploy. Returns false when there is nothing to deploy this pass.
  */
 async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logger, cycleNumber: number): Promise<boolean> {
-  const open = findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
+  const open = codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   if (!open) return false;
   const key = `${repoConfig.githubRepo}#${open.number}`;
   const listed = new Set(releaseIssues(open.body));
-  const issues = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).filter((i) => listed.has(i.number));
+  const issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).filter((i) => listed.has(i.number));
   // The EM's sign-off gate (foreman#128): no Tech Lead approval and no SRE merge
   // while the release lists an issue without `ready for prod release` (or a label
   // it moves on to). Before the back-off wait, so the hold shows at once; it
   // clears itself on the pass after the last issue is signed.
-  const unsigned = unsignedIssues(issues, listed, repoConfig.lifecycleLabels, foremanAppliedOrHold(repoConfig, logger));
+  const unsigned = codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger));
   if (unsigned.length > 0) {
     try {
-      await syncSignoff(repoConfig, open.number, viewReleasePr(repoConfig, open.number).headSha, unsigned, logger);
+      await codeHost().syncSignoff(repoConfig, open.number, codeHost().viewReleasePr(repoConfig, open.number).headSha, unsigned, logger);
     } catch (err) {
       logger.warn(`Could not read release PR #${open.number}: ${errText(err)}`);
     }
@@ -645,9 +622,9 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     return false;
   }
   if (releaseBackoff.waiting(key)) return false;
-  const pending = issues.filter((i) => hasLabel(i, repoConfig.lifecycleLabels.releasePending)).map((i) => i.number);
+  const pending = issues.filter((i) => codeHost().hasLabel(i, repoConfig.lifecycleLabels.releasePending)).map((i) => i.number);
   if (pending.length === 0) return false;
-  const stopped = issues.filter((i) => hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number);
+  const stopped = issues.filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number);
   if (stopped.length > 0) {
     logger.debug(`Release PR #${open.number}: ${stopped.map((n) => `#${n}`).join(", ")} blocked; not deploying`);
     return false;
@@ -655,7 +632,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
 
   let pr: ReleasePrView;
   try {
-    pr = viewReleasePr(repoConfig, open.number);
+    pr = codeHost().viewReleasePr(repoConfig, open.number);
   } catch (err) {
     logger.warn(`Could not read release PR #${open.number}: ${errText(err)}`);
     return false;
@@ -664,23 +641,23 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   // The body is a snapshot: an issue that merged to the base branch after it was written is in
   // this head all the same. Read what the head carries now, then the head again: if it moved,
   // the decision was about another commit, so decide again next pass.
-  const late = unsignedInHead(repoConfig, logger);
+  const late = codeHost().unsignedInHead(repoConfig, logger);
   if (late === null) {
     logger.warn(`Release PR #${pr.number}: could not read what ${repoConfig.baseBranch} carries; not deploying`);
     return false;
   }
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
-    await syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
+    await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);
     return false;
   }
   try {
-    if (viewReleasePr(repoConfig, pr.number).headSha !== pr.headSha) return false;
+    if (codeHost().viewReleasePr(repoConfig, pr.number).headSha !== pr.headSha) return false;
   } catch (err) {
     logger.warn(`Could not re-read release PR #${pr.number}: ${errText(err)}`);
     return false;
   }
-  await syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
+  await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);
   const approval = await asRun(repoConfig, (signal) =>
@@ -719,7 +696,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   const tr = r.trailer;
   let mergeSha = tr.mergeSha;
   if (!mergeSha) {
-    try { mergeSha = viewReleasePr(repoConfig, pr.number).mergeSha; } catch { /* read again next pass */ }
+    try { mergeSha = codeHost().viewReleasePr(repoConfig, pr.number).mergeSha; } catch { /* read again next pass */ }
   }
   const merged: ProdRelease = { ...rel, phase: "merged", mergedAt: iso(now()), ...(mergeSha ? { mergeSha } : {}) };
   putRelease(repoConfig, merged);
@@ -773,7 +750,7 @@ export async function tryRelease(
     if (rel.phase !== "deploying") continue;
     // The Foreman stopped mid-deploy: read where the PR ended up.
     try {
-      const pr = viewReleasePr(repoConfig, rel.pr);
+      const pr = codeHost().viewReleasePr(repoConfig, rel.pr);
       if (pr.state === "MERGED") {
         putRelease(repoConfig, { ...rel, phase: "merged", mergedAt: pr.mergedAt ?? iso(t), ...(pr.mergeSha ? { mergeSha: pr.mergeSha } : {}) });
         rlog.info(`Release PR #${rel.pr} merged while its deploy was in flight; verifying it`);
@@ -793,7 +770,7 @@ export async function tryRelease(
   if (waiting.length > 0 && t - (lastHeadProbe.get(repoConfig.name) ?? 0) >= HEAD_PROBE_MS) {
     lastHeadProbe.set(repoConfig.name, t);
     try {
-      const head = productionHead(repoConfig);
+      const head = codeHost().productionHead(repoConfig);
       passHead.set(repoConfig.name, head);
       const moved = waiting.filter((r) => r.verifiedHead !== head);
       if (moved.length > 0) {
@@ -821,7 +798,7 @@ export async function tryRelease(
   if (merged) {
     if (!merged.mergeSha) {
       try {
-        const pr = viewReleasePr(repoConfig, merged.pr);
+        const pr = codeHost().viewReleasePr(repoConfig, merged.pr);
         if (pr.mergeSha) merged.mergeSha = pr.mergeSha;
       } catch { /* tagged on a later pass */ }
     }

@@ -25,7 +25,10 @@ test("the reconciler looks up closed-unmerged PRs, not only open ones", () => {
     "no closed-unmerged lookup — a rejected PR is invisible again",
   );
   const fn = reconciler.slice(reconciler.indexOf("function findLastClosedUnmergedPR"));
-  assert.match(fn.slice(0, 900), /"--state", "closed"/, "the lookup must query closed PRs");
+  assert.match(fn.slice(0, 900), /codeHost\(\)\.closedPrsForBranch\(/, "the lookup must query closed PRs");
+  const host = readFileSync(join(root, "src/github/core-reads.ts"), "utf-8");
+  const closed = host.slice(host.indexOf("function closedPrsForBranch"));
+  assert.match(closed.slice(0, 600), /"--state", "closed"/, "the code host's lookup must query closed PRs");
   assert.match(fn.slice(0, 900), /!p\.mergedAt/, "a merged PR is a delivery, not a rejection");
 });
 

@@ -5,6 +5,8 @@ import { findOpenPrs, formatGhError } from "./cache.js";
 import { gh, ghAsTechLead, isBackoffRefusal } from "./gh.js";
 import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
 import { OpenPromotionPR } from "./promotion.js";
+import type { BranchDrift } from "../code-host.js";
+export type { BranchDrift } from "../code-host.js";
 
 
 // --- Post-Implementation Self-Check ---
@@ -72,20 +74,6 @@ export function getRemoteBranchSha(
     logger.warn("getRemoteBranchSha: gh api failed", { ...formatGhError(err), repo, branch });
     return null;
   }
-}
-
-// --- Branch Sync ---
-
-export interface BranchDrift {
-  developBehindMain: number;
-  developAheadOfMain: number;
-  /** Files differing between main and develop. Zero means merge-commit-only drift. */
-  developAheadFiles: number;
-  /**
-   * The paths of those files, as GitHub lists them (capped at
-   * {@link COMPARE_FILE_CAP}). Absent when the compare did not return them.
-   */
-  developAheadPaths?: string[];
 }
 
 /** GitHub's compare API lists at most this many files; a list this long may be truncated. */

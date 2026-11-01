@@ -11,8 +11,8 @@
 import type { RepoConfig } from "./config.js";
 import type { WorkSourceAdapter } from "./adapters.js";
 import type { Logger } from "./logger.js";
-import { openIssueLabels } from "./github.js";
 import { loadRepoState, saveRepoState } from "./state.js";
+import { codeHost } from "./plugins/registry.js";
 
 /** Drop the repo's state entries for issues GitHub reads closed; the numbers dropped. */
 export async function pruneClosedHolds(
@@ -20,7 +20,7 @@ export async function pruneClosedHolds(
   source: WorkSourceAdapter,
   logger: Logger,
   /** The open issues' numbers (tests inject them). */
-  openNumbers: () => number[] = () => openIssueLabels(repoConfig, logger).map((i) => i.number),
+  openNumbers: () => number[] = () => codeHost().openIssueLabels(repoConfig, logger).map((i) => i.number),
 ): Promise<number[]> {
   if (!source.states) return [];
   const state = loadRepoState(repoConfig.name);

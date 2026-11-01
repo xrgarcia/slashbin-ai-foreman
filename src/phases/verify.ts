@@ -10,12 +10,11 @@ import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import { findIssuesMergedToBase, findIssuesAwaitingVerify, prChangedFiles } from "../github.js";
-import { getOpenIssues, hasLabel } from "../github/cache.js";
 import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
 import { noteUnrelated } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
+import { codeHost } from "../plugins/registry.js";
 
 /**
  * Review phase: invoke the EM /review-all-prs skill, scoped to one repo, when it
@@ -45,7 +44,7 @@ export function isDeployFailureHold(reason: string): boolean {
 
 /** The files a PR touched, for the EM's call; empty when unreadable (best effort, never throws). */
 function prFilesTouched(repoConfig: RepoConfig, pr: number, vlog: Logger): string[] {
-  return prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog).slice(0, 40);
+  return codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog).slice(0, 40);
 }
 
 export function reopensOnBaseAdvance(reason: string): boolean {
@@ -231,12 +230,12 @@ export function pickVerifyTarget(
  */
 async function takeQaRerunRequests(repoConfig: RepoConfig, config: AgentConfig, vlog: Logger): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
-  const approved = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)
-    .filter((i) => hasLabel(i, prApproved) && !hasLabel(i, readyForProd)).map((i) => i.number);
+  const approved = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)
+    .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)).map((i) => i.number);
   if (approved.length === 0) return;
   const deps = realQaDeps(repoConfig, config, vlog);
   const byPr = new Map<number, number[]>();
-  for (const r of findIssuesMergedToBase(repoConfig, approved, vlog)) byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
+  for (const r of codeHost().findIssuesMergedToBase(repoConfig, approved, vlog)) byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
   for (const [pr, issues] of byPr) {
     try {
       if (!postMergeQaState(await deps.comments!(pr), []).rerunRequested) continue;
@@ -276,7 +275,7 @@ export async function tryVerify(
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
   if (qaApplies(repoConfig, config)) await takeQaRerunRequests(repoConfig, config, vlog);
-  const waiting = findIssuesAwaitingVerify(repoConfig, vlog);
+  const waiting = codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
   const state = loadRepoState(repoName);
   const held: Record<number, VerifyHold> = { ...(state.verifyHeld ?? {}) };
   // A hold outlives its label only by mistake: a person relabelled the issue,
@@ -288,7 +287,7 @@ export async function tryVerify(
   }
   if (waiting.length === 0) return false;
 
-  const refs = findIssuesMergedToBase(repoConfig, waiting, vlog);
+  const refs = codeHost().findIssuesMergedToBase(repoConfig, waiting, vlog);
   // The blocked verify holds, re-checked: a merged PR now closes a
   // "no merged PR" hold; an edited spec reopens any failed one at once, with a
   // fresh attempt count, because retrying an unchanged spec cannot pass; new
@@ -301,7 +300,7 @@ export async function tryVerify(
     if (h.rework && !h.rework.landed && !exhausted) {
       // Waiting on the Foreman's fix: it landed once its issue's PR merged (or, with none filed, base moved).
       const landed = h.rework.issue !== null
-        ? findIssuesMergedToBase(repoConfig, [h.rework.issue], vlog).length > 0
+        ? codeHost().findIssuesMergedToBase(repoConfig, [h.rework.issue], vlog).length > 0
         : baseAdvancedSince(repoConfig, h.heldAt) === true;
       if (landed) {
         held[n] = { ...h, rework: { ...h.rework, landed: true } };

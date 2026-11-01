@@ -1,6 +1,6 @@
 import type { WorkObserver, WorkSourceAdapter } from "../adapters.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
-import type { AgentRole, ForemanPlugin, PluginCommand, PluginContext, PluginRole, QaRunner } from "./contract.js";
+import type { AgentRole, CodeHost, ForemanPlugin, PluginCommand, PluginContext, PluginRole, QaRunner } from "./contract.js";
 
 /**
  * The plugin registry (EM#1150): the core's only way to reach a plugin.
@@ -16,6 +16,16 @@ const startedObservers = new Map<ForemanPlugin, WorkObserver>();
 const observerList: WorkObserver[] = [];
 /** A work source set directly (tests, an embedding host); wins over a plugin's. */
 let workSourceOverride: WorkSourceAdapter | null = null;
+/** A code host set directly (tests, an embedding host); wins over a plugin's. */
+let codeHostOverride: CodeHost | null = null;
+/** The config plugins were last started or reconfigured with, for `fills`. */
+let currentConfig: AgentConfig | undefined;
+
+/** Whether `p` fills `role` under `config` (or the current one): listed, and selected when it says which. */
+function fills(p: ForemanPlugin, role: PluginRole, config: AgentConfig | undefined = currentConfig): boolean {
+  if (!p.roles.includes(role)) return false;
+  return !p.fills || !config || p.fills(role, config);
+}
 
 export function registerPlugin(p: ForemanPlugin): void {
   if (registered.some((r) => r.id === p.id)) throw new Error(`plugin "${p.id}" is registered twice`);
@@ -28,6 +38,7 @@ export function registeredPlugins(): readonly ForemanPlugin[] {
 
 /** Start every registered plugin this config enables, in registration order. */
 export async function startPlugins(config: AgentConfig, ctx: PluginContext): Promise<readonly ForemanPlugin[]> {
+  currentConfig = config;
   for (const p of registered) {
     if (started.includes(p)) continue;
     if (!p.enabled(config)) {
@@ -46,6 +57,7 @@ export async function startPlugins(config: AgentConfig, ctx: PluginContext): Pro
  * One plugin's failure never stops the rest.
  */
 export async function reconfigurePlugins(config: AgentConfig, ctx: PluginContext): Promise<void> {
+  currentConfig = config;
   for (const p of registered) {
     let action = "reload";
     try {
@@ -121,7 +133,7 @@ export async function stopPlugins(): Promise<void> {
 
 /** The started plugins that fill `role`. */
 export function pluginsFor(role: PluginRole): readonly ForemanPlugin[] {
-  return started.filter((p) => p.roles.includes(role));
+  return started.filter((p) => fills(p, role));
 }
 
 /**
@@ -151,7 +163,7 @@ export function qaFor(repo: RepoConfig, config: AgentConfig): QaRunner | undefin
  * starting anything.
  */
 export function enabledFor(role: PluginRole, config: AgentConfig): boolean {
-  return registered.some((p) => p.roles.includes(role) && p.enabled(config));
+  return registered.some((p) => fills(p, role, config) && p.enabled(config));
 }
 
 /** A CLI command any registered plugin adds, or undefined. */
@@ -206,6 +218,36 @@ export function activeWorkSource(): WorkSourceAdapter | null {
   return workSourceOverride ?? pluginsFor("workSource").find((p) => p.workSource)?.workSource ?? null;
 }
 
+export function setCodeHost(host: CodeHost | null): void {
+  codeHostOverride = host;
+}
+
+/** The directly set code host, else the first started plugin's, else null. */
+function activeCodeHost(): CodeHost | null {
+  return codeHostOverride ?? pluginsFor("codeHost").find((p) => p.codeHost)?.codeHost ?? null;
+}
+
+/**
+ * The code host (EM#1150 f5): the core's only way to reach PRs, branches, merges,
+ * comments and labels. Throws when none is enabled; startup refuses first.
+ */
+export function codeHost(): CodeHost {
+  const host = activeCodeHost();
+  if (!host) throw new Error(codeHostRefusal(undefined) ?? "no code host");
+  return host;
+}
+
+/**
+ * Why the Foreman cannot run, or null: no code-host plugin is started. The CLI
+ * refuses to start on it, and logs it after a reload that switched the host off.
+ */
+export function codeHostRefusal(config: Pick<AgentConfig, "codeHost"> | undefined): string | null {
+  if (activeCodeHost()) return null;
+  const id = config ? ` (codeHost: "${config.codeHost ?? "github"}")` : "";
+  return `no code host is enabled${id}: no plugin of that id is installed and started, ` +
+    `so the Foreman has nowhere to open, review or merge a PR. Set "codeHost" to "github" (the default) or install the plugin.`;
+}
+
 /** Tests only: forget every plugin and observer. */
 export function resetRegistryForTests(): void {
   registered.length = 0;
@@ -213,4 +255,6 @@ export function resetRegistryForTests(): void {
   startedObservers.clear();
   observerList.length = 0;
   workSourceOverride = null;
+  codeHostOverride = null;
+  currentConfig = undefined;
 }

@@ -1,43 +1,20 @@
 // The core calls one plugin interface, never GitHub or Paperclip (EM#1150;
-// EM docs/architecture.md decision 4). Every core file that still imports
-// plugin code directly is listed below with its exact count of such imports.
-// The list is a ratchet: it may only shrink. A new violator, a count that
-// grows, or a count that falls without the list being lowered fails the build.
-// The epic is done when the list is empty. The ratchet logic is the pure
-// checkBoundary in plugin-boundary-check.mjs, tested below against fixtures.
+// EM docs/architecture.md decision 4). The ratchet listed every core file that
+// imported plugin code directly; it only ever shrank, and since f5 (GitHub as the
+// code-host plugin) it is empty and must stay so. Nor may the core run `gh`.
+// The logic is the pure checkBoundary and ghSpawnProblems in
+// plugin-boundary-check.mjs, tested below against fixtures.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBoundary, connectorProblems, countViolations, isAgentPlugin, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
+import { checkBoundary, connectorProblems, countViolations, ghSpawnProblems, isAgentPlugin, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = join(root, "src");
 
-const KNOWN_VIOLATORS = {
-  "agent.ts": 2,
-  "closed-holds.ts": 1,
-  "config.ts": 2,
-  "daemon.ts": 2,
-  "divergence-repair.ts": 1,
-  "index.ts": 2,
-  "onboarding.ts": 2,
-  "phases/common.ts": 2,
-  "phases/custom.ts": 1,
-  "phases/implement.ts": 4,
-  "phases/promote.ts": 2,
-  "phases/qa-before-merge.ts": 1,
-  "phases/reconcile.ts": 1,
-  "phases/release.ts": 3,
-  "phases/review.ts": 2,
-  "phases/revise.ts": 1,
-  "phases/unstick.ts": 1,
-  "phases/verify.ts": 2,
-  "qa-report.ts": 2,
-  "reconciler.ts": 2,
-  "unstick.ts": 1,
-};
+const KNOWN_VIOLATORS = {};
 
 const importsOf = (file) => [...readFileSync(file, "utf8").matchAll(/^(?:import|export)[^;]*?from "([^"]+)"/gm)].map((m) => m[1]);
 const srcFiles = () => readdirSync(src, { recursive: true }).map((n) => String(n).split("\\").join("/")).filter((n) => n.endsWith(".ts"));
@@ -48,6 +25,17 @@ if (process.env.PRINT_PLUGIN_VIOLATIONS) console.log(JSON.stringify(countViolati
 
 test("core imports no plugin beyond the shrinking allowlist", () => {
   assert.deepEqual(checkBoundary(realImports(), KNOWN_VIOLATORS), []);
+});
+
+test("the ratchet is empty: no core file imports plugin code (EM#1150 f5)", () => {
+  assert.deepEqual(KNOWN_VIOLATORS, {});
+  assert.deepEqual(countViolations(realImports()), {});
+});
+
+test("no core file runs gh; only src/github* and the GitHub plugin may (EM#1150 f5)", () => {
+  const sources = Object.fromEntries(srcFiles().map((rel) => [rel, readFileSync(join(src, rel), "utf8")]));
+  assert.match(sources["github/gh.ts"], /execFileSync\("gh"/, "the walk sees the GitHub code that does run gh");
+  assert.deepEqual(ghSpawnProblems(sources), []);
 });
 
 test("no core file constructs the GitHub work-source connector (EM#1150 f4)", () => {
@@ -129,5 +117,33 @@ test("ratchet forbids constructing GitHubIssueConnector in core; the GitHub plug
     "github/x.ts": "new GitHubIssueConnector()",
     "adapters.ts": "// (`GitHubIssueConnector` in github-work-source.ts)\n/* new GitHubIssueConnector() */",
     "index.ts": 'export { GitHubIssueConnector } from "./github-work-source.js";',
+  }), []);
+});
+
+test("ratchet: core importing src/github* fails against the empty list, in any form", () => {
+  for (const [rel, spec] of [["orchestrator.ts", "./github.js"], ["phases/review.ts", "../github/pr.js"], ["daemon.ts", "./github-state.js"], ["work-source.ts", "./github-work-source.js"]]) {
+    const problems = checkBoundary({ [rel]: [spec] }, KNOWN_VIOLATORS);
+    assert.equal(problems.length, 1, `${rel} -> ${spec}`);
+    assert.match(problems[0], /imports plugin code directly/);
+  }
+  // The code-host interface and the config schema are core: importing them is fine.
+  assert.deepEqual(checkBoundary({ "phases/review.ts": ["../code-host.js", "../config-schema/github.js"] }, KNOWN_VIOLATORS), []);
+});
+
+test("ratchet: core spawning gh fails, whichever child_process call; src/github* and the GitHub plugin may", () => {
+  const spawns = ['execFileSync("gh", ["pr", "list"])', "spawnSync('gh', args)", "spawn(`gh`, [])", 'execFile("gh", a, cb)', 'execSync("gh api user")', 'exec("gh pr view")', 'execFileAsync("gh", args)'];
+  for (const call of spawns) {
+    for (const rel of ["agent.ts", "phases/release.ts", "upstream-backoff.ts", "plugins/paperclip.ts", "paperclip/client.ts"]) {
+      const problems = ghSpawnProblems({ [rel]: `const out = ${call};` });
+      assert.equal(problems.length, 1, `${rel}: ${call}`);
+      assert.match(problems[0], new RegExp(`src/${rel.replace(/\./g, "\\.")} runs gh directly`));
+    }
+    for (const rel of ["github/gh.ts", "github.ts", "github-state.ts", "github/core-reads.ts", "plugins/github.ts"]) {
+      assert.deepEqual(ghSpawnProblems({ [rel]: call }), [], `${rel} may: ${call}`);
+    }
+  }
+  // Comments, git and other commands are not gh.
+  assert.deepEqual(ghSpawnProblems({
+    "agent.ts": '// execFileSync("gh", [])\n/* spawnSync("gh") */\nspawnSync("git", ["log"]); execFileSync("ghost"); spawn("claude", []);',
   }), []);
 });
