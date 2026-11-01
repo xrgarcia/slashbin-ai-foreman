@@ -4,6 +4,7 @@
 import { repairDivergence } from "../divergence-repair.js";
 import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
+import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { selectWork, heldWork, emit, advance, wantsSessionReports } from "../work-source.js";
@@ -514,7 +515,7 @@ export async function tryBatchImplementation(
   // flight per repo). Queued the same way; see devVerifyHolding for what frees it.
   const repoQueue = queuedBehind.get(repoName) ?? new Map<number, string>();
   queuedBehind.set(repoName, repoQueue);
-  const merged = !featurePr && config.srePath && config.buildWaitsForDevVerify
+  const merged = !featurePr && roleFor("verifier", config) !== undefined && config.buildWaitsForDevVerify
     ? [...labels].filter(([, names]) => names.includes(repoConfig.lifecycleLabels.prMerged)).map(([n]) => n)
     : [];
   const verifying = devVerifyHolding(merged, loadRepoState(repoName).verifyHeld ?? {}, config.backoff.verifyRetry.maxAttempts);
@@ -752,15 +753,16 @@ export async function tryBatchImplementation(
       // merged PR that says it CLOSED the issue counts (never a "related to #N").
       // On any lookup failure it advances nothing — we under-advance by design.
       const alreadyMerged = findIssuesMergedToBase(repoConfig, skippedSet, repoLogger);
+      const hasVerifier = roleFor("verifier", config) !== undefined;
       if (alreadyMerged.length > 0) {
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
         await notifyOnce("merged", repoConfig, mergedNums, repoLogger);
         for (const n of mergedNums) {
           // With a verify stage, merged work still owes its acceptance evidence (EM#441).
-          await advance(itemOf(repoConfig, n), config.srePath ? "alreadyMerged" : "alreadyApproved", repoConfig, repoLogger);
+          await advance(itemOf(repoConfig, n), hasVerifier ? "alreadyMerged" : "alreadyApproved", repoConfig, repoLogger);
         }
         repoLogger.info(
-          `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels[config.srePath ? "prMerged" : "prApproved"]}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
+          `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels[hasVerifier ? "prMerged" : "prApproved"]}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
         );
         events?.push({
           message: `Advanced ${mergedNums.length} already-merged issue(s) on ${repoConfig.githubRepo} to '${repoConfig.lifecycleLabels.prApproved}': ${mergedNums.map((n) => `#${n}`).join(", ")}`,

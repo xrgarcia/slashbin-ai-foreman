@@ -89,6 +89,11 @@ const LABELS = [
   ["recoverMerged", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr merged"]],
   // Was a flagless edit (GitHub rejects it: false); fixed 2026-10-10 to make no call.
   ["recoverMerged", "pr merged", false, null],
+  // No reviewer (EM#1150 f3): a person merged the PR; the merge is recorded, then approved, then closed.
+  ["humanMerged", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr merged"]],
+  ["humanMerged", "pr merged", false, null],
+  ["humanMergedApproved", "pr merged", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
+  ["closedNoRelease", "pr approved", true, ["--remove-label", "pr approved"]],
   ["release", "pr under review", true, ["--remove-label", "pr under review"]],
   ["release", "pr merged", false, null],
   // The release lifecycle (EM#578). Each reads the issue first and writes only what is missing.

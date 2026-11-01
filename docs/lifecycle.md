@@ -57,7 +57,7 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `prodVerifyHeld` | `prod verification held` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
 | `needsRuling` | — (a session holds it) | Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue (an agent's edit or label buys one session; its comment releases nothing). |
 | `blocked` | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
-| `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed. |
+| `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed (or, with no reviewer, verifier, deployer or promote stage, once a person merged it). |
 
 ## Moves
 
@@ -79,6 +79,9 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |
 | `recoverFailed` | unknown | changesRequested | `changesRequested` | Dead-zone recovery: a fresh verification failed. |
 | `recoverMerged` | unknown | merged | `merged` | Dead-zone recovery with a verify stage: the merge is recorded and verification follows. |
+| `humanMerged` | unknown | merged | `merged` | No reviewer is enabled, so a person reviewed and merged the PR: the merge is recorded, and dev verification follows when a verifier is enabled. |
+| `humanMergedApproved` | merged | approved | `pendingVerification` | A person merged it, and there is no verifier: it goes straight on. |
+| `closedNoRelease` | approved | released | `done` | A person merged it, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed. |
 | `release` | unknown | queued | `approved` | An orphan: in review with no open PR; released back to the queue. |
 | `releaseQueued` | releaseAuthorized | releasing | `releasing` | The promote stage put an EM-authorized item in the release PR (opened, updated, or already listing it), or found its work already in production with no prod verification on record. |
 | `alreadyReleased` | releaseAuthorized | released | `done` | Authorized, its work already in production, and a passed prod verification on record for it: closed. |
@@ -102,6 +105,9 @@ stateDiagram-v2
   unknown --> approved: recoverPassed
   unknown --> changesRequested: recoverFailed
   unknown --> merged: recoverMerged
+  unknown --> merged: humanMerged
+  merged --> approved: humanMergedApproved
+  approved --> released: closedNoRelease
   unknown --> queued: release
   releaseAuthorized --> releasing: releaseQueued
   releaseAuthorized --> released: alreadyReleased

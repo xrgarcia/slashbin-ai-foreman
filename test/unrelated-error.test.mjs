@@ -8,7 +8,11 @@ import { join } from "node:path";
 import { setStatePath, loadRepoState } from "../dist/state.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { noteUnrelated, unrelatedSignature, UNSTICK_KINDS } from "../dist/unstick.js";
-import { parseUnrelatedErrors, parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
+import { parseUnrelatedErrors, parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
+import { verifyVerdict } from "../dist/plugins/sre.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";

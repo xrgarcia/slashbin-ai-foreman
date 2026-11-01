@@ -29,11 +29,12 @@
 // fleet's.
 
 import { resolve } from "node:path";
-import { releaseStageReady, type AgentConfig, type RepoConfig } from "../config.js";
+import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
 import type { Move } from "../lifecycle.js";
-import { approvePromotionViaTechLead, deployViaSre, verifyProdViaSre, type VerifyResult } from "../agent.js";
+import { roleFor } from "../plugins/registry.js";
+import type { VerifyResult } from "../plugins/contract.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
   findOpenPromotionPR,
@@ -112,6 +113,12 @@ function holdVerdict(hold: string, evidence?: string): Verdict {
   if (plan.kind === "defer") return { kind: "defer", reason: hold };
   if (plan.kind === "wait") return { kind: "wait", retryAt: plan.retryAt, hold };
   return { kind: "hold", hold, ...(evidence ? { evidence } : {}) };
+}
+
+/** Production verification (or the soak) by the enabled verifier; an error result when none is enabled. */
+function verifyProd(repoConfig: RepoConfig, config: AgentConfig, pr: number, logger: Logger, signal: AbortSignal, path: string, mode: "prod" | "soak"): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
+  const v = roleFor("verifier", config);
+  return v ? v.verifyProd(repoConfig, config, pr, logger, signal, path, mode) : Promise.resolve({ kind: "error", error: "no verifier is enabled" });
 }
 
 /** The evidence link for a verification the SRE just posted: its latest Production Verification comment. */
@@ -548,7 +555,7 @@ async function mergedVerdict(repoConfig: RepoConfig, config: AgentConfig, rel: P
   }
   const path = transcript(repoConfig, `verify-pr${rel.pr}`, cycleNumber);
   logger.info(`Release PR #${rel.pr}: SRE prod verification, transcript: ${path}`);
-  const r = await asRun(repoConfig, (signal) => verifyProdViaSre(repoConfig, config, rel.pr, logger, signal, path, "prod"));
+  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "prod"));
   if (r.kind === "nothing") return { kind: "defer", reason: r.reason };
   return fromVerifyResult(r, repoConfig, rel.pr, logger);
 }
@@ -582,7 +589,7 @@ async function soak(repoConfig: RepoConfig, config: AgentConfig, rel: ProdReleas
   const key = `${repoConfig.githubRepo}#${rel.pr}`;
   const path = transcript(repoConfig, `soak-pr${rel.pr}`, cycleNumber);
   logger.info(`Release PR #${rel.pr}: SRE 30-minute soak, transcript: ${path}`);
-  const r = await asRun(repoConfig, (signal) => verifyProdViaSre(repoConfig, config, rel.pr, logger, signal, path, "soak"));
+  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "soak"));
   if (r.kind === "nothing") {
     logger.info(`Release PR #${rel.pr}: no soak to run (${r.reason}); done`);
     dropRelease(repoConfig, rel.pr);
@@ -677,7 +684,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);
   const approval = await asRun(repoConfig, (signal) =>
-    approvePromotionViaTechLead(repoConfig, config, pr.number, pr.headSha, logger, signal, approvePath));
+    roleFor("reviewer", config)?.approvePromotion(repoConfig, config, pr.number, pr.headSha, logger, signal, approvePath) ?? Promise.resolve({ kind: "retry" as const, reason: "no reviewer is enabled" }));
   if (approval.kind === "refused") {
     await stopRelease(repoConfig, pr.number, pending, `the Tech Lead refused to approve it at \`${short(pr.headSha)}\`: ${approval.reason}`, undefined, logger);
     return true;
@@ -693,7 +700,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   putRelease(repoConfig, rel);
   const deployPath = transcript(repoConfig, `deploy-pr${pr.number}`, cycleNumber);
   logger.info(`Release PR #${pr.number}: Tech Lead approved at ${short(pr.headSha)}; SRE deploying, transcript: ${deployPath}`);
-  const r = await asRun(repoConfig, (signal) => deployViaSre(repoConfig, config, pr.number, pr.headSha, logger, signal, deployPath));
+  const r = await asRun(repoConfig, (signal) => roleFor("deployer", config)?.deploy(repoConfig, config, pr.number, pr.headSha, logger, signal, deployPath) ?? Promise.resolve({ kind: "retry" as const, reason: "no deployer is enabled" }));
 
   if (r.kind !== "trailer" || !r.trailer.merged) {
     dropRelease(repoConfig, pr.number);
@@ -744,7 +751,8 @@ export async function tryRelease(
   logger: Logger,
   cycleNumber: number,
 ): Promise<boolean> {
-  if (!releaseStageReady(config)) return false;
+  // One reviewer approval and one deployer deploy (EM#578): without both the stage does not run.
+  if (!roleFor("deployer", config) || !roleFor("reviewer", config)) return false;
   if (repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch) return false;
   if (isUpstreamBlocked("github")) return false;
   const rlog = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "release" });
@@ -827,7 +835,7 @@ export async function tryRelease(
   if (held) {
     const path = transcript(repoConfig, `verify-pr${held.pr}`, cycleNumber);
     rlog.info(`Release PR #${held.pr}: re-verifying production after ${held.hold ?? "a hold"}, transcript: ${path}`);
-    const r = await asRun(repoConfig, (signal) => verifyProdViaSre(repoConfig, config, held.pr, rlog, signal, path, "prod"));
+    const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held.pr, rlog, signal, path, "prod"));
     const v: Verdict = r.kind === "nothing" ? { kind: "defer", reason: r.reason } : fromVerifyResult(r, repoConfig, held.pr, rlog);
     await settle(repoConfig, config, held, v, rlog);
     return true;

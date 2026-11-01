@@ -8,7 +8,7 @@
 //      because it now performs a real write instead of only logging.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReviewTrailerRecords } from "../dist/agent.js";
+import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
 import { labelFromTrailer } from "../dist/orchestrator.js";
 
 test("the original four-field trailer parses unchanged (backward compat)", () => {

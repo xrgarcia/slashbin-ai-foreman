@@ -1,44 +1,18 @@
 // The QA report: after the SRE's dev verify passes, run `qa.mjs check` once for the
 // merged PR and say what it found on the PR. Report-only: nothing here moves a label,
 // holds a card or waits (the caller does not await `reportQaAfterVerify`'s work).
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { buildQaEnv, runAgentCli, type CliRun, type VerifyResult } from "./agent.js";
+import type { VerifyResult } from "./plugins/contract.js";
+import { qaFor, roleFor } from "./plugins/registry.js";
 import { commentBodies, commentsWithTimes, hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
 import { prChangedFiles } from "./github/reports.js";
 
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
-
-/**
- * One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment.
- * QA reviews serially, one Codex run per 4 shots (slashbin_ai_qa `lib/review.mjs` BATCH_SIZE)
- * plus a 2-run control, each allowed 900 s (`lib/review.mjs:113`, `lib/codex.mjs:49`), so its
- * own ceiling grows with the pages a PR touches. Slashbin-console PR #1518 (a `shared/schema.ts`
- * change fans out to all 18 routes, 72 shots, 18 batches) was still reviewing when 20 minutes
- * killed it (2026-10-29 21:03Z, capture had taken 4 min). 90 minutes covers that review; a
- * longer one is a tooling hold (`qa-errored`) that retries without charging (slashbin-ai-foreman#137).
- */
-export const QA_MAX_DURATION_MS = 90 * 60_000;
-
-/**
- * Which QA step a killed run was in, from its `[qa]` progress lines on stderr
- * (`lib/check.mjs`): "review" once it logged "captured N shots; reviewing", "capture"
- * once it resolved pages or took a shot, else "setup". Pure.
- */
-export function qaStepOf(stderr: string): "setup" | "capture" | "review" {
-  const lines = stderr.split("\n").filter((l) => l.startsWith("[qa] "));
-  if (lines.some((l) => /\bcaptured \d+ shots; reviewing\b/.test(l))) return "review";
-  if (lines.some((l) => /^\[qa\] (shot |resolved |affected pages)/.test(l))) return "capture";
-  return "setup";
-}
-
-/** The EM script that hands a named Doppler key to one child, and nothing else. */
-const DOPPLER_RUN = "scripts/secrets/doppler-run.mjs";
-const MINT_KEY = "DEV_SESSION_MINT_KEY";
 
 /** What `manifest.json` carries that the report reads. */
 export interface QaManifest {
@@ -142,24 +116,21 @@ export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger
   }
 }
 
-/** Whether QA applies to `repoConfig` on this install. */
+/** Whether an enabled QA plugin covers `repoConfig` on this install. */
 export function qaApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
-  return Boolean(agentConfig.qaPath) && agentConfig.qaRepos.includes(repoConfig.githubRepo);
+  return qaFor(repoConfig, agentConfig) !== undefined;
 }
 
 /**
  * Whether QA runs BEFORE the merge for `repoConfig` (config.qaBeforeMerge): the flag, a QA repo, and the
- * Tech Lead that does the merge. When true the post-merge QA (gate and report-only) does not run for it.
+ * reviewer that does the merge. When true the post-merge QA (gate and report-only) does not run for it.
  */
 export function qaBeforeMergeApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
-  return agentConfig.qaBeforeMerge && Boolean(agentConfig.techLeadPath) && qaApplies(repoConfig, agentConfig);
+  return agentConfig.qaBeforeMerge && roleFor("reviewer", agentConfig) !== undefined && qaApplies(repoConfig, agentConfig);
 }
 
-/**
- * The real edges: `qa.mjs check` run under the EM's doppler-run.mjs, which gives
- * DEV_SESSION_MINT_KEY (project = the repo, config dev) to that child alone.
- */
-export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger): QaDeps {
+/** The real edges: the PR's comments and files on the code host, and the QA plugin covering the repo, on dev. */
+export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger, local = false): QaDeps {
   return {
     hasMarker: (pr, marker) => hasCommentContaining(repoConfig, pr, marker),
     hasReport: (pr) => hasCommentStartingWith(repoConfig, pr, QA_HEADING),
@@ -167,36 +138,11 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
     comments: (pr) => commentsWithTimes(repoConfig, pr),
     changedFiles: async (pr) => prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
     async run({ repo, pr, out }) {
-      const em = agentConfig.emRepoPath;
-      const qa = agentConfig.qaPath;
-      if (!em || !qa) return { kind: "errored", detail: "emRepoPath and qaPath must both be set" };
-      const args = ["--keys", `${MINT_KEY}@${repo}`, "dev", "--", "node", join(qa, "bin/qa.mjs"), "check", "--repo", repo, "--pr", String(pr), "--out", out];
-      const r: CliRun = await runAgentCli(em, DOPPLER_RUN, args, buildQaEnv(agentConfig), agentConfig, QA_MAX_DURATION_MS);
-      return readOutcome(r, out, logger);
+      const qa = qaFor(repoConfig, agentConfig);
+      if (!qa) return { kind: "errored", detail: `no enabled QA plugin covers ${repo}` };
+      return qa.check(repoConfig, agentConfig, { repo, pr, out, local }, logger);
     },
   };
-}
-
-/** Exit 0/1/3 with a readable manifest is a result; a timeout, any other exit or a missing manifest is an error. */
-export function readOutcome(r: CliRun, out: string, logger: Logger): QaOutcome {
-  if (r.timedOut) {
-    const step = qaStepOf(r.stderr);
-    const last = r.stderr.split("\n").filter((l) => l.startsWith("[qa] ")).pop() ?? "(no progress line)";
-    logger.warn(`QA: killed at ${QA_MAX_DURATION_MS / 60_000} minutes during ${step}; last line: ${last.slice(0, 200)}`);
-    return { kind: "errored", detail: `timed out after ${QA_MAX_DURATION_MS / 60_000} minutes during the ${step} step` };
-  }
-  if (![0, 1, 3].includes(r.code ?? -1)) {
-    // stderr tail goes to the log only (already redacted of known secrets), never onto the PR.
-    logger.warn(`QA: exit ${r.code}; tail: ${(r.stderr || r.stdout).trim().slice(-300)}`);
-    return { kind: "errored", detail: `exit code ${r.code}` };
-  }
-  try {
-    const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as QaManifest;
-    if (!manifest.verdict) return { kind: "errored", detail: "manifest.json has no verdict" };
-    return { kind: "manifest", exitCode: r.code as number, manifest };
-  } catch (e) {
-    return { kind: "errored", detail: `exit ${r.code} but manifest.json is unreadable (${String(e).slice(0, 100)})` };
-  }
 }
 
 // --- The gate (config.qaGate) ---
@@ -303,24 +249,9 @@ export async function applyQaGate(
 
 // --- QA before the merge (config.qaBeforeMerge) ---
 
-/**
- * The local run: `qa.mjs check --local` boots the PR itself and generates its own mint key, so it
- * takes no secret and does not go through doppler-run (the gate's `run` above does). It needs git,
- * npm, the network and GH_TOKEN, all in `buildQaEnv`.
- */
+/** The same edges, with QA booting the PR locally (before the merge) instead of checking dev. */
 export function realQaLocalDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger): QaDeps {
-  return {
-    ...realQaDeps(repoConfig, agentConfig, logger),
-    async run({ repo, pr, out }) {
-      const qa = agentConfig.qaPath;
-      if (!qa) return { kind: "errored", detail: "qaPath must be set" };
-      // A manifest left by an earlier run must never be read as this one's.
-      rmSync(join(out, "manifest.json"), { force: true });
-      const args = ["check", "--local", "--repo", repo, "--pr", String(pr), "--out", out];
-      const r: CliRun = await runAgentCli(qa, "bin/qa.mjs", args, buildQaEnv(agentConfig), agentConfig, QA_MAX_DURATION_MS);
-      return readOutcome(r, out, logger);
-    },
-  };
+  return realQaDeps(repoConfig, agentConfig, logger, true);
 }
 
 /** The marker a gating report for `verdict` on head `sha` carries (see qaGateMarker). */

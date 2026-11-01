@@ -1,6 +1,6 @@
 import type { WorkObserver, WorkSourceAdapter } from "../adapters.js";
-import type { AgentConfig } from "../config.js";
-import type { ForemanPlugin, PluginCommand, PluginContext, PluginRole } from "./contract.js";
+import type { AgentConfig, RepoConfig } from "../config.js";
+import type { AgentRole, ForemanPlugin, PluginCommand, PluginContext, PluginRole, QaRunner } from "./contract.js";
 
 /**
  * The plugin registry (EM#1150): the core's only way to reach a plugin.
@@ -122,6 +122,36 @@ export async function stopPlugins(): Promise<void> {
 /** The started plugins that fill `role`. */
 export function pluginsFor(role: PluginRole): readonly ForemanPlugin[] {
   return started.filter((p) => p.roles.includes(role));
+}
+
+/**
+ * The agent filling `role` for this config: a started plugin that this config
+ * enables, or undefined when none does (the stage then does not run). The
+ * phases reach the Tech Lead, the SRE, QA and the EM only through this.
+ */
+export function roleFor<R extends AgentRole>(role: R, config: AgentConfig): NonNullable<ForemanPlugin[R]> | undefined {
+  for (const p of pluginsFor(role)) {
+    const impl = p[role];
+    if (impl && p.enabled(config)) return impl as NonNullable<ForemanPlugin[R]>;
+  }
+  return undefined;
+}
+
+/** The QA runner that covers `repo`, or undefined. */
+export function qaFor(repo: RepoConfig, config: AgentConfig): QaRunner | undefined {
+  for (const p of pluginsFor("qa")) {
+    if (p.qa && p.enabled(config) && p.qa.covers(repo, config)) return p.qa;
+  }
+  return undefined;
+}
+
+/**
+ * Whether this config enables a registered plugin filling `role`, started or
+ * not: for startup warnings and the doctor, which judge a config without
+ * starting anything.
+ */
+export function enabledFor(role: PluginRole, config: AgentConfig): boolean {
+  return registered.some((p) => p.roles.includes(role) && p.enabled(config));
 }
 
 /** A CLI command any registered plugin adds, or undefined. */

@@ -4,12 +4,17 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewViaTechLead, QA_PENDING_HOLD, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD, parseReviewTrailerRecords } from "../dist/agent.js";
+import { QA_PENDING_HOLD, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../dist/agent.js";
+import { reviewViaTechLead } from "../dist/plugins/tech-lead.js";
+import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
 import { runQaBeforeMerge, qaBeforeMergeApplies, qaVerdictMarker, qaFailLines, qaGateBody, runQaReport, applyQaGate, executeQa } from "../dist/qa-report.js";
 import { rulingState } from "../dist/github/reports.js";
 import { sessionFallbackStage, MOVES, STAGE_MEANING, SESSION_FALLBACK_STAGE } from "../dist/lifecycle.js";
 import { TOOLING_HOLDS, verifyHoldPlan } from "../dist/phases/verify.js";
 import { configSchema } from "../dist/config.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 const REPO = "xrgarcia/Slashbin-console";
@@ -85,8 +90,8 @@ test("3: PASS posts the QA Report with the head's marker; the post-merge gate do
   assert.match(d.posted[0], /^## QA Report\n/);
   assert.ok(d.posted[0].includes(qaVerdictMarker(SHA, "PASS")));
   const phase = src("phases/qa-before-merge.ts");
-  assert.ok(phase.indexOf("runQaBeforeMerge(") < phase.indexOf("reviewViaTechLead("), "QA first, then the merge call");
-  assert.match(phase, /reviewViaTechLead\(repoConfig, config, prNumber, qlog, runAbort\.signal, transcriptPath, undefined, false, headSha\)/, "the merge is pinned to the head QA passed");
+  assert.ok(phase.indexOf("runQaBeforeMerge(") < phase.indexOf(".reviewPr("), "QA first, then the merge call");
+  assert.match(phase, /reviewer\.reviewPr\(repoConfig, config, prNumber, qlog, runAbort\.signal, transcriptPath, undefined, false, headSha\)/, "the merge is pinned to the head QA passed");
   assert.match(phase, /settleReviewOutcome\(/);
   assert.match(src("phases/verify.ts"), /config\.qaGate && !qaBeforeMerge && qaApplies\(/);
   assert.match(src("phases/verify.ts"), /!config\.qaGate && !qaBeforeMerge && qaApplies\(/);
@@ -159,7 +164,7 @@ test("7: the flag is off by default; it applies only to a qaRepos repo with the 
 
 test("7: flag-off parity: the review call appends --no-merge only on request, and the moves are unchanged", () => {
   assert.match(src("phases/review.ts"), /const qaFirst = qaBeforeMergeApplies\(/);
-  assert.match(src("agent.ts"), /noMerge \? \["--no-merge"\] : \[\]/);
+  assert.match(src("plugins/tech-lead.ts"), /noMerge \? \["--no-merge"\] : \[\]/);
   assert.ok(MOVES.reviewMerged && MOVES.changesRequested);
 });
 
