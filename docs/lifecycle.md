@@ -21,13 +21,13 @@ event too, through the same `emit()`.
 
 Each event goes to two kinds of listener, and neither reads the other:
 
-- **The work source** (`WorkSourceAdapter.record`) — today GitHub issues (`src/github-work-source.ts`),
+- **The work source** (`WorkSourceAdapter.record`) — the GitHub plugin's issues (`src/plugins/github.ts`, `src/github-work-source.ts`),
   which turns each move into exactly one `gh issue edit` of lifecycle labels. Other events write nothing there.
 - **Observers** (`WorkObserver.onEvent`) — optional plugins, queued and best-effort: the Paperclip
-  board mirror (`src/paperclip/`, on when `paperclip.enabled`) and the daemon's activity log. An
+  board plugin (`src/plugins/paperclip.ts`, on when `paperclip.enabled`) and the daemon's activity log. An
   observer that fails or hangs never stops the Foreman.
 
-So the core calls one interface; GitHub is updated, and Paperclip too when it is enabled.
+So the core calls one interface (`src/plugins/registry.ts`); GitHub is updated, and Paperclip too when it is enabled.
 
 ## Stages
 
