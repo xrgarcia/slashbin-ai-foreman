@@ -119,12 +119,14 @@ if (config.srePath) {
   if (process.env.SRE_GITHUB_KEY) line("PASS", "SRE_GITHUB_KEY", "set");
   else line("FAIL", "SRE_GITHUB_KEY", "unset, and srePath is set — the verify stage refuses to run without it.");
 }
-// QA report (report-only): needs the QA checkout and the EM's doppler-run.mjs, which supplies its one secret.
+// QA report (report-only): needs the QA checkout and the EM checkout's qaSecretsRunner, which supplies its one secret.
 if (config.qaPath) {
   const qaOk = existsSync(join(config.qaPath, "bin/qa.mjs"));
-  const dopplerOk = config.emRepoPath && existsSync(join(config.emRepoPath, "scripts/secrets/doppler-run.mjs"));
-  if (qaOk && dopplerOk) line("PASS", "QA report", `on for ${config.qaRepos.join(", ")}`);
-  else line("FAIL", "QA report", `${!qaOk ? "qaPath has no bin/qa.mjs. " : ""}${!dopplerOk ? "emRepoPath has no scripts/secrets/doppler-run.mjs (it supplies DEV_SESSION_MINT_KEY). " : ""}QA reports will post as errored.`.trim());
+  const runner = config.qaSecretsRunner;
+  const runnerOk = Boolean(runner && config.emRepoPath && existsSync(join(config.emRepoPath, runner)));
+  const runnerWhy = !runner ? "qaSecretsRunner is not set (it supplies DEV_SESSION_MINT_KEY). " : `emRepoPath has no ${runner} (it supplies DEV_SESSION_MINT_KEY). `;
+  if (qaOk && runnerOk) line("PASS", "QA report", `on for ${config.qaRepos.join(", ")}`);
+  else line("FAIL", "QA report", `${!qaOk ? "qaPath has no bin/qa.mjs. " : ""}${!runnerOk ? runnerWhy : ""}QA reports will post as errored.`.trim());
 }
 if (config.qaGate && !config.qaPath) line("FAIL", "QA gate", "qaGate is true but qaPath is not set, so QA never runs and nothing is gated.");
 else if (config.qaGate) line("PASS", "QA gate", "on: QA runs before a verify pass advances the card");

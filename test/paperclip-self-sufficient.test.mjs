@@ -14,6 +14,10 @@ import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
 import { loadCardBlocks, saveCardBlock, setStatePath } from "../dist/state.js";
+import { slashbinProfile } from "../dist/profiles/slashbin.js";
+
+/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
+const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
 
 async function allOpen(ns) { return new Map(ns.map((n) => [n, "open"])); }
 
@@ -29,7 +33,7 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
   const agent = { id: AGENT, metadata: {} };
   // The board's agents, as `GET /companies/:id/agents` lists them; each may carry metadata.githubLogin.
   const boardAgents = [];
-  // Who each comment was credited to (x-slashbin-comment-author), in posting order; null = the key's user.
+  // Who each comment was credited to (the HEADER), in posting order; null = the key's user.
   const credits = [];
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -37,7 +41,7 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path: u.pathname, body });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/agents`) return new Response(JSON.stringify(boardAgents), { status: 200 });
-    if (body && ((method === "POST" && u.pathname.endsWith("/comments")) || (method === "PATCH" && "comment" in body))) credits.push(init.headers?.["x-slashbin-comment-author"] ?? null);
+    if (body && ((method === "POST" && u.pathname.endsWith("/comments")) || (method === "PATCH" && "comment" in body))) credits.push(init.headers?.[HEADER] ?? null);
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
@@ -124,7 +128,7 @@ function mirrorOn(fake, extra = {}, store) {
   const cfg = { enabled: true, url: "http://pc.test", companyId: CID, agentId: AGENT, agentName: "Foreman",
     identityKeyFormat: "source: {repo}#{N}", comments: { enabled: false }, agentStatus: false, roles: ROLES, board: BOARD, ...extra };
   const fetch = (url, init = {}) => fake.down && init.method === "PATCH" ? Promise.resolve(new Response("{}", { status: 503 })) : fake.fetch(url, init);
-  const client = new PaperclipClient({ url: cfg.url, companyId: CID, fetch });
+  const client = new PaperclipClient({ url: cfg.url, companyId: CID, fetch, commentAuthorHeader: HEADER });
   return new PaperclipMirror(client, cfg, [], logger(), {}, store);
 }
 

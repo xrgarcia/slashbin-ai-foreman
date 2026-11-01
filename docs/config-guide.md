@@ -7,6 +7,7 @@
 - [Single-repo mode](#single-repo-mode)
 - [Lifecycle labels](#lifecycle-labels)
 - [Multi-repo mode](#multi-repo-mode)
+- [Profiles](#profiles)
 - [GitHub tokens](#github-tokens)
 - [Discord notifications](#discord-notifications)
 
@@ -154,6 +155,37 @@ sessions for larger features in that repo only.
 Existing configs that don't specify per-repo overrides continue to behave identically —
 the top-level values still apply to every repo. Per-repo overrides are additive and
 optional.
+
+## Profiles
+
+The core ships neutral: nobody is mentioned when a stuck card gives up, no issue body is
+read for an epic reference, no credit header goes to Paperclip, and QA covers no repo.
+A deployment's own values live in a named profile under `src/profiles/`, chosen with one
+key:
+
+```json
+{ "profile": "slashbin" }
+```
+
+Each value resolves as **neutral default < profile < explicit `.ai-agent.json` value**
+(env vars still beat all three), and nested objects such as `paperclip` merge key by key.
+An unknown name stops startup with the list of valid profiles, and the daemon logs the
+active profile once when it starts.
+
+What the `slashbin` profile sets, and what each falls back to without it:
+
+| Key | `slashbin` | Neutral default |
+|---|---|---|
+| `unstickEscalationOwner` | `xrgarcia` | none: a give-up is logged and nobody is mentioned |
+| `epicRefLabel` | `engineering-manager` | none: issue bodies are not read for an epic, so no epic-close ask |
+| `divergenceRulerLogin` | `slashbin-engineering-manager` | none: no divergence ruling is looked for |
+| `paperclip.commentAuthorHeader` | `x-slashbin-comment-author` | none: no credit header is sent |
+| `qaRepos` | `["xrgarcia/Slashbin-console"]` | `[]` |
+| `qaSecretsRunner` | `scripts/secrets/doppler-run.mjs` | none: a dev QA run reports errored |
+| `reviewAllowedTools` | the base tools plus GitHub, Postgres, Redis, Railway and knowledge MCPs | `Read, Write, Edit, Bash, Glob, Grep, WebFetch` |
+
+To add a deployment, add `src/profiles/<name>.ts` and register it in
+`src/profiles/index.ts`. A test keeps Slashbin's names out of the rest of `src/`.
 
 ## GitHub tokens
 

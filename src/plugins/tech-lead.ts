@@ -7,7 +7,7 @@ import { cliTail, lastLine, parseReviewTrailerRecords, runAgentCli } from "./age
 import type { ForemanPlugin, PromotionApproval, Reviewer, ReviewFallback } from "./contract.js";
 
 /**
- * The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427) as the reviewer
+ * The Tech Lead (slashbin_ai_tech_lead, EM#427) as the reviewer
  * plugin (EM#1150 f3): it reviews and merges feature PRs and approves release
  * PRs. On when `techLeadPath` is set.
  */

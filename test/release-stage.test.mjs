@@ -191,7 +191,8 @@ const writeCfg = (name, extra) => {
   writeFileSync(p, JSON.stringify({ emRepoPath: tmp, repos: [{ name: "rel", repoPath: tmp, githubRepo: REPO }], ...extra }));
   return p;
 };
-const config = loadConfig(writeCfg("cfg.json", { techLeadPath: techLeadDir, srePath: sreDir }));
+// Slashbin's profile: its epic label (`engineering-manager #N`) is what the epic tests read.
+const config = loadConfig(writeCfg("cfg.json", { profile: "slashbin", techLeadPath: techLeadDir, srePath: sreDir }));
 const repo = config.repos[0];
 
 const HEAD = "a".repeat(40);
@@ -349,6 +350,16 @@ test("closing an epic's child in production asks the EM whether the epic is read
   assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
   assert.equal(await run(2), false);
   assert.equal(epicEntries().length, 1, "a later cycle adds nothing");
+});
+
+test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
+  const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
+  assert.equal(neutral.repos[0].epicRefLabel, undefined);
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
+  setBodies({ 5: "## References\n- engineering-manager #880" });
+  assert.equal(await tryRelease(neutral.repos[0], neutral, logger, 1), true);
+  assertClosedVerified(5);
+  assert.equal(epicEntries().length, 0);
 });
 
 test("the soak runs once, 30 minutes on: a pass ends the release", async () => {

@@ -11,6 +11,7 @@ import {
 import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./config-schema/github.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
 import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSyncConfig } from "./skill-sync.js";
+import { applyProfile, profileNamed } from "./profiles/index.js";
 
 // --- Schemas ---
 
@@ -132,6 +133,11 @@ export const configSchema = z.object({
 
   // --- Global settings ---
 
+  // A named set of defaults for one operator's fleet (src/profiles/): each key it
+  // sets replaces the neutral default below, and a key this file sets still wins.
+  // `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name
+  // stops startup, naming the valid ones.
+  profile: z.string().min(1).optional(),
   // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
   // RETIRED, ignored. It capped how many repos ran their serial pass at once;
@@ -251,26 +257,39 @@ export const configSchema = z.object({
   // Tech Lead, never a Claude session in this directory.
   emRepoPath: z.string().optional(),
   // GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
+  // Unset = no one is mentioned: the hold stays at its failed cap and the log says so.
   unstickEscalationOwner: z.string().min(1).optional(),
-  // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
+  // The GitHub login whose divergence ruling the Foreman carries out (foreman#104):
+  // the EM's own account. Unset = no ruling is honoured; a diverged branch stays
+  // blocked until a person repairs it.
+  divergenceRulerLogin: z.string().min(1).optional(),
+  // The name issue bodies give the epic tracker in `<label> #N` references (the
+  // `## References` convention). When an issue closes in production, each epic it
+  // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
+  epicRefLabel: z.string().min(1).optional(),
+  // The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each
   // review is offered to it FIRST — Codex judges, its code posts and merges.
   // It exits 3 when Codex cannot take the review and nothing was written; the
   // review phase then runs the Claude /review-all-prs session exactly as
   // before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
   techLeadPath: z.string().optional(),
-  // The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at
+  // The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at
   // the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs
   // `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved.
   // Unset = no verify stage: the review run verifies and labels as before.
   srePath: z.string().optional(),
-  // The QA agent (xrgarcia/slashbin_ai_qa): when set, a PR the SRE's dev verify
+  // The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify
   // passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the
   // result is posted on the PR as "## QA Report (report-only)". It never gates:
   // the card moves to prApproved first and nothing waits on QA. Unset = no QA.
-  // Needs `emRepoPath` (its doppler-run.mjs supplies DEV_SESSION_MINT_KEY).
+  // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY).
   qaPath: z.string().optional(),
-  // GitHub repos (owner/name) QA applies to. QA supports only the Console today.
-  qaRepos: z.array(z.string()).default(["xrgarcia/Slashbin-console"]),
+  // GitHub repos (owner/name) QA applies to. Default none.
+  qaRepos: z.array(z.string()).default([]),
+  // The script in the EM checkout (relative to emRepoPath) that runs QA's dev check
+  // with its one secret, DEV_SESSION_MINT_KEY, handed to that child alone. Unset =
+  // the dev check reports `errored` instead of running; the local check needs none.
+  qaSecretsRunner: z.string().min(1).optional(),
   // Whether QA gates delivery. false (default) = report-only: the card advances on the
   // SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances,
   // FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card
@@ -337,18 +356,9 @@ export const configSchema = z.object({
     (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
     z.boolean(),
   ).default(true),
-  // Broad tool surface — the skill drives GitHub, Postgres, Redis, Railway, and
-  // the knowledge index via MCP, plus shell scripts and file reads.
-  reviewAllowedTools: z.array(z.string()).default([
-    "Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch",
-    "mcp__github__*",
-    "mcp__pg-dev-console__*", "mcp__pg-dev-worker__*",
-    "mcp__pg-prod-console__*", "mcp__pg-prod-worker__*",
-    "mcp__redis-dev-console__*", "mcp__redis-dev-ingest__*", "mcp__redis-dev-worker__*",
-    "mcp__redis-prod-console__*", "mcp__redis-prod-ingest__*", "mcp__redis-prod-worker__*",
-    "mcp__railway__*",
-    "mcp__slashbin-ai-knowledge__*",
-  ]),
+  // The review session's tools: file and shell tools, plus any MCP servers
+  // (`mcp__<server>__*`) your fleet's review needs. Default the file and shell tools only.
+  reviewAllowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch"]),
   // GitHub login the review runs as — used by the freshness guard to detect a
   // review already posted for the current PR head (avoids re-review loops).
   // No default. Unset, the guard counts a verdict by ANY reviewer as current,
@@ -487,6 +497,10 @@ export interface RepoConfig {
   lifecycleLabels: LifecycleLabels;
   /** The fleet-wide GitHub conventions (`github` block) — the global value. */
   github: GithubConventions;
+  /** The login whose divergence ruling is honoured — the global value; undefined = none. */
+  divergenceRulerLogin?: string;
+  /** The epic label in `<label> #N` issue references — the global value; undefined = no epic parsing. */
+  epicRefLabel?: string;
 }
 
 /**
@@ -494,6 +508,8 @@ export interface RepoConfig {
  * Use `config.repos[i]` to get the RepoConfig for each repo.
  */
 export interface AgentConfig {
+  /** The config profile selected (`profile`), undefined for the neutral defaults. */
+  profile?: string;
   repos: readonly RepoConfig[];
   /**
    * Every configured repo, even when `--repo` narrowed `repos` to one. Set only
@@ -528,8 +544,12 @@ export interface AgentConfig {
   // --- Review phase settings (shared across repos) ---
   // emRepoPath is the absolute path to the EM checkout (unstick stage's cwd).
   emRepoPath?: string;
-  /** Login @-mentioned when the unstick stage gives up on a hold; default UNSTICK_ESCALATION_OWNER. */
+  /** Login @-mentioned when the unstick stage gives up on a hold; undefined = the give-up is only logged. */
   unstickEscalationOwner?: string;
+  /** The login whose divergence ruling is honoured; undefined = none. */
+  divergenceRulerLogin?: string;
+  /** The epic label in `<label> #N` issue references; undefined = no epic parsing. */
+  epicRefLabel?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
@@ -537,6 +557,8 @@ export interface AgentConfig {
   qaPath?: string;
   /** Repos QA applies to. */
   qaRepos: string[];
+  /** EM-checkout-relative script that runs QA's dev check with its secret; undefined = the dev check errors. */
+  qaSecretsRunner?: string;
   /** QA gates the advance to prApproved (see configSchema). */
   qaGate: boolean;
   /** QA runs on the PR head before the Tech Lead merges it (see configSchema). */
@@ -657,7 +679,11 @@ function loadConfigFile(configPath?: string): Record<string, unknown> {
 // --- Config Loading ---
 
 export function loadConfig(configPath?: string): AgentConfig {
-  const fileConfig = loadConfigFile(configPath);
+  // The profile's values sit under the file's (src/profiles/index.ts), so from here
+  // on a profile value reads exactly like one the file set. Env still wins.
+  const rawFile = loadConfigFile(configPath);
+  const profileName = typeof rawFile.profile === "string" ? rawFile.profile : undefined;
+  const fileConfig = profileName ? applyProfile(rawFile, profileNamed(profileName)) : rawFile;
 
   const merged = {
     repoPath: process.env.AI_AGENT_REPO_PATH ?? fileConfig.repoPath,
@@ -697,14 +723,18 @@ export function loadConfig(configPath?: string): AgentConfig {
     sessionEnv: fileConfig.sessionEnv,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
+    profile: fileConfig.profile,
     repos: fileConfig.repos,
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
+    divergenceRulerLogin: fileConfig.divergenceRulerLogin,
+    epicRefLabel: fileConfig.epicRefLabel,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
     qaRepos: fileConfig.qaRepos,
+    qaSecretsRunner: fileConfig.qaSecretsRunner,
     qaGate: fileConfig.qaGate,
     qaBeforeMerge: fileConfig.qaBeforeMerge,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
@@ -754,6 +784,8 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
+    divergenceRulerLogin: parsed.divergenceRulerLogin,
+    epicRefLabel: parsed.epicRefLabel,
   };
 
   let repos: RepoConfig[];
@@ -884,6 +916,7 @@ export function loadConfig(configPath?: string): AgentConfig {
   const paperclip = resolvePaperclipConfig(parsed.paperclip, repos.map((r) => r.githubRepo));
 
   return Object.freeze({
+    profile: parsed.profile,
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
     ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
@@ -901,10 +934,13 @@ export function loadConfig(configPath?: string): AgentConfig {
     sessionEnv: [...parsed.sessionEnv],
     emRepoPath,
     unstickEscalationOwner: parsed.unstickEscalationOwner,
+    divergenceRulerLogin: parsed.divergenceRulerLogin,
+    epicRefLabel: parsed.epicRefLabel,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaRepos: [...parsed.qaRepos],
+    qaSecretsRunner: parsed.qaSecretsRunner,
     qaGate: parsed.qaGate,
     qaBeforeMerge: parsed.qaBeforeMerge,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,

@@ -132,6 +132,10 @@ export const paperclipConfigSchema = z.object({
   // instance that requires sign-in. Unset sends no authorization header. Set it
   // from the environment; it is a secret and is redacted from the mirror's logs.
   apiKey: z.string().min(1).optional(),
+  // The request header that credits a write to the Foreman's agent (or another
+  // author) instead of the key's user, for an instance that supports one. Unset =
+  // no credit header is sent: every write reads as the key's user.
+  commentAuthorHeader: z.string().min(1).optional(),
   // How a Paperclip task names the GitHub issue it mirrors. {repo} is the full
   // owner/name, {N} the issue number. Must match whatever else writes those
   // tasks, or the Foreman creates a second row for an issue that already has one.
@@ -211,6 +215,7 @@ export function mergePaperclip(fromFile: unknown): unknown {
     agentName: process.env.AI_AGENT_PAPERCLIP_AGENT_NAME,
     agentId: process.env.AI_AGENT_PAPERCLIP_AGENT_ID,
     apiKey: process.env.AI_AGENT_PAPERCLIP_API_KEY,
+    commentAuthorHeader: process.env.AI_AGENT_PAPERCLIP_COMMENT_AUTHOR_HEADER,
     identityKeyFormat: process.env.AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT,
     taskTitleFormat: process.env.AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT,
     projectId: process.env.AI_AGENT_PAPERCLIP_PROJECT_ID,

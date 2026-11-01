@@ -9,6 +9,10 @@ import { setStatePath } from "../dist/state.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { epicRefs, noteEpicChildClosed, UNSTICK_KINDS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { slashbinProfile } from "../dist/profiles/slashbin.js";
+
+/** The epic label Slashbin's issues use (`epicRefLabel`, from its profile). */
+const LABEL = slashbinProfile.epicRefLabel;
 
 await startAgentPlugins();
 
@@ -17,8 +21,14 @@ process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
 
 test("epic-ready-to-close is an unstick kind, and an epic is read from the References line", () => {
   assert.ok(UNSTICK_KINDS.includes("epic-ready-to-close"));
-  assert.deepEqual(epicRefs("## References\n- engineering-manager #880\n- slashbin-engineering-manager #880, engineering-manager #12"), [880, 12]);
-  assert.deepEqual(epicRefs("follow-up to #1538"), []);
+  assert.deepEqual(epicRefs("## References\n- engineering-manager #880\n- slashbin-engineering-manager #880, engineering-manager #12", LABEL), [880, 12]);
+  assert.deepEqual(epicRefs("follow-up to #1538", LABEL), []);
+});
+
+test("no epicRefLabel: no epic is parsed from any body", () => {
+  assert.deepEqual(epicRefs("## References\n- engineering-manager #880", undefined), []);
+  assert.deepEqual(epicRefs("## References\n- tracker #7", "tracker"), [7], "any configured label works");
+  assert.deepEqual(epicRefs("see a.b #3 and axb #4", "a.b"), [3], "the label is matched literally, not as a regex");
 });
 
 test("two children of one epic: two EM calls, one per close; a repeat close adds none", async () => {
@@ -31,9 +41,9 @@ test("two children of one epic: two EM calls, one per close; a repeat close adds
   const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } } };
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
-  assert.equal(noteEpicChildClosed("erc", "o/erc", 5, [880]), 1);
-  assert.equal(noteEpicChildClosed("erc", "o/erc", 6, [880]), 1);
-  assert.equal(noteEpicChildClosed("erc", "o/erc", 5, [880]), 0);
+  assert.equal(noteEpicChildClosed("erc", "o/erc", 5, [880], LABEL), 1);
+  assert.equal(noteEpicChildClosed("erc", "o/erc", 6, [880], LABEL), 1);
+  assert.equal(noteEpicChildClosed("erc", "o/erc", 5, [880], LABEL), 0);
   assert.equal(await tryUnstick(repo, config, logger, 1, {}), 2);
   const made = calls();
   assert.equal(made.length, 2);
