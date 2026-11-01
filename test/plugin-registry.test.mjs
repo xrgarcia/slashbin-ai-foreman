@@ -68,3 +68,42 @@ test("Paperclip is a built-in plugin: off unless enabled with agent and company 
   assert.deepEqual(logs, [], "a disabled Paperclip says nothing");
   resetRegistryForTests();
 });
+
+test("reconfigure: started plugins get the fresh config; a throw is logged and later plugins still run", async () => {
+  resetRegistryForTests();
+  const seen = [];
+  const fresh = { fresh: true };
+  registerPlugin({ id: "p1", roles: [], enabled: () => true, reconfigure: (c) => { seen.push(["p1", c]); } });
+  registerPlugin({ id: "p2", roles: [], enabled: () => true, reconfigure: () => { throw new Error("boom"); } });
+  registerPlugin({ id: "p3", roles: [], enabled: () => true, reconfigure: async (c) => { seen.push(["p3", c]); } });
+  registerPlugin({ id: "p4", roles: [], enabled: () => true });
+  await startPlugins({}, ctx);
+  logs.length = 0;
+  await reconfigurePlugins(fresh, ctx);
+  assert.deepEqual(seen, [["p1", fresh], ["p3", fresh]]);
+  assert.ok(logs.some((m) => /plugin p2 reconfigure failed: boom/.test(m)));
+  resetRegistryForTests();
+});
+
+test("reconfigure: an async rejection is caught and logged too", async () => {
+  resetRegistryForTests();
+  registerPlugin({ id: "r", roles: [], enabled: () => true, reconfigure: async () => { throw new Error("late"); } });
+  await startPlugins({}, ctx);
+  logs.length = 0;
+  await reconfigurePlugins({}, ctx);
+  assert.ok(logs.some((m) => /plugin r reconfigure failed: late/.test(m)));
+  resetRegistryForTests();
+});
+
+test("reconfigure: a plugin that becomes enabled on reload is NOT started (startup decides); one disabled on reload is still reconfigured", async () => {
+  resetRegistryForTests();
+  const calls = [];
+  let on = { late: false, early: true };
+  registerPlugin({ id: "early", roles: [], enabled: () => on.early, start: () => calls.push("start early"), reconfigure: () => calls.push("reconf early") });
+  registerPlugin({ id: "late", roles: [], enabled: () => on.late, start: () => calls.push("start late"), reconfigure: () => calls.push("reconf late") });
+  await startPlugins({}, ctx);
+  on = { late: true, early: false }; // the reloaded config flips both
+  await reconfigurePlugins({}, ctx);
+  assert.deepEqual(calls, ["start early", "reconf early"]);
+  resetRegistryForTests();
+});

@@ -3,28 +3,17 @@
 // plugin code directly is listed below with its exact count of such imports.
 // The list is a ratchet: it may only shrink. A new violator, a count that
 // grows, or a count that falls without the list being lowered fails the build.
-// The epic is done when the list is empty.
+// The epic is done when the list is empty. The ratchet logic is the pure
+// checkBoundary in plugin-boundary-check.mjs, tested below against fixtures.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, posix } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkBoundary, countViolations, isPlugin, pluginImportsOf } from "./plugin-boundary-check.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = join(root, "src");
-
-/** Plugin code: GitHub, Paperclip, and each plugin implementation under src/plugins/. */
-const PLUGIN_FILES = [
-  /^github\//,
-  /^github\.ts$/,
-  /^github-work-source\.ts$/,
-  /^github-state\.ts$/,
-  /^paperclip\//,
-  /^plugins\/(?!contract\.ts$|registry\.ts$|index\.ts$)/,
-];
-const isPlugin = (rel) => PLUGIN_FILES.some((re) => re.test(rel));
-/** The composition root names plugins; that is its job. */
-const COMPOSITION_ROOT = "plugins/index.ts";
 
 const KNOWN_VIOLATORS = {
   "agent.ts": 2,
@@ -52,46 +41,19 @@ const KNOWN_VIOLATORS = {
 };
 
 const importsOf = (file) => [...readFileSync(file, "utf8").matchAll(/^(?:import|export)[^;]*?from "([^"]+)"/gm)].map((m) => m[1]);
+const srcFiles = () => readdirSync(src, { recursive: true }).map((n) => String(n).split("\\").join("/")).filter((n) => n.endsWith(".ts"));
+/** Every src file mapped to its import specifiers. */
+const realImports = () => Object.fromEntries(srcFiles().map((rel) => [rel, importsOf(join(src, rel))]));
 
-/** The plugin files a src-relative file imports (relative specifiers only). */
-const pluginImports = (rel) =>
-  importsOf(join(src, rel))
-    .filter((spec) => spec.startsWith("."))
-    .map((spec) => posix.normalize(posix.join(posix.dirname(rel), spec)).replace(/\.js$/, ".ts"))
-    .filter(isPlugin);
-
-/** Each core file's count of imports that resolve into plugin code. */
-function violations() {
-  const out = {};
-  const files = readdirSync(src, { recursive: true }).map((n) => String(n).split("\\").join("/")).filter((n) => n.endsWith(".ts"));
-  for (const rel of files) {
-    if (isPlugin(rel) || rel === COMPOSITION_ROOT) continue;
-    const n = pluginImports(rel).length;
-    if (n > 0) out[rel] = n;
-  }
-  return out;
-}
-
-if (process.env.PRINT_PLUGIN_VIOLATIONS) console.log(JSON.stringify(violations(), null, 2));
+if (process.env.PRINT_PLUGIN_VIOLATIONS) console.log(JSON.stringify(countViolations(realImports()), null, 2));
 
 test("core imports no plugin beyond the shrinking allowlist", () => {
-  const now = violations();
-  const problems = [];
-  for (const [file, n] of Object.entries(now)) {
-    const allowed = KNOWN_VIOLATORS[file];
-    if (allowed === undefined) problems.push(`src/${file} imports plugin code directly (${n}); call it through src/plugins/registry.ts`);
-    else if (n > allowed) problems.push(`src/${file} plugin imports grew ${allowed} -> ${n}; call the new ones through the registry`);
-  }
-  for (const [file, allowed] of Object.entries(KNOWN_VIOLATORS)) {
-    const n = now[file] ?? 0;
-    if (n < allowed) problems.push(`src/${file} is down to ${n} plugin imports from ${allowed}: lower KNOWN_VIOLATORS to ${n}${n === 0 ? " (delete the line)" : ""}`);
-  }
-  assert.deepEqual(problems, []);
+  assert.deepEqual(checkBoundary(realImports(), KNOWN_VIOLATORS), []);
 });
 
 test("the contract and the registry import no plugin", () => {
   for (const f of ["plugins/contract.ts", "plugins/registry.ts"]) {
-    assert.deepEqual(pluginImports(f), [], `src/${f} must stay plugin-free`);
+    assert.deepEqual(pluginImportsOf(f, importsOf(join(src, f))), [], `src/${f} must stay plugin-free`);
   }
 });
 
@@ -99,4 +61,40 @@ test("the walk sees the core and the plugin code it judges", () => {
   const files = readdirSync(src, { recursive: true }).map((n) => String(n).split("\\").join("/"));
   assert.ok(files.includes("orchestrator.ts") && files.includes("phases/review.ts"), "core reached");
   assert.ok(files.some((f) => f.startsWith("github/")) && files.includes("plugins/paperclip.ts"), "plugins reached");
+});
+
+// The ratchet itself, against fixtures: each fails if checkBoundary stops catching it.
+test("ratchet: a new unlisted core file importing ./github.js fails", () => {
+  const problems = checkBoundary({ "fresh.ts": ["./github.js"] }, {});
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /src\/fresh\.ts imports plugin code directly/);
+});
+
+test("ratchet: a listed file whose count grows fails", () => {
+  const problems = checkBoundary({ "agent.ts": ["./github.js", "./github-state.js", "./paperclip/client.js"] }, { "agent.ts": 2 });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /grew 2 -> 3/);
+});
+
+test("ratchet: a listed file whose count drops without the allowlist being lowered fails", () => {
+  const problems = checkBoundary({ "agent.ts": ["./github.js"] }, { "agent.ts": 2 });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /down to 1 plugin imports from 2/);
+  assert.match(checkBoundary({ "agent.ts": ["./logger.js"] }, { "agent.ts": 1 })[0], /delete the line/);
+});
+
+test("ratchet: a listed file at exactly its count passes", () => {
+  assert.deepEqual(checkBoundary({ "agent.ts": ["./github.js", "./config.js"] }, { "agent.ts": 1 }), []);
+});
+
+test("ratchet: core importing plugins/registry.js or plugins/contract.js is allowed", () => {
+  assert.deepEqual(checkBoundary({ "orchestrator.ts": ["./plugins/registry.js", "./plugins/contract.js"], "phases/review.ts": ["../plugins/registry.js"] }, {}), []);
+});
+
+test("ratchet: core importing plugins/paperclip.js fails; plugins/index.ts may", () => {
+  const problems = checkBoundary({ "orchestrator.ts": ["./plugins/paperclip.js"] }, {});
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /src\/orchestrator\.ts imports plugin code directly/);
+  assert.deepEqual(checkBoundary({ "plugins/index.ts": ["./paperclip.js"] }, {}), []);
+  assert.ok(isPlugin("plugins/paperclip.ts") && !isPlugin("plugins/registry.ts"));
 });
