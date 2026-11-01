@@ -76,10 +76,10 @@ test("paperclip placement, title and scope: file and env set them; a bad value s
     () => loadConfig(cfg({ paperclip: { projectId: "p-1" } })).paperclip);
   assert.equal(env.projectId, "p-env");
   assert.equal(env.taskTitleFormat, "#{N}");
-  assert.throws(() => loadConfig(cfg({ paperclip: { taskTitleFormat: "{repo}" } })), /must contain \{N\}/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["example/typo"] } })), /"example\/typo" is not a configured githubRepo/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["no-owner"] } })));
-  assert.throws(() => loadConfig(cfg({ paperclip: { repos: [] } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, taskTitleFormat: "{repo}" } })), /must contain \{N\}/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: ["example/typo"] } })), /"example\/typo" is not a configured githubRepo/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: ["no-owner"] } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: [] } })));
 });
 
 test("paperclip.comments: a partial block keeps the other defaults; a bad maxLength stops startup", () => {
@@ -89,7 +89,7 @@ test("paperclip.comments: a partial block keeps the other defaults; a bad maxLen
   assert.equal(paperclip.comments.events.progress, false);
   assert.equal(paperclip.comments.events.reviewEnd, true);
   assert.equal(paperclip.comments.includeDiffStat, true);
-  assert.throws(() => loadConfig(cfg({ paperclip: { comments: { maxLength: 10 } } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, comments: { maxLength: 10 } } })));
 });
 
 test("block with only companyId keeps the other defaults", () => {
@@ -147,13 +147,13 @@ test("enabled without a companyId fails to load", () => {
 });
 
 test("identityKeyFormat must name both {repo} and {N}", () => {
-  assert.throws(() => loadConfig(cfg({ paperclip: { identityKeyFormat: "source: {repo}" } })), /identityKeyFormat/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, identityKeyFormat: "source: {repo}" } })), /identityKeyFormat/);
 });
 
 test("statusMap overrides only the buckets it names; unknown buckets are rejected", () => {
   const { paperclip } = loadConfig(cfg({ paperclip: { statusMap: { in_review: "review", blocked: "on_hold" } } }));
   assert.deepEqual({ ...paperclip.statusMap }, { in_review: "review", blocked: "on_hold" });
-  assert.throws(() => loadConfig(cfg({ paperclip: { statusMap: { paused: "x" } } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, statusMap: { paused: "x" } } })));
 });
 
 // --- client ---
@@ -258,9 +258,9 @@ test("board: a partial stage keeps its defaults; an unknown owner, label or repo
   assert.deepEqual({ ...paperclip.board.inReview }, { owner: "reviewer", status: "in_review", label: "inReview" });
   assert.equal(paperclip.board.approved.owner, "foreman");
   assert.equal(paperclip.roles.reviewer.role, "engineer");
-  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { owner: "nobody" } } } })), /nobody/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { label: "nope" } } } })), /nope/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { agentReportsTo: "ghost" } })), /ghost/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, board: { inReview: { owner: "nobody" } } } })), /nobody/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, board: { inReview: { label: "nope" } } } })), /nope/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, agentReportsTo: "ghost" } })), /ghost/);
 });
 
 // EM#512: an instance that requires sign-in gets the key as a bearer on every request.

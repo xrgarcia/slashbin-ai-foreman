@@ -148,8 +148,8 @@ async function main(): Promise<void> {
   logger.info(`slashbin-ai-agent v${getVersion()}`);
 
   // Plugins (EM#1150): every registered plugin this config enables is started
-  // once, here. A config reload does not add or drop one; each started plugin
-  // is handed the reloaded config.
+  // here. A config reload starts one it newly enables, stops one it disables,
+  // and hands the reloaded config to one that stays on.
   const pluginCtx: PluginContext = {
     logger,
     configText: () => {

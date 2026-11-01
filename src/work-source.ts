@@ -5,7 +5,7 @@ import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { loadRepoState, type RepoState } from "./state.js";
 import { clearUnstick, noteStuck } from "./unstick.js";
-import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, setWorkSource } from "./plugins/registry.js";
+import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
 
 /**
  * The work source each repo selects from and reports to. GitHub issues unless
@@ -87,9 +87,14 @@ export function addObserver(o: WorkObserver): void {
   addRegistryObserver(o);
 }
 
-/** True when any observer is registered: a session's report costs GitHub reads, spent only for someone. */
-export function hasObservers(): boolean {
-  return registryObservers().length > 0;
+/** True when an enabled observer wants session reports: they cost GitHub reads, spent only for someone who uses them. */
+export function wantsSessionReports(): boolean {
+  return observersWantSessionReports();
+}
+
+/** True when an enabled observer wants the board snapshot, which costs GitHub reads each pass. */
+export function wantsSnapshot(): boolean {
+  return observersWantSnapshot();
 }
 
 /** True when an observer writes every card itself (`WorkObserver.wantsCards`). */
@@ -201,10 +206,10 @@ export function foremanHolds(state: RepoState): (n: number) => boolean {
 /**
  * Tell observers where every open item stands on the source, so a card the
  * Foreman stopped acting on is put back where it belongs. Reads the source
- * only when someone is listening.
+ * only when an enabled observer wants a snapshot.
  */
 export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  if (!hasObservers()) return;
+  if (!wantsSnapshot()) return;
   const source = workSourceFor(repoConfig);
   const items = await source.snapshot(repoConfig, logger);
   // Every card, not only the lifecycle's, read only when an observer writes them all.

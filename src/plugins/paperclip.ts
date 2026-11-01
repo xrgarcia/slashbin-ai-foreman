@@ -21,9 +21,10 @@ export function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | un
 
 /**
  * Paperclip (EM#417): an observer of the Foreman's steps, never a work source.
- * Enabled once at startup; a config reload does not add or drop it, but its
- * board mapping follows the reload, and the file it runs is published on its
- * agent for anything else that places the same cards.
+ * Started when the config enables it, at startup or on a reload; a reload that
+ * disables it stops it. While it stays on, its board mapping follows the reload
+ * (a change of company, agent or identity restarts it), and the file it runs is
+ * published on its agent for anything else that places the same cards.
  */
 export class PaperclipPlugin implements ForemanPlugin {
   readonly id = "paperclip";
@@ -32,6 +33,7 @@ export class PaperclipPlugin implements ForemanPlugin {
     "paperclip:doctor": (config: AgentConfig) => runDoctor(config),
   };
   private mirror: PaperclipMirror | null = null;
+  private stopMirror: (() => void) | null = null;
   private mirroredText: string | null = null;
 
   get observer(): PaperclipMirror | undefined {
@@ -48,6 +50,19 @@ export class PaperclipPlugin implements ForemanPlugin {
 
   start(config: AgentConfig, ctx: PluginContext): void {
     const { logger } = ctx;
+    this.begin(config, ctx);
+    logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
+  }
+
+  stop(): void {
+    this.stopMirror?.();
+    this.stopMirror = null;
+    this.mirror = null;
+    this.mirroredText = null;
+  }
+
+  private begin(config: AgentConfig, ctx: PluginContext): void {
+    const { logger } = ctx;
     this.mirror = new PaperclipMirror(
       new PaperclipClient({
         url: config.paperclip.url,
@@ -63,10 +78,9 @@ export class PaperclipPlugin implements ForemanPlugin {
       config.lifecycleLabels,
     );
     // Housekeeping off the observer queue: project backfill, retiring the old live task.
-    this.mirror.start();
+    this.stopMirror = this.mirror.start();
     this.mirroredText = ctx.configText();
     if (this.mirroredText !== null) void this.mirror.publishConfig(this.mirroredText);
-    logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
   }
 
   /** A reload whose file changed hands the mirror the new mapping, then publishes it. */
@@ -74,7 +88,14 @@ export class PaperclipPlugin implements ForemanPlugin {
     if (!this.mirror) return;
     const text = ctx.configText();
     if (text === null || text === this.mirroredText) return;
-    this.mirroredText = text;
-    if (this.mirror.reconfigure(fresh.paperclip)) void this.mirror.publishConfig(text);
+    if (this.mirror.reconfigure(fresh.paperclip)) {
+      this.mirroredText = text;
+      void this.mirror.publishConfig(text);
+      return;
+    }
+    // The company, agent or identity changed: a mirror cannot follow that, so a new one takes over.
+    this.stop();
+    this.begin(fresh, ctx);
+    ctx.logger.info("Paperclip mirror restarted for the reloaded config");
   }
 }

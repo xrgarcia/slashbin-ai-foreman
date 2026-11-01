@@ -278,7 +278,7 @@ test("publishSnapshot: carries the state reader, and the closed items when the c
     states: async (_rc, ns) => { asked.push([...ns]); return new Map(ns.map((n) => [n, "open"])); },
   });
   const seen = [];
-  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsCards: () => false });
+  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsSnapshot: () => true });
   try {
     await publishSnapshot({ name: "r", githubRepo: REPO }, logger());
     await drainObservers();

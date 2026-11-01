@@ -222,14 +222,40 @@ export function mergePaperclip(fromFile: unknown): unknown {
 }
 
 /**
+ * The `paperclip` block as the core config may parse it. A block that is off (or
+ * absent) is never a reason to stop: it is kept when it is valid and dropped to
+ * the defaults when it is not, since nothing reads a disabled block. A block that
+ * is on, or whose `enabled` is not a recognised yes/no, is returned untouched so
+ * the full schema rejects what is wrong with it.
+ */
+export function leniencyForDisabled(raw: unknown): unknown {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "object" && !Array.isArray(raw) && "enabled" in raw) {
+    const on = paperclipConfigSchema.shape.enabled.safeParse((raw as { enabled: unknown }).enabled);
+    if (!on.success || on.data) return raw;
+  } else if (typeof raw === "object" && !Array.isArray(raw)) {
+    // `enabled` unset: off.
+  } else {
+    return undefined;
+  }
+  return paperclipConfigSchema.safeParse(raw).success ? raw : undefined;
+}
+
+/**
  * The parsed block, checked and frozen. Throws on a mirror with nowhere to
  * write, a board stage that names a role or label that does not exist, or a
  * `repos` entry that is none of `knownRepos` (the configured owner/name list).
  */
 export function resolvePaperclipConfig(pc: z.infer<typeof paperclipConfigSchema>, knownRepos?: ReadonlyArray<string>): PaperclipConfig {
+  // A block that is off is not checked: nothing reads it, and a stale one must not stop startup.
+  if (pc.enabled) checkEnabled(pc, knownRepos);
+  return freezeBlock(pc);
+}
+
+function checkEnabled(pc: z.infer<typeof paperclipConfigSchema>, knownRepos?: ReadonlyArray<string>): void {
   // Fail fast on a mirror with nowhere to write: every Paperclip route the
   // Foreman uses is scoped to one company.
-  if (pc.enabled && !pc.companyId) {
+  if (!pc.companyId) {
     throw new Error("paperclip.enabled is true but no paperclip.companyId is set.");
   }
   // Every stage must name a role that exists and a label that exists, or a card
@@ -247,10 +273,12 @@ export function resolvePaperclipConfig(pc: z.infer<typeof paperclipConfigSchema>
     const unknown = pc.repos.filter((r) => !knownRepos.includes(r));
     if (unknown.length) throw new Error(`paperclip.repos ${unknown.map((r) => `"${r}"`).join(", ")} is not a configured githubRepo.`);
   }
-  const paperclip: PaperclipConfig = Object.freeze({
+}
+
+function freezeBlock(pc: z.infer<typeof paperclipConfigSchema>): PaperclipConfig {
+  return Object.freeze({
     ...pc,
     ...(pc.statusMap ? { statusMap: Object.freeze({ ...pc.statusMap }) } : {}),
     ...(pc.repos ? { repos: Object.freeze([...pc.repos]) as string[] } : {}),
   });
-  return paperclip;
 }

@@ -252,7 +252,7 @@ without a \`paperclip\` block runs exactly as it would without this feature.
 
 The \`paperclip\` block sits at the top level of \`.ai-agent.json\` (never per repo: one Foreman
 is one Paperclip agent). Each environment variable, when set, overrides the file's value for
-that one field. The block is read once at startup — restart the daemon after changing it.
+that one field. A reload applies the block: enabling it starts the mirror, disabling it stops it.
 
 | Field | Type | Env override | Default | Description |
 |---|---|---|---|---|
@@ -260,6 +260,7 @@ ${configRows.join("\n")}
 
 \`enabled\` is a boolean; given as a string (as the env var always is) it takes \`true\` / \`false\`,
 \`1\` / \`0\`, \`yes\` / \`no\` or \`on\` / \`off\`, and any other value stops the Foreman at startup.
+A block that is off (or absent) is never validated, so a stale or partial one cannot stop startup.
 \`companyId\` is required once \`enabled\` is true; the Foreman refuses to start without it.
 The mirror runs only when \`enabled\` is true **and** both \`companyId\` and \`agentId\` are set;
 with \`agentId\` missing the daemon logs that it is skipping the mirror and runs without it.
@@ -507,8 +508,8 @@ whenever a reload changes the file. The sha256 is of the file less its trailing 
 that places the same cards reads its board mapping from there, so it never runs a copy the
 Foreman has moved on from. A file with a secret-shaped key (\`apiKey\`, \`token\`, \`secret\`,
 \`password\`) or a known secret value is not published, and the Foreman logs why. A reload that
-changes \`enabled\`, \`url\`, \`companyId\`, \`agentId\` or \`identityKeyFormat\` needs a
-restart: until then the mirror and the published config keep the old file.
+changes \`url\`, \`companyId\`, \`agentId\` or \`identityKeyFormat\` restarts the mirror on
+the new file.
 
 ## Assignment
 
@@ -617,7 +618,7 @@ picks it up, its Paperclip task appears, in progress and assigned to the Foreman
 ## Remove
 
 Set \`paperclip.enabled\` to \`false\` (or \`AI_AGENT_PAPERCLIP_ENABLED=false\`), or delete the
-block, and restart the daemon. The Foreman then makes no Paperclip call at all. Tasks and notes
+block (a reload is enough). The Foreman then makes no Paperclip call, snapshot or session-report read. Tasks and notes
 already written stay in Paperclip; delete the Foreman agent there if you no longer want it.
 `;
 

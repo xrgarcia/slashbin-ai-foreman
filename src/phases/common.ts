@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
-import { emit, advance, hasObservers } from "../work-source.js";
+import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
 import { commentOnIssue, gh, issueTitles, readPrDigest, readLatestReviewBody } from "../github.js";
@@ -166,7 +166,7 @@ export function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {
 
 /** The items' goals (their issue titles), for a session's start. */
 export function startReport(repoConfig: RepoConfig, issues: ReadonlyArray<number>, logger: Logger): SessionReport | undefined {
-  if (!hasObservers()) return undefined;
+  if (!wantsSessionReports()) return undefined;
   const goals = issueTitles(repoConfig, issues, logger);
   return Object.keys(goals).length ? { goals } : undefined;
 }

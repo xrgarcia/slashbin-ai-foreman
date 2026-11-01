@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
-import { emit, advance, hasObservers } from "../work-source.js";
+import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import {
   findPRsNeedingReview,
@@ -172,7 +172,7 @@ async function reviewPass(
   // Paperclip cannot edit one (review-progress.ts). Off the build path, never
   // fatal: emit queues for observers and swallows their errors.
   const progress = new ReviewProgressRelay((milestones) =>
-    hasObservers() ? emit({ kind: "reviewProgress", repo: repoConfig.githubRepo, pr: candidate.prNumber, items: session.items, milestones }, null, reviewLogger) : undefined);
+    wantsSessionReports() ? emit({ kind: "reviewProgress", repo: repoConfig.githubRepo, pr: candidate.prNumber, items: session.items, milestones }, null, reviewLogger) : undefined);
   const onProgress = (m: Parameters<ReviewProgressRelay["push"]>[0]) => {
     reviewLogger.info(`Tech Lead PR #${candidate.prNumber}: ${REVIEW_MILESTONES[m.milestone]}${m.detail ? ` — ${m.detail}` : ""}`);
     progress.push(m);
@@ -195,7 +195,7 @@ async function reviewPass(
       return false;
     }
     reviewDefer.clear(repoName);
-    if (hasObservers()) {
+    if (wantsSessionReports()) {
       report = reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
     }
 
