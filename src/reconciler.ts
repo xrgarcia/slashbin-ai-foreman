@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { gh, knownOpenPr, verifyPRExists } from "./github.js";
-import { fillTitle, signed } from "./github/conventions.js";
+import { codeHost } from "./plugins/registry.js";
+import { fillTitle, signed } from "./config-schema/github.js";
 
 export interface ReconciliationResult {
   reconciled: boolean;
@@ -328,18 +328,9 @@ function hasOpenPR(
     // Every cycle, for every branch with commits waiting on review, this asks
     // whether the PR is still open — and almost always it is. The fleet state
     // answers that without a request; only "not known open" goes to GitHub.
-    const known = knownOpenPr(githubRepo, featureBranch, baseBranch);
+    const known = codeHost().knownOpenPr(githubRepo, featureBranch, baseBranch);
     if (known) return { number: known.number, url: known.url };
-    const json = gh([
-      "pr", "list",
-      "--repo", githubRepo,
-      "--head", featureBranch,
-      "--base", baseBranch,
-      "--state", "open",
-      "--json", "number,url",
-      "--limit", "1",
-    ], cwd);
-    const prs: { number: number; url: string }[] = JSON.parse(json || "[]");
+    const prs = codeHost().openPrsForBranch(githubRepo, featureBranch, baseBranch, cwd);
     return prs.length > 0 ? prs[0] : null;
   } catch {
     // Unknown, never "no open PR". Read as null, a failed lookup made the
@@ -370,19 +361,7 @@ function findLastClosedUnmergedPR(
   cwd: string,
 ): { number: number; url: string; headSha: string } | null | "unknown" {
   try {
-    const json = gh([
-      "pr", "list",
-      "--repo", githubRepo,
-      "--head", featureBranch,
-      "--base", baseBranch,
-      "--state", "closed",
-      "--json", "number,url,mergedAt,headRefOid,closedAt",
-      "--limit", "20",
-    ], cwd);
-    const prs: {
-      number: number; url: string;
-      mergedAt: string | null; headRefOid: string; closedAt: string | null;
-    }[] = JSON.parse(json || "[]");
+    const prs = codeHost().closedPrsForBranch(githubRepo, featureBranch, baseBranch, cwd);
     const unmerged = prs
       .filter((p) => !p.mergedAt && p.headRefOid)
       .sort((a, b) => String(b.closedAt ?? "").localeCompare(String(a.closedAt ?? "")));
@@ -423,14 +402,7 @@ ${issueList}
 ${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``, config.github, " (reconciler)");
 
   try {
-    const result = gh([
-      "pr", "create",
-      "--repo", config.githubRepo,
-      "--base", config.baseBranch,
-      "--head", headBranch,
-      "--title", title,
-      "--body", body,
-    ], config.repoPath);
+    const result = codeHost().createPr(config, { base: config.baseBranch, head: headBranch, title, body });
 
     const match = result.match(/https:\/\/github\.com\/[^\s]+/);
     return match ? match[0] : null;
@@ -563,7 +535,7 @@ export function reconcileRepo(
       };
     }
 
-    const verified = verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath, logger);
+    const verified = codeHost().verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath, logger);
     if (!verified) {
       logger.warn("PR URL returned but verification failed — PR may not exist");
       return {

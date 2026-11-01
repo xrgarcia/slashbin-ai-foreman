@@ -12,6 +12,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+
+setCodeHost(githubCodeHost());
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { implementApprovedIssues, revisePRFeedback } = await import(join(root, "dist/agent.js"));

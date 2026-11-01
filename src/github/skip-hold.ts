@@ -8,19 +8,8 @@
 // issue runs again only when something it waits on actually moves.
 
 import { gh } from "./gh.js";
-
-/** What a skip says it waits on: another issue or PR, by structured reference. */
-export interface WaitingOn {
-  repo: string;
-  number: number;
-}
-
-/** Where a waited-on reference stands: open or done, and whether it is a PR. */
-export interface RefState {
-  open: boolean;
-  isPr: boolean;
-  merged: boolean;
-}
+import type { WaitingOn, RefState, IssueActivity, HoldReads, HeldEntry, SkipGate } from "../code-host.js";
+export type { WaitingOn, RefState, IssueActivity, HoldReads, HeldEntry, SkipGate } from "../code-host.js";
 
 /**
  * Parse `owner/repo#N` or `#N` (same repo as `repo`). Anything else is not a
@@ -56,15 +45,6 @@ export function refState(ref: WaitingOn, cwd: string): RefState {
   const raw = gh(["api", `repos/${ref.repo}/issues/${ref.number}`, "--jq", "{state, pr: (.pull_request != null), merged: (.pull_request.merged_at != null)}"], cwd);
   const s = JSON.parse(raw) as { state: string; pr: boolean; merged: boolean };
   return { open: s.state !== "closed", isPr: s.pr, merged: s.merged };
-}
-
-/** One change on the issue: when, by whom, and what kind (absent reads as an action). */
-export interface IssueActivity {
-  at: string;
-  login?: string;
-  kind?: "edit" | "comment" | "event";
-  /** A comment opening `**EM unstick`: the EM's note from an unstick call. It is talk about the hold, never a change to the issue. */
-  emUnstick?: boolean;
 }
 
 /** The opening of the one comment every `bin/em.mjs unstick` call leaves (foreman#103). */
@@ -154,18 +134,6 @@ export function foremanLogin(cwd: string): string | undefined {
   return selfLogin;
 }
 
-/** The reads a hold decision makes, injectable so the decision is testable without GitHub. */
-export interface HoldReads {
-  /** The waited-on reference's state. Throws when GitHub cannot say. */
-  refState(ref: WaitingOn): RefState;
-  /** The issue's changes after `since`. Throws when GitHub cannot say. */
-  activitySince(since: string): IssueActivity[];
-  /** The Foreman's own login; its writes never release a hold. */
-  self: string | undefined;
-  /** Other agents' logins (`backoff.skip.agentLogins`); their comments never release an escalated hold. */
-  agents?: readonly string[];
-}
-
 /** Whether a held issue stays held, and if not, what released it. */
 export type HoldStatus =
   | { held: true; ref?: WaitingOn; refIsPr?: boolean }
@@ -211,27 +179,6 @@ export function holdStatus(
 export function escalatedReason(reason: string, attempts: number): string {
   return `${reason.split("\n")[0]} — skipped ${attempts} times in a row; held for the EM until a person changes this issue (an agent's edit or label buys one session; its comment releases nothing)`;
 }
-
-/** What a held skip entry carries into the decision. */
-export interface HeldEntry {
-  lastSkippedAt: string;
-  reason: string;
-  skipCount?: number;
-  waitingOn?: string;
-  releasedAt?: string;
-  escalatedAt?: string;
-}
-
-/** Whether a held skip runs a session this cycle. */
-export type SkipGate =
-  /**
-   * Run it. `by` is the check that released it this cycle (absent: released
-   * on an earlier one, so nothing new to announce). `reset` clears the entry,
-   * attempt count included; otherwise the entry stays, marked released.
-   */
-  | { run: true; by?: "transientCauseGone" | "waitedOnDone" | "issueChanged"; reset: boolean }
-  /** Hold it, with the reason the card shows; `escalate` the first time it is out of attempts. */
-  | { run: false; reason: string; escalate: boolean };
 
 /**
  * Decide one skipped issue under `backoff.skip.hold`. Under the cap, any cheap

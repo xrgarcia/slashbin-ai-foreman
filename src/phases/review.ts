@@ -5,25 +5,11 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
-import {
-  findPRsNeedingReview,
-  getPRCheckVerdict,
-  countCiBouncesSinceReview,
-  bounceForRedCI,
-  findOpenPromotionPR,
-} from "../github.js";
 import type { ReviewTrailer } from "../agent.js";
 import { roleFor } from "../plugins/registry.js";
 import { REVIEW_MILESTONES, ReviewProgressRelay } from "../review-progress.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { BackoffTracker, formatWait } from "../backoff.js";
-import {
-  findIssuesMergedToBase,
-  planFailedReviewOutcome,
-  findIssuesStillUnderReview,
-  findRevokedEmGates,
-  restoreEmGate,
-} from "../github.js";
 import { prepareReviewCheckout, releaseReviewCheckout } from "../review-checkout.js";
 import {
   CycleEvent,
@@ -40,6 +26,7 @@ import {
 import { reconcileReviewOutcomeLabels } from "./reconcile.js";
 import { tryQaBeforeMerge } from "./qa-before-merge.js";
 import { qaBeforeMergeApplies } from "../qa-report.js";
+import { codeHost } from "../plugins/registry.js";
 
 /** Per repo: the review waiting after the Tech Lead could not take a PR (backoff.agentUnavailable). */
 export const reviewDefer = new BackoffTracker();
@@ -87,7 +74,7 @@ async function reviewPass(
   // could not take a PR the repo waits (backoff.agentUnavailable).
   const agent = roleFor("reviewer", config);
   if (!agent) {
-    const open = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
+    const open = codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
     const key = open ? `${repoName}#${open.prNumber}` : "";
     if (open && !leftForHuman.has(key)) {
       leftForHuman.add(key);
@@ -110,7 +97,7 @@ async function reviewPass(
   }
 
   // Gate: is there an open feature PR awaiting EM review?
-  const candidate = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
+  const candidate = codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
   if (!candidate) {
     if (failures > 0) reviewFailureCount.set(repoName, 0);
     return false;
@@ -133,16 +120,16 @@ async function reviewPass(
   }
 
   // CI gate: never spend a review session on a PR its own CI already rejects.
-  const checks = getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
+  const checks = codeHost().getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
   if (checks.state === "pending") {
     reviewLogger.info(`PR #${candidate.prNumber} CI still running (${checks.pending.join(", ")}) — review waits for it`);
     return false;
   }
   if (checks.state === "failing") {
-    const bounces = countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
+    const bounces = codeHost().countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
     if (bounces < maxCiBounces) {
       const names = checks.failing.map((f) => f.name).join(", ");
-      bounceForRedCI(repoConfig, candidate.prNumber, checks);
+      codeHost().bounceForRedCI(repoConfig, candidate.prNumber, checks);
       for (const n of candidate.issueNumbers) {
         await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
       }
@@ -234,10 +221,10 @@ async function reviewPass(
     // Ask GitHub, not the trailer: a run killed at the wall may never have
     // emitted one. `planFailedReviewOutcome` holds the rule and the incident
     // behind it (#41).
-    const mergedRefs = findIssuesMergedToBase(repoConfig, candidate.issueNumbers, reviewLogger);
-    const plan = planFailedReviewOutcome(
+    const mergedRefs = codeHost().findIssuesMergedToBase(repoConfig, candidate.issueNumbers, reviewLogger);
+    const plan = codeHost().planFailedReviewOutcome(
       mergedRefs,
-      findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
+      codeHost().findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
     );
 
     ended = { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
@@ -317,7 +304,7 @@ async function reviewPass(
     if (checkoutPath) {
       try {
         const stillApproved = (await workSourceFor(repoConfig).selectEligible?.(repoConfig, reviewLogger) ?? []).length;
-        const stillToReview = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
+        const stillToReview = codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
         releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
       } catch (err) {
         // Never let bookkeeping fail the phase. The nightly sweep is the backstop.
@@ -332,17 +319,17 @@ async function reviewPass(
     // takes ownership. When one is open the label is SUPPOSED to be gone, and
     // restoring it would fight the promotion path — so that case is checked
     // before any write, and only when something actually looks revoked.
-    const revoked = findRevokedEmGates(
+    const revoked = codeHost().findRevokedEmGates(
       repoConfig, candidate.issueNumbers, reviewStartedAt, reviewLogger,
     );
     const promotionOwnsIt = revoked.length > 0 &&
-      !!findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, reviewLogger);
+      !!codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, reviewLogger);
     if (promotionOwnsIt) {
       reviewLogger.info(
         `"${repoConfig.lifecycleLabels.readyForProd}" left removed on #${revoked.join(", #")} — an open promotion PR owns it now.`,
       );
     }
-    const restored = promotionOwnsIt ? [] : restoreEmGate(repoConfig, revoked, reviewLogger);
+    const restored = promotionOwnsIt ? [] : codeHost().restoreEmGate(repoConfig, revoked, reviewLogger);
     if (restored.length > 0) {
       events?.push({
         message: `⚠️ ${repoConfig.githubRepo} — the review run removed "${repoConfig.lifecycleLabels.readyForProd}" from issue(s) ${restored.map((n) => `#${n}`).join(", ")}; restored. Promotion would otherwise have stalled silently.`,
@@ -388,7 +375,7 @@ export async function settleReviewOutcome(
     await notifyOnce("merged", repoConfig, issueNumbers, logger);
   }
   if (mergedPrs.length > 0) {
-    const stuck = findIssuesStillUnderReview(repoConfig, issueNumbers, logger);
+    const stuck = codeHost().findIssuesStillUnderReview(repoConfig, issueNumbers, logger);
     if (stuck.length > 0) {
       logger.warn(
         `Review post-condition: PR(s) #${mergedPrs.join(", #")} reported merged, but issue(s) #${stuck.join(", #")} are still "${repoConfig.lifecycleLabels.prUnderReview}" — the run merged without completing the label transition`,

@@ -6,7 +6,6 @@ import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { reconcileRepo } from "../reconciler.js";
-import { commentOnIssue, findStuckMergedIssues, findIssuesMergedToBase, findOrphanedLifecycleIssues, getOpenIssues, hasCommentContaining, hasLabel } from "../github.js";
 import { roleFor } from "../plugins/registry.js";
 import { hasStage } from "../stages.js";
 import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
@@ -20,6 +19,8 @@ import {
   notifyOnce,
   workStateOf,
 } from "./common.js";
+import { codeHost } from "../plugins/registry.js";
+import type { CodeHost } from "../code-host.js";
 
 /**
  * Set the outcome label the review run reported, for issues it merged but left at
@@ -54,7 +55,7 @@ export async function reconcileReviewOutcomeLabels(
   events?: CycleEvent[],
   verifyStage = false,
 ): Promise<number[]> {
-  const merged = findIssuesMergedToBase(repoConfig, stuck, logger);
+  const merged = codeHost().findIssuesMergedToBase(repoConfig, stuck, logger);
   const byIssue = new Map(merged.map((m) => [m.issueNumber, m]));
   const unresolved: number[] = [];
   let held: { issue: number; reason: string; pr: number }[] = [];
@@ -128,8 +129,8 @@ export async function reconcileReviewOutcomeLabels(
 export const HUMAN_MERGE_CLOSE_MARK = "<!-- foreman:human-merge-close -->";
 
 export interface HumanMergeDeps {
-  comment?: typeof commentOnIssue;
-  hasComment?: typeof hasCommentContaining;
+  comment?: CodeHost["commentOnIssue"];
+  hasComment?: CodeHost["hasCommentContaining"];
 }
 
 /** No deployer and no promote path (a main-only repo has none): nothing will ever release a merged issue. */
@@ -166,7 +167,7 @@ export async function settleHumanMerge(
   if (!nothingReleases(repoConfig, config)) return reached;
   let commented: boolean;
   try {
-    commented = await (deps.hasComment ?? hasCommentContaining)(repoConfig, merged.issueNumber, HUMAN_MERGE_CLOSE_MARK);
+    commented = await (deps.hasComment ?? codeHost().hasCommentContaining)(repoConfig, merged.issueNumber, HUMAN_MERGE_CLOSE_MARK);
   } catch (err) {
     // Unreadable: closing now could post the comment twice, or close with none. Retry next pass.
     logger.warn(`Could not read #${merged.issueNumber}'s comments before closing it: ${err instanceof Error ? err.message : String(err)}`);
@@ -174,7 +175,7 @@ export async function settleHumanMerge(
   }
   if (!commented) {
     try {
-      await (deps.comment ?? commentOnIssue)(repoConfig, merged.issueNumber,
+      await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, merged.issueNumber,
         `PR #${merged.prNumber} was merged to \`${repoConfig.baseBranch}\` by a person. No reviewer, verifier, deployer or promote stage is configured, so nothing further will release this issue: closing it as done.\n\n${HUMAN_MERGE_CLOSE_MARK}`);
     } catch (err) {
       // Never close without the comment: stay at approved, and the next pass's resume posts it and closes.
@@ -201,23 +202,23 @@ export async function resumeHumanMerges(
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
-  deps: HumanMergeDeps & { openIssues?: typeof getOpenIssues; mergedToBase?: typeof findIssuesMergedToBase } = {},
+  deps: HumanMergeDeps & { openIssues?: CodeHost["getOpenIssues"]; mergedToBase?: CodeHost["findIssuesMergedToBase"] } = {},
 ): Promise<{ issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[]> {
   if (roleFor("reviewer", config)) return [];
   const l = repoConfig.lifecycleLabels;
   const later = [l.readyForProd, l.releasePending, l.prodVerifyHeld, l.readyToClose, repoConfig.github.blockedLabel];
-  const open = (deps.openIssues ?? getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger)
-    .filter((i) => !later.some((x) => hasLabel(i, x)));
-  const atMerged = roleFor("verifier", config) ? [] : open.filter((i) => hasLabel(i, l.prMerged)).map((i) => i.number);
+  const open = (deps.openIssues ?? codeHost().getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => !later.some((x) => codeHost().hasLabel(i, x)));
+  const atMerged = roleFor("verifier", config) ? [] : open.filter((i) => codeHost().hasLabel(i, l.prMerged)).map((i) => i.number);
   const atApproved = !roleFor("verifier", config) && nothingReleases(repoConfig, config)
-    ? open.filter((i) => hasLabel(i, l.prApproved) && !hasLabel(i, l.prMerged)).map((i) => i.number)
+    ? open.filter((i) => codeHost().hasLabel(i, l.prApproved) && !codeHost().hasLabel(i, l.prMerged)).map((i) => i.number)
     : [];
   const inReview = open
-    .filter((i) => (hasLabel(i, l.prUnderReview) || hasLabel(i, l.prPendingActions)) && !hasLabel(i, l.prMerged) && !hasLabel(i, l.prApproved))
+    .filter((i) => (codeHost().hasLabel(i, l.prUnderReview) || codeHost().hasLabel(i, l.prPendingActions)) && !codeHost().hasLabel(i, l.prMerged) && !codeHost().hasLabel(i, l.prApproved))
     .map((i) => i.number);
   if (atMerged.length + atApproved.length + inReview.length === 0) return [];
   const out: { issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[] = [];
-  for (const m of (deps.mergedToBase ?? findIssuesMergedToBase)(repoConfig, [...inReview, ...atMerged, ...atApproved], logger)) {
+  for (const m of (deps.mergedToBase ?? codeHost().findIssuesMergedToBase)(repoConfig, [...inReview, ...atMerged, ...atApproved], logger)) {
     const from = inReview.includes(m.issueNumber) ? "start" : atMerged.includes(m.issueNumber) ? "merged" : "approved";
     if (from === "start") await notifyOnce("merged", repoConfig, [m.issueNumber], logger);
     const settled = await settleHumanMerge(repoConfig, config, m, logger, deps, from);
@@ -311,7 +312,7 @@ export async function runReconcileStage(
   // messages"). The warning fires on transition INTO the dead-zone; the entry
   // clears when the issue leaves it, so a genuine re-entry alerts again.
   try {
-    const stuck = findStuckMergedIssues(repoConfig, reconLogger);
+    const stuck = codeHost().findStuckMergedIssues(repoConfig, reconLogger);
     const seen = deadZoneAlerted.get(repoConfig.name) ?? new Set<number>();
     const tried = deadZoneRecoveryAttempted.get(repoConfig.name) ?? new Set<number>();
     const current = new Set(stuck.map((s) => s.issueNumber));
@@ -411,7 +412,7 @@ export async function runReconcileStage(
     // Recovery is the inverse of the merged case: nothing exists to verify, so
     // return it to the queue. Safe precisely BECAUSE nothing merged —
     // re-implementing cannot duplicate work that was never done.
-    for (const num of findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
+    for (const num of codeHost().findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
       if (await advance(itemOf(repoConfig, num), "release", repoConfig, reconLogger)) {
         events.push({
           message: `${repoConfig.githubRepo} #${num} released back to the implement queue — it carried a lifecycle label but no PR covers it and nothing merged, so the work never landed.`,

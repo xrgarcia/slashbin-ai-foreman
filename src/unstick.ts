@@ -19,7 +19,7 @@
 
 import { createHash } from "node:crypto";
 import { loadRepoState, saveRepoState, type BranchBlock, type RepoState, type VerifyHold } from "./state.js";
-import { escalatedReason } from "./github/skip-hold.js";
+import { codeHost } from "./plugins/registry.js";
 
 /**
  * Every `--kind` the EM's `unstick` command accepts. Shared verbatim with the
@@ -160,7 +160,7 @@ export function derivedCandidates(
     }
   }
   for (const [key, s] of Object.entries(state.skipped ?? {})) {
-    if (s.escalatedAt) out.push({ issue: Number(key), kind: "skip", reason: escalatedReason(s.reason, s.skipCount ?? 0) });
+    if (s.escalatedAt) out.push({ issue: Number(key), kind: "skip", reason: codeHost().escalatedReason(s.reason, s.skipCount ?? 0) });
   }
   const b = state.branchBlock;
   if (b) {

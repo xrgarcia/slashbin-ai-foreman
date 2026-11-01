@@ -6,6 +6,8 @@ import {
   closedVersion, isGitHubStateEnabled, markAllDirty, markRepoDirty, stateOpenIssues, stateOpenPrs,
 } from "../github-state.js";
 import { gh } from "./gh.js";
+import type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
+export type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
 
 
 // ---------------------------------------------------------------------------
@@ -43,12 +45,6 @@ import { gh } from "./gh.js";
  * Additive and OSS-safe: `issueCacheTtlMs: 0` restores the old behaviour of one
  * live query per lookup.
  */
-export interface IssueSnapshot {
-  number: number;
-  title: string;
-  labels: { name: string }[];
-}
-
 export const DEFAULT_ISSUE_CACHE_TTL_MS = 30_000;
 export const DEFAULT_ISSUE_SNAPSHOT_LIMIT = 500;
 
@@ -190,15 +186,6 @@ export function hasLabel(issue: IssueSnapshot, name: string): boolean {
  * and the one call that needs `files` (a per-PR file list, far heavier than the
  * scalar fields below). Those stay live.
  */
-export interface PrSnapshot {
-  number: number;
-  url: string;
-  title: string;
-  body: string;
-  headRefName: string;
-  baseRefName: string;
-}
-
 export const prSnapshots = new Map<string, { fetchedAt: number; prs: PrSnapshot[] }>();
 
 /**
@@ -315,17 +302,6 @@ export function openPrVersion(repo: string, head: string, base: string): string 
 export function closedPrVersion(repo: string): string | null {
   if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return null;
   return String(closedVersion(repo));
-}
-
-/**
- * Extract the actionable bits of a thrown gh CLI error so callers can log
- * something useful instead of swallowing the failure. execFileSync attaches
- * `stderr` (Buffer) and `status` (exit code) to the Error it throws.
- */
-export interface GhFailure {
-  message: string;
-  stderr: string;
-  status: number | null;
 }
 
 export function formatGhError(err: unknown): GhFailure {

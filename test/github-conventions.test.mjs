@@ -175,7 +175,7 @@ test("promotion and sync PRs carry the configured titles and signature", () => {
 
 test("no GitHub name is a literal outside conventions.ts", () => {
   const src = new URL("../src/", import.meta.url).pathname;
-  const files = readdirSync(src, { recursive: true }).filter((f) => f.endsWith(".ts") && f !== join("github", "conventions.ts"));
+  const files = readdirSync(src, { recursive: true }).filter((f) => f.endsWith(".ts") && f !== join("config-schema", "github.ts") && f !== join("github", "conventions.ts"));
   const banned = [/Automated by slashbin-ai-agent/, /`release: /, /`chore: sync /, /`feat: implement /, /"dependabot\/"/, /includes\("blocked"\)/, /hasLabel\([^,]+, "blocked"\)/];
   for (const f of files) {
     const text = readFileSync(join(src, f), "utf8");

@@ -21,6 +21,10 @@ import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { transition } from "../dist/lifecycle.js";
 import { revisePRFeedback } from "../dist/agent.js";
 import { createLogger } from "../dist/logger.js";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+
+setCodeHost(githubCodeHost());
 
 const CUSTOM = {
   prUnderReview: "in-review",

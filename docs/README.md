@@ -100,6 +100,6 @@ npm run docs:check
 ```
 
 The code owns the contracts: named lifecycle moves in `src/lifecycle.ts`, retry
-policies in `src/backoff.ts`, GitHub names in `src/github/conventions.ts`, and
+policies in `src/backoff.ts`, GitHub names in `src/config-schema/github.ts`, and
 settings in `src/config.ts`. Each setting's description lives with its declaration;
 the configuration generator rejects undocumented keys.

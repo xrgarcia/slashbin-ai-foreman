@@ -135,7 +135,7 @@ test("config: hold is the default; false opts back into the timed retry, from th
 
 test("no session while held: a held issue leaves the hand-off before any session starts", () => {
   const src = orchestratorSource();
-  const filterAt = src.indexOf("const gate = skipGate(entry");
+  const filterAt = src.indexOf("const gate = codeHost().skipGate(entry");
   const sessionAt = src.indexOf("implementApprovedIssues(repoConfig", filterAt);
   assert.ok(filterAt > 0, "the hold check is gone from the implement phase");
   assert.ok(sessionAt > filterAt, "a session launches before the hold check");

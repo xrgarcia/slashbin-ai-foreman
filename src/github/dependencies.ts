@@ -4,6 +4,8 @@ import type { Logger } from "../logger.js";
 import { IssueSnapshot, PrSnapshot, formatGhError, getOpenIssues, getOpenPrs } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./conventions.js";
+import type { DependencyChange } from "../code-host.js";
+export type { DependencyChange } from "../code-host.js";
 
 
 // --- Dependency PRs (Dependabot) ---
@@ -154,16 +156,6 @@ export function selectSecurityPRs<T extends Pick<PrSnapshot, "title" | "body">>(
  * label to create on twenty repos, no extra API call, and nothing to drift.
  */
 export const DEPENDENCY_BATCH_TITLE_PREFIX = DEFAULT_GITHUB_CONVENTIONS.dependencyBatchTitlePrefix;
-
-/** One dependency PR, reduced to what the issue body needs to say about it. */
-export interface DependencyChange {
-  number: number;
-  packages: string[];
-  from?: string;
-  to?: string;
-  /** True when the leading version component moves. `0.x` counts every minor. */
-  major: boolean;
-}
 
 /**
  * Read a Dependabot PR title into packages and versions.
