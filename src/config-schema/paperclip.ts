@@ -132,6 +132,14 @@ export const paperclipConfigSchema = z.object({
   // instance that requires sign-in. Unset sends no authorization header. Set it
   // from the environment; it is a secret and is redacted from the mirror's logs.
   apiKey: z.string().min(1).optional(),
+  // The registry's MCP endpoint (slashbin_mcp_services, `repo_identity`). The mirror compares
+  // cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an
+  // item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own
+  // key (exact string comparison), and no registry call is made.
+  registryUrl: z.url().optional(),
+  // The bearer credential the registry's router requires. Set it from the environment; it is a
+  // secret and is redacted from the mirror's logs. Unset sends no authorization header.
+  registryApiKey: z.string().min(1).optional(),
   // The request header that credits a write to the Foreman's agent (or another
   // author) instead of the key's user, for an instance that supports one. Unset =
   // no credit header is sent: every write reads as the key's user.
@@ -215,6 +223,8 @@ export function mergePaperclip(fromFile: unknown): unknown {
     agentName: process.env.AI_AGENT_PAPERCLIP_AGENT_NAME,
     agentId: process.env.AI_AGENT_PAPERCLIP_AGENT_ID,
     apiKey: process.env.AI_AGENT_PAPERCLIP_API_KEY,
+    registryUrl: process.env.AI_AGENT_PAPERCLIP_REGISTRY_URL,
+    registryApiKey: process.env.AI_AGENT_PAPERCLIP_REGISTRY_API_KEY,
     commentAuthorHeader: process.env.AI_AGENT_PAPERCLIP_COMMENT_AUTHOR_HEADER,
     identityKeyFormat: process.env.AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT,
     taskTitleFormat: process.env.AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT,
@@ -275,7 +285,12 @@ function checkEnabled(pc: z.infer<typeof paperclipConfigSchema>, knownRepos?: Re
   }
   // A misspelled repo would mirror nothing for it, silently.
   if (pc.repos && knownRepos) {
-    const unknown = pc.repos.filter((r) => !knownRepos.includes(r));
+    // With a registry (`registryUrl`), either owner spelling of a configured repo is accepted: the
+    // mirror compares them on identity keys at run time, and this check cannot ask the registry.
+    // Matching on the repo name keeps a misspelled or unrelated repo rejected.
+    const nameOf = (r: string) => r.slice(r.indexOf("/") + 1).toLowerCase();
+    const known = (r: string) => knownRepos.includes(r) || (!!pc.registryUrl && knownRepos.some((k) => nameOf(k) === nameOf(r)));
+    const unknown = pc.repos.filter((r) => !known(r));
     if (unknown.length) throw new Error(`paperclip.repos ${unknown.map((r) => `"${r}"`).join(", ")} is not a configured githubRepo.`);
   }
 }
