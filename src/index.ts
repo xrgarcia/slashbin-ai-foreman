@@ -5,8 +5,7 @@ export {
   BUILTIN_STAGES, defaultStages, type StageEntry, type StageType, type StageOutcome,
 } from "./stages.js";
 export { createLogger, type Logger, type LogLevel } from "./logger.js";
-export { hasPendingRevisions, verifyPRExists } from "./github.js";
-export { GitHubIssueConnector } from "./github-work-source.js";
+export { hasPendingRevisions, verifyPRExists, GitHubIssueConnector } from "./plugins/index.js";
 export type { WorkItem, WorkSourceAdapter, WorkObserver, WorkEvent, SnapshotItem, SnapshotCard, SnapshotHold } from "./adapters.js";
 export { DEFAULT_BACKOFF, backoffDelay, type BackoffConfig, type BackoffWindow } from "./backoff.js";
 export { STAGES, MOVES, transition, type Stage, type Move, type Transition } from "./lifecycle.js";

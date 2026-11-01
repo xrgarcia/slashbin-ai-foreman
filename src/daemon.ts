@@ -6,10 +6,7 @@ import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
 import { lanesFor, setSessionLimit } from "./lanes.js";
 import { stageName } from "./stages.js";
 import { join } from "node:path";
-import { configureIssueCache, gh } from "./github.js";
-import {
-  clearActivity, configureGitHubState, recordActivity, setGitHubStateRepos, takeGitHubStateUsage,
-} from "./github-state.js";
+import { codeHost } from "./plugins/registry.js";
 import { addObserver } from "./work-source.js";
 import { stateDir } from "./state.js";
 import { configureBackoff } from "./backoff.js";
@@ -48,19 +45,19 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   configureClaudeTrust({ enabled: config.trustManagedRepos });
   trustManagedRepos(config.repos, logger);
 
-  configureIssueCache({
+  const host = codeHost();
+  host.configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
     snapshotLimit: config.issueSnapshotLimit,
   });
 
   // Every repo's open issues and PRs from ONE bulk GraphQL query per refresh,
   // and only what changed since the last one. See the header of github-state.ts.
-  configureGitHubState({
+  host.configureState({
     repos: config.repos.map((r) => r.githubRepo),
     refreshMs: config.issueCacheTtlMs,
     issueLimit: config.issueSnapshotLimit,
     persistPath: join(stateDir(), ".github-state.json"),
-    run: (args) => gh(args, process.cwd()),
     logger,
   });
 
@@ -69,13 +66,13 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   addObserver({
     onEvent: async (event) => {
       switch (event.kind) {
-        case "claim": return recordActivity(event.item.repo, event.item.issueNumber, "claimed");
-        case "transition": return recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
-        case "prLink": return recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
-        case "blocked": return recordActivity(event.item.repo, event.item.issueNumber, "blocked");
-        case "escalated": return recordActivity(event.item.repo, event.item.issueNumber, "needs-ruling");
-        case "merged": return recordActivity(event.item.repo, event.item.issueNumber, "merged");
-        case "promoted": return clearActivity(event.item.repo, event.item.issueNumber);
+        case "claim": return host.recordActivity(event.item.repo, event.item.issueNumber, "claimed");
+        case "transition": return host.recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
+        case "prLink": return host.recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
+        case "blocked": return host.recordActivity(event.item.repo, event.item.issueNumber, "blocked");
+        case "escalated": return host.recordActivity(event.item.repo, event.item.issueNumber, "needs-ruling");
+        case "merged": return host.recordActivity(event.item.repo, event.item.issueNumber, "merged");
+        case "promoted": return host.clearActivity(event.item.repo, event.item.issueNumber);
         default: return;
       }
     },
@@ -91,7 +88,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
   // One info line per hour: spawned gh calls by quota bucket and subcommand.
   // statePoints: what the fleet state's bulk queries actually cost, as GitHub reported it.
-  configureGhUsage({ intervalMs: 3_600_000, logger, extra: takeGitHubStateUsage });
+  configureGhUsage({ intervalMs: 3_600_000, logger, extra: () => host.takeStateUsage() });
 
   // A TTL at or above the poll interval means a cycle can be served entirely
   // from the previous cycle's snapshot, so an externally-applied `approved`
@@ -170,7 +167,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         }
       }
 
-      setGitHubStateRepos(fresh.repos.map((r) => r.githubRepo));
+      host.setStateRepos(fresh.repos.map((r) => r.githubRepo));
       configureBackoff(fresh.backoff);
       configureClaudeTrust({ enabled: fresh.trustManagedRepos });
       trustManagedRepos(fresh.repos, logger);

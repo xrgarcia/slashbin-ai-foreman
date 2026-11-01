@@ -1,4 +1,5 @@
 import type { WorkObserver, WorkSourceAdapter } from "../adapters.js";
+import type { CodeHost } from "../code-host.js";
 import type { ReviewResult, ReviewTrailer } from "../agent.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -35,8 +36,8 @@ export interface PluginContext {
 /** A command a plugin adds to the CLI (`slashbin-ai-agent <name>`). Resolves true on success. */
 export type PluginCommand = (config: AgentConfig) => Promise<boolean>;
 
-/* The code-host role is filled in by the feature that moves GitHub behind the registry. */
-export interface CodeHost {}
+/** The code-host role (EM#1150 f5): every PR, branch, merge, comment and label operation. */
+export type { CodeHost } from "../code-host.js";
 
 // --- Agent roles (EM#1150 f3). Each returns the outcome the phases consume;
 // how the agent is run, and how its exit code and trailers are read, stay
@@ -156,6 +157,12 @@ export interface ForemanPlugin {
   enabled(config: AgentConfig): boolean;
   /** Why an apparently requested plugin is off, logged once at startup (e.g. a missing id). */
   disabledReason?(config: AgentConfig): string | undefined;
+  /**
+   * Whether this config has the plugin fill `role`, for a plugin with several roles
+   * that a config may select one at a time (GitHub as work source, code host, or
+   * both). Absent: an enabled plugin fills every role it lists.
+   */
+  fills?(role: PluginRole, config: AgentConfig): boolean;
   start?(config: AgentConfig, ctx: PluginContext): void | Promise<void>;
   /** A config reload. Only started plugins are told. */
   reconfigure?(config: AgentConfig, ctx: PluginContext): void | Promise<void>;

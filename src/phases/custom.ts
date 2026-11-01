@@ -3,12 +3,13 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { emit } from "../work-source.js";
-import { findOpenFeaturePR } from "../github.js";
 import { runCustomStage } from "../agent.js";
 import { type CustomStage, type StageResult } from "../stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { CycleEvent, activeRuns, itemOf } from "./common.js";
 import { reportLaunchThrew } from "./implement.js";
+import { codeHost } from "../plugins/registry.js";
+import type { CodeHost } from "../code-host.js";
 
 /**
  * A custom stage's last verdict per repo, keyed `<repo>\0<stage id>`, with the
@@ -40,9 +41,9 @@ export async function tryCustomStage(
     return { outcome: "blocked", reason: "upstream back-off", ran: false };
   }
 
-  let pr: ReturnType<typeof findOpenFeaturePR>;
+  let pr: ReturnType<CodeHost["findOpenFeaturePR"]>;
   try {
-    pr = findOpenFeaturePR(repoConfig);
+    pr = codeHost().findOpenFeaturePR(repoConfig);
   } catch (err) {
     // Could not look is not "nothing to check": hold the later stages this pass.
     return { outcome: "blocked", reason: `work in flight unreadable: ${err instanceof Error ? err.message : String(err)}`, ran: false };

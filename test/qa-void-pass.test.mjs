@@ -79,7 +79,7 @@ test("wiring: the re-run move goes pr approved -> pr merged, verify takes reques
   assert.match(v, /advance\(itemOf\(repoConfig, n\), "qaRerun"/);
   assert.match(v, /qaBeforeMerge && await postMergeQaNeeded\(/);
   assert.match(v, /\|\| qaAgain\)\) \{/);
-  assert.match(v, /!hasLabel\(i, readyForProd\)/, "an authorized issue is never sent back");
+  assert.match(v, /!codeHost\(\)\.hasLabel\(i, readyForProd\)/, "an authorized issue is never sent back");
   assert.match(src("../docs/em-coordination.md"), /`\*\*EM QA re-run`/);
 });
 

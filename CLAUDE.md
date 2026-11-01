@@ -132,7 +132,7 @@ phase.** Groups, defaults and env names: `docs/configuration.md` (generated).
 
 Every label, branch prefix, title and signature the Foreman reads or writes on GitHub
 is config: the trigger label, `lifecycleLabels`, or the `github` block
-(`src/github/conventions.ts`), each defaulting to the name it always had. Phases pass
+(`src/config-schema/github.ts`), each defaulting to the name it always had. Phases pass
 `repoConfig.github`; `src/github/*` functions take it as a trailing parameter defaulting
 to `DEFAULT_GITHUB_CONVENTIONS`. Sessions get every label name as `FOREMAN_*_LABEL(S)`
 env vars (`setLabelEnv` in `agent.ts`), so no skill types one. **A new GitHub name is a

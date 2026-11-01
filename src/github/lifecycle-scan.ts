@@ -8,14 +8,8 @@ import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { gh } from "./gh.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
 import { backoffSettings } from "../backoff.js";
-
-
-export interface MergedIssueRef {
-  issueNumber: number;
-  prNumber: number;
-  prUrl: string;
-  mergedAt: string;
-}
+import type { MergedIssueRef, StuckMergedIssue, ReviewOutcome } from "../code-host.js";
+export type { MergedIssueRef, StuckMergedIssue, ReviewOutcome } from "../code-host.js";
 
 /**
  * THE shared primitive: of `candidates`, which issues' work is already MERGED to
@@ -96,8 +90,6 @@ export function findIssuesMergedToBase(
     return [];
   }
 }
-
-export type StuckMergedIssue = MergedIssueRef;
 
 /** Grace window before a merged-but-unadvanced issue is treated as dead-zoned,
  *  giving an in-flight post-merge verify time to advance it. Prevents flapping
@@ -364,13 +356,6 @@ export function findIssuesStillUnderReview(
     return [];
   }
 }
-
-/**
- * The lifecycle states a review can end in, as `LifecycleLabels` keys.
- * `prMerged` when dev verification is its own stage (EM#440): the reviewer
- * merged, and `pr approved` waits on the verifier.
- */
-export type ReviewOutcome = "prApproved" | "prMerged" | "prPendingActions";
 
 /**
  * The outcome each of `issueNumbers` carries in `issues`: `pr approved` or

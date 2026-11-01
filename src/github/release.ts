@@ -9,12 +9,8 @@
 
 import type { RepoConfig } from "../config.js";
 import { gh } from "./gh.js";
-
-/** An issue read live, open or closed: the snapshot holds open issues only. */
-export interface IssueView {
-  state: "OPEN" | "CLOSED";
-  labels: string[];
-}
+import type { IssueView, ReleasePrView } from "../code-host.js";
+export type { IssueView, ReleasePrView } from "../code-host.js";
 
 /**
  * `gh issue view N --json state,labels`. Always with `--json`: without it gh
@@ -26,20 +22,6 @@ export function viewIssue(config: RepoConfig, num: number): IssueView | null {
   const v = JSON.parse(out || "null") as { state?: string; labels?: { name: string }[] } | null;
   if (!v?.state) return null;
   return { state: v.state === "OPEN" ? "OPEN" : "CLOSED", labels: (v.labels ?? []).map((l) => l.name) };
-}
-
-/** A release PR read live. */
-export interface ReleasePrView {
-  number: number;
-  url: string;
-  state: "OPEN" | "MERGED" | "CLOSED";
-  /** The full 40-character head SHA: what the Tech Lead approves and the SRE pins the merge to. */
-  headSha: string;
-  /** The merge commit, once merged. */
-  mergeSha: string | null;
-  /** ISO merge time, once merged. */
-  mergedAt: string | null;
-  body: string;
 }
 
 const PR_FIELDS = "number,url,state,headRefOid,mergeCommit,mergedAt,body";

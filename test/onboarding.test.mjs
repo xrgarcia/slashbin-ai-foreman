@@ -18,6 +18,10 @@ import { lanesFor } from "../dist/lanes.js";
 import { configureIssueCache } from "../dist/github.js";
 import { setStatePath } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+
+setCodeHost(githubCodeHost());
 
 const DEFAULTS = ["approved", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release",
   "release pending", "prod verification held", "ready to close", "blocked"];

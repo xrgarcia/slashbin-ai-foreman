@@ -18,6 +18,8 @@
 
 import type { RepoConfig } from "../config.js";
 import { gh } from "./gh.js";
+import type { Announced } from "../code-host.js";
+export type { Announced } from "../code-host.js";
 
 /** An issue as `GET /repos/{o}/{r}/issues/{n}/dependencies/blocking` returns it. */
 export interface Dependent {
@@ -81,14 +83,6 @@ export function alreadyLandedComment(reason: string, baseBranch: string): string
 export function closeAlreadyLanded(config: RepoConfig, num: number, reason: string): void {
   gh(["issue", "comment", String(num), "--repo", config.githubRepo, "--body", alreadyLandedComment(reason, config.featureBranch)], config.repoPath);
   gh(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
-}
-
-/** What `announceDeadBlocker` did for one dependent. */
-export interface Announced {
-  /** `#N` or `owner/repo#N`. */
-  ref: string;
-  repo: string;
-  number: number;
 }
 
 /**

@@ -7,8 +7,8 @@ import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 import { enabledFor } from "./plugins/registry.js";
 import {
   paperclipConfigSchema, mergePaperclip, leniencyForDisabled, resolvePaperclipConfig, type PaperclipConfig,
-} from "./paperclip/config.js";
-import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./github/conventions.js";
+} from "./config-schema/paperclip.js";
+import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./config-schema/github.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
 import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSyncConfig } from "./skill-sync.js";
 
@@ -390,6 +390,12 @@ export const configSchema = z.object({
   // to start until a plugin of that id is installed.
   workSource: z.string().min(1).default("github"),
 
+  // Where the Foreman's PRs, branches, merges, comments and labels live: the id
+  // of the code-host plugin. `github` (default) is the only one today; any other
+  // value turns GitHub's code host off, and the Foreman refuses to start until a
+  // plugin of that id is installed.
+  codeHost: z.string().min(1).default("github"),
+
   // The optional Paperclip board mirror, off unless `enabled` (docs/paperclip.md).
   // Global, never per repo: one Foreman is one Paperclip agent. prefault for
   // the same reason as above.
@@ -553,6 +559,8 @@ export interface AgentConfig {
   stages: readonly StageEntry[];
   /** The work-source plugin's id (default `github`). Optional so a hand-built test config means the default. */
   workSource?: string;
+  /** The code-host plugin's id (default `github`). Optional so a hand-built test config means the default. */
+  codeHost?: string;
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
   /** Skill sync settings. Always present; `enabled` is false unless opted in. */
@@ -713,6 +721,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     stages: fileConfig.stages,
     github: fileConfig.github,
     workSource: fileConfig.workSource,
+    codeHost: fileConfig.codeHost,
     paperclip: leniencyForDisabled(mergePaperclip(fileConfig.paperclip)),
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
@@ -911,6 +920,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     github,
     stages,
     workSource: parsed.workSource,
+    codeHost: parsed.codeHost,
     paperclip,
     skillSync: resolveSkillSync(parsed.skillSync),
     dependabot: globals.dependabot,

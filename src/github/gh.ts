@@ -3,8 +3,8 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { ghResource, recordGhCall } from "../gh-usage.js";
-import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "../upstream-backoff.js";
+import { ghResource, recordGhCall, type GhResource } from "../gh-usage.js";
+import { isUpstreamBlocked, setUpstreamProbe, signalUpstreamLimit, UpstreamBackoffError, type UpstreamProbeResult } from "../upstream-backoff.js";
 import { formatGhError, invalidateSnapshotIfMutating } from "./cache.js";
 import { backoffDelay, backoffSettings } from "../backoff.js";
 
@@ -191,3 +191,42 @@ export function ghAsTechLead(args: string[], cwd: string): string {
   invalidateSnapshotIfMutating(args);
   return runGh(args, cwd, token);
 }
+
+interface RateResource {
+  remaining?: number;
+  reset?: number;
+}
+
+const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining resetAt}}"];
+
+/**
+ * Probe the bucket that tripped, with the token that tripped it — deliberately
+ * NOT via `runGh` (which refuses while blocked) and not counted as usage.
+ *  - graphql: `gh api graphql` rateLimit. Clears only on remaining > 0; on 0
+ *    its resetAt bounds the next window. A refused probe lands in catch.
+ *  - core (or unknown): `gh api rate_limit` resources.core, as before.
+ * No stored token (ambient gh auth): probe with the ambient auth.
+ * A probe that itself fails never clears; it extends on the computed window.
+ */
+export function probeGitHub(trip: { token?: string; resource?: GhResource }): UpstreamProbeResult {
+  const env = trip.token ? { ...process.env, GH_TOKEN: trip.token } : { ...process.env };
+  const opts = { encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"], timeout: 30_000, env };
+  try {
+    if (trip.resource === "graphql") {
+      const rl = JSON.parse(execFileSync("gh", PROBE_GRAPHQL, opts))?.data?.rateLimit;
+      if (typeof rl?.remaining === "number" && rl.remaining > 0) return { clear: true };
+      const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
+      return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
+    }
+    const core = JSON.parse(execFileSync("gh", ["api", "rate_limit"], opts))?.resources?.core as RateResource | undefined;
+    if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
+    return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
+  } catch (err) {
+    console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    return { clear: false };
+  }
+}
+
+// Every gh call that can trip the GitHub back-off runs through this module, so it
+// is loaded whenever a GitHub window can end.
+setUpstreamProbe("github", probeGitHub);
