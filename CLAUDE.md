@@ -75,7 +75,7 @@ decision-layer workflow rather than an in-repo edit:
 - **Runs as the Tech Lead, only.** `reviewViaTechLead` runs `bin/tech-lead.mjs
   review-pr` in `techLeadPath`; when it cannot take a review the PR waits a
   `backoff.agentUnavailable` window — there is no Claude review session.
-  `reviewSkillPath` is accepted but no longer read; `emRepoPath` is (the Unstick stage and the contract reader).
+  `emRepoPath` is read only by the Unstick stage and the contract reader.
 - **Runs under a separate token.** Reviews/merges are attributed to `TECHLEAD_GITHUB_KEY`
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
 - **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
@@ -192,9 +192,8 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
 
 ## Key design decisions
 
-- **Skills own the workflow; the Foreman just triggers.** Implement/revise/review logic
-  lives in skills (in the service repo for implement/revise, in `emRepoPath` for review),
-  not in TypeScript. The daemon discovers work, spawns Claude on the right skill, and
+- **Skills own the workflow; the Foreman just triggers.** Implement/revise logic
+  lives in the service repo's skills, review in the Tech Lead (reviewer plugin), not TypeScript. The daemon discovers work, spawns Claude on the right skill, and
   reconciles labels/state.
 - **One state machine, one call.** Every state change is a named move in `src/lifecycle.ts`;
   the orchestrator calls `advance(item, "<move>")` and reports everything else with `emit()`.

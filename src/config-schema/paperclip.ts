@@ -164,13 +164,13 @@ export const paperclipConfigSchema = z.object({
   // = every configured repo. A repo left out is never touched in Paperclip; its
   // existing cards stay as they are.
   repos: z.array(z.string().regex(/^[\w.-]+\/[\w.-]+$/, "a repo as owner/name")).min(1).optional(),
-  // The Foreman is the only writer of every card for an issue in a mirrored repo: it creates one for each open issue (approved or not), keeps its title ("{name}#{N} {title}"), description and status in step with GitHub (not approved: backlog, unassigned; closed: done, or cancelled when not planned), writes a held issue's reason from GitHub, and retires a second card for the same issue. Published with the config, so another sync reads it and leaves those cards' content alone; where a card is filed (project, parent, goal, priority) stays that sync's. Off = cards are created on claim and moved by the Foreman's own steps only.
+  // The Foreman is the only writer of every card for an issue in a mirrored repo: it creates one for each open issue (approved or not), keeps its title ("{name}#{N} {title}"), description and status in step with GitHub (not approved: backlog, unassigned, or held by humanUserId when approved-for-human; closed: done, or cancelled when not planned), writes a held issue's reason from GitHub, and retires a second card for the same issue. Published with the config, so another sync reads it and leaves those cards' content alone; where a card is filed (project, parent, goal, priority) stays that sync's. Off = cards are created on claim and moved by the Foreman's own steps only.
   ownsCards: z.boolean().default(false),
   // Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise.
   agentStatus: z.boolean().default(true),
   // Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card.
   roles: z.record(z.string().regex(/^\w+$/), roleSchema).default({}),
-  // The Paperclip user id of the person who holds `approved-for-human` cards (assigneeFor in board.ts), written by whatever syncs those issues; the Foreman's own moves never assign a user. Set it in the installed `.ai-agent.json`: a person's id never goes in the repo. Unset = those cards are written unassigned.
+  // The Paperclip user id of the person who holds `approved-for-human` cards (assigneeFor in board.ts), applied by the card sync (ownsCards) to an open card in no lifecycle stage. Set it in the installed `.ai-agent.json`: a person's id never goes in the repo. Unset = those cards are written unassigned.
   humanUserId: z.string().min(1).optional(),
   // The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is.
   agentReportsTo: z.string().min(1).optional(),

@@ -257,7 +257,7 @@ The name issue bodies give the epic tracker in `<label> #N` references (the `## 
 
 Type: string · Default: none · Env: `AI_AGENT_TECH_LEAD_PATH`
 
-The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each review is offered to it FIRST — Codex judges, its code posts and merges. It exits 3 when Codex cannot take the review and nothing was written; the review phase then runs the Claude /review-all-prs session exactly as before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
+The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each review runs through it — Codex judges, its code posts and merges. It exits 3 when it cannot take the review and nothing was written; the PR waits and the review retries after a backoff wait. Unset = no review runs.
 
 ### `srePath`
 
@@ -306,12 +306,6 @@ The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex run and 
 Type: boolean · Default: `false` · Per repo: yes, falls back to this value
 
 Run the review stage. Off by default; per repo too, where it wins.
-
-### `reviewSkillPath`
-
-Type: string · Default: none · Per repo: yes, falls back to this value
-
-No longer read: review runs through the Tech Lead (techLeadPath), which carries its own review procedure. Accepted so an older config still loads.
 
 ### `reviewModel`
 

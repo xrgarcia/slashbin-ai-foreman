@@ -132,8 +132,8 @@ export const HUMAN_HOLD_LABEL = "approved-for-human";
 export type CardAssignee = { assigneeAgentId: string | null; assigneeUserId: string | null };
 
 /**
- * Who holds an item's card by its labels, for a caller (a sync) that reads
- * them; this plugin never reads GitHub. Pure: the same item and config always
+ * Who holds an item's card by its labels, which the work source's cards carry
+ * (the card sync, mirror.ts syncCard); this plugin never reads GitHub. Pure: the same item and config always
  * give the same answer.
  *
  * - labelled `approved-for-human` → the `humanUserId` user (unset → both null,
