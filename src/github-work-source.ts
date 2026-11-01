@@ -188,6 +188,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         state: "open" as const,
         stage: issueStage(labelsOf(i), release.has(i.number), repoConfig.lifecycleLabels, repoConfig.triggerLabel, blockedLabel),
         ...(hold ? { hold } : {}),
+        labels: labelsOf(i),
       };
     });
     const closed = recentlyClosed(repo, repoConfig.repoPath, logger)

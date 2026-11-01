@@ -144,6 +144,8 @@ export interface SnapshotCard {
   readonly stage: StageOrDone | null;
   /** An open held item's reason, when it was read. */
   readonly hold?: SnapshotHold;
+  /** An open item's labels in the source's own terms, for a mirror that assigns by them (a human hold). */
+  readonly labels?: readonly string[];
 }
 
 /** One lifecycle item as the work source shows it at the end of a cycle. */
