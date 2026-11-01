@@ -32,6 +32,7 @@ Discord is not required.
 - [Start with one repo](#start-with-one-repo)
 - [Give it its first issue](#give-it-its-first-issue)
 - [Extend the loop through review and release](#extend-the-loop-through-review-and-release)
+- [Plugins](#plugins)
 - [Why we built it](#why-we-built-it)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
@@ -73,10 +74,11 @@ release needs both. The [starter setup](#start-with-one-repo) begins with PRs.
 | Image handling | Include mockups and screenshots from issues and review comments in default and skill-driven prompts; custom prompts supply their own image guidance. | [Images](docs/skills.md#image-handling-in-issue-bodies) |
 | Session security | Limit the session environment, separate builder and reviewer credentials, block common secret-printing operations, and redact Foreman's own logs. | [Session access and limits](docs/security.md) |
 | Workspace trust | Mark configured checkouts trusted in Claude Code so sessions load repo settings, tools, and hooks; disable automatic trust if you manage it yourself. | [Workspace trust](docs/security.md#claude-code-workspace-trust) |
-| Paperclip board *(optional, off by default)* | Mirror GitHub work onto a board with stage owners, handoffs, session summaries, PR links, and hold reasons. GitHub remains the work source. | [Paperclip](docs/paperclip.md) |
+| Paperclip board *(optional, off by default)* | Mirror GitHub work onto a board with stage owners, handoffs, session summaries, PR links, and hold reasons. GitHub remains the work source; off, the Foreman makes no Paperclip call. | [Paperclip](docs/paperclip.md) |
 | Discord *(not used by the daemon)* | Follow work through GitHub, logs, and the optional board without Discord. An exported bridge client is available for other agents. | [Discord client](docs/config-guide.md#discord-notifications) |
 | Programmatic usage | Start the daemon or run a pass from your own Node code through the package exports. | [Programmatic usage](docs/architecture.md#programmatic-usage) |
-| Architecture | Extend the work-source and observer interfaces, or follow the source layout to the component that owns a behavior. | [Architecture](docs/architecture.md) |
+| Plugins | GitHub, Paperclip and each agent sit behind one plugin contract; the core reaches none of them directly, so any can be replaced or left off. | [Plugins](#plugins), [architecture](docs/architecture.md#plugins) |
+| Config profiles | Keep one operator's logins, repo names and tool lists in a named profile instead of in the core. | [Profiles](docs/config-guide.md#profiles) |
 
 Sessions run unattended with Claude Code permission prompts disabled. Foreman limits
 the session environment, blocks common secret-printing operations, and redacts its
@@ -138,8 +140,10 @@ The integration can:
 the GitHub trigger label does. Foreman's Paperclip agent is registered with its wake
 paths off because the daemon runs its own loop.
 
-Paperclip is off by default. A board outage does not stop GitHub work; notes due
-during the outage are skipped. The daemon sends no Discord messages—its operating
+Paperclip is off by default, and off means the Foreman makes no Paperclip call. On, each
+pass re-reads GitHub and puts every card where its issue says: a missing card is
+created, and a closed issue's card goes to done with nobody holding it. A board outage does not stop GitHub work; notes due during the outage
+are skipped. The daemon sends no Discord messages—its operating
 surfaces are GitHub, logs, and the optional board.
 
 [Set up and verify the Paperclip mirror →](docs/paperclip.md#set-up)
@@ -247,6 +251,30 @@ your branch protection; an `approved` build label alone does not authorize produ
 Add the stages you need to the starter config, or use the default pipeline.
 Read [automated review](docs/review.md), [pipeline stages](docs/pipeline.md#the-stages),
 and the [release contract](docs/lifecycle.md#the-release-stage) before enabling them.
+
+## Plugins
+
+The core (stages, phases, lifecycle, orchestrator) calls one interface,
+`ForemanPlugin` in [`src/plugins/contract.ts`](src/plugins/contract.ts). The registry,
+[`src/plugins/registry.ts`](src/plugins/registry.ts), starts the plugins a config enables
+and resolves each role; [`src/plugins/index.ts`](src/plugins/index.ts) is the only file
+that names one. The core never imports GitHub or Paperclip code and never runs `gh`;
+[`test/plugin-boundary.test.mjs`](test/plugin-boundary.test.mjs) fails the build if it does.
+
+| Plugin | Roles | File | On when |
+|---|---|---|---|
+| GitHub | `workSource`, `codeHost` | [`src/plugins/github.ts`](src/plugins/github.ts) | `workSource` / `codeHost` is `github` (the default) |
+| Paperclip | `observer` | [`src/plugins/paperclip.ts`](src/plugins/paperclip.ts) | `paperclip.enabled`, with `companyId` and `agentId` |
+| Tech Lead | `reviewer` | [`src/plugins/tech-lead.ts`](src/plugins/tech-lead.ts) | `techLeadPath` is set |
+| SRE | `verifier`, `deployer` | [`src/plugins/sre.ts`](src/plugins/sre.ts) | `srePath` is set |
+| QA | `qa` | [`src/plugins/qa.ts`](src/plugins/qa.ts) | `qaPath` is set (covers `qaRepos`) |
+| EM | `unstick` | [`src/plugins/em.ts`](src/plugins/em.ts) | `emRepoPath` is set |
+
+A stage whose role no plugin fills does not run: with no reviewer, a person merges. With
+no work source or code host, startup refuses. An operator's own values (logins, repo
+names, MCP tool lists) live in a profile under `src/profiles/`, selected with
+`"profile"`; each key resolves as neutral default, then profile, then `.ai-agent.json`,
+then env ([profiles](docs/config-guide.md#profiles)).
 
 ## Why we built it
 

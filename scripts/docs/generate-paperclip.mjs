@@ -245,8 +245,10 @@ company: each GitHub issue it builds gets a Paperclip task whose holder, status 
 follow the issue through its lifecycle, and which gets a note at every step.
 
 GitHub stays the only work source. Paperclip only ever shows what the Foreman is doing; nothing
-set in Paperclip starts, stops or changes a build. The mirror is off by default, and a config
-without a \`paperclip\` block runs exactly as it would without this feature.
+set in Paperclip starts, stops or changes a build. The mirror is the Paperclip plugin
+(\`src/plugins/paperclip.ts\`, an observer); it is off by default, and off it is never started:
+the Foreman makes no Paperclip call. It is self-sufficient: each pass's snapshot is enough to put
+every card where GitHub says, with no other writer's help.
 
 ## Configuration
 
@@ -287,7 +289,7 @@ ever written at creation, and never used to find a task, so changing the format 
 
 When two tasks carry the same identity line, the card is the oldest one that is not cancelled
 (else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
-the receiver's sync the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+another writer the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
 
 ## Who writes which card
 
@@ -306,7 +308,7 @@ the snapshot of the repo:
   \`GitHub: open · not approved\` or \`GitHub: closed completed|not_planned\` (at a stage a role
   holds, then \`Next: <role> — <action>\`; see **Handoffs**), a blank line, the issue's URL (\`stage awaitingRelease\` when an open PR into the production branch names it);
 - not approved: \`backlog\`, nobody's, no stage label; closed: \`done\`, or \`cancelled\` when
-  not planned, no stage label, the last holder kept; approved: the lifecycle stage, as before;
+  not planned, no stage label, nobody holding it; approved: the lifecycle stage, as before;
 - held by the blocked label: the holder's reason as the unblock descriptor
   (\`blocked: on GitHub — <their comment's first line> (<login>, <date>) <url>\`), and their
   comment copied once, never on another agent's card;
@@ -314,8 +316,9 @@ the snapshot of the repo:
   line rewritten to \`duplicate of <card> (<key>)\` so nothing adopts it again.
 
 Another writer may set where one of these cards is filed (project, project workspace, goal,
-parent, priority) and nothing else. With \`ownsCards\` off the Foreman creates a card only on a
-claim and moves it by its own steps, and leaves a card's content to whoever wrote it.
+parent, priority) and nothing else. With \`ownsCards\` off the Foreman still creates a card for an
+issue at a lifecycle stage that has none (once GitHub reads it open, within the same 20 writes),
+moves it by its own steps and the snapshot, and leaves a card's content to whoever wrote it.
 
 ### A closed issue's card
 
@@ -526,8 +529,9 @@ Release the block on GitHub, where the Foreman looks, and the card follows on it
 ### Cards held by a person
 
 A card labelled ${code(HUMAN_HOLD_LABEL)} waits on a person, not on a stage's owner. The plugin
-never reads GitHub labels, so a sync supplies them: \`assigneeFor(cfg, { labels, repo })\` in
-\`board.ts\`, a pure function. The Foreman's own moves never call it, and are unchanged.
+never reads GitHub; the work source's cards carry each open issue's labels, and the card sync
+(\`syncCard\` in \`mirror.ts\`, with \`ownsCards\` on) asks \`assigneeFor(cfg, { labels, repo })\` in
+\`board.ts\` who holds a card that is in no lifecycle stage. A closed card stays nobody's.
 
 | The item | Assignee |
 |---|---|
@@ -582,8 +586,8 @@ The mirror is best-effort and never blocks the Foreman. Every Paperclip call is 
 failure logs one warning when an outage starts (\`Paperclip mirror: … failed, notes are skipped
 until Paperclip answers again\`) and one info line when the next call succeeds. Notes and status
 changes due during the outage are skipped, not queued, and builds, reviews and promotions carry
-on unaffected. A skipped status is set again at the issue's next status-setting step; an issue
-picked up while Paperclip was down gets no task, because only the pick-up creates one.
+on unaffected. The first snapshot after the outage moves each card to its issue's stage, and
+creates the card of an issue picked up while Paperclip was down.
 
 ## Set up
 

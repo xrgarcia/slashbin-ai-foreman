@@ -79,10 +79,7 @@ const repoEntrySchema = z.object({
   maxDurationMs: z.coerce.number().int().positive().optional(),
   // Per-repo opt-out for the review phase (falls back to the global default).
   reviewEnabled: z.boolean().optional(),
-  // Per-repo review skill and reviewer identity; each falls back to the global
-  // value. See the global fields below for what they mean and how a relative
-  // reviewSkillPath resolves.
-  reviewSkillPath: z.string().optional(),
+  // Per-repo reviewer identity; falls back to the global value.
   reviewerLogin: z.string().optional(),
   // Owner standing authorization: file this repo's dependency batch issue
   // already carrying the trigger label. Opt-in per repo, default OFF — owner
@@ -268,10 +265,9 @@ export const configSchema = z.object({
   // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
   epicRefLabel: z.string().min(1).optional(),
   // The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each
-  // review is offered to it FIRST — Codex judges, its code posts and merges.
-  // It exits 3 when Codex cannot take the review and nothing was written; the
-  // review phase then runs the Claude /review-all-prs session exactly as
-  // before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
+  // review runs through it — Codex judges, its code posts and merges.
+  // It exits 3 when it cannot take the review and nothing was written; the PR
+  // waits and the review retries after a backoff wait. Unset = no review runs.
   techLeadPath: z.string().optional(),
   // The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at
   // the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs
@@ -310,9 +306,6 @@ export const configSchema = z.object({
   sreDeployMaxDurationMs: z.coerce.number().int().positive().default(7_200_000),
   // Run the review stage. Off by default; per repo too, where it wins.
   reviewEnabled: z.boolean().default(false),
-  // No longer read: review runs through the Tech Lead (techLeadPath), which
-  // carries its own review procedure. Accepted so an older config still loads.
-  reviewSkillPath: z.string().optional(),
   // Model for review sessions, independent of `model`. Omit for the CLI default.
   reviewModel: z.string().optional(),
   // Where the review session finds the service repo's code.
@@ -483,8 +476,6 @@ export interface RepoConfig {
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
-  /** Review skill as configured (per-repo, else global). Required when reviewEnabled. */
-  reviewSkillPath?: string;
   /** Reviewer login for the freshness guard (per-repo, else global). */
   reviewerLogin?: string;
   // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
@@ -565,8 +556,6 @@ export interface AgentConfig {
   qaBeforeMerge: boolean;
   /** Ceiling on one SRE deploy run (the release stage). */
   sreDeployMaxDurationMs: number;
-  /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
-  reviewSkillPath?: string;
   reviewModel?: string;
   reviewCheckoutRoot: string;
   reviewMaxTurns: number;
@@ -739,7 +728,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaBeforeMerge: fileConfig.qaBeforeMerge,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
     reviewEnabled: fileConfig.reviewEnabled,
-    reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
     reviewCheckoutRoot: process.env.AI_AGENT_REVIEW_CHECKOUT_ROOT ?? fileConfig.reviewCheckoutRoot,
     reviewMaxTurns: process.env.AI_AGENT_REVIEW_MAX_TURNS ?? fileConfig.reviewMaxTurns,
@@ -820,7 +808,6 @@ export function loadConfig(configPath?: string): AgentConfig {
         maxTurns: entry.maxTurns ?? parsed.maxTurns,
         maxDurationMs: entry.maxDurationMs ?? parsed.maxDurationMs,
         reviewEnabled: entry.reviewEnabled ?? parsed.reviewEnabled,
-        reviewSkillPath: entry.reviewSkillPath ?? parsed.reviewSkillPath,
         reviewerLogin: entry.reviewerLogin ?? parsed.reviewerLogin,
         dependencyPreApproved: entry.dependencyPreApproved ?? false,
         ...(entry.skillSyncSkills ? { skillSyncSkills: Object.freeze([...entry.skillSyncSkills]) } : {}),
@@ -856,7 +843,6 @@ export function loadConfig(configPath?: string): AgentConfig {
       maxTurns: parsed.maxTurns,
       maxDurationMs: parsed.maxDurationMs,
       reviewEnabled: parsed.reviewEnabled,
-      reviewSkillPath: parsed.reviewSkillPath,
       reviewerLogin: parsed.reviewerLogin,
       dependencyPreApproved: false,
       ...globals,
@@ -944,7 +930,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaGate: parsed.qaGate,
     qaBeforeMerge: parsed.qaBeforeMerge,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
-    reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
     reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),
     reviewMaxTurns: parsed.reviewMaxTurns,

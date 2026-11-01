@@ -75,7 +75,7 @@ decision-layer workflow rather than an in-repo edit:
 - **Runs as the Tech Lead, only.** `reviewViaTechLead` runs `bin/tech-lead.mjs
   review-pr` in `techLeadPath`; when it cannot take a review the PR waits a
   `backoff.agentUnavailable` window — there is no Claude review session.
-  `reviewSkillPath` is accepted but no longer read; `emRepoPath` is (the Unstick stage and the contract reader).
+  `emRepoPath` is read only by the Unstick stage and the contract reader.
 - **Runs under a separate token.** Reviews/merges are attributed to `TECHLEAD_GITHUB_KEY`
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
 - **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
@@ -164,12 +164,11 @@ src/
 ├── orchestrator.ts  # Stage pass per repo, failure cooldowns, the session slot; dispatches to phases/
 ├── phases/          # One file per stage: reconcile, implement, revise, verify, review, promote, custom;
 │                    #   common.ts holds what they share. Each reports every step via emit/advance
-├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
-├── paperclip/config.ts # The plugin's config block: schema, AI_AGENT_PAPERCLIP_* overrides, checks
-├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
-├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
-├── paperclip/mirror.ts # PaperclipMirror: a WorkObserver (plugin) — each event → the issue's card; best-effort
-├── paperclip/doctor.ts # Read-only check of the integration, six named PASS/FAIL checks (`npm run paperclip:doctor`)
+├── daemon.ts        # Poll loop, config hot-reload, graceful shutdown
+├── plugins/         # contract.ts (roles), registry.ts (core's only way in), index.ts names them; one file each
+├── code-host.ts     # CodeHost: every PR, branch, merge, comment and label operation
+├── profiles/        # Named defaults (`"profile"`): default < profile < .ai-agent.json < env
+├── paperclip/       # Paperclip plugin code: mirror (cards), client, agent register, doctor
 └── index.ts         # Public API exports
 ```
 
@@ -193,16 +192,14 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
 
 ## Key design decisions
 
-- **Skills own the workflow; the Foreman just triggers.** Implement/revise/review logic
-  lives in skills (in the service repo for implement/revise, in `emRepoPath` for review),
-  not in TypeScript. The daemon discovers work, spawns Claude on the right skill, and
+- **Skills own the workflow; the Foreman just triggers.** Implement/revise logic
+  lives in the service repo's skills, review in the Tech Lead (reviewer plugin), not TypeScript. The daemon discovers work, spawns Claude on the right skill, and
   reconciles labels/state.
 - **One state machine, one call.** Every state change is a named move in `src/lifecycle.ts`;
   the orchestrator calls `advance(item, "<move>")` and reports everything else with `emit()`.
   The work source (GitHub labels) records the event; observers (Paperclip, when enabled) get
-  the same event. Only `plugins/paperclip.ts` imports `paperclip/`, plus `config.ts` composing
-  the plugin's own block from `paperclip/config.ts`; the connector and the plugin never read
-  each other (a test walks every core file and enforces it). A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
+  the same event. No core file imports `github*` or `paperclip/` code or runs `gh`;
+  it goes through `plugins/registry.ts` (`test/plugin-boundary.test.mjs`). A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
 - **One Claude session at a time** — resource + git-state safety.
 - **Phase order is the priority order** — reconcile and review settle prior-cycle state
   before new implementation starts. The default `stages` keeps it; a config that

@@ -17,7 +17,7 @@ action you are about to take is not one of these seven, you are doing someone el
 `deliver-to-prod` on an epic is **not** a Foreman input: `src/` never reads it. It is the
 EM's own gate (the deliver-to-prod skill) for applying `ready for prod release`.
 
-## 1. Lifecycle stages (the Paperclip card / GitHub labels)
+## 1. Lifecycle stages (GitHub labels; the Paperclip card when that plugin is on)
 
 Every stage in `STAGES` (`src/lifecycle.ts`). "Wait" means the Foreman moves it on its own
 poll (every 5 minutes); touching it cancels or duplicates a stage.
@@ -39,7 +39,7 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 | `releasing` | `release pending` | Tech Lead approves the release PR, SRE merges, deploys, prod-verifies, soaks, closes the issue | none — wait. If the PR shows a failing EM sign-off status, an issue it carries lacks your label (§4) |
 | `prodVerifyHeld` | `prod verification held` | re-verifies on 10 min → 6 h back-off, uncapped; re-checks at once when production's head moves | **sort it:** read the newest prod-verification comment. A wait needs nothing. A check that cannot observe the outcome → file the verifier defect. Production broken → file a corrective issue. Never re-verify by hand |
 | `needsRuling` | — | paused; the card stays Blocked on the EM, through a later "changes requested" update and a restart, until the ruling's revise starts | **yours:** `/rule-on-scope <repo> <pr>` and a PR comment opening `**EM scope ruling`; or, for a skip that spent its attempts, change the issue |
-| `blocked` | `blocked` | paused: no build, and no review, QA-before-merge or revise of its open PR (foreman#167); the unstick stage calls the EM wrapper (§3). The card's block (reason, holder, stage) survives a restart; a block a person or a seat's escalation put on the card is never undone while the issue stays at that stage | read the reason, fix what it names, then lift `blocked` or edit the issue — **on the issue, never the board** |
+| `blocked` | `blocked` | paused: no build, and no review, QA-before-merge or revise of its open PR (foreman#167); the unstick stage calls the EM plugin (§3). The card's block (reason, holder, stage) survives a restart; a block a person or a seat's escalation put on the card is never undone while the issue stays at that stage | read the reason, fix what it names, then lift `blocked` or edit the issue — **on the issue, never the board** |
 
 **QA before the merge (`qaBeforeMerge`, default off, EM#923).** For a `qaRepos` repo with the flag on, the order is review, QA, then SRE: the Tech Lead approves without merging (trailer `merged=no hold=qa-pending`, not a failure), QA runs `check --local` on that head (no secret, it boots the PR itself), and only a PASS has the Tech Lead merge before the SRE's dev verify. The merge is `review-pr --merge-approved <the full sha QA passed>`: merge only, never a new judgment. Trailer `hold=head-moved` (the PR head changed after QA) means no merge, nothing charged, and the card goes back to review for the new head; `hold=not-approved` is a charged hold. Only a consistent result is remembered (PASS with exit 0, FAIL with exit 1, marker keyed by the full head sha); an inconsistent one posts `verdict=INCONSISTENT`, holds on every retry, and is not a review round. The card stays `inReview` and shows `qaReviewing` while QA runs. A QA FAIL moves it to `changesRequested`, counts as a review round toward the review-rounds alert (a FAIL that stands on an unmoved head posts a `foreman-qa-fail-stands` comment, so each send-back is a round), and the revise session is handed QA's failing lines; the SRE never sees it. Holds `qa-held-qa-local-boot-failed` and `qa-held-qa-local-seed-missing` (owner QA / Console), `qa-held-worker-data-unavailable`, `qa-held-attribution-unavailable` and `qa-errored` are tooling holds: deferred, nothing charged, nothing merged. Flag off or repo outside `qaRepos`: unchanged.
 
@@ -104,7 +104,7 @@ blocker fixed, then nothing — the next poll picks it up.
 
 ## 3. Unstick: when the Foreman calls the EM
 
-The `unstick` stage runs `em.mjs unstick` for each stuck item, by kind (`UNSTICK_KINDS`,
+The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
 `release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`. Verify holds become candidates only after their attempts are spent,
@@ -120,7 +120,7 @@ the repo and PR it was first seen on, and the SRE's evidence links. It is repo-l
 The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
 fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
 `epic-ready-to-close` fires when the release stage closes an issue after its production verification and that issue
-names an epic (`engineering-manager #N` in its body, or in the body of the issue a "follow-up to #N" title names).
+names an epic (`<epicRefLabel> #N` in its body, `engineering-manager #N` in the `slashbin` profile; unset, this kind never fires; or in the body of the issue a "follow-up to #N" title names).
 It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
@@ -128,8 +128,9 @@ else makes it (foreman#151).
 never auto-recovered and goes to the EM as a message.
 
 After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up comment
-@-mentioning Ray. **That comment means the EM failed its stage** — a give-up is never the
-first Ray hears of a stuck card.
+@-mentioning `unstickEscalationOwner` (Ray, in the `slashbin` profile; unset, the give-up is only
+logged). **That comment means the EM failed its stage** — a give-up is never the first Ray hears
+of a stuck card.
 
 ## 4. Release: how work reaches production
 
