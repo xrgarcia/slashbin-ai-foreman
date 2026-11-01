@@ -170,13 +170,14 @@ test("core never imports the Paperclip plugin, and the plugin never imports the 
   const core = readdirSync(join(root, "src"), { recursive: true })
     .filter((n) => n.endsWith(".ts") && !n.startsWith("paperclip"));
   assert.ok(core.some((n) => n.startsWith("phases")) && core.some((n) => n.startsWith("github/")), "the walk reaches the subdirectories");
-  // cli.ts wires the plugin in; config.ts composes the plugin's own config block, and nothing else of it.
-  const ALLOWED = { "cli.ts": () => true, "config.ts": (p) => p === "./paperclip/config.js" };
+  // plugins/paperclip.ts is the plugin's entry (registered by plugins/index.ts, EM#1150); config.ts composes
+  // the plugin's own config block, and nothing else of it.
+  const ALLOWED = { [join("plugins", "paperclip.ts")]: () => true, "config.ts": (p) => p === "./paperclip/config.js" };
   for (const f of core) {
     const bad = importsOf(join(root, "src", f))
       .filter((p) => /^(\.\/|\.\.\/)paperclip\//.test(p))
       .filter((p) => !(ALLOWED[f]?.(p)));
-    assert.deepEqual(bad, [], `src/${f} imports the plugin; only cli.ts wires it in`);
+    assert.deepEqual(bad, [], `src/${f} imports the plugin; only plugins/paperclip.ts wraps it`);
   }
   for (const f of readdirSync(join(root, "src", "paperclip")).filter((n) => n.endsWith(".ts"))) {
     const bad = importsOf(join(root, "src", "paperclip", f)).filter((p) => /^\.\.\/(github|orchestrator|state|phases)/.test(p));

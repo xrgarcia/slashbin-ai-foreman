@@ -6,6 +6,7 @@
 
 - [How it fits together](#how-it-fits-together)
 - [Two kinds of listener](#two-kinds-of-listener)
+- [Plugins](#plugins)
 - [Source layout](#source-layout)
 - [Programmatic usage](#programmatic-usage)
 
@@ -45,6 +46,20 @@ labels; **observers** (the optional Paperclip board, the activity log) receive t
 events, best-effort, and an observer that fails never stops the Foreman. The full
 picture: [lifecycle.md](lifecycle.md).
 
+## Plugins
+
+The core reaches every outside system through one contract, `src/plugins/contract.ts`
+(EM#1150). A plugin declares the roles it fills (`workSource`, `codeHost`, `observer`,
+`reviewer`, `verifier`, `deployer`, `qa`, `unstick`), whether a config enables it, and
+`start` / `reconfigure` / `stop`. `src/plugins/registry.ts` starts the enabled ones once
+at startup, hands them each config reload, and resolves each role; every enabled observer
+hears every event. `src/plugins/index.ts` is the only file that names a plugin. Paperclip
+is the first (`src/plugins/paperclip.ts`); a plugin can add a CLI command (`paperclip:doctor`).
+
+The move is in progress. `test/plugin-boundary.test.mjs` lists each core file that still
+imports GitHub or Paperclip code directly, with its exact count. The list may only shrink:
+a new import fails the build, and so does a removed one until its line is lowered.
+
 ## Source layout
 
 ```
@@ -55,6 +70,7 @@ src/
 ├── lifecycle.ts       # The state machine: stages and named moves (docs/lifecycle.md)
 ├── adapters.ts        # Data contract: WorkEvent, WorkSourceAdapter, WorkObserver
 ├── work-source.ts     # emit()/advance(): one event → work source + observers
+├── plugins/           # Plugin contract, registry, composition root, and plugin entries
 ├── github.ts          # GitHub API surface (polling, PRs, labels, dual-token ops); code in github/
 ├── github-work-source.ts # GitHub issues as the work source: a move → its labels
 ├── agent.ts           # Claude Code CLI spawner (session env, secret gate, redaction)
