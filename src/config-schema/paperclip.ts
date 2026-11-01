@@ -285,7 +285,12 @@ function checkEnabled(pc: z.infer<typeof paperclipConfigSchema>, knownRepos?: Re
   }
   // A misspelled repo would mirror nothing for it, silently.
   if (pc.repos && knownRepos) {
-    const unknown = pc.repos.filter((r) => !knownRepos.includes(r));
+    // With a registry (`registryUrl`), either owner spelling of a configured repo is accepted: the
+    // mirror compares them on identity keys at run time, and this check cannot ask the registry.
+    // Matching on the repo name keeps a misspelled or unrelated repo rejected.
+    const nameOf = (r: string) => r.slice(r.indexOf("/") + 1).toLowerCase();
+    const known = (r: string) => knownRepos.includes(r) || (!!pc.registryUrl && knownRepos.some((k) => nameOf(k) === nameOf(r)));
+    const unknown = pc.repos.filter((r) => !known(r));
     if (unknown.length) throw new Error(`paperclip.repos ${unknown.map((r) => `"${r}"`).join(", ")} is not a configured githubRepo.`);
   }
 }

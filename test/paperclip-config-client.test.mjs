@@ -372,3 +372,11 @@ test("client: with no commentAuthorHeader, no credit header is ever sent, whatev
   await c.getAgent("a");
   assert.deepEqual(sent, ["accept,content-type", "accept,content-type", "accept"]);
 });
+
+test("paperclip.repos: with a registry, either owner of a configured repo's name loads; an unrelated repo still does not", () => {
+  const reg = "http://registry.test/mcp";
+  const { paperclip } = loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, registryUrl: reg, repos: ["other-owner/r"] } }));
+  assert.deepEqual(paperclip.repos, ["other-owner/r"]);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, registryUrl: reg, repos: ["other-owner/typo"] } })), /is not a configured githubRepo/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: ["other-owner/r"] } })), /is not a configured githubRepo/, "no registry, exact match as before");
+});
