@@ -6,7 +6,7 @@ import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
-import { selectWork, heldWork, emit, advance, hasObservers } from "../work-source.js";
+import { selectWork, heldWork, emit, advance, wantsSessionReports } from "../work-source.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import {
   discoveryBatch,
@@ -593,7 +593,7 @@ export async function tryBatchImplementation(
       : result.skipped
         ? { status: "finished", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
         : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
-    if (hasObservers()) {
+    if (wantsSessionReports()) {
       // Commits on the open PR leave no URL: the feature branch names the PR.
       const pr = result.success ? prReport(repoConfig, result.prUrl ?? repoConfig.featureBranch, repoLogger) : undefined;
       report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
