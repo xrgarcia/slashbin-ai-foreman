@@ -7,7 +7,7 @@
 // remove; what they need is a source to follow.
 //
 // WHY HERE, AND WHY ONE ISSUE AT A TIME. Before this, the EM pushed a skill
-// change to every repo at once (slashbin-engineering-manager
+// change to every repo at once (the EM repo's
 // scripts/skills-publish.mjs): one tracking issue and one commit on `features`
 // per repo. One publish was ~23 PRs walking review, verify and release, and on
 // 2026-10-15 it put 26 cards in the board's Review column at once. Now the

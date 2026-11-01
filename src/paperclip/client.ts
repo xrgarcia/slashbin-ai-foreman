@@ -101,15 +101,14 @@ export type PaperclipClientOptions = {
    * author overrides it; `null` there sends none.
    */
   actingAs?: string;
+  /** The header that carries the credited author (`paperclip.commentAuthorHeader`). Unset = credit is never sent. */
+  commentAuthorHeader?: string;
 };
 
-/**
- * Who a write is credited to: `agent:<agentId>` or `user:<userId>`. Sent as this
- * header by an instance-admin board key; the comment's author and the activity
- * row's actor change, nothing else (the Slashbin fork, slashbin/PATCHES.md
- * "Credited comment authors").
- */
-export const COMMENT_AUTHOR_HEADER = "x-slashbin-comment-author";
+// Who a write is credited to: `agent:<agentId>` or `user:<userId>`, sent in the
+// configured `commentAuthorHeader` by an instance-admin board key; the comment's
+// author and the activity row's actor change, nothing else. Only an instance that
+// implements the header (a fork; the profile names it) honours it.
 /** The board's refusals of that header: not an admin board key, or an author it cannot credit. */
 const COMMENT_AUTHOR_REFUSED = /comment_author_override_(denied|invalid)/;
 
@@ -141,6 +140,7 @@ export class PaperclipClient {
   private readonly apiKey: string | undefined;
   private readonly warn: (message: string) => void;
   private readonly actingAs: string | null;
+  private readonly commentAuthorHeader: string | undefined;
 
   constructor(opts: PaperclipClientOptions) {
     this.base = opts.url.replace(/\/+$/, "");
@@ -149,6 +149,7 @@ export class PaperclipClient {
     this.apiKey = opts.apiKey || undefined;
     this.warn = opts.warn ?? (() => {});
     this.actingAs = opts.actingAs || null;
+    this.commentAuthorHeader = opts.commentAuthorHeader || undefined;
   }
 
   /** `GET /api/health`: resolves when the server answers 2xx. */
@@ -242,7 +243,7 @@ export class PaperclipClient {
   private async request<T>(method: string, path: string, body?: unknown, credit?: string | null): Promise<T> {
     // Unnamed (undefined) → `actingAs` on a write; a named author, or null for none, wins.
     const commentAuthor = credit !== undefined ? credit : method === "GET" ? null : this.actingAs;
-    if (!commentAuthor) return this.send<T>(method, path, body, null);
+    if (!commentAuthor || !this.commentAuthorHeader) return this.send<T>(method, path, body, null);
     try {
       return await this.send<T>(method, path, body, commentAuthor);
     } catch (err) {
@@ -260,7 +261,7 @@ export class PaperclipClient {
         ? { accept: "application/json" }
         : { accept: "application/json", "content-type": "application/json" };
       if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
-      if (commentAuthor) headers[COMMENT_AUTHOR_HEADER] = commentAuthor;
+      if (commentAuthor && this.commentAuthorHeader) headers[this.commentAuthorHeader] = commentAuthor;
       res = await this.fetchImpl(`${this.base}${path}`, {
         method,
         headers,

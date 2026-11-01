@@ -8,6 +8,7 @@ import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { UNSTICK_MAX_ATTEMPTS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
 await startAgentPlugins();
 
@@ -20,7 +21,8 @@ function setup(exitCode = 1) {
   mkdirSync(join(em, "bin"));
   writeFileSync(join(em, "bin/em.mjs"), `console.error("${"x".repeat(900)} session PARSE_ERROR"); process.exit(${exitCode});`);
   const repo = { name: "gr", githubRepo: "o/gr", repoPath: join(em, "no-such-clone"), lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };
-  const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } } };
+  // Slashbin's owner, from its profile: the comment mentions exactly today's login.
+  const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } }, unstickEscalationOwner: slashbinProfile.unstickEscalationOwner };
   const hold = (reason) => saveRepoState("gr", { ...loadRepoState("gr"), verifyHeld: { 7: { heldAt: "t", prNumber: 5, reason, attempts: 3 } } });
   return { repo, config, hold };
 }
@@ -63,6 +65,22 @@ test("the owner is configurable", async () => {
   hold("r");
   for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(repo, { ...config, unstickEscalationOwner: "someone" }, logger, i, { comment: (_r, _n, b) => bodies.push(b) });
   assert.match(bodies[0], /@someone/);
+});
+
+test("no unstickEscalationOwner: nobody is mentioned, no comment is posted, the log says so, and it is not retried", async () => {
+  const { repo, config, hold } = setup();
+  const warned = [];
+  const log = { ...logger, warn: (m) => warned.push(m), child() { return this; } };
+  let posts = 0;
+  const comment = () => { posts++; };
+  hold("r");
+  const neutral = { ...config, unstickEscalationOwner: undefined };
+  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(repo, neutral, log, i, { comment });
+  assert.equal(posts, 0);
+  assert.equal(entry().status, "failed");
+  assert.equal(warned.filter((m) => /no unstickEscalationOwner configured/.test(m)).length, 1);
+  assert.equal(await tryUnstick(repo, neutral, log, 9, { comment }), 0);
+  assert.equal(posts, 0);
 });
 
 test("a failing comment post does not throw, stays failed at the cap and is not retried", async () => {

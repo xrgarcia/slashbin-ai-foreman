@@ -19,7 +19,7 @@ import type { UnstickOutcome } from "../plugins/contract.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
-  EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_ESCALATION_OWNER, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
+  EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
   type UnstickCandidate, type UnstickEntry,
 } from "../unstick.js";
 import { activeRuns, divergenceReason } from "./common.js";
@@ -136,18 +136,24 @@ export async function tryUnstick(
       // The attempt that spends the last call: say so once, on the issue. Stored
       // `escalated`, an unchanged reason never comments again; if the post
       // fails the entry stays `failed` at the cap (no retry, no throw).
-      // Issue 0 is a repo-level hold with no issue to comment on.
+      // Issue 0 is a repo-level hold with no issue to comment on. With no
+      // `unstickEscalationOwner` there is nobody to mention: the entry stays
+      // `failed` at the cap, as for a failed post, and the log says why.
       if (spent && c.issue > 0) {
-        const owner = config.unstickEscalationOwner ?? UNSTICK_ESCALATION_OWNER;
-        try {
-          (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
-          mutate(repoName, (table) => {
-            const cur = table[key];
-            if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
-          });
-          log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — escalated to @${owner}`);
-        } catch (err) {
-          log.warn(`Could not post the unstick give-up comment on #${c.issue}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        const owner = config.unstickEscalationOwner;
+        if (!owner) {
+          log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — no unstickEscalationOwner configured, so nobody is mentioned`);
+        } else {
+          try {
+            (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
+            mutate(repoName, (table) => {
+              const cur = table[key];
+              if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
+            });
+            log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — escalated to @${owner}`);
+          } catch (err) {
+            log.warn(`Could not post the unstick give-up comment on #${c.issue}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+          }
         }
       }
     }

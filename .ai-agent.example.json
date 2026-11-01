@@ -35,6 +35,8 @@
       "_skillOverlayPath": "Optional. A repo-relative file appended after the skill; revisionSkillOverlayPath does the same for revise."
     }
   ],
+  "_profile": "Optional. A named set of defaults for one deployment (src/profiles/). Omit it for neutral defaults; an explicit key below still beats the profile. See docs/config-guide.md#profiles.",
+  "profile": "slashbin",
   "triggerLabel": "approved",
   "baseBranch": "develop",
   "productionBranch": "main",
