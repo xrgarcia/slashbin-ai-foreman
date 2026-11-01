@@ -10,27 +10,11 @@ import { runCycle } from "./orchestrator.js";
 import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
-import { addObserver } from "./work-source.js";
-import { secretValues } from "./agent.js";
-import { PaperclipClient } from "./paperclip/client.js";
-import { PaperclipMirror } from "./paperclip/mirror.js";
-import { runDoctor } from "./paperclip/doctor.js";
+import { registerBuiltinPlugins } from "./plugins/index.js";
+import { pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
+import type { PluginContext } from "./plugins/contract.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * The session secrets plus the Paperclip key, so a refused response that echoes
- * the key is logged redacted. The key is kept out of `sessionEnv`, which would
- * hand it to agent sessions. Same 8-character floor and longest-first order as
- * secretValues.
- */
-function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | undefined): Array<{ name: string; value: string }> {
-  const out = secretValues(sessionEnv);
-  if (apiKey && apiKey.length >= 8 && !out.some((s) => s.value === apiKey)) {
-    out.push({ name: "AI_AGENT_PAPERCLIP_API_KEY", value: apiKey });
-  }
-  return out.sort((a, b) => b.value.length - a.value.length);
-}
 
 function getVersion(): string {
   try {
@@ -107,9 +91,12 @@ async function main(): Promise<void> {
   const repoFilter = getArg(args, "--repo");
   const once = args.includes("--once");
 
-  // Read-only Paperclip check. Handled here, before anything that needs a GitHub
-  // token, a logger or the PID file: the doctor needs only the config.
-  if (args[0] === "paperclip:doctor") {
+  // A plugin's own command (e.g. the read-only `paperclip:doctor`). Handled here,
+  // before anything that needs a GitHub token, a logger or the PID file: a
+  // plugin command needs only the config.
+  registerBuiltinPlugins();
+  const command = args[0] ? pluginCommand(args[0]) : undefined;
+  if (command) {
     let doctorConfig;
     try {
       doctorConfig = loadConfig(configPath);
@@ -117,7 +104,7 @@ async function main(): Promise<void> {
       console.log(`FAIL: config-complete — the config does not load: ${err instanceof Error ? err.message : err}`);
       process.exit(1);
     }
-    const allPassed = await runDoctor(doctorConfig);
+    const allPassed = await command(doctorConfig);
     process.exit(allPassed ? 0 : 1);
   }
 
@@ -160,42 +147,17 @@ async function main(): Promise<void> {
 
   logger.info(`slashbin-ai-agent v${getVersion()}`);
 
-  // Paperclip mirror (EM#417): an observer of the Foreman's steps, never a work
-  // source. Read once at startup; a config reload does not add or drop it, but
-  // its board mapping follows the reload, and the file it runs is published on
-  // its agent for anything else that places the same cards.
-  let mirror: PaperclipMirror | null = null;
-  let mirroredText: string | null = null;
-  const configText = (): string | null => {
-    const p = findConfigFile(configPath);
-    return p ? readFileSync(p, "utf-8") : null;
+  // Plugins (EM#1150): every registered plugin this config enables is started
+  // once, here. A config reload does not add or drop one; each started plugin
+  // is handed the reloaded config.
+  const pluginCtx: PluginContext = {
+    logger,
+    configText: () => {
+      const p = findConfigFile(configPath);
+      return p ? readFileSync(p, "utf-8") : null;
+    },
   };
-  if (config.paperclip.enabled) {
-    if (config.paperclip.agentId && config.paperclip.companyId) {
-      mirror = new PaperclipMirror(
-        new PaperclipClient({
-          url: config.paperclip.url,
-          companyId: config.paperclip.companyId,
-          apiKey: config.paperclip.apiKey,
-          warn: (m) => logger.warn(m),
-          // The activity feed names the Foreman for its own writes, not the key's user.
-          actingAs: config.paperclip.agentId ? `agent:${config.paperclip.agentId}` : undefined,
-        }),
-        config.paperclip,
-        mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
-        logger,
-        config.lifecycleLabels,
-      );
-      addObserver(mirror);
-      // Housekeeping off the observer queue: project backfill, retiring the old live task.
-      mirror.start();
-      mirroredText = configText();
-      if (mirroredText !== null) void mirror.publishConfig(mirroredText);
-      logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
-    } else {
-      logger.info("paperclip mirror enabled but no agentId configured; run npm run paperclip:register");
-    }
-  }
+  await startPlugins(config, pluginCtx);
 
   if (once) {
     // Single cycle mode. The daemon does this on start and reload; --once must
@@ -236,13 +198,8 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
-    // A reload whose file changed hands the mirror the new mapping, then publishes it.
     const onReload = (fresh: AgentConfig): void => {
-      if (!mirror) return;
-      const text = configText();
-      if (text === null || text === mirroredText) return;
-      mirroredText = text;
-      if (mirror.reconfigure(fresh.paperclip)) void mirror.publishConfig(text);
+      void reconfigurePlugins(fresh, pluginCtx);
     };
     const daemon = startDaemon(config, logger, { configPath, repoFilter, onReload });
 
