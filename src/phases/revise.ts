@@ -5,18 +5,25 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
-import { findPendingRevisions, readRulingState, type PendingRevisionInfo } from "../github.js";
+import { findPendingRevisions, isPrOpen, readPrHeadSha, readRulingState, type PendingRevisionInfo } from "../github.js";
 import { revisePRFeedback } from "../agent.js";
 import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { type BlockKind } from "../unblock.js";
 import {
-  CycleEvent,
   MAX_CONSECUTIVE_NO_COMMIT,
+  clearNoCommitStreak,
+  noCommitCount,
+  prsWithNoCommitStreak,
+  recordNoCommit,
+  stalemateHead,
+} from "../no-commit-streak.js";
+import {
+  CycleEvent,
   REVIEW_ROUNDS_ALERT,
   activeRuns,
-  consecutiveNoCommit,
   itemOf,
+  pausedByBlockedLabel,
   prReport,
   releaseIfResolved,
   reviewRoundsAlerted,
@@ -57,21 +64,27 @@ export async function tryRevision(
   if (!pending) {
     if (failures > 0) revisionFailureCount.set(repoName, 0);
     revisionEscalated.delete(repoName);
-    consecutiveNoCommit.delete(repoName);
     revisionStoppedHead.delete(repoName);
+    forgetClosedPrStreaks(repoConfig, revLogger);
     return null;
   }
+  const prNumber = pending.pr.number;
+
+  // The EM's `blocked` label on the PR's issue pauses revise (docs/em-coordination.md §1).
+  if (pausedByBlockedLabel(repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
+
+  // The head the no-commit streak is keyed on. An empty head (unreadable) keeps the streak counting.
+  const head = pending.pr.headRefOid ?? readPrHeadSha(repoConfig, prNumber, revLogger) ?? "";
 
   // A stopped revision resumes when someone pushes to the PR out of band.
-  const stoppedAt = revisionStoppedHead.get(repoName);
+  const stoppedAt = revisionStoppedHead.get(repoName) ?? stalemateHead(repoName, prNumber);
   if (stoppedAt !== undefined) {
-    const head = pending.pr.headRefOid;
     const kind: BlockKind = failures >= maxFailures ? "revision-exhausted" : "revision-stalemate";
     if (await releaseIfResolved(kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
       revisionStoppedHead.delete(repoName);
       revisionFailureCount.set(repoName, 0);
       revisionEscalated.delete(repoName);
-      consecutiveNoCommit.delete(repoName);
+      clearNoCommitStreak(repoName, prNumber);
       failures = 0;
     }
   }
@@ -85,9 +98,9 @@ export async function tryRevision(
   // A no-commit stalemate already escalated: the card is Blocked and the EM must
   // rule. Re-running the reviser only re-answers the same review — it launched a
   // paid session on 17 straight cycles for slashbin-io-worker PR #694
-  // (2026-10-03). Clears with the pending feedback, like the retry cap above.
-  if ((consecutiveNoCommit.get(repoName) ?? 0) > MAX_CONSECUTIVE_NO_COMMIT) {
-    revLogger.debug(`Skipping ${repoName} revision — PR #${pending.pr.number} is in a no-commit stalemate awaiting the EM`);
+  // (2026-10-03). Clears when the head moves or the PR closes (foreman#167).
+  if (noCommitCount(repoName, prNumber, head) > MAX_CONSECUTIVE_NO_COMMIT) {
+    revLogger.debug(`Skipping ${repoName} revision — PR #${prNumber} is in a no-commit stalemate awaiting the EM`);
     return null;
   }
 
@@ -153,11 +166,11 @@ export async function tryRevision(
       revisionEscalated.delete(repoName);
 
       if (result.noCommit) {
-        const seen = (consecutiveNoCommit.get(repoName) ?? 0) + 1;
-        consecutiveNoCommit.set(repoName, seen);
+        recordNoCommit(repoName, prNumber, head);
+        const seen = noCommitCount(repoName, prNumber, head);
 
-        // Second one in a row: the reviewer keeps asking and the reviser keeps
-        // answering "already correct". Neither is going to move. Stop, and say
+        // Second one on this head: the reviewer (or QA) keeps asking and the reviser
+        // keeps answering "already correct". Neither is going to move. Stop, and say
         // who is stuck on what — a ping-pong nobody is told about looks exactly
         // like an idle queue.
         if (seen > MAX_CONSECUTIVE_NO_COMMIT) {
@@ -175,7 +188,7 @@ export async function tryRevision(
             level: "error",
           });
           // Stopped for a person: the board must say so, not leave it "in review".
-          if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
+          // The streak records the head it stopped on; a push to the PR resumes it.
           const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule, or push to the PR and the Foreman resumes. Last reason: ${result.noCommitReason ?? "not given"}`;
           for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, stuck: "revision-stalemate" }, repoConfig, revLogger);
           return null;
@@ -185,7 +198,7 @@ export async function tryRevision(
           `PR #${pending.pr.number} revision made no commit by declaration — returning it to review: ${result.noCommitReason}`,
         );
       } else {
-        consecutiveNoCommit.delete(repoName);
+        clearNoCommitStreak(repoName, prNumber);
       }
 
       // Transition issue labels: `prPendingActions` → `prUnderReview`
@@ -247,3 +260,11 @@ export async function tryRevision(
   }
 }
 
+/** A closed or merged PR's no-commit streak is over: forget every one whose PR is no longer open. */
+function forgetClosedPrStreaks(repoConfig: RepoConfig, logger: Logger): void {
+  for (const pr of prsWithNoCommitStreak(repoConfig.name)) {
+    const open = isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
+    if (open === false) clearNoCommitStreak(repoConfig.name, pr);
+    else if (open === null) logger.debug(`PR #${pr}: no-commit streak kept, GitHub could not say whether it is open`);
+  }
+}

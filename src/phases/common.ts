@@ -9,7 +9,7 @@ import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
-import { commentOnIssue, gh, issueTitles, readPrDigest, readLatestReviewBody } from "../github.js";
+import { blockedAmong, commentOnIssue, gh, issueTitles, readPrDigest, readLatestReviewBody } from "../github.js";
 import { type BranchDivergence } from "../reconciler.js";
 import { readReviewOutcomes, type ReviewOutcome } from "../github.js";
 import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
@@ -258,21 +258,11 @@ export const revisionFailureCount = new Map<string, number>();
 // cleared the moment a revision succeeds or the pending feedback clears, so a repo
 // that recovers escalates again if it breaks again.
 export const revisionEscalated = new Set<string>();
-// Consecutive revisions that pushed nothing BY DECLARATION, per repo.
-//
-// A declared no-commit is a valid answer, so it returns to `pr under review`
-// and gets re-reviewed. But if the reviewer then asks for the same change
-// again, the pair will ping-pong forever at no cost to either side and with
-// nothing changing. One is an answer; two in a row is a disagreement, and a
-// disagreement between two agents is a human's call.
-//
-// Cleared whenever a revision actually pushes, or the pending feedback clears.
-export const consecutiveNoCommit = new Map<string, number>();
-// The PR head SHA revision stopped on (retries exhausted, or a no-commit
-// stalemate), per repo. A different head later means someone pushed to the PR
-// out of band: the `revision-*` unblock check (src/unblock.ts) resumes on it.
+// The PR head SHA revision stopped on after its retries were exhausted, per
+// repo. A different head later means someone pushed to the PR out of band: the
+// `revision-exhausted` unblock check (src/unblock.ts) resumes on it. A no-commit
+// stalemate's head is persisted with its streak (src/no-commit-streak.ts).
 export const revisionStoppedHead = new Map<string, string>();
-export const MAX_CONSECUTIVE_NO_COMMIT = 1;
 // A PR sent back this many times is probably not converging: each round answers
 // the last finding and the reviewer finds a new one in the answer. The retry cap
 // above counts only FAILED revisions, so a spiral of successful ones was silent —
@@ -339,6 +329,35 @@ export function labelFromTrailer(t: ReviewTrailer, verifyStage = false): ReviewO
 /** The work state a review outcome reports. */
 export function workStateOf(outcome: ReviewOutcome): "approved" | "merged" | "changesRequested" {
   return outcome === "prApproved" ? "approved" : outcome === "prMerged" ? "merged" : "changesRequested";
+}
+
+/** `phase:owner/repo#pr` already logged as paused by the blocked label, so a standing hold logs once. */
+const blockedPauseNoted = new Set<string>();
+
+/**
+ * Whether the EM holds PR `pr`: one of its issues carries `github.blockedLabel`, so `phase` (review, QA
+ * before the merge, revise) does not act on it until the label is lifted. Slashbin-console PR #1597 ran
+ * three more QA FAILs and revises after its issue was labelled (foreman#167). Issues that cannot be read
+ * pause it for this pass: an unknown hold is not a lifted one.
+ */
+export function pausedByBlockedLabel(repoConfig: RepoConfig, phase: string, pr: number, issueNumbers: ReadonlyArray<number>, logger: Logger): boolean {
+  const key = `${phase}:${repoConfig.githubRepo}#${pr}`;
+  let held: number[];
+  try {
+    held = blockedAmong(repoConfig, issueNumbers, logger);
+  } catch (err) {
+    logger.debug(`PR #${pr}: ${phase} waits a pass, its issues' labels could not be read: ${err instanceof Error ? err.message : String(err)}`);
+    return true;
+  }
+  if (held.length === 0) {
+    blockedPauseNoted.delete(key);
+    return false;
+  }
+  if (!blockedPauseNoted.has(key)) {
+    blockedPauseNoted.add(key);
+    logger.info(`PR #${pr} paused: ${held.map((n) => `#${n}`).join(", ")} carries "${repoConfig.github.blockedLabel}" — no ${phase} until it is lifted`);
+  }
+  return true;
 }
 
 export interface CycleEvent {
