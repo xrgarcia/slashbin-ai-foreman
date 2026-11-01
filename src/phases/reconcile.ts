@@ -6,7 +6,7 @@ import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { reconcileRepo } from "../reconciler.js";
-import { commentOnIssue, findStuckMergedIssues, findIssuesMergedToBase, findOrphanedLifecycleIssues } from "../github.js";
+import { commentOnIssue, findStuckMergedIssues, findIssuesMergedToBase, findOrphanedLifecycleIssues, getOpenIssues, hasCommentContaining, hasLabel } from "../github.js";
 import { roleFor } from "../plugins/registry.js";
 import { hasStage } from "../stages.js";
 import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
@@ -124,33 +124,95 @@ export async function reconcileReviewOutcomeLabels(
   return unresolved;
 }
 
+/** Marks the no-release close comment, so a retried close never posts it twice. */
+export const HUMAN_MERGE_CLOSE_MARK = "<!-- foreman:human-merge-close -->";
+
+export interface HumanMergeDeps {
+  comment?: typeof commentOnIssue;
+  hasComment?: typeof hasCommentContaining;
+}
+
+/** No deployer and no promote path (a main-only repo has none): nothing will ever release a merged issue. */
+function nothingReleases(repoConfig: RepoConfig, config: AgentConfig): boolean {
+  const mainOnly = repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch;
+  return !roleFor("deployer", config) && !(hasStage(config.stages, "promote") && !mainOnly);
+}
+
 /**
  * No reviewer is enabled, so a person reviews and merges the PR (EM#1150 f3).
- * Once it has merged (the dead-zone scan finds it), record the merge; with no
- * verifier, go on to approved; and with no deployer and no promote stage,
- * nothing else will ever release it, so comment and close it. Every step is a
- * lifecycle move. Returns how far it got, or null when nothing moved.
+ * Once it has merged: record the merge (`humanMerged`); with no verifier, go on
+ * to approved (`humanMergedApproved`); and when nothing releases it, comment and
+ * close (`closedNoRelease`). Every step is a lifecycle move, so a step that
+ * failed is retried on a later pass from where the issue stands (`from`): an
+ * issue at `pr merged` resumes at step 2, one at `pr approved` at step 3. The
+ * comment carries HUMAN_MERGE_CLOSE_MARK and is posted only when no comment
+ * already carries it. Returns how far it got, or null when nothing moved.
  */
 export async function settleHumanMerge(
   repoConfig: RepoConfig,
   config: AgentConfig,
   merged: { issueNumber: number; prNumber: number },
   logger: Logger,
-  deps: { comment?: typeof commentOnIssue } = {},
+  deps: HumanMergeDeps = {},
+  from: "start" | "merged" | "approved" = "start",
 ): Promise<"merged" | "approved" | "closed" | null> {
   const item = itemOf(repoConfig, merged.issueNumber);
-  if (!await advance(item, "humanMerged", repoConfig, logger)) return null;
-  if (roleFor("verifier", config)) return "merged";
-  if (!await advance(item, "humanMergedApproved", repoConfig, logger)) return "merged";
-  const mainOnly = repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch;
-  if (roleFor("deployer", config) || (hasStage(config.stages, "promote") && !mainOnly)) return "approved";
-  try {
-    (deps.comment ?? commentOnIssue)(repoConfig, merged.issueNumber,
-      `PR #${merged.prNumber} was merged to \`${repoConfig.baseBranch}\` by a person. No reviewer, verifier, deployer or promote stage is configured, so nothing further will release this issue: closing it as done.`);
-  } catch (err) {
-    logger.warn(`Could not comment on #${merged.issueNumber} before closing it: ${err instanceof Error ? err.message : String(err)}`);
+  if (from === "start") {
+    if (!await advance(item, "humanMerged", repoConfig, logger)) return null;
+    if (roleFor("verifier", config)) return "merged";
   }
-  return await advance(item, "closedNoRelease", repoConfig, logger) ? "closed" : "approved";
+  if (from !== "approved" && !await advance(item, "humanMergedApproved", repoConfig, logger)) return from === "start" ? "merged" : null;
+  const reached = from === "approved" ? null : "approved";
+  if (!nothingReleases(repoConfig, config)) return reached;
+  let commented: boolean;
+  try {
+    commented = await (deps.hasComment ?? hasCommentContaining)(repoConfig, merged.issueNumber, HUMAN_MERGE_CLOSE_MARK);
+  } catch (err) {
+    // Unreadable: closing now could post the comment twice, or close with none. Retry next pass.
+    logger.warn(`Could not read #${merged.issueNumber}'s comments before closing it: ${err instanceof Error ? err.message : String(err)}`);
+    return reached;
+  }
+  if (!commented) {
+    try {
+      await (deps.comment ?? commentOnIssue)(repoConfig, merged.issueNumber,
+        `PR #${merged.prNumber} was merged to \`${repoConfig.baseBranch}\` by a person. No reviewer, verifier, deployer or promote stage is configured, so nothing further will release this issue: closing it as done.\n\n${HUMAN_MERGE_CLOSE_MARK}`);
+    } catch (err) {
+      logger.warn(`Could not comment on #${merged.issueNumber} before closing it: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return await advance(item, "closedNoRelease", repoConfig, logger) ? "closed" : reached;
+}
+
+/**
+ * Resume human merges a failed move left part-way (EM#1150 f3). With no reviewer
+ * and no verifier, nothing else moves an issue at `pr merged`, and with nothing
+ * to release it nothing moves one at `pr approved`; each continues from its step
+ * once its PR is confirmed merged to base. Reads the shared open-issue snapshot
+ * and the cached merged-PR list the dead-zone scan already uses: no new scan.
+ * A no-op whenever a reviewer or a verifier is enabled.
+ */
+export async function resumeHumanMerges(
+  repoConfig: RepoConfig,
+  config: AgentConfig,
+  logger: Logger,
+  deps: HumanMergeDeps & { openIssues?: typeof getOpenIssues; mergedToBase?: typeof findIssuesMergedToBase } = {},
+): Promise<{ issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[]> {
+  if (roleFor("reviewer", config) || roleFor("verifier", config)) return [];
+  const l = repoConfig.lifecycleLabels;
+  const later = [l.readyForProd, l.releasePending, l.prodVerifyHeld, l.readyToClose, repoConfig.github.blockedLabel];
+  const open = (deps.openIssues ?? getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    .filter((i) => !later.some((x) => hasLabel(i, x)));
+  const atMerged = open.filter((i) => hasLabel(i, l.prMerged)).map((i) => i.number);
+  const atApproved = nothingReleases(repoConfig, config)
+    ? open.filter((i) => hasLabel(i, l.prApproved) && !hasLabel(i, l.prMerged)).map((i) => i.number)
+    : [];
+  if (atMerged.length + atApproved.length === 0) return [];
+  const out: { issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[] = [];
+  for (const m of (deps.mergedToBase ?? findIssuesMergedToBase)(repoConfig, [...atMerged, ...atApproved], logger)) {
+    const settled = await settleHumanMerge(repoConfig, config, m, logger, deps, atMerged.includes(m.issueNumber) ? "merged" : "approved");
+    if (settled) out.push({ issueNumber: m.issueNumber, prNumber: m.prNumber, settled });
+  }
+  return out;
 }
 
 /**
@@ -275,8 +337,8 @@ export async function runReconcileStage(
       // (EM#441: four issues were approved on 2026-10-01 with no acceptance
       // evidence). Hand the issue to the verify stage instead; it runs the full
       // dev verification and owns the move to `pr approved`.
-      if (!roleFor("reviewer", config) && !tried.has(s.issueNumber)) {
-        tried.add(s.issueNumber);
+      // No `tried` guard: each step is a lifecycle move, safe to retry every pass.
+      if (!roleFor("reviewer", config)) {
         const settled = await settleHumanMerge(repoConfig, config, s, reconLogger);
         if (settled) {
           events.push({ message: `${repoConfig.githubRepo} #${s.issueNumber}: PR #${s.prNumber} merged by a person (no reviewer) → ${settled}`, level: "info" });
@@ -322,6 +384,11 @@ export async function runReconcileStage(
     for (const n of [...tried]) if (!current.has(n)) tried.delete(n);
     deadZoneAlerted.set(repoConfig.name, seen);
     deadZoneRecoveryAttempted.set(repoConfig.name, tried);
+
+    for (const r of await resumeHumanMerges(repoConfig, config, reconLogger)) {
+      events.push({ message: `${repoConfig.githubRepo} #${r.issueNumber}: human merge of PR #${r.prNumber} resumed → ${r.settled}`, level: "info" });
+      processed++;
+    }
 
     // --- Third dead zone: a lifecycle label whose work NEVER LANDED ----------
     // `pr under review` / `pr pending actions` with no open PR covering the
