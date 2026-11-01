@@ -4,8 +4,7 @@ import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
-import { emit, advance, wantsSessionReports } from "../work-source.js";
-import { GitHubIssueConnector } from "../github-work-source.js";
+import { emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
 import {
   findPRsNeedingReview,
   getPRCheckVerdict,
@@ -314,7 +313,7 @@ async function reviewPass(
     // queue and releases, while a repo mid-batch keeps its node_modules.
     if (checkoutPath) {
       try {
-        const stillApproved = (await new GitHubIssueConnector().selectEligible(repoConfig, reviewLogger)).length;
+        const stillApproved = (await workSourceFor(repoConfig).selectEligible?.(repoConfig, reviewLogger) ?? []).length;
         const stillToReview = findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
         releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
       } catch (err) {

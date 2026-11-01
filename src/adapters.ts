@@ -65,6 +65,13 @@ export interface WorkSourceAdapter {
   heldWork?(repoConfig: RepoConfig): ReadonlyArray<WaitingItem>;
 
   /**
+   * Every item approved and free to build, without `selectWork`'s open-PR
+   * cross-check and batch cap: implement labels a PR against it, review counts
+   * it to keep a checkout. Optional; never throws (a failed read gives []).
+   */
+  selectEligible?(repoConfig: RepoConfig, logger: Logger): Promise<WorkItem[]>;
+
+  /**
    * Record `event` on the source. Resolves `true` when the source recorded a
    * change, `false` when it wrote nothing (already there, no longer open, a
    * failed write, or an event this source keeps no record of). Never throws.

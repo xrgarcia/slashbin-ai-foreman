@@ -19,6 +19,7 @@ import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { setStatePath } from "../dist/state.js";
 import { addObserver, drainObservers } from "../dist/work-source.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
 
 const logger = createLogger({ format: "text", level: "error" });
 let tmp, F, saved;
@@ -35,7 +36,8 @@ const BOARD = [
   { number: 1, title: "one", labels: [{ name: "approved" }] },
 ];
 
-before(() => {
+before(async () => {
+  await startGitHubWorkSource();
   tmp = mkdtempSync(join(tmpdir(), "foreman-work-source-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);

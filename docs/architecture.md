@@ -54,7 +54,13 @@ The core reaches every outside system through one contract, `src/plugins/contrac
 `start` / `reconfigure` / `stop`. `src/plugins/registry.ts` starts the enabled ones once
 at startup, hands them each config reload, and resolves each role; every enabled observer
 hears every event. `src/plugins/index.ts` is the only file that names a plugin. Paperclip
-is the first (`src/plugins/paperclip.ts`); a plugin can add a CLI command (`paperclip:doctor`).
+is an observer (`src/plugins/paperclip.ts`); a plugin can add a CLI command (`paperclip:doctor`).
+
+GitHub issues are the `workSource` plugin (`src/plugins/github.ts`), on unless the config's
+`workSource` names another id. Selection, implement, review and every recorded move reach it
+only through the registry (`workSourceFor`); the core never constructs `GitHubIssueConnector`,
+which the ratchet enforces. With no work source enabled, startup refuses (exit 78). GitHub's PR,
+branch and merge operations (the `codeHost` role) are not moved yet.
 
 The agents are plugins too, each on when its path key is set: the Tech Lead is the
 `reviewer` (`tech-lead.ts`, `techLeadPath`), the SRE the `verifier` and `deployer`
@@ -108,10 +114,12 @@ Branch sync and dependency batches live in `phases/promote.ts`.
 ## Programmatic usage
 
 ```typescript
-import { startDaemon, loadConfig, createLogger } from "slashbin-ai-agent";
+import { startDaemon, loadConfig, createLogger, registerBuiltinPlugins, startPlugins } from "slashbin-ai-agent";
 
 const config = loadConfig();
 const logger = createLogger({ format: "json", level: "info" });
+registerBuiltinPlugins();
+await startPlugins(config, { logger, configText: () => null }); // the work source and agents
 const daemon = startDaemon(config, logger);
 
 // Graceful shutdown
