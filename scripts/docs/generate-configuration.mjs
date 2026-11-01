@@ -23,7 +23,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OUT = join(root, "docs", "configuration.md");
 const CONFIG_SRC = join(root, "src", "config.ts");
 const BACKOFF_SRC = join(root, "src", "backoff.ts");
-const GITHUB_SRC = join(root, "src", "github", "conventions.ts");
+const GITHUB_SRC = join(root, "src", "config-schema", "github.ts");
 const builtConfig = join(root, "dist", "config.js");
 const builtBackoff = join(root, "dist", "backoff.js");
 
@@ -89,7 +89,7 @@ const top = readBlock(configSrc, "configSchema", "src/config.ts");
 const repo = readBlock(configSrc, "repoEntrySchema", "src/config.ts");
 const labels = readBlock(configSrc, "lifecycleLabelsSchema", "src/config.ts");
 const backoff = readBlock(backoffSrc, "backoffConfigSchema", "src/backoff.ts");
-const github = readBlock(readFileSync(GITHUB_SRC, "utf8"), "githubConventionsSchema", "src/github/conventions.ts");
+const github = readBlock(readFileSync(GITHUB_SRC, "utf8"), "githubConventionsSchema", "src/config-schema/github.ts");
 
 const load = configSrc.match(/export function loadConfig\([\s\S]*?\n\}/);
 if (!load) fail("could not find `export function loadConfig` in src/config.ts.");
@@ -116,7 +116,7 @@ const undocumented = [
 ];
 if (undocumented.length) fail(`no comment above: ${undocumented.join(", ")} — describe each setting where it is declared.`);
 for (const k of Object.keys(shape)) if (!top.fields.some((f) => f.key === k)) fail(`configSchema.${k} was not found in the source block.`);
-for (const k of Object.keys(DEFAULT_GITHUB_CONVENTIONS)) if (!github.fields.some((f) => f.key === k)) fail(`github.${k} was not found in src/github/conventions.ts.`);
+for (const k of Object.keys(DEFAULT_GITHUB_CONVENTIONS)) if (!github.fields.some((f) => f.key === k)) fail(`github.${k} was not found in src/config-schema/github.ts.`);
 for (const k of Object.keys(DEFAULT_BACKOFF)) if (!backoff.fields.some((f) => f.key === k)) fail(`backoff.${k} was not found in src/backoff.ts.`);
 
 // --- Rendering ---

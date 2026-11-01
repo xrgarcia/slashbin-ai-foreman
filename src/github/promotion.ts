@@ -6,14 +6,8 @@ import { findOpenPrs, formatGhError, getOpenIssues, hasLabel } from "./cache.js"
 import { gh, isBackoffRefusal } from "./gh.js";
 import { unlinkedSection, type ReleaseCarry } from "./release-carry.js";
 import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
-
-
-// --- Promotion PR Creation ---
-
-export interface PromotionIssue {
-  number: number;
-  title: string;
-}
+import type { PromotionIssue, OpenPromotionPR } from "../code-host.js";
+export type { PromotionIssue, OpenPromotionPR } from "../code-host.js";
 
 export function findReadyForProdIssues(
   repo: string,
@@ -35,12 +29,6 @@ export function findReadyForProdIssues(
     });
     return [];
   }
-}
-
-export interface OpenPromotionPR {
-  number: number;
-  url: string;
-  body: string;
 }
 
 export function findOpenPromotionPR(

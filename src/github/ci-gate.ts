@@ -5,34 +5,8 @@ import type { Logger } from "../logger.js";
 import { gh } from "./gh.js";
 import { byReviewer } from "./review-freshness.js";
 import { backoffSettings } from "../backoff.js";
-
-
-// --- CI gate in front of review ---------------------------------------------
-//
-// A review is a full EM session (median 13 min). Spending one on a PR whose own
-// CI is red buys a REQUEST_CHANGES that says "CI is red" — the builder could have
-// learned that for free. So the review phase reads the PR's checks first:
-// red → straight back to revise with the failing checks named, still running →
-// wait a pass, green or no CI at all → review as before.
-
-/** One entry of `gh pr view --json statusCheckRollup`: a CheckRun or a StatusContext. */
-export interface CheckRollupEntry {
-  __typename?: string;
-  name?: string;
-  context?: string;
-  status?: string;
-  conclusion?: string;
-  state?: string;
-  detailsUrl?: string;
-  targetUrl?: string;
-}
-
-export interface CheckVerdict {
-  /** `none` = the repo runs no CI on this PR; review proceeds exactly as before. */
-  state: "none" | "pending" | "passing" | "failing";
-  failing: { name: string; url?: string }[];
-  pending: string[];
-}
+import type { CheckRollupEntry, CheckVerdict } from "../code-host.js";
+export type { CheckRollupEntry, CheckVerdict } from "../code-host.js";
 
 export const FAILING_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
 export const PENDING_STATES = new Set(["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED", "EXPECTED"]);

@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import type { GhResource } from "./gh-usage.js";
 import type { Logger } from "./logger.js";
 import { emit } from "./work-source.js";
@@ -227,40 +226,30 @@ function onWindowEnd(u: Upstream): void {
   releaseWaiters("claude");
 }
 
-interface RateResource {
-  remaining?: number;
-  reset?: number;
+/** What a GitHub probe answers: clear, or still limited (until `resetAtMs` when known). */
+export interface UpstreamProbeResult {
+  clear: boolean;
+  resetAtMs?: number;
 }
 
-const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining resetAt}}"];
+/** The code host's own probe of the bucket that tripped, with the token that tripped it. */
+export type GitHubProbe = (trip: { token?: string; resource?: GhResource }) => UpstreamProbeResult;
+
+let githubProbe: GitHubProbe | undefined;
 
 /**
- * Probe the bucket that tripped, with the token that tripped it — deliberately
- * NOT via `runGh` (which refuses while blocked) and not counted as usage.
- *  - graphql: `gh api graphql` rateLimit. Clears only on remaining > 0; on 0
- *    its resetAt bounds the next window. A refused probe lands in catch.
- *  - core (or unknown): `gh api rate_limit` resources.core, as before.
- * No stored token (ambient gh auth): probe with the ambient auth.
- * A probe that itself fails never clears; it extends on the computed window.
+ * Register how the end of a GitHub window is probed. The GitHub module registers
+ * it where it loads (github/gh.ts), so the core spawns no `gh` itself. With none
+ * registered, the probe counts as failed: the window extends, it never clears blind.
  */
-function probeGitHub(): { clear: boolean; resetAtMs?: number } {
+export function setUpstreamProbe(u: "github", probe: GitHubProbe | undefined): void {
+  if (u === "github") githubProbe = probe;
+}
+
+function probeGitHub(): UpstreamProbeResult {
   const s = states.github;
-  const env = s.trippedToken ? { ...process.env, GH_TOKEN: s.trippedToken } : { ...process.env };
-  const opts = { encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"], timeout: 30_000, env };
-  try {
-    if (s.trippedResource === "graphql") {
-      const rl = JSON.parse(execFileSync("gh", PROBE_GRAPHQL, opts))?.data?.rateLimit;
-      if (typeof rl?.remaining === "number" && rl.remaining > 0) return { clear: true };
-      const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
-      return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
-    }
-    const core = JSON.parse(execFileSync("gh", ["api", "rate_limit"], opts))?.resources?.core as RateResource | undefined;
-    if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
-    return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
-  } catch (err) {
-    console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
-    return { clear: false };
-  }
+  if (!githubProbe) return { clear: false };
+  return githubProbe({ token: s.trippedToken, resource: s.trippedResource });
 }
 
 /**

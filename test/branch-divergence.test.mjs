@@ -40,7 +40,7 @@ test("an episode is keyed on the merge base and an unknown result never clears i
 test("a recorded block is re-checked read-only before the pending-revision gate", () => {
   // jerky_service #76/#79 2026-10-05: the block outlived its cause while PR #84 was in revise.
   const recheck = orchestrator.indexOf("divergenceStillHolds(repoConfig) === false");
-  const revGate = orchestrator.indexOf("if (hasPendingRevisions(repoConfig, repoLogger))");
+  const revGate = orchestrator.indexOf("if (codeHost().hasPendingRevisions(repoConfig, repoLogger))");
   assert.ok(recheck > 0 && recheck < revGate);
   const fn = reconciler.slice(reconciler.indexOf("export function divergenceStillHolds"), reconciler.indexOf("export function fastForwardFeatureBranch"));
   assert.doesNotMatch(fn, /"checkout"|"push"|"merge",/, "the re-check must never write to the shared clone");

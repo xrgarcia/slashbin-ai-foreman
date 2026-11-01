@@ -9,13 +9,13 @@ import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
-import { blockedAmong, commentOnIssue, gh, issueTitles, readPrDigest, readLatestReviewBody } from "../github.js";
 import { type BranchDivergence } from "../reconciler.js";
-import { readReviewOutcomes, type ReviewOutcome } from "../github.js";
 import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
 import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "../unblock.js";
 import { BackoffTracker } from "../backoff.js";
+import { codeHost } from "../plugins/registry.js";
+import type { ReviewOutcome } from "../code-host.js";
 
 /**
  * Why a run stopped, worded for the card. Every stop — the first failure, a
@@ -60,11 +60,8 @@ export async function releaseIfResolved(
  * by new code. Undefined when GitHub cannot say: unknown never unblocks.
  */
 export function issueEditedSince(repoConfig: RepoConfig, n: number, sinceIso: string): boolean | undefined {
-  const [owner, name] = repoConfig.githubRepo.split("/");
   try {
-    const out = gh(["api", "graphql", "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `n=${n}`, "-f",
-      "query=query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){lastEditedAt}}}"], repoConfig.repoPath);
-    const at = JSON.parse(out || "{}")?.data?.repository?.issue?.lastEditedAt;
+    const at = codeHost().issueLastEditedAt(repoConfig, n);
     if (at === undefined) return undefined;
     if (at === null) return false;
     const since = Date.parse(sinceIso);
@@ -142,7 +139,7 @@ export async function announceDivergence(
   }
   for (const n of fresh) {
     try {
-      commentOnIssue(repoConfig, n, divergenceNotice(repoConfig, block));
+      codeHost().commentOnIssue(repoConfig, n, divergenceNotice(repoConfig, block));
       block.announced.push(n);
     } catch (err) {
       // Not recorded as announced, so the next cycle tries again.
@@ -167,13 +164,13 @@ export function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {
 /** The items' goals (their issue titles), for a session's start. */
 export function startReport(repoConfig: RepoConfig, issues: ReadonlyArray<number>, logger: Logger): SessionReport | undefined {
   if (!wantsSessionReports()) return undefined;
-  const goals = issueTitles(repoConfig, issues, logger);
+  const goals = codeHost().issueTitles(repoConfig, issues, logger);
   return Object.keys(goals).length ? { goals } : undefined;
 }
 
 /** A PR's title and diff stat; `pr` is a number, a URL or a head branch. */
 export function prReport(repoConfig: RepoConfig, pr: string | number, logger: Logger): SessionPr | undefined {
-  return readPrDigest(repoConfig.githubRepo, pr, repoConfig.repoPath, logger) ?? undefined;
+  return codeHost().readPrDigest(repoConfig.githubRepo, pr, repoConfig.repoPath, logger) ?? undefined;
 }
 
 /** A finished review: its trailer for `pr`, and the review body it posted since `since`. */
@@ -185,7 +182,7 @@ export function reviewReport(
   const t = trailers.find((x) => x.pr === pr);
   if (!t) return { ...(digest ? { pr: digest } : {}), ...(summary ? { text: summary } : {}) };
   // A minute's slack for clock skew between this host and GitHub.
-  const body = readLatestReviewBody(repoConfig.githubRepo, pr, new Date(since.getTime() - 60_000).toISOString(), repoConfig.repoPath, logger);
+  const body = codeHost().readLatestReviewBody(repoConfig.githubRepo, pr, new Date(since.getTime() - 60_000).toISOString(), repoConfig.repoPath, logger);
   const parsed = parseReviewBody(body ?? summary);
   return {
     ...(digest ? { pr: digest } : {}),
@@ -214,7 +211,7 @@ export const observerEventsSent = new Set<string>();
  * reconcile, which reports its own.
  */
 export async function reportReviewOutcomes(repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
-  for (const [n, outcome] of readReviewOutcomes(repoConfig, issueNumbers, logger)) {
+  for (const [n, outcome] of codeHost().readReviewOutcomes(repoConfig, issueNumbers, logger)) {
     await advance(itemOf(repoConfig, n), reviewMove(workStateOf(outcome)), repoConfig, logger, { observed: true });
   }
 }
@@ -344,7 +341,7 @@ export function pausedByBlockedLabel(repoConfig: RepoConfig, phase: string, pr: 
   const key = `${phase}:${repoConfig.githubRepo}#${pr}`;
   let held: number[];
   try {
-    held = blockedAmong(repoConfig, issueNumbers, logger);
+    held = codeHost().blockedAmong(repoConfig, issueNumbers, logger);
   } catch (err) {
     logger.debug(`PR #${pr}: ${phase} waits a pass, its issues' labels could not be read: ${err instanceof Error ? err.message : String(err)}`);
     return true;

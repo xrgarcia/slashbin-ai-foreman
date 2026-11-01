@@ -177,7 +177,7 @@ test("core never imports the Paperclip plugin, and the plugin never imports the 
   assert.ok(core.some((n) => n.startsWith("phases")) && core.some((n) => n.startsWith("github/")), "the walk reaches the subdirectories");
   // plugins/paperclip.ts is the plugin's entry (registered by plugins/index.ts, EM#1150); config.ts composes
   // the plugin's own config block, and nothing else of it.
-  const ALLOWED = { [join("plugins", "paperclip.ts")]: () => true, "config.ts": (p) => p === "./paperclip/config.js" };
+  const ALLOWED = { [join("plugins", "paperclip.ts")]: () => true, "config.ts": () => false };
   for (const f of core) {
     const bad = importsOf(join(root, "src", f))
       .filter((p) => /^(\.\/|\.\.\/)paperclip\//.test(p))

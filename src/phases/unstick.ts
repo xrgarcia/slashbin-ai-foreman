@@ -16,7 +16,6 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
 import type { UnstickOutcome } from "../plugins/contract.js";
-import { commentOnIssue, getOpenIssues, hasLabel } from "../github.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
@@ -25,6 +24,8 @@ import {
 } from "../unstick.js";
 import { activeRuns, divergenceReason } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
+import { codeHost } from "../plugins/registry.js";
+import type { CodeHost } from "../code-host.js";
 
 function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): string {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -47,7 +48,7 @@ export async function tryUnstick(
   config: AgentConfig,
   base: Logger,
   cycleNumber: number,
-  deps: { comment?: typeof commentOnIssue } = {},
+  deps: { comment?: CodeHost["commentOnIssue"] } = {},
 ): Promise<number> {
   const unsticker = roleFor("unstick", config);
   if (!unsticker) return 0;
@@ -68,11 +69,11 @@ export async function tryUnstick(
     let open: Set<number> | null = null;
     if (!isUpstreamBlocked("github")) {
       try {
-        const issues = getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
+        const issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
         open = new Set(issues.map((i) => i.number));
         const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
         for (const i of issues) {
-          if (hasLabel(i, prApproved) && !hasLabel(i, readyForProd)) {
+          if (codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)) {
             candidates.push({ issue: i.number, kind: "release-gate", reason: RELEASE_GATE_REASON });
           }
         }
@@ -139,7 +140,7 @@ export async function tryUnstick(
       if (spent && c.issue > 0) {
         const owner = config.unstickEscalationOwner ?? UNSTICK_ESCALATION_OWNER;
         try {
-          (deps.comment ?? commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
+          (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
           mutate(repoName, (table) => {
             const cur = table[key];
             if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };

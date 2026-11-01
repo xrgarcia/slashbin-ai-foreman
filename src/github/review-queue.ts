@@ -9,22 +9,8 @@ import { gh, isBackoffRefusal } from "./gh.js";
 import { extractImplementedIssues } from "./discovery.js";
 import { BackoffTracker, backoffSettings } from "../backoff.js";
 import { currentApprovalMs, currentVerdictRequestsChanges, hasFreshReview, readPrHeadSha, returnedToReviewSinceVerdict } from "./review-freshness.js";
-
-
-// --- Revision Gate ---
-
-export interface PendingRevisionPR {
-  number: number;
-  url: string;
-  headRefName: string;
-  /** The PR's head commit: an unblock check compares it to where the Foreman stopped. */
-  headRefOid?: string;
-}
-
-export interface PendingRevisionInfo {
-  issueNumbers: number[];
-  pr: PendingRevisionPR;
-}
+import type { PendingRevisionPR, PendingRevisionInfo, ReviewCandidate, QaPendingPr } from "../code-host.js";
+export type { PendingRevisionPR, PendingRevisionInfo, ReviewCandidate, QaPendingPr } from "../code-host.js";
 
 /**
  * Gate check: are there any issues with the `prPendingActions` label?
@@ -109,24 +95,6 @@ export function hasPendingRevisions(
   logger: Logger
 ): boolean {
   return findPendingRevisions(config, logger) !== null;
-}
-
-export interface ReviewCandidate {
-  prNumber: number;
-  prUrl: string;
-  issueNumbers: number[];
-  /**
-   * The subset of `issueNumbers` adopted by the orphan fallback — the ones the
-   * caller must report `new → inReview` for. Empty on the normal path, where
-   * every issue already carries `pr under review`.
-   */
-  adopted: number[];
-  /**
-   * True when the PR's current verdict is CHANGES_REQUESTED but its issues still
-   * sit at `pr under review`: the review landed, its label move did not. The
-   * caller reports them `inReview → changesRequested` instead of reviewing.
-   */
-  stranded?: boolean;
 }
 
 /**
@@ -246,14 +214,6 @@ export function findPRsNeedingReview(
     });
     return null;
   }
-}
-
-/** An approved, unmerged feature PR whose head QA has yet to pass (config.qaBeforeMerge). */
-export interface QaPendingPr {
-  prNumber: number;
-  issueNumbers: number[];
-  /** The head commit the approval covers; QA's PASS must name this sha. */
-  headSha: string;
 }
 
 /**

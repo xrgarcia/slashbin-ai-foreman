@@ -186,3 +186,25 @@ test("claude trust: trusted passes, untrusted with trustManagedRepos off warns, 
   assert.match(run().out, /^WARN  a: claude trust — .*does not parse/m);
   assert.equal(readFileSync(claudeCfg, "utf8"), "{ not json", "the doctor wrote Claude Code's config");
 });
+
+// EM#1150 f5: the daemon refuses to start (exit 78) with no work source or no code
+// host enabled, so the doctor reports not-ready for each, naming the fix.
+for (const [role, needs] of [["workSource", /nothing to select work from/], ["codeHost", /nothing to open, review or merge a PR on/]]) {
+  test(`no ${role} enabled: not ready, a FAIL naming the key and the default`, () => {
+    const run = arrange({ techLeadPath: tmp, srePath: tmp, [role]: "nope", repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] }, { "acme/a": ready() });
+    const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN, TECHLEAD_GITHUB_KEY: TOKEN, SRE_GITHUB_KEY: TOKEN });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, new RegExp(`^FAIL  ${role} — no installed plugin is "nope"`, "m"), r.out);
+    assert.match(r.out, needs);
+    assert.match(r.out, new RegExp(`Set "${role}" to "github"`));
+    const other = role === "workSource" ? "codeHost" : "workSource";
+    assert.match(r.out, new RegExp(`^PASS  ${other} — "github"`, "m"), "the other role is still served by GitHub");
+  });
+}
+
+test("the default config enables both: PASS workSource and PASS codeHost", () => {
+  const run = arrange({ techLeadPath: tmp, srePath: tmp, repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] }, { "acme/a": ready() });
+  const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN, TECHLEAD_GITHUB_KEY: TOKEN, SRE_GITHUB_KEY: TOKEN });
+  assert.match(r.out, /^PASS  workSource — "github"$/m, r.out);
+  assert.match(r.out, /^PASS  codeHost — "github"$/m, r.out);
+});

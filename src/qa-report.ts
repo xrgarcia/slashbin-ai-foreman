@@ -8,8 +8,7 @@ import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { VerifyResult } from "./plugins/contract.js";
 import { qaFor, roleFor } from "./plugins/registry.js";
-import { commentBodies, commentsWithTimes, hasCommentContaining, hasCommentStartingWith, commentOnPr } from "./github/pr-comments.js";
-import { prChangedFiles } from "./github/reports.js";
+import { codeHost } from "./plugins/registry.js";
 
 /** The heading the comment opens with; also the idempotency key. */
 export const QA_HEADING = "## QA Report (report-only)";
@@ -132,11 +131,11 @@ export function qaBeforeMergeApplies(repoConfig: RepoConfig, agentConfig: AgentC
 /** The real edges: the PR's comments and files on the code host, and the QA plugin covering the repo, on dev. */
 export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger, local = false): QaDeps {
   return {
-    hasMarker: (pr, marker) => hasCommentContaining(repoConfig, pr, marker),
-    hasReport: (pr) => hasCommentStartingWith(repoConfig, pr, QA_HEADING),
-    post: (pr, body) => commentOnPr(repoConfig, pr, body),
-    comments: (pr) => commentsWithTimes(repoConfig, pr),
-    changedFiles: async (pr) => prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
+    hasMarker: (pr, marker) => codeHost().hasCommentContaining(repoConfig, pr, marker),
+    hasReport: (pr) => codeHost().hasCommentStartingWith(repoConfig, pr, QA_HEADING),
+    post: (pr, body) => codeHost().commentOnPr(repoConfig, pr, body),
+    comments: (pr) => codeHost().commentsWithTimes(repoConfig, pr),
+    changedFiles: async (pr) => codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
     async run({ repo, pr, out }) {
       const qa = qaFor(repoConfig, agentConfig);
       if (!qa) return { kind: "errored", detail: `no enabled QA plugin covers ${repo}` };
@@ -427,7 +426,7 @@ export function qaFailLines(body: string): string {
 /** The newest QA FAIL report on PR `pr`, reduced to its failing lines; undefined when there is none or GitHub cannot say. */
 export async function latestQaFailLines(repoConfig: RepoConfig, pr: number, logger: Logger): Promise<string | undefined> {
   try {
-    const fails = (await commentBodies(repoConfig, pr)).filter((b) => QA_FAIL_REPORT.test(b));
+    const fails = (await codeHost().commentBodies(repoConfig, pr)).filter((b) => QA_FAIL_REPORT.test(b));
     const last = fails[fails.length - 1];
     return last ? qaFailLines(last) : undefined;
   } catch (e) {

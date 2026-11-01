@@ -18,10 +18,9 @@
 // one paginated GET, one POST per missing name, never a PATCH or DELETE, so an
 // existing label's colour, description and issues are never touched.
 
-import { formatGhError } from "./github/cache.js";
-import { gh } from "./github/gh.js";
 import { requiredLabels, type RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import { codeHost } from "./plugins/registry.js";
 
 /** GitHub's own default label colour; colour is not configurable. */
 const COLOR = "ededed";
@@ -64,7 +63,7 @@ export async function onboardRepo(repo: RepoConfig, logger: Logger): Promise<boo
 }
 
 function firstLine(err: unknown): string {
-  const { message, stderr } = formatGhError(err);
+  const { message, stderr } = codeHost().formatGhError(err);
   return (stderr || message).split("\n")[0];
 }
 
@@ -72,8 +71,7 @@ function installLabels(repo: RepoConfig, log: Logger): boolean {
   const wanted = labelsFor(repo);
   let existing: Set<string>;
   try {
-    const out = gh(["api", "-X", "GET", `repos/${repo.githubRepo}/labels`, "--paginate", "--jq", ".[].name"], repo.repoPath);
-    existing = new Set(out.split("\n").map((l) => l.trim()).filter(Boolean));
+    existing = new Set(codeHost().labelNames(repo));
   } catch (err) {
     log.warn(`Onboarding: could not read ${repo.githubRepo}'s labels — no work starts on this repo until it can (${firstLine(err)})`);
     return false;
@@ -88,10 +86,10 @@ function installLabels(repo: RepoConfig, log: Logger): boolean {
   const failed: string[] = [];
   for (const name of missing) {
     try {
-      gh(["api", "-X", "POST", `repos/${repo.githubRepo}/labels`, "-f", `name=${name}`, "-f", `color=${COLOR}`], repo.repoPath);
+      codeHost().createLabel(repo, name, COLOR);
     } catch (err) {
       // Created by someone else between the read and this write: present, so fine.
-      const { message, stderr } = formatGhError(err);
+      const { message, stderr } = codeHost().formatGhError(err);
       if (/already_exists/i.test(`${stderr} ${message}`)) continue;
       failed.push(`"${name}" (${firstLine(err)})`);
     }

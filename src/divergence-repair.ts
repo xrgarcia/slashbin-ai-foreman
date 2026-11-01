@@ -22,9 +22,10 @@
 
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { commentOnIssue, gh } from "./github.js";
 import { divergenceStillHolds, formatGitError, git } from "./reconciler.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "./state.js";
+import { codeHost } from "./plugins/registry.js";
+import type { CodeHost } from "./code-host.js";
 
 /** The only author whose ruling is honoured. */
 export const EM_DIVERGENCE_RULER = "slashbin-engineering-manager";
@@ -62,20 +63,14 @@ export function pickRuling(cands: readonly RulingCandidate[], block: Pick<Branch
   return best ? { id: best.id, issue: best.issue, winner: best.winner } : null;
 }
 
-const jsonLines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
-
 /** Read the places a ruling can be. Throws on a failed read (the caller treats that as "no ruling this cycle"). */
 export function readRulingCandidates(repoConfig: RepoConfig, block: BranchBlock): RulingCandidate[] {
   const { githubRepo: repo, repoPath: cwd } = repoConfig;
   const out: RulingCandidate[] = [];
   for (const n of block.announced.filter((x) => x > 0)) {
-    const rows = jsonLines(gh(["api", "--paginate", `repos/${repo}/issues/${n}/comments?per_page=100`, "--jq",
-      `.[] | {id: ("comment:" + (.id|tostring)), issue: ${n}, author: (.user.login // ""), at: .created_at, body: (.body // "")} | @json`], cwd));
-    out.push(...rows);
+    out.push(...codeHost().issueCommentRows(repo, n, cwd));
   }
-  const issues = jsonLines(gh(["api", "--paginate", `repos/${repo}/issues?state=open&creator=${EM_DIVERGENCE_RULER}&per_page=100`, "--jq",
-    `.[] | select(.pull_request | not) | {id: ("issue:" + (.number|tostring)), issue: .number, author: (.user.login // ""), at: .created_at, body: (.body // ""), title: .title} | @json`], cwd));
-  out.push(...issues);
+  out.push(...codeHost().openIssueRowsBy(repo, EM_DIVERGENCE_RULER, cwd));
   return out;
 }
 
@@ -111,7 +106,7 @@ function carryOut(repoConfig: RepoConfig, winner: "base" | "branch", now: Date, 
 
 export interface RepairDeps {
   readCandidates?: (repoConfig: RepoConfig, block: BranchBlock) => RulingCandidate[];
-  comment?: typeof commentOnIssue;
+  comment?: CodeHost["commentOnIssue"];
   now?: () => Date;
 }
 
@@ -161,7 +156,7 @@ export async function repairDivergence(
       "```",
     ].join("\n");
     for (const n of targets) {
-      try { (deps.comment ?? commentOnIssue)(repoConfig, n, body); }
+      try { (deps.comment ?? codeHost().commentOnIssue)(repoConfig, n, body); }
       catch (e) { logger.warn(`Could not post the divergence repair failure on #${n}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`); }
     }
     return "failed";

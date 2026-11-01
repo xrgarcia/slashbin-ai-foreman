@@ -1,18 +1,18 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, createWriteStream, type WriteStream } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { LifecycleLabels, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { verifyPRExists, checkPRHasChanges, getRemoteBranchSha, forgetOpenPrs } from "./github.js";
 import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
 import { redactAll } from "./redact.js";
 import { claudeTrustEnabled, ensureClaudeTrust, isUntrustedWarning } from "./claude-trust.js";
-import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./github/conventions.js";
 import { contractBlock, contractReaderPath } from "./handoff-contract.js";
+import { codeHost } from "./plugins/registry.js";
+import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./config-schema/github.js";
 export { redactAll };
 
 const FOREMAN_OVERRIDES = resolve(
@@ -985,7 +985,7 @@ export async function implementApprovedIssues(
   // Captured so a DECLARED skip can be distinguished from a declaration made
   // while the agent was in fact pushing work. Evidence beats narrative in both
   // directions: the trailer is only honoured when the branch really did not move.
-  const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  const beforeSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
   // Resolve the skill and the overlay before anything is launched: either one
   // configured but unreadable fails this item with Claude never started.
@@ -1060,7 +1060,7 @@ Work autonomously. Do not ask questions.`;
   logger.info(`Transcript: ${transcriptPath}`);
   const result = await spawnClaude(prompt, config, logger, abortSignal, transcriptPath);
   // The session may have opened a PR the cached list predates.
-  forgetOpenPrs(config.githubRepo);
+  codeHost().forgetOpenPrs(config.githubRepo);
 
   if (result.timedOut) {
     return { success: false, error: "timed out" };
@@ -1094,7 +1094,7 @@ Work autonomously. Do not ask questions.`;
   // its issue and the orchestrator closes only an issue in the batch.
   const declaredLanded = detectDeclaredLanded(result.stdout);
   if (declaredLanded.landed) {
-    const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+    const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
     if (beforeSha && afterSha && beforeSha !== afterSha) {
       logger.warn(
         `Agent emitted a landed trailer but ${config.featureBranch} advanced ` +
@@ -1115,7 +1115,7 @@ Work autonomously. Do not ask questions.`;
 
   const declaredSkip = detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
-    const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+    const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
     if (beforeSha && afterSha && beforeSha !== afterSha) {
       logger.warn(
         `Agent emitted a skip trailer but ${config.featureBranch} advanced ` +
@@ -1167,17 +1167,7 @@ Work autonomously. Do not ask questions.`;
   // outside runGh, so it has to honour the GitHub back-off itself.
   if (!prUrl && !isUpstreamBlocked("github")) {
     logger.info("PR URL not found in output, querying GitHub as fallback");
-    const fallback = spawnSync("gh", [
-      "pr", "list",
-      "--repo", config.githubRepo,
-      "--head", config.featureBranch,
-      "--base", config.baseBranch,
-      "--state", "open",
-      "--limit", "1",
-      "--json", "url",
-      "--jq", ".[0].url",
-    ], { cwd: config.repoPath, encoding: "utf-8", timeout: 15_000 });
-    const fallbackUrl = fallback.stdout?.trim();
+    const fallbackUrl = codeHost().featurePrUrlFallback(config);
     if (fallbackUrl?.startsWith("https://")) {
       prUrl = fallbackUrl;
       logger.info(`PR found via GitHub fallback: ${prUrl}`);
@@ -1186,7 +1176,7 @@ Work autonomously. Do not ask questions.`;
 
   if (prUrl) {
     // Verify the PR actually exists on GitHub
-    const verified = verifyPRExists(
+    const verified = codeHost().verifyPRExists(
       config.githubRepo,
       config.featureBranch,
       config.baseBranch,
@@ -1198,7 +1188,7 @@ Work autonomously. Do not ask questions.`;
       return { success: false, error: "PR creation could not be verified" };
     }
     // Post-implementation self-check: verify the PR has actual file changes
-    const changedFiles = checkPRHasChanges(config.githubRepo, config.featureBranch, config.baseBranch, config.repoPath, logger);
+    const changedFiles = codeHost().checkPRHasChanges(config.githubRepo, config.featureBranch, config.baseBranch, config.repoPath, logger);
     if (changedFiles === 0) {
       return { success: false, error: "PR exists but has no file changes" };
     }
@@ -1209,7 +1199,7 @@ Work autonomously. Do not ask questions.`;
 
   // If Claude exited cleanly but no new PR was found, check if an existing
   // feature PR already has the work (Claude may have added commits to it).
-  const existingPR = verifyPRExists(
+  const existingPR = codeHost().verifyPRExists(
     config.githubRepo,
     config.featureBranch,
     config.baseBranch,
@@ -1274,7 +1264,7 @@ export async function revisePRFeedback(
   // Without this, a silent no-op would be reported as success and the
   // orchestrator would (incorrectly) transition labels to `pr under review`,
   // hiding the fact that the requested fix was never applied.
-  const beforeSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  const beforeSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
   const prContext = prNumber
     ? `\n\nCONTEXT: PR #${prNumber} needs revision. Linked issues: ${(issueNumbers || []).map(n => `#${n}`).join(", ")}. Read the review comments on PR #${prNumber} to understand what changes are requested.`
@@ -1347,7 +1337,7 @@ Work autonomously. Do not ask questions.`;
   //
   // Conservative on lookup failures: if either SHA is null (transient gh
   // error), we trust the exit code rather than fail spuriously.
-  const afterSha = getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
   if (beforeSha && afterSha && beforeSha === afterSha) {
     // Declared no-commit: the revision determined the branch is already correct
     // and said so on the trailer. That is a real outcome, not a misfire, and it

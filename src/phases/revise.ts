@@ -5,7 +5,6 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
-import { findPendingRevisions, isPrOpen, readPrHeadSha, readRulingState, type PendingRevisionInfo } from "../github.js";
 import { revisePRFeedback } from "../agent.js";
 import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
@@ -33,6 +32,8 @@ import {
   stoppedReason,
 } from "./common.js";
 import { reportLaunchThrew } from "./implement.js";
+import { codeHost } from "../plugins/registry.js";
+import type { PendingRevisionInfo } from "../code-host.js";
 
 export async function tryRevision(
   repoConfig: RepoConfig,
@@ -60,7 +61,7 @@ export async function tryRevision(
   // implement is gated on "no pending revision", so #412 could not build either.
   // Clearing `pr pending actions` for one pass now resets it, as the comment on
   // `revisionEscalated` always claimed.
-  const pending = findPendingRevisions(repoConfig, revLogger);
+  const pending = codeHost().findPendingRevisions(repoConfig, revLogger);
   if (!pending) {
     if (failures > 0) revisionFailureCount.set(repoName, 0);
     revisionEscalated.delete(repoName);
@@ -74,7 +75,7 @@ export async function tryRevision(
   if (pausedByBlockedLabel(repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
 
   // The head the no-commit streak is keyed on. An empty head (unreadable) keeps the streak counting.
-  const head = pending.pr.headRefOid ?? readPrHeadSha(repoConfig, prNumber, revLogger) ?? "";
+  const head = pending.pr.headRefOid ?? codeHost().readPrHeadSha(repoConfig, prNumber, revLogger) ?? "";
 
   // A stopped revision resumes when someone pushes to the PR out of band.
   const stoppedAt = revisionStoppedHead.get(repoName) ?? stalemateHead(repoName, prNumber);
@@ -111,7 +112,7 @@ export async function tryRevision(
   // its review (TECH_LEAD_ESCALATE_MARKER). jerky_service PR #125 went 13
   // rounds (2026-10-13) because each fix answered the last finding and the
   // spec question underneath reached no one who owned the spec.
-  const ruling = readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
+  const ruling = codeHost().readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
   if (ruling && (ruling.roundsSinceRuling >= REVIEW_ROUNDS_ALERT || ruling.escalateRequested)) {
     const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}@${ruling.latestReviewId ?? "none"}`;
     if (!reviewRoundsAlerted.has(roundsKey)) {
@@ -263,7 +264,7 @@ export async function tryRevision(
 /** A closed or merged PR's no-commit streak is over: forget every one whose PR is no longer open. */
 function forgetClosedPrStreaks(repoConfig: RepoConfig, logger: Logger): void {
   for (const pr of prsWithNoCommitStreak(repoConfig.name)) {
-    const open = isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
+    const open = codeHost().isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
     if (open === false) clearNoCommitStreak(repoConfig.name, pr);
     else if (open === null) logger.debug(`PR #${pr}: no-commit streak kept, GitHub could not say whether it is open`);
   }

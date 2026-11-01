@@ -23,6 +23,9 @@ const { implementApprovedIssues, revisePRFeedback, runCustomStage, sessionSettin
   await import(join(root, "dist/agent.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
 const { createLogger } = await import(join(root, "dist/logger.js"));
+const { setCodeHost } = await import(join(root, "dist/plugins/registry.js"));
+const { githubCodeHost } = await import(join(root, "dist/plugins/github.js"));
+setCodeHost(githubCodeHost());
 const logger = createLogger({ format: "text", level: "error" });
 const DUMMY = "test-dummy-value-not-a-token";
 

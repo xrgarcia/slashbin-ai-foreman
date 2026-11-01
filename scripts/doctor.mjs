@@ -28,6 +28,7 @@ if (!existsSync(built)) {
 const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning, requiredLabels } = await import(built);
 // The release-stage checks judge roles (reviewer, deployer), so the built-in plugins must be registered.
 (await import(join(root, "dist", "plugins", "index.js"))).registerBuiltinPlugins();
+const { enabledFor } = await import(join(root, "dist", "plugins", "registry.js"));
 const { claudeConfigPath, claudeTrustStatus } = await import(join(root, "dist", "claude-trust.js"));
 const { readGolden, skillsFor, driftAt, describeDrift } = await import(join(root, "dist", "skill-sync.js"));
 
@@ -89,6 +90,12 @@ try {
 } catch (err) {
   line("FAIL", "config", `${configFile ?? "AI_AGENT_* env"} does not load: ${err?.message ?? err}`);
   process.exit(1);
+}
+// The daemon refuses to start (exit 78) without a work source or a code host (EM#1150).
+for (const [role, needs] of [["workSource", "select work from"], ["codeHost", "open, review or merge a PR on"]]) {
+  const id = config[role] ?? "github";
+  if (enabledFor(role, config)) line("PASS", role, `"${id}"`);
+  else line("FAIL", role, `no installed plugin is "${id}", so the Foreman has nothing to ${needs} and refuses to start. Set "${role}" to "github" (the default).`);
 }
 
 // --- Tokens (set or unset; a value is never printed) ---

@@ -11,6 +11,10 @@ import { acceptanceVerdict } from "../dist/github/acceptance-gate.js";
 import { loadConfig } from "../dist/config.js";
 import { configureIssueCache } from "../dist/github.js";
 import { createLogger } from "../dist/logger.js";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+
+setCodeHost(githubCodeHost());
 
 const logger = createLogger({ format: "text", level: "error" });
 // Vendored from slashbin-engineering-manager scripts/foreman/acceptance-gate-cases.json; the EM's

@@ -11,7 +11,7 @@ import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
 import { registerBuiltinPlugins } from "./plugins/index.js";
-import { pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
+import { codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
 import type { PluginContext } from "./plugins/contract.js";
 import { workSourceRefusal } from "./work-source.js";
 
@@ -159,9 +159,10 @@ async function main(): Promise<void> {
     },
   };
   await startPlugins(config, pluginCtx);
-  // Every stage selects and records through the work source; without one, refuse
-  // here rather than throw mid-pass. 78 (EX_CONFIG): a restart cannot fix a config.
-  const noSource = workSourceRefusal(config);
+  // Every stage selects and records through the work source, and opens, reads and
+  // merges through the code host; without either, refuse here rather than throw
+  // mid-pass. 78 (EX_CONFIG): a restart cannot fix a config.
+  const noSource = workSourceRefusal(config) ?? codeHostRefusal(config);
   if (noSource) {
     logger.error(`Refusing to start: ${noSource}`);
     process.exit(78);
@@ -208,8 +209,9 @@ async function main(): Promise<void> {
 
     const onReload = (fresh: AgentConfig): void => {
       void reconfigurePlugins(fresh, pluginCtx).then(() => {
-        const lost = workSourceRefusal(fresh);
-        if (lost) logger.error(`Config reload: ${lost}. Every pass fails until it is restored.`);
+        for (const lost of [workSourceRefusal(fresh), codeHostRefusal(fresh)]) {
+          if (lost) logger.error(`Config reload: ${lost}. Every pass fails until it is restored.`);
+        }
       });
     };
     const daemon = startDaemon(config, logger, { configPath, repoFilter, onReload });

@@ -20,7 +20,7 @@ import { configureIssueCache } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { setStatePath } from "../dist/state.js";
 import { selectWork, workSourceFor, workSourceRefusal, drainObservers } from "../dist/work-source.js";
-import { registerPlugin, startPlugins, activeWorkSource, resetRegistryForTests } from "../dist/plugins/registry.js";
+import { registerPlugin, registeredPlugins, startPlugins, activeWorkSource, resetRegistryForTests, codeHost, codeHostRefusal } from "../dist/plugins/registry.js";
 import { registerBuiltinPlugins } from "../dist/plugins/index.js";
 import { GitHubPlugin } from "../dist/plugins/github.js";
 import { checkoutPathFor } from "../dist/review-checkout.js";
@@ -196,6 +196,39 @@ test("with no work source enabled, startup refuses (exit 78) before any GitHub o
   const run = spawnSync(process.execPath, [join(root, "dist", "cli.js"), "--once", "--config", cfg], { cwd: tmp, env, encoding: "utf8", timeout: 60_000 });
   assert.equal(run.status, 78, `exit ${run.status}\n${run.stdout}\n${run.stderr}`);
   assert.match(run.stdout + run.stderr, /Refusing to start: no work source is enabled \(workSource: "nowhere"\)/);
+  assert.ok(!existsSync(F.ghLog), `gh was called: ${existsSync(F.ghLog) ? readFileSync(F.ghLog, "utf8") : ""}`);
+  assert.ok(!existsSync(F.claudeLog), "claude was launched");
+});
+
+// EM#1150 f5: GitHub is the code-host plugin too, selected by `codeHost` (default "github").
+test("the GitHub plugin is the code host on the live config shape; another id leaves none, and the core refuses", async () => {
+  const live = load({ paperclip: { enabled: false }, skillSync: { enabled: false } });
+  assert.equal(live.codeHost, "github", "the default");
+  await boot(live);
+  const github = registeredPlugins().find((p) => p.id === "github");
+  assert.equal(codeHost(), github.codeHost, "GitHub fills the codeHost role");
+  assert.equal(codeHostRefusal(live), null);
+
+  resetRegistryForTests();
+  const other = load({ codeHost: "gitlab", paperclip: { enabled: false } });
+  await boot(other);
+  assert.ok(activeWorkSource() instanceof GitHubIssueConnector, "GitHub stays the work source");
+  assert.match(codeHostRefusal(other), /no code host is enabled \(codeHost: "gitlab"\)/);
+  assert.throws(() => codeHost(), /no code host is enabled/, "never a silent GitHub fallback mid-pass");
+
+  resetRegistryForTests();
+  const neither = load({ codeHost: "gitlab", workSource: "linear", paperclip: { enabled: false } });
+  await boot(neither);
+  assert.ok(!registeredPlugins().find((p) => p.id === "github").enabled(neither), "with neither role selected, GitHub is off");
+});
+
+test("with no code host enabled, startup refuses (exit 78) before any GitHub or Claude call", () => {
+  const cfg = join(tmp, "no-host.json");
+  writeFileSync(cfg, JSON.stringify({ codeHost: "nowhere", repos: [{ name: "r", repoPath: tmp, githubRepo: "example/fake" }] }));
+  const env = { ...process.env, GH_TOKEN: "", GITHUB_TOKEN: "", FOREMAN_GITHUB_TOKEN: "test-fake", PATH: `${bin}:${saved.PATH}` };
+  const run = spawnSync(process.execPath, [join(root, "dist", "cli.js"), "--once", "--config", cfg], { cwd: tmp, env, encoding: "utf8", timeout: 60_000 });
+  assert.equal(run.status, 78, `exit ${run.status}\n${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout + run.stderr, /Refusing to start: no code host is enabled \(codeHost: "nowhere"\)/);
   assert.ok(!existsSync(F.ghLog), `gh was called: ${existsSync(F.ghLog) ? readFileSync(F.ghLog, "utf8") : ""}`);
   assert.ok(!existsSync(F.claudeLog), "claude was launched");
 });
