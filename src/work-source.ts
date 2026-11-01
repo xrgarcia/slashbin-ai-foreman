@@ -5,6 +5,7 @@ import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { loadRepoState, type RepoState } from "./state.js";
 import { clearUnstick, noteStuck } from "./unstick.js";
+import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, setWorkSource } from "./plugins/registry.js";
 
 /**
  * The work source each repo selects from and reports to. GitHub issues unless
@@ -17,18 +18,15 @@ import { clearUnstick, noteStuck } from "./unstick.js";
  * miss the observers. The orchestrator never knows whether any observer — the
  * Paperclip plugin or another — is registered.
  */
-let registered: WorkSourceAdapter | null = null;
-
 export function registerWorkSource(adapter: WorkSourceAdapter | null): void {
-  registered = adapter;
+  setWorkSource(adapter);
 }
 
 /** The active adapter. The orchestrator uses `emit` / `advance` instead. */
 export function workSourceFor(_repoConfig: RepoConfig): WorkSourceAdapter {
-  return registered ?? new GitHubIssueConnector();
+  return activeWorkSource() ?? new GitHubIssueConnector();
 }
 
-const observers: WorkObserver[] = [];
 
 /**
  * Per-observer, per-event limit. Generous because observers run OFF the build
@@ -72,7 +70,7 @@ export function loopTimeout(limitMs: number, onExpire: () => void, tickMs = OBSE
 let queue: Promise<void> = Promise.resolve();
 
 function enqueue(event: WorkEvent, logger: Logger): void {
-  if (observers.length === 0) return;
+  if (registryObservers().length === 0) return;
   queue = queue.then(() => fanOut(event, logger));
 }
 
@@ -86,17 +84,17 @@ export function drainObservers(): Promise<void> {
  * is a boot-path bug, and doubled events make it visible instead of hiding it.
  */
 export function addObserver(o: WorkObserver): void {
-  observers.push(o);
+  addRegistryObserver(o);
 }
 
 /** True when any observer is registered: a session's report costs GitHub reads, spent only for someone. */
 export function hasObservers(): boolean {
-  return observers.length > 0;
+  return registryObservers().length > 0;
 }
 
 /** True when an observer writes every card itself (`WorkObserver.wantsCards`). */
 export function wantsCards(): boolean {
-  return observers.some((o) => {
+  return registryObservers().some((o) => {
     try {
       return o.wantsCards?.() === true;
     } catch {
@@ -112,7 +110,7 @@ export function wantsCards(): boolean {
  * observers after it. Never rejects.
  */
 async function fanOut(event: WorkEvent, logger: Logger): Promise<void> {
-  for (const obs of observers) {
+  for (const obs of [...registryObservers()]) {
     let stop: (() => void) | undefined;
     try {
       await Promise.race([
