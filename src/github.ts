@@ -28,7 +28,9 @@ export {
   findPRsNeedingReview,
   type QaPendingPr,
   findQaPendingPr,
+  blockedAmong,
 } from "./github/review-queue.js";
+export { readPrHeadSha } from "./github/review-freshness.js";
 export {
   type MergedIssueRef,
   findIssuesMergedToBase,

@@ -89,8 +89,10 @@ export type RulingState = {
 
 /** A QA FAIL report (qaGateBody): the marker line carries the verdict, inside the first 140 characters. */
 const QA_FAIL_PATTERN = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=FAIL -->/;
+/** A reused QA FAIL that sent the same head back again (qaFailStandsBody): a round with no new report. */
+const QA_FAIL_STANDS_PATTERN = /^<!-- foreman-qa-fail-stands sha=\S+ -->/;
 
-/** Pure: a PR's reviews and comments → its ruling state. A QA FAIL sends the PR back like a CHANGES_REQUESTED review. */
+/** Pure: a PR's reviews and comments → its ruling state. A QA FAIL, new or standing, sends the PR back like a CHANGES_REQUESTED review. */
 export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: ReadonlyArray<CommentFact>): RulingState {
   const rulings = comments.filter((c) => EM_RULING_PATTERN.test(c.head)).map((c) => c.at).sort();
   const rulingAt = rulings.length ? rulings[rulings.length - 1]! : null;
@@ -98,7 +100,7 @@ export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: Readon
   const latest = [...reviews].filter((r) => r.at).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id - b.id)).pop();
   return {
     roundsSinceRuling: after.filter((r) => r.state === "CHANGES_REQUESTED").length
-      + comments.filter((c) => QA_FAIL_PATTERN.test(c.head) && (rulingAt === null || c.at > rulingAt)).length,
+      + comments.filter((c) => (QA_FAIL_PATTERN.test(c.head) || QA_FAIL_STANDS_PATTERN.test(c.head)) && (rulingAt === null || c.at > rulingAt)).length,
     latestReviewId: latest?.id ?? null,
     escalateRequested: !!latest && latest.state === "CHANGES_REQUESTED" && latest.escalate && (rulingAt === null || latest.at > rulingAt),
     rulingAt,
