@@ -177,19 +177,25 @@ export async function settleHumanMerge(
       await (deps.comment ?? commentOnIssue)(repoConfig, merged.issueNumber,
         `PR #${merged.prNumber} was merged to \`${repoConfig.baseBranch}\` by a person. No reviewer, verifier, deployer or promote stage is configured, so nothing further will release this issue: closing it as done.\n\n${HUMAN_MERGE_CLOSE_MARK}`);
     } catch (err) {
-      logger.warn(`Could not comment on #${merged.issueNumber} before closing it: ${err instanceof Error ? err.message : String(err)}`);
+      // Never close without the comment: stay at approved, and the next pass's resume posts it and closes.
+      logger.warn(`Could not comment on #${merged.issueNumber}, so not closing it this pass: ${err instanceof Error ? err.message : String(err)}`);
+      return reached;
     }
   }
   return await advance(item, "closedNoRelease", repoConfig, logger) ? "closed" : reached;
 }
 
 /**
- * Resume human merges a failed move left part-way (EM#1150 f3). With no reviewer
- * and no verifier, nothing else moves an issue at `pr merged`, and with nothing
- * to release it nothing moves one at `pr approved`; each continues from its step
- * once its PR is confirmed merged to base. Reads the shared open-issue snapshot
- * and the cached merged-PR list the dead-zone scan already uses: no new scan.
- * A no-op whenever a reviewer or a verifier is enabled.
+ * Find and settle human merges, and resume ones a failed move left part-way
+ * (EM#1150 f3). With no reviewer, an issue at `pr under review` or `pr pending
+ * actions` whose PR is merged to base starts at step 1, whatever the branch
+ * layout: the dead-zone scan (`findStuckMergedIssues`) skips a repo whose feature
+ * branch is its base, because there a reviewer labels its own merges and the
+ * feature→base open-PR check cannot say which issues are still in review. With
+ * no verifier too, nothing else moves an issue at `pr merged` (step 2); with
+ * nothing to release it, nothing moves one at `pr approved` (step 3). Reads the
+ * shared open-issue snapshot and the cached merged-PR list the dead-zone scan
+ * already uses: no new scan. A no-op whenever a reviewer is enabled.
  */
 export async function resumeHumanMerges(
   repoConfig: RepoConfig,
@@ -197,19 +203,24 @@ export async function resumeHumanMerges(
   logger: Logger,
   deps: HumanMergeDeps & { openIssues?: typeof getOpenIssues; mergedToBase?: typeof findIssuesMergedToBase } = {},
 ): Promise<{ issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[]> {
-  if (roleFor("reviewer", config) || roleFor("verifier", config)) return [];
+  if (roleFor("reviewer", config)) return [];
   const l = repoConfig.lifecycleLabels;
   const later = [l.readyForProd, l.releasePending, l.prodVerifyHeld, l.readyToClose, repoConfig.github.blockedLabel];
   const open = (deps.openIssues ?? getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger)
     .filter((i) => !later.some((x) => hasLabel(i, x)));
-  const atMerged = open.filter((i) => hasLabel(i, l.prMerged)).map((i) => i.number);
-  const atApproved = nothingReleases(repoConfig, config)
+  const atMerged = roleFor("verifier", config) ? [] : open.filter((i) => hasLabel(i, l.prMerged)).map((i) => i.number);
+  const atApproved = !roleFor("verifier", config) && nothingReleases(repoConfig, config)
     ? open.filter((i) => hasLabel(i, l.prApproved) && !hasLabel(i, l.prMerged)).map((i) => i.number)
     : [];
-  if (atMerged.length + atApproved.length === 0) return [];
+  const inReview = open
+    .filter((i) => (hasLabel(i, l.prUnderReview) || hasLabel(i, l.prPendingActions)) && !hasLabel(i, l.prMerged) && !hasLabel(i, l.prApproved))
+    .map((i) => i.number);
+  if (atMerged.length + atApproved.length + inReview.length === 0) return [];
   const out: { issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[] = [];
-  for (const m of (deps.mergedToBase ?? findIssuesMergedToBase)(repoConfig, [...atMerged, ...atApproved], logger)) {
-    const settled = await settleHumanMerge(repoConfig, config, m, logger, deps, atMerged.includes(m.issueNumber) ? "merged" : "approved");
+  for (const m of (deps.mergedToBase ?? findIssuesMergedToBase)(repoConfig, [...inReview, ...atMerged, ...atApproved], logger)) {
+    const from = inReview.includes(m.issueNumber) ? "start" : atMerged.includes(m.issueNumber) ? "merged" : "approved";
+    if (from === "start") await notifyOnce("merged", repoConfig, [m.issueNumber], logger);
+    const settled = await settleHumanMerge(repoConfig, config, m, logger, deps, from);
     if (settled) out.push({ issueNumber: m.issueNumber, prNumber: m.prNumber, settled });
   }
   return out;
@@ -337,16 +348,11 @@ export async function runReconcileStage(
       // (EM#441: four issues were approved on 2026-10-01 with no acceptance
       // evidence). Hand the issue to the verify stage instead; it runs the full
       // dev verification and owns the move to `pr approved`.
-      // No `tried` guard: each step is a lifecycle move, safe to retry every pass.
+      // No reviewer: a person merged it, and resumeHumanMerges (below) settles it every
+      // pass, whatever the branch layout. No `tried` guard: each step is a lifecycle move.
       if (!roleFor("reviewer", config)) {
-        const settled = await settleHumanMerge(repoConfig, config, s, reconLogger);
-        if (settled) {
-          events.push({ message: `${repoConfig.githubRepo} #${s.issueNumber}: PR #${s.prNumber} merged by a person (no reviewer) → ${settled}`, level: "info" });
-          seen.delete(s.issueNumber);
-          current.delete(s.issueNumber);
-          processed++;
-          continue;
-        }
+        current.delete(s.issueNumber);
+        continue;
       }
       if (roleFor("verifier", config) && !tried.has(s.issueNumber)) {
         tried.add(s.issueNumber);
