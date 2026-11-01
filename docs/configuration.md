@@ -359,6 +359,12 @@ Type: object · Default: see [GitHub conventions](#github-conventions-github)
 
 The other GitHub names the Foreman reads and writes: the blocked label, the priority labels, the dependency-PR branch prefixes, and the titles and signature of the PRs and issues it files. Set any subset; each default is what the Foreman always used. Global, like lifecycleLabels. See [GitHub conventions](#github-conventions-github).
 
+### `workSource`
+
+Type: string · Default: `"github"`
+
+Where the Foreman's work comes from: the id of the work-source plugin that selects issues and records their moves. `github` (default) is GitHub issues, the only one today; any other value turns GitHub off, and the Foreman refuses to start until a plugin of that id is installed.
+
 ### `paperclip`
 
 Type: object · Default: see [paperclip.md](paperclip.md)

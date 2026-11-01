@@ -17,6 +17,7 @@ import { runRepoPass } from "../dist/orchestrator.js";
 import { configureIssueCache } from "../dist/github.js";
 import { setStatePath } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
 
 const DEFAULT = ["reconcile", "review", "verify", "promote", "release", "revise", "implement", "branch-sync", "dependabot", "unstick"];
 const logger = createLogger({ format: "text", level: "error" });
@@ -24,7 +25,8 @@ const names = (stages) => stages.map((s) => s.type ?? s.id);
 
 let tmp, F, saved;
 
-before(() => {
+before(async () => {
+  await startGitHubWorkSource();
   tmp = mkdtempSync(join(tmpdir(), "foreman-stages-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);

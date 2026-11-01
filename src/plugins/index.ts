@@ -1,4 +1,5 @@
 import { registerPlugin, registeredPlugins } from "./registry.js";
+import { GitHubPlugin } from "./github.js";
 import { PaperclipPlugin } from "./paperclip.js";
 import { TechLeadPlugin } from "./tech-lead.js";
 import { SrePlugin } from "./sre.js";
@@ -12,6 +13,7 @@ import { EmPlugin } from "./em.js";
  */
 export function registerBuiltinPlugins(): void {
   if (registeredPlugins().length > 0) return;
+  registerPlugin(new GitHubPlugin());
   registerPlugin(new PaperclipPlugin());
   registerPlugin(new TechLeadPlugin());
   registerPlugin(new SrePlugin());

@@ -16,6 +16,7 @@ import {
 } from "../dist/plugins/registry.js";
 import { PaperclipPlugin } from "../dist/plugins/paperclip.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
 
 const logger = createLogger({ format: "text", level: "error" });
 let tmp, ghLog, saved;
@@ -102,6 +103,7 @@ const ghCalls = () => (existsSync(ghLog) ? readFileSync(ghLog, "utf8").trim().sp
 
 async function passWith(observer) {
   resetRegistryForTests();
+  await startGitHubWorkSource();
   const events = [];
   if (observer) addObserver({ ...observer, onEvent: async (e) => { events.push(e); } });
   rmSync(ghLog, { force: true });
