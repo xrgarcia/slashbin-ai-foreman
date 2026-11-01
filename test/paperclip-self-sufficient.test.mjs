@@ -334,3 +334,172 @@ test("blocks: the state file keeps and forgets a card's block", () => {
   saveCardBlock("r7", null);
   assert.deepEqual(loadCardBlocks(), { r8: { at: null, ruling: true } });
 });
+
+// --- PR #171 review: the Tech Lead's replay matrices ------------------------------------
+
+const closedSnap = (mirror, how = "completed", more = {}) =>
+  mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], states: async (ns) => new Map(ns.map((n) => [n, how])), closed: [{ item, state: how }], ...more }, logger());
+const emWrites = (fake) => fake.calls.filter((c) => c.method === "PATCH" && c.body?.assigneeAgentId === "em-agent");
+const unassigned = (r) => r.assigneeAgentId == null && r.assigneeUserId == null;
+
+// Closed-issue write authorization.
+test("review closed R1: a queued approved update before any closed snapshot leaves a Done card Done, no EM", async () => {
+  const fake = fakePaperclip([row7("done", { assigneeAgentId: null })]);
+  const mirror = mirrorOn(fake);
+  await transition(mirror, "approved");
+  assert.equal(fake.rows[0].status, "done");
+  assert.equal(emWrites(fake).length, 0);
+});
+
+test("review closed R2: released, then a delayed approved, keeps the card Done with no EM hand-off", async () => {
+  const fake = fakePaperclip([row7("in_progress", { assigneeAgentId: "sre-agent" })]);
+  const mirror = mirrorOn(fake);
+  await mirror.onRelease({ state: "merged", pr: 12, productionBranch: "main", issues: [item] }, logger());
+  assert.equal(fake.rows[0].status, "done");
+  await transition(mirror, "approved");
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+  assert.equal(emWrites(fake).length, 0);
+});
+
+test("review closed R3: a move deferred behind a Tech Lead run never lands on an issue the snapshot reads completed", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "tl-agent", executionRunId: "run-1", checkoutRunId: "run-1" })]);
+  const mirror = mirrorOn(fake);
+  await transition(mirror, "approved");
+  assert.equal(fake.rows[0].assigneeAgentId, "tl-agent", "deferred while the run is in flight");
+  Object.assign(fake.rows[0], { executionRunId: null, checkoutRunId: null });
+  await closedSnap(mirror);
+  assert.equal(emWrites(fake).length, 0, "an open-stage EM assignment was written first");
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});
+
+test("review closed R4: closure of an in_review card held by the Tech Lead is Done and nobody's", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "tl-agent" })]);
+  const mirror = mirrorOn(fake);
+  await closedSnap(mirror);
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});
+
+// Persisted ruling hand-off.
+test("review ruling R1: a ruling block lost to an outage on a Foreman To-do card is delivered by the next snapshot", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "tl-agent" })]);
+  const mirror = mirrorOn(fake, {}, memoryStore());
+  await snapshot(mirror, ["approved", "pr under review"]);
+  await transition(mirror, "changesRequested");
+  assert.equal(fake.rows[0].status, "todo");
+  fake.down = true;
+  await ruling(mirror);
+  assert.equal(fake.rows[0].status, "todo", "the outage lost the block");
+  fake.down = false;
+  await snapshot(mirror, ["approved", "pr pending actions"]);
+  const r = fake.rows[0];
+  assert.equal(r.status, "blocked");
+  assert.equal(r.assigneeAgentId, "em-agent");
+  assert.match(r.unblockDescriptor.action, /^blocked: needs an EM scope ruling: PR #3/);
+  await transition(mirror, "changesRequested");
+  assert.equal(r.status, "blocked");
+  assert.equal(r.assigneeAgentId, "em-agent");
+});
+
+for (const restart of [false, true]) {
+  test(`review ruling R2: a ruling block lost on a Tech Lead card is delivered on the first reachable snapshot${restart ? ", after a restart" : ""}`, async () => {
+    const store = memoryStore();
+    const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "tl-agent" })]);
+    let mirror = mirrorOn(fake, {}, store);
+    await snapshot(mirror, ["approved", "pr under review"]);
+    fake.down = true;
+    await ruling(mirror);
+    assert.equal(fake.rows[0].status, "in_review");
+    fake.down = false;
+    if (restart) mirror = mirrorOn(fake, {}, store);
+    for (let i = 0; i < 3; i++) {
+      await snapshot(mirror, ["approved", "pr pending actions"], { foremanHeld: true });
+      const r = fake.rows[0];
+      assert.equal(r.status, "blocked", `snapshot ${i + 1}`);
+      assert.equal(r.assigneeAgentId, "em-agent");
+      assert.match(r.unblockDescriptor.action, /^blocked: needs an EM scope ruling/);
+    }
+  });
+}
+
+// External hold made after the cached scan.
+const poHop = { owner: { agentId: "po-agent" }, action: "Escalation in progress (process.escalate hand_up): Product Owner holds this card until it is resolved." };
+const escalateToPo = (r) => Object.assign(r, { status: "blocked", assigneeAgentId: "po-agent", assigneeUserId: null, unblockDescriptor: { ...poHop } });
+const onPo = (r) => r.status === "blocked" && r.assigneeAgentId === "po-agent" && r.unblockDescriptor?.action === poHop.action;
+
+test("review hold R1: an escalation made after the scan survives an approved update and three reconciliations", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "em-agent" })]);
+  const mirror = mirrorOn(fake);
+  await mirror.ensureIndex(true);
+  escalateToPo(fake.rows[0]);
+  await transition(mirror, "approved");
+  assert.ok(onPo(fake.rows[0]), "the update took the card back from the PO");
+  for (let i = 0; i < 3; i++) {
+    await snapshot(mirror, ["pr approved"]);
+    assert.ok(onPo(fake.rows[0]), `reconciliation ${i + 1}`);
+  }
+});
+
+test("review hold R2: after a pendingVerification snapshot, a later escalation survives an approved update", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "em-agent" })]);
+  const mirror = mirrorOn(fake);
+  await snapshot(mirror, ["pr approved"]);
+  escalateToPo(fake.rows[0]);
+  await transition(mirror, "approved");
+  assert.ok(onPo(fake.rows[0]));
+  await snapshot(mirror, ["pr approved"]);
+  assert.ok(onPo(fake.rows[0]));
+});
+
+test("review hold: a label-lifted stale block still returns to its stage", async () => {
+  const fake = fakePaperclip([row7("blocked", { assigneeAgentId: "em-agent", unblockDescriptor: { owner: "board", action: "blocked: needs attention" } })]);
+  const mirror = mirrorOn(fake);
+  await snapshot(mirror, ["pr approved"]);
+  assert.equal(fake.rows[0].status, "in_review");
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+});
+
+// Terminal ownership.
+test("review owner R1: ownsCards off, closure clears the EM and a late approved keeps it Done and nobody's", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "em-agent" })]);
+  const mirror = mirrorOn(fake);
+  await closedSnap(mirror);
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+  await transition(mirror, "approved");
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});
+
+test("review owner R2: ownsCards on, closure clears the EM and a late approved keeps it Done and nobody's", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "em-agent" })]);
+  const mirror = mirrorOn(fake, { ownsCards: true });
+  const card = { item, title: "issue 7", url: "https://github.com/example/r/issues/7", state: "completed", stage: null };
+  await mirror.onEvent({ kind: "snapshot", repo: "example/r", items: [], states: async (ns) => new Map(ns.map((n) => [n, "completed"])), cards: [card] }, logger());
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+  await transition(mirror, "approved");
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});
+
+test("review owner R3: an already-Done card still held by the EM is unassigned on closure", async () => {
+  const fake = fakePaperclip([row7("done", { assigneeAgentId: "em-agent" })]);
+  const mirror = mirrorOn(fake);
+  await closedSnap(mirror);
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+  await transition(mirror, "approved");
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});
+
+test("review owner R4: closure of a card held by a person clears the user too", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: null, assigneeUserId: "ray" })]);
+  const mirror = mirrorOn(fake);
+  await closedSnap(mirror);
+  assert.equal(fake.rows[0].status, "done");
+  assert.ok(unassigned(fake.rows[0]));
+});

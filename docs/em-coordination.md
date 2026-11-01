@@ -51,9 +51,12 @@ EM's: route it to the SRE, then release the hold.
 **The card follows GitHub on its own (EM#1150 feature 6).** Each pass, the Foreman's mirror
 places every card from GitHub: the column and the holder the stage calls for (a hand-off lost
 to a Paperclip outage is re-made next pass), a card for any lifecycle issue that has none,
-created at its stage, and done or cancelled for every card whose issue is closed. A closed
-issue's card is terminal: no late stage update moves it, until GitHub reads the issue open
-again. Never fix a card by hand that the next pass would place: fix the issue.
+created at its stage, and done or cancelled, with no agent or person on it, for every card whose
+issue is closed or released. A closed issue's card is terminal: no late or deferred stage update
+moves it or assigns anyone, until GitHub reads the issue open again. A hold a person or a seat
+put on the card after the last pass is read live before any stage move, so it is kept, and a
+ruling block a Paperclip outage lost is re-delivered on the next pass. Never fix a card by hand
+that the next pass would place: fix the issue.
 
 ## 2. Holds by code
 
