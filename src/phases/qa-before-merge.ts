@@ -11,11 +11,11 @@ import { emit, advance } from "../work-source.js";
 import { HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../agent.js";
 import { roleFor } from "../plugins/registry.js";
 import { findQaPendingPr, getPRCheckVerdict, countCiBouncesSinceReview, bounceForRedCI } from "../github.js";
-import { qaBeforeMergeApplies, realQaLocalDeps, runQaBeforeMerge, type QaDeps, type QaPreMergeDecision } from "../qa-report.js";
+import { qaBeforeMergeApplies, qaFailStandsBody, realQaLocalDeps, runQaBeforeMerge, type QaDeps, type QaPreMergeDecision } from "../qa-report.js";
 import { isToolingHold } from "./verify.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { BackoffTracker, backoffSettings, formatWait } from "../backoff.js";
-import { CycleEvent, activeRuns, itemOf, reviewFailureCount, reviewFailurePause, stoppedReason } from "./common.js";
+import { CycleEvent, activeRuns, itemOf, pausedByBlockedLabel, reviewFailureCount, reviewFailurePause, stoppedReason } from "./common.js";
 import { settleReviewOutcome } from "./review.js";
 import { resolve } from "node:path";
 
@@ -51,6 +51,8 @@ export async function tryQaBeforeMerge(
   const target = findQaPendingPr(repoConfig, repoConfig.reviewerLogin, qlog);
   if (!target) return "none";
   const { prNumber, issueNumbers, headSha } = target;
+  // The EM's `blocked` label on the PR's issue pauses QA, and the Tech Lead is not offered the PR either.
+  if (pausedByBlockedLabel(repoConfig, "QA before the merge", prNumber, issueNumbers, qlog)) return "waiting";
   const { repoFailure, agentUnavailable, maxCiBounces } = config.backoff;
 
   if (qaDefer.waiting(repoName)) return "waiting";
@@ -90,12 +92,15 @@ export async function tryQaBeforeMerge(
   try {
     await emit({ kind: "session", session: { ...session, status: "started" } }, null, qlog);
     await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, qlog);
-    const decision: QaPreMergeDecision = await runQaBeforeMerge(repoConfig.githubRepo, prNumber, headSha, deps ?? realQaLocalDeps(repoConfig, config, qlog), qlog);
+    const qaDeps = deps ?? realQaLocalDeps(repoConfig, config, qlog);
+    const decision: QaPreMergeDecision = await runQaBeforeMerge(repoConfig.githubRepo, prNumber, headSha, qaDeps, qlog);
     await emit({ kind: "session", session: { ...qaSession, status: decision.kind === "pass" ? "finished" : "failed", detail: decision.kind } }, null, qlog);
 
     if (decision.kind === "fail") {
-      // A QA FAIL is a review round (reports.ts counts its report), so REVIEW_ROUNDS_ALERT bounds the loop.
       for (const n of issueNumbers) await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
+      // A QA FAIL is a review round (reports.ts counts its report), so REVIEW_ROUNDS_ALERT bounds the loop.
+      // A reused FAIL posted no report, so it says it stands, or the round would go uncounted (foreman#167).
+      if (decision.reused) await qaDeps.post(prNumber, qaFailStandsBody(headSha)).catch((e: unknown) => qlog.warn(`QA: PR #${prNumber} standing FAIL not posted: ${String(e).slice(0, 200)}`));
       ended = { status: "finished", detail: `QA failed PR #${prNumber}; sent back to the builder` };
       events?.push({ message: `❌ ${repoConfig.githubRepo} PR #${prNumber}: QA failed it — sent back to the builder, the SRE does not see it`, level: "warn" });
       return "handled";

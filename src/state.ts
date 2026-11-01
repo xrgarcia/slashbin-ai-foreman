@@ -178,6 +178,16 @@ export interface RepoState {
   // (src/unstick.ts). Persisted so a restart does not call the EM again for the
   // same reason, and so a failed call is retried to its cap across restarts.
   unstick?: Record<string, UnstickEntry>;
+  // Revisions that pushed nothing by declaration, per PR number, at the head
+  // they answered (src/no-commit-streak.ts). Persisted so a restart does not
+  // reset a stalemate count (foreman#167).
+  noCommitStreaks?: Record<number, NoCommitStreak>;
+}
+
+/** Consecutive no-commit revisions on one PR head. A different head starts afresh. */
+export interface NoCommitStreak {
+  head: string;
+  count: number;
 }
 
 /**
@@ -310,6 +320,7 @@ function loadRepoStateCopy(repoName: string): RepoState {
       ...(repo.promotionStallNoted ? { promotionStallNoted: [...repo.promotionStallNoted] } : {}),
       ...(repo.promotionHeldNoted ? { promotionHeldNoted: repo.promotionHeldNoted } : {}),
       ...(repo.unstick ? { unstick: Object.fromEntries(Object.entries(repo.unstick).map(([k, v]) => [k, { ...v }])) } : {}),
+      ...(repo.noCommitStreaks ? { noCommitStreaks: Object.fromEntries(Object.entries(repo.noCommitStreaks).map(([k, v]) => [k, { ...v }])) } : {}),
     };
   }
 
