@@ -10,6 +10,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
 import { PaperclipClient, PaperclipClientError, createPaperclipClient } from "../dist/paperclip/client.js";
+import { slashbinProfile } from "../dist/profiles/slashbin.js";
+
+/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
+const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-paperclip-test-"));
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -310,13 +314,13 @@ test("client: a comment's credited author rides only on a write that posts one; 
   const seen = [];
   let refuse = null;
   const fetch = async (url, init = {}) => {
-    const author = init.headers?.["x-slashbin-comment-author"] ?? null;
+    const author = init.headers?.[HEADER] ?? null;
     seen.push(`${init.method} ${author}`);
     if (author && refuse) return new Response(JSON.stringify({ error: "no", code: refuse.code }), { status: refuse.status });
     return new Response(JSON.stringify({ id: "x" }), { status: 200 });
   };
   const warned = [];
-  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, warn: (m) => warned.push(m) });
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, warn: (m) => warned.push(m), commentAuthorHeader: HEADER });
   await c.updateIssue("i", { status: "blocked" }, { commentAuthor: "agent:a" });
   await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:a" });
   await c.createComment("i", "hi", { commentAuthor: "agent:a" });
@@ -338,10 +342,10 @@ test("client: a comment's credited author rides only on a write that posts one; 
 test("client: with actingAs, every write is credited to it unless the call names an author or null; reads never are", async () => {
   const seen = [];
   const fetch = async (url, init = {}) => {
-    seen.push(`${init.method} ${init.headers?.["x-slashbin-comment-author"] ?? null}`);
+    seen.push(`${init.method} ${init.headers?.[HEADER] ?? null}`);
     return new Response(JSON.stringify(init.method === "GET" ? [] : { id: "x" }), { status: 200 });
   };
-  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman" });
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman", commentAuthorHeader: HEADER });
   await c.updateIssue("i", { status: "blocked" });
   await c.updateIssue("i", { status: "blocked", comment: "hi" });
   await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:sre" });
@@ -354,4 +358,17 @@ test("client: with actingAs, every write is credited to it unless the call names
     "PATCH agent:foreman", "PATCH agent:foreman", "PATCH agent:sre", "PATCH null",
     "POST agent:foreman", "POST agent:foreman", "PATCH agent:foreman", "GET null",
   ]);
+});
+
+test("client: with no commentAuthorHeader, no credit header is ever sent, whatever the author", async () => {
+  const sent = [];
+  const fetch = async (url, init = {}) => {
+    sent.push(Object.keys(init.headers ?? {}).sort().join(","));
+    return new Response(JSON.stringify(init.method === "GET" ? [] : { id: "x" }), { status: 200 });
+  };
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" });
+  await c.createComment("i", "hi", { commentAuthor: "agent:sre" });
+  await c.getAgent("a");
+  assert.deepEqual(sent, ["accept,content-type", "accept,content-type", "accept"]);
 });

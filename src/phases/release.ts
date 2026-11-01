@@ -196,12 +196,15 @@ function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): num
  * "follow-up to #N" those #N names. A read failure never touches the release.
  */
 function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger: Logger): void {
+  // No epic label configured (`epicRefLabel`): epics are not tracked, so nothing is read or raised.
+  const label = repoConfig.epicRefLabel;
+  if (!label) return;
   try {
-    let epics = epicRefs(codeHost().readIssueBody(repoConfig, n));
+    let epics = epicRefs(codeHost().readIssueBody(repoConfig, n), label);
     const parent = /follow-up to #(\d+)/i.exec(title);
-    if (!epics.length && parent) epics = epicRefs(codeHost().readIssueBody(repoConfig, Number(parent[1])));
-    if (noteEpicChildClosed(repoConfig.name, repoConfig.githubRepo, n, epics) > 0) {
-      logger.info(`#${n} closed in production; asking the EM whether engineering-manager ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
+    if (!epics.length && parent) epics = epicRefs(codeHost().readIssueBody(repoConfig, Number(parent[1])), label);
+    if (noteEpicChildClosed(repoConfig.name, repoConfig.githubRepo, n, epics, label) > 0) {
+      logger.info(`#${n} closed in production; asking the EM whether ${label} ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
     }
   } catch (err) {
     logger.warn(`#${n}: could not read its epic references (${err instanceof Error ? err.message : String(err)}); the EM is not told`);
