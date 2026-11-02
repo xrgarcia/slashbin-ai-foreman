@@ -1941,6 +1941,8 @@ export class PaperclipMirror implements WorkObserver {
 
   private async move(id: string, to: PaperclipStepMove, held = false, liveOpen = false): Promise<boolean> {
     if (to === null || to === "waiting") return true;
+    // Blocks unread, a card's hold is unknown: move nothing (fail closed); the next snapshot places the card.
+    if (!(await this.ensureBlocks())) return false;
     // A closed issue's card is terminal; only its close moves it, and only a
     // live GitHub read of the issue as open (`liveOpen`) reopens it (Foreman #112).
     if (to !== "done" && this.terminal(id)) {

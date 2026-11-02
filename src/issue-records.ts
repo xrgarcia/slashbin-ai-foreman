@@ -279,18 +279,34 @@ export function importIssueRecord(repoConfig: RepoConfig, n: number, change: (dr
 }
 
 function edit(repoConfig: RepoConfig, n: number, change: (draft: IssueRecord) => void, importing: boolean): Promise<boolean> {
-  const key = keyOf(repoConfig, n);
+  return mutateRecord<IssueRecord>(keyOf(repoConfig, n), repoConfig, () => !importing && withheld(repoConfig, n), change, (draft) => {
+    for (const f of FIELDS) if (draft[f] === undefined) delete draft[f];
+    if (draft.unstick && Object.keys(draft.unstick).length === 0) delete draft.unstick;
+  });
+}
+
+/**
+ * The one load–clone–change–normalize–compare–save pipeline every record kind goes through (issue, PR, repo).
+ * `blocked` withholds the record (its legacy import has not settled); `normalize` drops what holds nothing, per kind.
+ * Resolves `false` when the record could not be read or saved, in which case nothing changed.
+ */
+function mutateRecord<R extends object>(
+  key: RecordKey,
+  repoConfig: RepoConfig,
+  blocked: () => boolean,
+  change: (draft: R) => void,
+  normalize: (draft: R & Record<string, unknown>) => void,
+): Promise<boolean> {
   return serially(key, async () => {
     const source = activeWorkSource();
-    if (!source || (!importing && withheld(repoConfig, n))) return false;
+    if (!source || blocked()) return false;
     const load = await source.loadRecord(key, repoConfig);
     if (load.status === "unavailable") return false;
     const before: ItemRecord = load.status === "found" ? load.record : {};
-    const draft = structuredClone(before) as IssueRecord & Record<string, unknown>;
+    const draft = structuredClone(before) as R & Record<string, unknown>;
     change(draft);
-    for (const f of FIELDS) if (draft[f] === undefined) delete draft[f];
-    if (draft.unstick && Object.keys(draft.unstick).length === 0) delete draft.unstick;
-    // An issue with no record and nothing to record stays that way: no comment for an empty record.
+    normalize(draft);
+    // A record with nothing to record stays absent: no comment for an empty record.
     if (load.status === "absent" && Object.keys(draft).length === 0) return true;
     if (canonicalJson(draft) === canonicalJson(before)) return true;
     return source.saveRecord(key, draft, repoConfig);
@@ -391,20 +407,8 @@ export function importPrRecord(repoConfig: RepoConfig, n: number, change: (draft
 }
 
 function editPr(repoConfig: RepoConfig, n: number, change: (draft: PrRecord) => void, importing: boolean): Promise<boolean> {
-  const key = keyOf(repoConfig, n, "pr");
-  return serially(key, async () => {
-    const source = activeWorkSource();
-    if (!source || (!importing && prWithheld(repoConfig, n))) return false;
-    const load = await source.loadRecord(key, repoConfig);
-    if (load.status === "unavailable") return false;
-    const before: ItemRecord = load.status === "found" ? load.record : {};
-    const draft = structuredClone(before) as PrRecord & Record<string, unknown>;
-    change(draft);
+  return mutateRecord<PrRecord>(keyOf(repoConfig, n, "pr"), repoConfig, () => !importing && prWithheld(repoConfig, n), change, (draft) => {
     for (const f of PR_FIELDS) if (draft[f] === undefined) delete draft[f];
-    // A PR with no record and nothing to record stays that way: no comment for an empty record.
-    if (load.status === "absent" && Object.keys(draft).length === 0) return true;
-    if (canonicalJson(draft) === canonicalJson(before)) return true;
-    return source.saveRecord(key, draft, repoConfig);
   });
 }
 
@@ -460,32 +464,26 @@ export function importRepoRecord(repoConfig: RepoConfig, change: (draft: RepoRec
 }
 
 function editRepo(repoConfig: RepoConfig, change: (draft: RepoRecord) => void, importing: boolean): Promise<boolean> {
-  const key = keyOf(repoConfig, REPO_RECORD_NUMBER, "repo");
-  return serially(key, async () => {
-    const source = activeWorkSource();
-    if (!source || (!importing && repoRecordWithheld(repoConfig))) return false;
-    const load = await source.loadRecord(key, repoConfig);
-    if (load.status === "unavailable") return false;
-    const before: ItemRecord = load.status === "found" ? load.record : {};
-    const draft = structuredClone(before) as RepoRecord & Record<string, unknown>;
-    change(draft);
+  return mutateRecord<RepoRecord>(keyOf(repoConfig, REPO_RECORD_NUMBER, "repo"), repoConfig, () => !importing && repoRecordWithheld(repoConfig), change, (draft) => {
     for (const f of REPO_FIELDS) {
       const v = draft[f];
       if (v === undefined || (Array.isArray(v) ? v.length === 0 : typeof v === "object" && v !== null && Object.keys(v).length === 0)) delete draft[f];
     }
-    // A repo with no record and nothing to record stays that way: no issue and no comment for an empty record.
-    if (load.status === "absent" && Object.keys(draft).length === 0) return true;
-    if (canonicalJson(draft) === canonicalJson(before)) return true;
-    return source.saveRecord(key, draft, repoConfig);
   });
 }
 
-/** Repos whose legacy `.agent-state.json` repo-level entries (EM questions, card blocks) are not all imported yet. */
-const unimportedRepos = new Set<string>();
+/** Repos whose legacy `.agent-state.json` repo-level entries (EM questions, card blocks) are not all imported yet, with what is pending. */
+const unimportedRepos = new Map<string, Set<string>>();
 
-/** Set by the one-time import (legacy-records.ts): true while a repo-level legacy entry of `githubRepo` could not be saved. */
-export function setRepoUnimported(githubRepo: string, pending: boolean): void {
-  if (pending) unimportedRepos.add(githubRepo);
+/**
+ * Set by the one-time import (legacy-records.ts): true while a repo-level legacy entry of `githubRepo` could not be
+ * saved. `what` names the kind of entry, so the questions and the card blocks settle independently.
+ */
+export function setRepoUnimported(githubRepo: string, pending: boolean, what = "records"): void {
+  const kinds = unimportedRepos.get(githubRepo) ?? new Set<string>();
+  if (pending) kinds.add(what);
+  else kinds.delete(what);
+  if (kinds.size > 0) unimportedRepos.set(githubRepo, kinds);
   else unimportedRepos.delete(githubRepo);
 }
 

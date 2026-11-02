@@ -27,17 +27,22 @@ function describe(config: RepoConfig, d: { ahead: number; behind: number; mergeB
 }
 
 /**
- * The divergence standing on `config`'s repo, or null. The first call in a process asks git; later ones answer
- * from the last observation, which the implement stage refreshes on every pass. A git failure with nothing
- * observed yet reads as null: it proves nothing, and the fast-forward that follows asks again.
+ * What git shows about the divergence on `config`'s repo: a Divergence, null (reconciled), or undefined (unknown:
+ * git cannot be read and nothing was observed yet, which proves nothing). The first call in a process asks git;
+ * later ones answer from the last observation, which the implement stage refreshes on every pass.
  */
-export function standingDivergence(config: RepoConfig): Divergence | null {
+export function knownDivergence(config: RepoConfig): Divergence | null | undefined {
   if (!observed.has(config.name)) {
     const d = readDivergence(config);
-    if (d === undefined) return null;
+    if (d === undefined) return undefined;
     observed.set(config.name, d ? describe(config, d) : null);
   }
   return observed.get(config.name) ?? null;
+}
+
+/** The divergence standing on `config`'s repo, or null; an unknown state reads as null here (the fast-forward that follows asks again). Callers that must tell unknown from reconciled use `knownDivergence`. */
+export function standingDivergence(config: RepoConfig): Divergence | null {
+  return knownDivergence(config) ?? null;
 }
 
 /** Record what a fresh read showed: `d` diverged, null reconciled. Returns the previous observation. */

@@ -34,8 +34,10 @@
 //   - a standing `branchBlock` is derived from git now: its announced issues keep `divergenceTold`, its ruled ids
 //     become the repo record's `divergenceRuled`, and the block itself goes. A block whose episode git no longer
 //     shows is dropped;
-//   - `cardBlocks` carry no repo, so they move into the first configured repo's record; the mirror's store reads
+//   - `cardBlocks` carry no repo, so they move into the first configured repo's record (whichever repo's pass comes first moves them, and the block store reads none while the file still holds one); the mirror's store reads
 //     every repo's blocks and re-files a block under its card's own repo the next time it saves it;
+//   - an orphan is a repo entry no CONFIGURED repo matches (`--repo` narrows the lanes, never the configured list); a repo not
+//     processed this run keeps its entries. An unreadable git state keeps the branch block for the retry;
 //   - `implemented` (derived from labels), `promotionHeldNoted` (memory only), the empty shells earlier steps
 //     left, and every repo entry no configured repo matches are dropped;
 //   - an entry leaves the file only after its save succeeded; one that could not be read or saved stays, and its
@@ -51,7 +53,7 @@ import { importIssueRecord, importPrRecord, setRepoUnimported, setUnimported, se
 import { activeWorkSource, codeHost } from "./plugins/registry.js";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { importRepoRecord, type CardBlockRecord, type NoCommitStreak, type ProdRelease } from "./issue-records.js";
-import { standingDivergence } from "./divergence.js";
+import { knownDivergence } from "./divergence.js";
 import { legacyStatePath } from "./state-dir.js";
 import type { UnstickEntry } from "./unstick.js";
 import type { SavedRelease } from "./release-tracker.js";
@@ -97,8 +99,8 @@ async function importOnce(repoConfig: RepoConfig, logger: Logger, configured?: r
   const issuesPending = await importIssues(repoConfig, logger);
   const prsPending = await importPrs(repoConfig, logger);
   const repoPending = await importRepoLevel(repoConfig, logger);
-  // The card blocks name no repo: the first configured repo's pass moves them all.
-  const blocksPending = configured && configured[0]?.name === name ? await importCardBlocks(repoConfig, logger) : 0;
+  // The card blocks name no repo: whichever repo's pass comes first moves them all into the first configured repo's record.
+  const blocksPending = configured?.[0] ? await importCardBlocks(configured[0], logger) : 0;
   // Dead fields, empty shells and repos no configured repo matches; the file goes when nothing is left.
   const orphans = editLegacyFile(() => {}, configured ? new Set(configured.map((r) => r.name)) : undefined);
   if (orphans.length > 0) logger.info(`Legacy state: dropped ${orphans.length} repo entr(ies) no configured repo matches (${orphans.join(", ")})`);
@@ -396,10 +398,11 @@ async function importRepoLevel(repoConfig: RepoConfig, logger: Logger): Promise<
     } else pending++;
   }
   if (bb) {
-    // Only an episode git still shows is carried over; a reconciled one holds nothing.
-    const standing = bb.mergeBase !== undefined && standingDivergence(repoConfig)?.mergeBase === bb.mergeBase;
-    let ok = true;
-    if (standing) {
+    // Only an episode git still shows is carried over; a reconciled one holds nothing. Git unreadable is neither:
+    // the entry stays for the next run, with its announced issues and ruled ids.
+    const now = bb.mergeBase === undefined ? null : knownDivergence(repoConfig);
+    let ok = now !== undefined;
+    if (ok && now?.mergeBase === bb.mergeBase) {
       const ruled = (bb.ruled ?? []).filter((x) => typeof x === "string");
       if (ruled.length > 0) ok = await importRepoRecord(repoConfig, (d) => { d.divergenceRuled = [...new Set([...(d.divergenceRuled ?? []), ...ruled])]; });
       for (const n of bb.announced ?? []) {
@@ -418,10 +421,27 @@ async function importRepoLevel(repoConfig: RepoConfig, logger: Logger): Promise<
   return pending;
 }
 
-/** The file's card blocks go into `home`'s record, one block at a time, each leaving the file once saved. */
-async function importCardBlocks(home: RepoConfig, logger: Logger): Promise<number> {
+/** True while `.agent-state.json` still holds a card block: they are not all in a repo record yet, so none may be read as the whole set. */
+export function legacyCardBlocksPending(): boolean {
+  return !isEmpty(readLegacyFile()?.cardBlocks);
+}
+
+let cardBlocksRun: Promise<number> | null = null;
+
+/** The file's card blocks go into `home`'s record, one block at a time, each leaving the file once saved. Resolves how many could not be saved. */
+function importCardBlocks(home: RepoConfig, logger: Logger): Promise<number> {
+  cardBlocksRun ??= moveCardBlocks(home, logger).finally(() => { cardBlocksRun = null; });
+  return cardBlocksRun;
+}
+
+async function moveCardBlocks(home: RepoConfig, logger: Logger): Promise<number> {
   const blocks = readLegacyFile()?.cardBlocks;
-  if (!blocks || isEmpty(blocks)) return 0;
+  if (!blocks || isEmpty(blocks)) {
+    setRepoUnimported(home.githubRepo, false, "cardBlocks");
+    return 0;
+  }
+  // Withheld until settled: the repo whose record will hold them must not read as one with none.
+  setRepoUnimported(home.githubRepo, true, "cardBlocks");
   let moved = 0, pending = 0;
   for (const [id, block] of Object.entries(blocks)) {
     if (!block || typeof block !== "object") { editLegacyFile((f) => { delete f.cardBlocks?.[id]; }); continue; }
@@ -429,6 +449,7 @@ async function importCardBlocks(home: RepoConfig, logger: Logger): Promise<numbe
     if (ok) { moved++; editLegacyFile((f) => { delete f.cardBlocks?.[id]; }); }
     else pending++;
   }
+  setRepoUnimported(home.githubRepo, pending > 0, "cardBlocks");
   logger.info(`Legacy card blocks: ${moved} moved to ${home.githubRepo}'s record${pending > 0 ? `, ${pending} not saved yet` : ""}`);
   return pending;
 }
@@ -452,4 +473,5 @@ export function resetLegacyImportForTests(): void {
   done.clear();
   running.clear();
   retryAt.clear();
+  cardBlocksRun = null;
 }
