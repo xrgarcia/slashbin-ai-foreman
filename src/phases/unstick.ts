@@ -120,10 +120,13 @@ export async function tryUnstick(
     const now = new Date().toISOString();
     // One write per issue (and one for the repo's own questions). A derived question ends with its condition;
     // an event question ends when its issue is no longer open, which a record of an open issue never shows.
-    const issuesInPlay = new Set<number>([0, ...loaded.records.keys(), ...candidates.map((c) => c.issue)]);
+    // Grouped once by issue: a scan of every candidate per issue is O(issues x candidates).
+    const byIssue = new Map<number, UnstickCandidate[]>();
+    for (const c of candidates) (byIssue.get(c.issue) ?? byIssue.set(c.issue, []).get(c.issue)!).push(c);
+    const issuesInPlay = new Set<number>([0, ...loaded.records.keys(), ...byIssue.keys()]);
     for (const n of issuesInPlay) {
       if (loaded.unavailable.has(n)) continue;
-      const mine = candidates.filter((c) => c.issue === n);
+      const mine = byIssue.get(n) ?? [];
       await mutate(repoConfig, n, (table) => {
         for (const [key, e] of Object.entries(table)) if (!EVENT_KINDS.has(e.kind) && !live.has(key)) delete table[key];
         for (const c of mine) {

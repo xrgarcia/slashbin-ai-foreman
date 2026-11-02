@@ -166,6 +166,17 @@ export async function loadIssueRecords(repoConfig: RepoConfig, numbers: Iterable
 }
 
 /**
+ * Which of `numbers` a pass may act on: those whose record can be read. The one owner of that question for
+ * the release stage and its neighbours: a pass loads once, up front, hands only `ok` to anything that
+ * comments, labels, closes, deploys or saves, and leaves `withheld` for a later cycle.
+ */
+export async function actionableIssues(repoConfig: RepoConfig, numbers: Iterable<number>): Promise<{ ok: number[]; withheld: number[]; loaded: IssueRecords }> {
+  const all = [...new Set(numbers)];
+  const loaded = await loadIssueRecords(repoConfig, all);
+  return { ok: all.filter((n) => !loaded.unavailable.has(n)), withheld: all.filter((n) => loaded.unavailable.has(n)), loaded };
+}
+
+/**
  * Change one issue's record: `change` edits a copy; the result is saved when it differs. Resolves
  * `false` when the record could not be read or saved, in which case nothing changed.
  */

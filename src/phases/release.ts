@@ -38,7 +38,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues } from "../release-tracker.js";
 import { loadRepoState, saveRepoState, type ProdRelease, type RepoState } from "../state.js";
-import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
+import { fieldTable, loadIssueRecords, actionableIssues, updateIssueRecord } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
@@ -218,26 +218,32 @@ async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move,
   const line =
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
     `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.`;
-  // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
-  const openIssues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
-  const open = new Set(openIssues.map((i) => i.number));
-  for (const n of writable(repoConfig, rel, logger).filter((i) => open.has(i))) {
-    comment(repoConfig, n, line, logger);
-    await advance(itemOf(repoConfig, n), move, repoConfig, logger);
-    noteEpicClose(repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
-  }
+  // Record first, then act: an issue is commented on and closed only once its verification is saved, so a failed
+  // save can never leave it closed with no record. An unrecorded issue is left for the next pass of this release.
   const at = iso(now());
+  const unsaved: number[] = [];
+  const saved = new Set<number>();
   for (const n of rel.issues) {
-    const saved = await updateIssueRecord(repoConfig, n, (d) => {
+    const ok = await updateIssueRecord(repoConfig, n, (d) => {
       d.prodVerified = {
         pr: rel.pr, mergeSha: rel.mergeSha ?? "", at,
         ...(rel.tag ? { tag: rel.tag } : {}), ...(evidence ? { evidence } : {}),
       };
     });
-    // Unrecorded, the promote stage cannot close #n on this verification: it queues it for release pending instead.
-    if (!saved) logger.warn(`#${n}: the production verification of release PR #${rel.pr} could not be recorded`);
+    if (ok) saved.add(n);
+    else unsaved.push(n);
   }
-  logger.info(`Release PR #${rel.pr} verified in production; closed ${rel.issues.map((n) => `#${n}`).join(", ")}`);
+  if (unsaved.length > 0) logger.warn(`Release PR #${rel.pr}: the production verification of ${unsaved.map((n) => `#${n}`).join(", ")} could not be recorded; nothing is closed for them, the release is verified again next pass`);
+  // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
+  const openIssues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const open = new Set(openIssues.map((i) => i.number));
+  for (const n of writable(repoConfig, rel, logger).filter((i) => open.has(i) && saved.has(i))) {
+    comment(repoConfig, n, line, logger);
+    await advance(itemOf(repoConfig, n), move, repoConfig, logger);
+    noteEpicClose(repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
+  }
+  if (unsaved.length > 0) return;
+  logger.info(`Release PR #${rel.pr} verified in production; closed ${[...saved].map((n) => `#${n}`).join(", ")}`);
   if (rel.soaked) {
     dropRelease(repoConfig, rel.pr);
     return;
@@ -332,8 +338,11 @@ async function stopRelease(repoConfig: RepoConfig, pr: number | null, issues: nu
  * here. Each issue is checked once per process (one comments read).
  */
 async function adoptSweepHolds(repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  const blocked = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+  const blockedAll = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
     .filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel));
+  // An issue whose record cannot be read is not touched (and not marked checked): looked at again next scan.
+  const eligible = new Set((await actionableIssues(repoConfig, blockedAll.map((i) => i.number))).ok);
+  const blocked = blockedAll.filter((i) => eligible.has(i.number));
   for (const issue of blocked) {
     const key = `${repoConfig.githubRepo}#issue${issue.number}`;
     if (adoptChecked.has(key)) continue;
@@ -448,8 +457,12 @@ async function blockOrphans(repoConfig: RepoConfig, st: RepoState, logger: Logge
   if (codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger)) return;
   const diff = codeHost().countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   if (diff !== 0) return;  // promote opens a release PR for them next pass
-  if (await joinCarryingRelease(repoConfig, st, orphans, logger)) return;
-  await stopRelease(repoConfig, null, orphans,
+  // Joined, commented on or blocked only if the record can be read; the rest wait for a later scan.
+  const { ok } = await actionableIssues(repoConfig, orphans);
+  if (ok.length < orphans.length) logger.info(`Release orphans: ${orphans.length - ok.length} issue(s) with an unreadable record left alone this scan`);
+  if (ok.length === 0) return;
+  if (await joinCarryingRelease(repoConfig, st, ok, logger)) return;
+  await stopRelease(repoConfig, null, ok,
     `no release carries this issue: its work is already on \`${repoConfig.productionBranch}\`, but no release PR merged in the last ` +
     "48 hours lists it, so there is no release to verify it by. Check production by hand and close it, or move it back to " +
     `\`${repoConfig.lifecycleLabels.readyForProd}\` once a release can carry it`, undefined, logger);
@@ -614,6 +627,12 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
   if (!open) return false;
   const key = `${repoConfig.githubRepo}#${open.number}`;
   const listed = new Set(releaseIssues(open.body));
+  // Before any sign-off sync, approval or deploy: the release waits while a carried issue's record cannot be read.
+  const gate = await actionableIssues(repoConfig, listed);
+  if (gate.withheld.length > 0) {
+    logger.info(`Release PR #${open.number}: ${gate.withheld.map((n) => `#${n}`).join(", ")} cannot be read from the record store; not deploying this cycle`);
+    return false;
+  }
   const issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).filter((i) => listed.has(i.number));
   // The EM's sign-off gate (foreman#128): no Tech Lead approval and no SRE merge
   // while the release lists an issue without `ready for prod release` (or a label
@@ -800,7 +819,19 @@ export async function tryRelease(
   }
 
   const current = Object.values(loadRepoState(repoConfig.name).prodReleases ?? {}).sort((a, b) => a.pr - b.pr);
-  const ready = (rel: ProdRelease) => !releaseBackoff.waiting(`${repoConfig.githubRepo}#${rel.pr}`);
+  // A tracked release acts on its issues (verifies, comments, closes, records): it waits while any of them is unreadable.
+  const gate = await actionableIssues(repoConfig, current.flatMap((r) => r.issues));
+  const said = new Set<number>();
+  const ready = (rel: ProdRelease) => {
+    if (releaseBackoff.waiting(`${repoConfig.githubRepo}#${rel.pr}`)) return false;
+    const blocked = rel.issues.filter((n) => gate.loaded.unavailable.has(n));
+    if (blocked.length > 0) {
+      if (!said.has(rel.pr)) rlog.info(`Release PR #${rel.pr}: ${blocked.map((n) => `#${n}`).join(", ")} cannot be read from the record store; left alone this cycle`);
+      said.add(rel.pr);
+      return false;
+    }
+    return true;
+  };
 
   const merged = current.find((r) => r.phase === "merged" && ready(r) && due(r.retryAt));
   if (merged) {

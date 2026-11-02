@@ -63,6 +63,9 @@ async function importOnce(repoConfig: RepoConfig, logger: Logger): Promise<void>
     setUnimported(repoConfig.githubRepo, new Set());
     return;
   }
+  // Until this import has settled each entry, every issue holding one is withheld: a lookup that throws below
+  // must not leave them reading as issues with nothing recorded.
+  setUnimported(repoConfig.githubRepo, new Set(legacy.keys()));
   const closed = await closedIssues(repoConfig, [...legacy.keys()], logger);
   const imported = new Set<number>();
   const pending = new Set<number>();
