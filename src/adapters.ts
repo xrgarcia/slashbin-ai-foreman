@@ -177,8 +177,8 @@ export type WorkEvent =
   | { readonly kind: "claim"; readonly item: WorkItem }
   | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
-  /** `owner`: who the hold belongs to when not the stage's owner (the EM): `sre` for a failed dev deploy, which is infrastructure. */
-  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre"; readonly stuck?: UnstickKind }
+  /** `owner`: who the hold belongs to when not the stage's owner (the EM): `sre` for a failed dev deploy, which is infrastructure. `at`: the stage the block belongs to, so GitHub moving the issue off it releases the block (a review failure: `inReview`); default, the stage last seen. */
+  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre"; readonly stuck?: UnstickKind; readonly at?: "inReview" }
   /**
    * Dev verification of `item` waits on something that clears by itself (the deploy
    * is still building, or the SRE could not run) and resumes on its own. Not a

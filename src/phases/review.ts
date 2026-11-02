@@ -208,7 +208,7 @@ async function reviewPass(
       if (result.transient) return false;
       // A wait is a Blocked card that says what clears it; the next review session moves it on.
       const why = `waiting on the Tech Lead: it could not take PR #${candidate.prNumber} (${result.reason}) — the review retries automatically in ${wait}`;
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
       return false;
     }
     reviewDefer.clear(repoName);
@@ -284,18 +284,18 @@ async function reviewPass(
     // limit still settles its labels. The card still goes to Blocked.
     if (result.upstreamLimit || isUpstreamBlocked("github")) {
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, isUpstreamBlocked("github"));
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
       return false;
     }
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
     if (newCount < repoFailure.maxFailures) {
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, false, `${newCount}/${repoFailure.maxFailures}`);
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
     } else {
       const pause = reviewFailurePause.start(repoName, repoFailure);
       const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused ${formatWait(pause)}: ${result.error}`;
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
     }
     reviewLogger.warn(`Review failed (${newCount}/${repoFailure.maxFailures}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });

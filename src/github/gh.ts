@@ -33,6 +33,7 @@ export function isTransientGhError(err: unknown): boolean {
     blob.includes("enotfound") || blob.includes("eai_again") ||
     blob.includes("dial tcp") ||
     blob.includes("bad gateway") || blob.includes("service unavailable") ||
+    blob.includes("http 500") || blob.includes("internal server error") ||
     blob.includes("http 502") || blob.includes("http 503") || blob.includes("http 504")
   );
 }
