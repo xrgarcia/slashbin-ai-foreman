@@ -823,19 +823,26 @@ export async function tryRelease(
     await adoptSweepHolds(repoConfig, rlog);
     // Adopting changes the set of releases: the one reload this pass makes, on a scan pass only.
     await adoptMergedReleases(repoConfig, releases, rlog);
-    releases = (await loadReleases(repoConfig, rlog))?.releases ?? releases;
-    await blockOrphans(repoConfig, releases, rlog);
+    const reloaded = await loadReleases(repoConfig, rlog);
+    releases = reloaded?.releases ?? releases;
+    // Who carries an issue is unknown while a release PR's record cannot be read (it may be the one): no issue is
+    // joined to another release or blocked as an orphan until every record reads, and nothing needs unblocking after.
+    if (!reloaded) rlog.info("Release orphans: the release PRs cannot be listed; no issue is joined or blocked this scan");
+    else if (reloaded.unreadable.size > 0) rlog.info(`Release orphans: release PR(s) ${[...reloaded.unreadable].map((n) => `#${n}`).join(", ")} cannot be read from the work source; no issue is joined or blocked this scan`);
+    else await blockOrphans(repoConfig, releases, rlog);
     releases = (await loadReleases(repoConfig, rlog))?.releases ?? releases;
   }
 
   const t = now();
   const due = (at: string | undefined) => !at || t >= Date.parse(at);
   /** The pass's view of the releases follows each record it saves, so nothing is read twice. */
+  // Keyed by PR so each update is constant time (R updates cost O(R), not O(R^2)); `view()` orders it once per read.
+  const byPr = new Map<number, ProdRelease>(releases.map((r) => [r.pr, r]));
   const follow = (next: ProdRelease | number): void => {
-    const pr = typeof next === "number" ? next : next.pr;
-    releases = releases.filter((r) => r.pr !== pr);
-    if (typeof next !== "number") releases = [...releases, next].sort((a, b) => a.pr - b.pr);
+    if (typeof next === "number") byPr.delete(next);
+    else byPr.set(next.pr, next);
   };
+  const view = (): ProdRelease[] => [...byPr.values()].sort((a, b) => a.pr - b.pr);
 
   for (const rel of [...releases]) {
     if (rel.phase !== "deploying") continue;
@@ -860,7 +867,7 @@ export async function tryRelease(
   // A held release waits out its back-off, but a new production head (the blocker's fix
   // shipping in another release) makes it due now, once per head (#1477, 2026-10-29: held
   // 5 h 20 m past a fix that landed). Reuses `productionHead`, read at most once a minute.
-  const waiting = releases.filter((r) => r.phase === "held" && !due(r.retryAt));
+  const waiting = view().filter((r) => r.phase === "held" && !due(r.retryAt));
   if (waiting.length > 0 && t - (lastHeadProbe.get(repoConfig.name) ?? 0) >= HEAD_PROBE_MS) {
     lastHeadProbe.set(repoConfig.name, t);
     try {
@@ -883,7 +890,7 @@ export async function tryRelease(
     }
   }
 
-  const current = releases;
+  const current = view();
   // A tracked release acts on its issues (verifies, comments, closes, records): it waits while any of them is unreadable.
   const gate = await actionableIssues(repoConfig, current.flatMap((r) => r.issues));
   const said = new Set<number>();

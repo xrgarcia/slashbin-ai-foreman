@@ -64,6 +64,17 @@ export async function recordNoCommit(repoConfig: RepoConfig, pr: number, head: s
   return count;
 }
 
+/**
+ * Put PR `pr`'s streak back as it was before a round was admitted (`recordNoCommit` ahead of a session): the
+ * session failed, or never ran. False when that could not be saved; the round then stays counted, which can
+ * only make the stalemate come sooner, never later.
+ */
+export async function restoreNoCommitStreak(repoConfig: RepoConfig, pr: number, prior: NoCommitStreak | undefined): Promise<boolean> {
+  const ok = await updatePrRecord(repoConfig, pr, (d) => { if (prior) d.noCommit = prior; else delete d.noCommit; });
+  if (ok && !prior) seenOf(repoConfig).delete(pr);
+  return ok;
+}
+
 /** Forget PR `pr`'s streak: it pushed a commit, or someone pushed to it. False when that could not be saved. */
 export async function clearNoCommitStreak(repoConfig: RepoConfig, pr: number): Promise<boolean> {
   const ok = await updatePrRecord(repoConfig, pr, (d) => { delete d.noCommit; });

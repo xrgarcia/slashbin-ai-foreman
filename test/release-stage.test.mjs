@@ -80,8 +80,8 @@ if (a[0] === "issue") {
 }
 if (a[0] === "pr") {
   if (a[1] === "list") {
-    const want = flag("--state") === "merged" ? "MERGED" : "OPEN";
-    let l = Object.values(st.prs).filter((p) => p.state === want);
+    const want = flag("--state") === "merged" ? "MERGED" : flag("--state") === "all" ? null : "OPEN";
+    let l = Object.values(st.prs).filter((p) => want === null || p.state === want);
     if (flag("--base")) l = l.filter((p) => p.baseRefName === flag("--base"));
     if (flag("--head")) l = l.filter((p) => p.headRefName === flag("--head"));
     const since = /^merged:>=(.+)$/.exec(flag("--search") || "");
@@ -1441,4 +1441,39 @@ test("a restart after the deploy whose 'merged' record could not be saved verifi
   assert.ok(agentCalls().some((c) => c[0] === "sre" && c[1] === "verify"), "it verifies the merged release instead");
   assert.equal(gh().refs.length, 1);
   assertClosedVerified(5);
+});
+
+// --- Review follow-up (xrgarcia/slashbin-ai-foreman#192) ----------------------------------------------
+
+test("orphan scan: while a release PR's record is unreadable, ownership is unknown: no issue is joined or blocked, and none needs unblocking after", async () => {
+  const old = new Date(Date.now() - 72 * 3_600_000).toISOString();
+  const seedOld = async () => {
+    world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 72 * 60)], compareFiles: 0, prodHead: MERGE });
+    await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: old, attempts: 0, since: old });
+  };
+  await seedOld();
+  breakPrRecords([100]);
+  await run();
+  assert.deepEqual(gh().issues[5].labels, ["approved", "release pending"], "not blocked as an orphan");
+  assert.deepEqual(commentsOn(5), [], "no orphan comment");
+});
+
+test("release discovery: a stored release behind any number of newer closed release PRs is recovered after a restart", async () => {
+  const old = new Date(Date.now() - 72 * 3_600_000).toISOString();
+  const newer = Array.from({ length: 30 }, (_, k) => mergedPr(101 + k, "newer", "f".repeat(40), 60));
+  world({ issues: [issue(5, "prod verification held")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 72 * 60), ...newer], compareFiles: 0, prodHead: MERGE });
+  await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: old, attempts: 1,
+    retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: old });
+  resetReleaseTrackerForTests();
+  const { loadReleases } = await import("../dist/release-tracker.js");
+  const found = await loadReleases(repo, logger);
+  assert.deepEqual(found.releases.map((r) => r.pr), [100], "found although 30 newer PRs were listed first");
+});
+
+test("release view: updating R releases is O(R), not O(R^2): the view is a map, ordered once per read", () => {
+  const src = readFileSync(new URL("../src/phases/release.ts", import.meta.url), "utf8");
+  const follow = src.slice(src.indexOf("const byPr = new Map"), src.indexOf("const view = "));
+  assert.match(follow, /byPr\.delete\(next\)/);
+  assert.match(follow, /byPr\.set\(next\.pr, next\)/);
+  assert.doesNotMatch(follow, /\.filter\(|\.sort\(/, "no per-update scan or sort");
 });

@@ -16,6 +16,7 @@ import {
   prsWithNoCommitStreak,
   readNoCommitStreak,
   recordNoCommit,
+  restoreNoCommitStreak,
   stalemateHead,
 } from "../no-commit-streak.js";
 import {
@@ -140,8 +141,17 @@ export async function tryRevision(
     return null;
   }
 
+  // Admission: the round is counted and saved BEFORE the paid session starts, as a no-commit round until the
+  // session shows it committed. A streak that cannot be saved admits no session (a record store that rejects
+  // writes would otherwise let every pass pay for a round nothing can count), and the cap is durable at once.
+  const prior = streak;
+  const admitted = await recordNoCommit(repoConfig, prNumber, head, prior);
+  if (admitted === null) {
+    revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s no-commit record cannot be saved to the work source`);
+    return null;
+  }
   // Invoke the revision skill with specific PR and issue context
-  if (!tryAcquire("claude")) return null;
+  if (!tryAcquire("claude")) { await restoreNoCommitStreak(repoConfig, prNumber, prior); return null; }
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   buildStarted(repoName);
@@ -175,12 +185,8 @@ export async function tryRevision(
       revisionEscalated.delete(repoName);
 
       if (result.noCommit) {
-        // Recorded before the PR goes back to review or the EM is told: a streak that cannot be saved counts nothing.
-        const seen = await recordNoCommit(repoConfig, prNumber, head, streak);
-        if (seen === null) {
-          revLogger.warn(`PR #${pending.pr.number} revision made no commit but the streak could not be saved; the PR stays pending and is revised again`);
-          return null;
-        }
+        // Counted and saved at admission, before the session: the PR goes back to review or the EM is told on that record.
+        const seen = admitted;
 
         // Second one on this head: the reviewer (or QA) keeps asking and the reviser
         // keeps answering "already correct". Neither is going to move. Stop, and say
@@ -210,7 +216,8 @@ export async function tryRevision(
         revLogger.info(
           `PR #${pending.pr.number} revision made no commit by declaration — returning it to review: ${result.noCommitReason}`,
         );
-      } else if (streak) {
+      } else {
+        // It committed: the round admitted above was not a no-commit one.
         await clearNoCommitStreak(repoConfig, prNumber);
       }
 
@@ -224,6 +231,8 @@ export async function tryRevision(
       revLogger.info("PR revision succeeded");
       return pending;
     } else {
+      // The session did not answer: the round admitted above is not a no-commit one.
+      await restoreNoCommitStreak(repoConfig, prNumber, prior);
       // An upstream limit refused the run — not a defect, so it charges no retry.
       // The card still goes to Blocked: the work has stopped, and the board says why.
       if (result.upstreamLimit || isUpstreamBlocked("github")) {

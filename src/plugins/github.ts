@@ -47,6 +47,7 @@ export function githubCodeHost(): CodeHost {
     openIssueRowsBy: coreReads.openIssueRowsBy,
     openPrsForBranch: coreReads.openPrsForBranch,
     closedPrsForBranch: coreReads.closedPrsForBranch,
+    allPrsForBranch: coreReads.allPrsForBranch,
     createPr: coreReads.createPr,
     labelNames: coreReads.labelNames,
     createLabel: coreReads.createLabel,
