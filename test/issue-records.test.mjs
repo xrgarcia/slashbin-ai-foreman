@@ -15,7 +15,11 @@ import { loadIssueRecord, loadIssueRecords, updateIssueRecord, updatePrRecord, r
 import { noteReleasePrs, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
 import { importLegacyRecords, mergeLegacy, resetLegacyImportForTests } from "../dist/legacy-records.js";
 import { foremanHolds } from "../dist/work-source.js";
-import { legacyIssueEntries, loadRepoState, saveRepoState, setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
+import { legacyFile, legacyIssueEntries, loadRepoState, saveRepoState } from "./_legacy-state.mjs";
+import { repoRecordOf } from "./issue-records.mjs";
+import { observeDivergence, resetDivergenceForTests } from "../dist/divergence.js";
+import { existsSync } from "node:fs";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { mkTmp } from "./tmp-dir.mjs";
 
@@ -49,6 +53,7 @@ beforeEach(() => {
   source.saveRecord = async (key, record, rc) => (failSave.has(key.number) ? false : store.saveRecord(key, record, rc));
   source.states = async (_rc, ns) => new Map(ns.map((n) => [n, n === 5 ? "completed" : "open"]));
   resetIssueRecordsForTests();
+  resetDivergenceForTests();
   resetReleaseTrackerForTests();
   resetLegacyImportForTests();
 });
@@ -82,7 +87,7 @@ test("merge: what the store holds wins, unstick questions merge by key", () => {
 
 test("import: every live entry moves to its issue's record, a closed issue's is dropped, the file keeps none", async () => {
   legacyState();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.deepEqual(await loadIssueRecord(repo, 1), { skipped: skip, unstick: { "1:needs-ruling": question(1, "r1") } });
   assert.deepEqual(await loadIssueRecord(repo, 2), { held });
   assert.deepEqual(await loadIssueRecord(repo, 4), { verifyHeld: vheld });
@@ -90,31 +95,29 @@ test("import: every live entry moves to its issue's record, a closed issue's is 
   assert.deepEqual(await loadIssueRecord(repo, 7), { promotionStallNoted: true });
   assert.deepEqual(await loadIssueRecord(repo, 5), {}, "a closed issue holds nothing: its failure was dropped, not imported");
   assert.deepEqual(fileIssues(), []);
-  const s = loadRepoState("r");
-  assert.equal(s.unstick, undefined);
-  assert.deepEqual(s.implemented, [3], "the rest of the file is untouched");
-  assert.equal(s.repoUnstick["0:needs-ruling"].reason, "repo", "a question about no issue stays with the repo");
+  assert.equal((await repoRecordOf(repo)).unstick["0:needs-ruling"].reason, "repo", "a question about no issue moves to the repo's record");
+  assert.equal(existsSync(legacyFile()), false, "everything moved (implemented is derived, not kept): the file is deleted");
 });
 
 test("import is idempotent: a second run writes nothing and changes nothing", async () => {
   legacyState();
-  await importLegacyRecords(repo, quiet);
-  const before = JSON.stringify(loadRepoState("r"));
+  await importLegacyRecords(repo, quiet, [repo]);
+  assert.equal(existsSync(legacyFile()), false);
   let saves = 0;
   const source = activeWorkSource();
   const save = source.saveRecord;
   source.saveRecord = (...a) => { saves++; return save(...a); };
   resetLegacyImportForTests();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal(saves, 0);
-  assert.equal(JSON.stringify(loadRepoState("r")), before);
+  assert.equal(existsSync(legacyFile()), false);
   assert.deepEqual(await loadIssueRecord(repo, 2), { held });
 });
 
 test("a failed save leaves the legacy entry, withholds the issue, and the next import finishes it", async () => {
   legacyState();
   failSave.add(2);
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.deepEqual(fileIssues(), [2], "the hold is still in the file: no live hold is lost");
   assert.equal(await loadIssueRecord(repo, 2), null, "until it is imported the issue reads as unreadable, never as empty");
   assert.equal(await updateIssueRecord(repo, 2, (d) => { d.skipped = skip; }), false, "and nothing is written over it");
@@ -122,7 +125,7 @@ test("a failed save leaves the legacy entry, withholds the issue, and the next i
   // The store recovers; a later import (here, a restart) moves the rest.
   failSave.clear();
   resetLegacyImportForTests();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.deepEqual(await loadIssueRecord(repo, 2), { held });
   assert.deepEqual(fileIssues(), []);
 });
@@ -133,7 +136,7 @@ test("a lookup that throws during the import leaves every legacy issue unavailab
   const real = host.openIssueLabels;
   host.openIssueLabels = () => { throw new Error("github is down"); };
   try {
-    await importLegacyRecords(repo, quiet);
+    await importLegacyRecords(repo, quiet, [repo]);
   } finally {
     host.openIssueLabels = real;
   }
@@ -141,11 +144,11 @@ test("a lookup that throws during the import leaves every legacy issue unavailab
   for (const n of [1, 2, 4, 6, 7]) assert.equal(await loadIssueRecord(repo, n), null, `#${n} reads as unreadable, not as empty`);
   assert.equal((await foremanHolds(repo, [1, 2], quiet))(2), true);
   // The source recovers inside the retry window: still withheld, because the import has not run again.
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal(await loadIssueRecord(repo, 1), null);
   // The retry window passes (a restart stands in for it): the import completes and releases each issue.
   resetLegacyImportForTests();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.deepEqual(await loadIssueRecord(repo, 2), { held });
   assert.deepEqual(fileIssues(), []);
 });
@@ -168,6 +171,7 @@ test("a record survives a restart: nothing but the store carries it", async () =
   assert.equal(await updateIssueRecord(repo, 8, (d) => { delete d.skipped; }), true, "a cleared hold is a save without the field");
   // A restart: the process forgets everything it kept in memory.
   resetIssueRecordsForTests();
+  resetDivergenceForTests();
   resetLegacyImportForTests();
   assert.deepEqual(await loadIssueRecord(repo, 8), { held });
   assert.deepEqual(fileIssues(), [], "the state file never held it");
@@ -187,11 +191,11 @@ test("foremanHolds: any recorded hold, an unfinished release, a branch block, or
   const h = await foremanHolds(repo, [1, 2, 3, 4, 5, 7, 8, 10], quiet);
   for (const n of [1, 2, 3, 5, 7]) assert.equal(h(n), true, `#${n}`);
   for (const n of [4, 8, 10]) assert.equal(h(n), false, `#${n}`);
-  saveRepoState("r", { ...loadRepoState("r"), branchBlock: { reason: "diverged", announced: [] } });
+  observeDivergence(repo, { ahead: 1, behind: 1, mergeBase: "abc" });
   assert.equal((await foremanHolds(repo, [99], quiet))(99), true);
 });
 
-test("no core file reads an issue-keyed field from the state file but state.ts and the import", () => {
+test("no core file reads an issue-keyed field from the state file but the import", () => {
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
   const files = [];
   const walk = (d) => { for (const f of readdirSync(d)) { const p = join(d, f); statSync(p).isDirectory() ? walk(p) : p.endsWith(".ts") && files.push(p); } };
@@ -200,7 +204,7 @@ test("no core file reads an issue-keyed field from the state file but state.ts a
   const reads = new RegExp(`(?:loadRepoState\\([^)]*\\)|\\b(?:repoState|rs))\\??\\.${field}\\b`);
   const offenders = [];
   for (const p of files) {
-    if (/\/(state|legacy-records)\.ts$/.test(p)) continue;
+    if (/\/legacy-records\.ts$/.test(p)) continue;
     readFileSync(p, "utf8").split("\n").forEach((line, i) => { if (!/^\s*(\/\/|\*)/.test(line) && reads.test(line)) offenders.push(`${p.slice(dir.length + 1)}:${i + 1}: ${line.trim()}`); });
   }
   assert.deepEqual(offenders, []);

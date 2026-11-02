@@ -120,7 +120,8 @@ src/
 ├── orchestrator.ts    # Lane pass per (repo, lane), failure cooldowns, shutdown drain
 ├── phases/            # One file per stage (reconcile, review, verify, promote, release, revise, implement, custom)
 ├── paperclip/         # Paperclip plugin code: the board mirror, client, doctor
-├── state.ts           # Persistent state management (.agent-state.json)
+├── issue-records.ts   # Issue, PR and repo records in the work-source store (the daemon's persistence)
+├── legacy-records.ts  # One-time import of a leftover .agent-state.json
 ├── daemon.ts          # One poll loop per (repo, lane), config hot-reload, graceful shutdown
 ├── bridge-client.ts   # WebSocket Discord client (exported; unused by the daemon)
 └── index.ts           # Public API exports

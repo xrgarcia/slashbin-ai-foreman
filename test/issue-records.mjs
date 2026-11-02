@@ -4,7 +4,7 @@
 // needs no comment endpoint, and seeds or reads a record directly.
 import { activeWorkSource } from "../dist/plugins/registry.js";
 import { InMemoryRecordStore } from "../dist/record-store.js";
-import { loadIssueRecord, loadPrRecord, resetIssueRecordsForTests, updateIssueRecord, updatePrRecord } from "../dist/issue-records.js";
+import { loadIssueRecord, loadPrRecord, loadRepoRecord, resetIssueRecordsForTests, updateIssueRecord, updatePrRecord } from "../dist/issue-records.js";
 import { noteReleasePrs, noteLiveRelease, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
 import { resetNoCommitStreaksForTests } from "../dist/no-commit-streak.js";
 
@@ -60,3 +60,6 @@ export const prRecordOf = async (repoConfig, n) => (await loadPrRecord(repoConfi
 
 /** The release PR `n` carries now, or undefined. */
 export const releaseOf = async (repoConfig, n) => (await prRecordOf(repoConfig, n)).release;
+
+/** The repo's own record as the Foreman reads it (EM#1244 f4): its EM questions about no issue, rulings carried out, card blocks. */
+export const repoRecordOf = async (repoConfig) => (await loadRepoRecord(repoConfig)) ?? {};

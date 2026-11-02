@@ -14,7 +14,6 @@ import { PaperclipMirror } from "../dist/paperclip/mirror.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
-import { loadCardBlocks, saveCardBlock, setStatePath } from "../dist/state.js";
 import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
 /** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
@@ -133,10 +132,15 @@ function mirrorOn(fake, extra = {}, store) {
   return new PaperclipMirror(client, cfg, [], logger(), {}, store);
 }
 
-/** A store held in memory, as the plugin's is in the state file. */
+/** A store held in memory, as the plugin's is in each repo's record. `failLoad` makes the read fail; `failSave` the writes. */
 function memoryStore() {
   const blocks = {};
-  return { blocks, load: () => ({ ...blocks }), save: (id, b) => { if (b) blocks[id] = b; else delete blocks[id]; } };
+  const store = {
+    blocks, failLoad: false, failSave: false,
+    load: async () => (store.failLoad ? null : { ...blocks }),
+    save: async (id, b) => { if (store.failSave) return false; if (b) blocks[id] = b; else delete blocks[id]; return true; },
+  };
+  return store;
 }
 
 const at = (labels, extra = {}) => ({ item, stage: issueStage(labels, false, LL, "approved"), detail: labels.join(", "), ...extra });
@@ -330,14 +334,32 @@ test("blocks: a restored block the Foreman's state no longer holds is released (
   assert.equal(store.blocks.r7, undefined);
 });
 
-test("blocks: the state file keeps and forgets a card's block", () => {
-  setStatePath(mkTmp("card-blocks-"));
-  assert.deepEqual(loadCardBlocks(), {});
-  saveCardBlock("r7", { reason: "blocked: x", owner: "sre", at: "merged" });
-  saveCardBlock("r8", { at: null, ruling: true });
-  assert.deepEqual(loadCardBlocks(), { r7: { reason: "blocked: x", owner: "sre", at: "merged" }, r8: { at: null, ruling: true } });
-  saveCardBlock("r7", null);
-  assert.deepEqual(loadCardBlocks(), { r8: { at: null, ruling: true } });
+test("blocks (f4): blocks that cannot be read skip the pass, never release the card; the next readable pass resumes", async () => {
+  const store = memoryStore();
+  store.blocks.r7 = { reason: "blocked: dev deploy failed", owner: "sre", at: "merged" };
+  store.failLoad = true;
+  const fake = fakePaperclip([row7("blocked", { assigneeAgentId: "sre-agent", unblockDescriptor: { owner: { agentId: "sre-agent" }, action: "blocked: dev deploy failed" } })]);
+  const mirror = mirrorOn(fake, {}, store);
+  await snapshot(mirror, ["pr merged"], { foremanHeld: false });
+  assert.equal(fake.rows[0].status, "blocked", "an unreadable store released the block");
+  assert.equal(statusPatches(fake).length, 0);
+  assert.deepEqual(store.blocks.r7.owner, "sre", "and nothing was deleted");
+  store.failLoad = false;
+  await snapshot(mirror, ["pr merged"], { foremanHeld: true });
+  assert.equal(fake.rows[0].status, "blocked", "readable again: the held block stands");
+});
+
+test("blocks (f4): a block whose save failed is retried by the next pass", async () => {
+  const store = memoryStore();
+  const fake = fakePaperclip([row7("in_review")]);
+  const mirror = mirrorOn(fake, {}, store);
+  await snapshot(mirror, ["pr merged"]);
+  store.failSave = true;
+  await mirror.onEvent({ kind: "blocked", item, reason: "dev deploy failed", owner: "sre" }, logger());
+  assert.equal(store.blocks.r7, undefined, "the save failed");
+  store.failSave = false;
+  await snapshot(mirror, ["pr merged"], { foremanHeld: true });
+  assert.equal(store.blocks.r7?.owner, "sre", "the next pass saved it");
 });
 
 // --- PR #171 review: the Tech Lead's replay matrices ------------------------------------

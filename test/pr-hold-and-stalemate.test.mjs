@@ -13,7 +13,7 @@ import { tryRevision } from "../dist/phases/revise.js";
 import { tryReview } from "../dist/phases/review.js";
 import { tryQaBeforeMerge } from "../dist/phases/qa-before-merge.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { memoryRecords, prRecordOf } from "./issue-records.mjs";
 import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plugins/registry.js";
 import { GitHubPlugin } from "../dist/plugins/github.js";

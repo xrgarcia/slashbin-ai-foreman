@@ -23,7 +23,7 @@ import { defaultLifecycleLabels } from "../dist/config.js";
 import { closedWins, issueStage } from "../dist/github-work-source.js";
 import { issueStates } from "../dist/github/cards.js";
 import { addObserver, drainObservers, publishSnapshot, registerWorkSource } from "../dist/work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

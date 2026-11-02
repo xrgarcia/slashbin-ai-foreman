@@ -2,7 +2,7 @@ import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter 
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
-import { loadRepoState } from "./state.js";
+import { standingDivergence } from "./divergence.js";
 import { fieldTable, loadIssueRecords } from "./issue-records.js";
 import { loadReleases } from "./release-tracker.js";
 import { clearUnstick, noteStuck } from "./unstick.js";
@@ -211,8 +211,7 @@ export function advance(
  * be moved on an unknown (fail closed).
  */
 export async function foremanHolds(repoConfig: RepoConfig, numbers: readonly number[], logger: Logger): Promise<(n: number) => boolean> {
-  const state = loadRepoState(repoConfig.name);
-  if (state.branchBlock) return () => true;
+  if (standingDivergence(repoConfig)) return () => true;
   // A release whose record cannot be read may be holding any issue: unknown, so every card is held.
   const releases = await loadReleases(repoConfig, logger);
   if (!releases || releases.unreadable.size > 0) return () => true;

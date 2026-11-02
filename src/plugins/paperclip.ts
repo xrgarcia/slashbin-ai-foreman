@@ -1,9 +1,9 @@
-import type { AgentConfig } from "../config.js";
+import type { AgentConfig, RepoConfig } from "../config.js";
 import { secretValues } from "../agent.js";
 import { PaperclipClient } from "../paperclip/client.js";
 import { PaperclipMirror } from "../paperclip/mirror.js";
 import { runDoctor } from "../paperclip/doctor.js";
-import { loadCardBlocks, saveCardBlock } from "../state.js";
+import { createCardBlockStore } from "../card-blocks.js";
 import { createRepoIdentity } from "../paperclip/repo-identity.js";
 import type { ForemanPlugin, PluginContext } from "./contract.js";
 
@@ -40,6 +40,8 @@ export class PaperclipPlugin implements ForemanPlugin {
   private mirror: PaperclipMirror | null = null;
   private stopMirror: (() => void) | null = null;
   private mirroredText: string | null = null;
+  /** The repos the card-block store writes to; the latest config's. */
+  private repos: readonly RepoConfig[] = [];
 
   get observer(): PaperclipMirror | undefined {
     return this.mirror ?? undefined;
@@ -68,6 +70,7 @@ export class PaperclipPlugin implements ForemanPlugin {
 
   private begin(config: AgentConfig, ctx: PluginContext): void {
     const { logger } = ctx;
+    this.repos = config.repos;
     this.mirror = new PaperclipMirror(
       new PaperclipClient({
         url: config.paperclip.url,
@@ -82,8 +85,8 @@ export class PaperclipPlugin implements ForemanPlugin {
       mirrorSecrets(config.sessionEnv, config.paperclip.apiKey, config.paperclip.registryApiKey),
       logger,
       config.lifecycleLabels,
-      // A card's block (reason, holder, stage, ruling) outlives a restart, in the Foreman's state file.
-      { load: loadCardBlocks, save: saveCardBlock },
+      // A card's block (reason, holder, stage, ruling) outlives a restart, in its repo's own record.
+      createCardBlockStore(() => this.repos),
       config.paperclip.registryUrl
         ? createRepoIdentity({ url: config.paperclip.registryUrl, apiKey: config.paperclip.registryApiKey })
         : undefined,
@@ -97,6 +100,7 @@ export class PaperclipPlugin implements ForemanPlugin {
   /** A reload whose file changed hands the mirror the new mapping, then publishes it. */
   reconfigure(fresh: AgentConfig, ctx: PluginContext): void {
     if (!this.mirror) return;
+    this.repos = fresh.repos;
     const text = ctx.configText();
     if (text === null || text === this.mirroredText) return;
     if (this.mirror.reconfigure(fresh.paperclip)) {

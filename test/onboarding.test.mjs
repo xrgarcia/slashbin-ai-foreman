@@ -16,7 +16,7 @@ import { requiredLabels } from "../dist/config.js";
 import { runLanePass } from "../dist/orchestrator.js";
 import { lanesFor } from "../dist/lanes.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { setCodeHost } from "../dist/plugins/registry.js";
 import { githubCodeHost } from "../dist/plugins/github.js";
