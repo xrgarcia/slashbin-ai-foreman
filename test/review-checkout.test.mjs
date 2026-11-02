@@ -14,6 +14,7 @@
 //
 // Run with `npm test` (node:test, no dependencies) after `npm run build`.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +24,7 @@ import { checkoutPathFor, releaseReviewCheckout } from "../dist/review-checkout.
 const quietLogger = { info() {}, warn() {}, debug() {}, error() {} };
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "foreman-checkout-test-"));
+  const root = mkTmp("foreman-checkout-test-");
   const config = { reviewCheckoutRoot: root };
   const repoConfig = { name: "jerky_shipping", githubRepo: "xrgarcia/jerky_shipping" };
   const path = checkoutPathFor(config, repoConfig);

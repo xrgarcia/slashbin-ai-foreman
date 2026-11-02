@@ -1,5 +1,6 @@
 // trackRelease: a release PR is announced open once, then merged or closed once.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { trackRelease, releaseIssues } from "../dist/release-tracker.js";
 
@@ -60,7 +61,7 @@ test("loadRepoState keeps the saved release, so an open release is announced onc
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { setStatePath, loadRepoState, saveRepoState } = await import("../dist/state.js");
-  setStatePath(mkdtempSync(join(tmpdir(), "release-state-")));
+  setStatePath(mkTmp("release-state-"));
   const events = [];
   const pass = () => trackRelease({
     repo: "o/r", productionBranch: "main",

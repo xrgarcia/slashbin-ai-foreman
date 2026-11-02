@@ -15,6 +15,7 @@
 //   not_planned+read
 //   unreadable     the live read fails: nothing is guessed, the card stays
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
@@ -273,7 +274,7 @@ test("issueStates: a healthy batch of 25 is one request", () => {
 });
 
 test("publishSnapshot: carries the state reader, and the closed items when the cards are not read", async () => {
-  setStatePath(mkdtempSync(join(tmpdir(), "closed-cards-")));
+  setStatePath(mkTmp("closed-cards-"));
   const asked = [];
   registerWorkSource({
     snapshot: async () => [],

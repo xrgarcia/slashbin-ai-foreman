@@ -2,6 +2,7 @@
 // hold, failure and unstick entries for an issue GitHub reads closed are dropped;
 // an open or unreadable issue keeps its own.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -16,7 +17,7 @@ const repoConfig = { name: "r", githubRepo: "o/r", repoPath: "/nowhere" };
 const skip = { lastSkippedAt: "2026-10-26T00:00:00Z", reason: "no change needed", skipCount: 1 };
 
 function seed() {
-  setStatePath(mkdtempSync(join(tmpdir(), "closed-holds-")));
+  setStatePath(mkTmp("closed-holds-"));
   saveRepoState("r", {
     implemented: [], failed: { 5: { count: 4, lastError: "x" }, 6: { count: 1, lastError: "y" } },
     skipped: { 1: skip, 2: skip, 3: skip },

@@ -1,5 +1,6 @@
 // QA before the merge (config.qaBeforeMerge, EM#923): review (no merge) -> QA --local -> merge on PASS -> SRE.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,7 +40,7 @@ const ran = (verdict, exitCode, extra) => ({ kind: "manifest", exitCode, manifes
 
 // 1. The Tech Lead is asked not to merge, and its answer is not a hold.
 test("1: --no-merge is passed only when asked; the qa-pending trailer parses and is not a declared hold", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "fake-tl-"));
+  const dir = mkTmp("fake-tl-");
   mkdirSync(join(dir, "bin"));
   const argsFile = join(dir, "args.json");
   writeFileSync(join(dir, "bin/tech-lead.mjs"), `
@@ -172,7 +173,7 @@ test("7: flag-off parity: the review call appends --no-merge only on request, an
 
 // Finding 1: the merge is bound to the head QA passed.
 test("F1: the PASS merge calls the Tech Lead with --merge-approved <full sha>, and only that call merges", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "fake-tl-"));
+  const dir = mkTmp("fake-tl-");
   mkdirSync(join(dir, "bin"));
   const argsFile = join(dir, "args.json");
   writeFileSync(join(dir, "bin/tech-lead.mjs"), `

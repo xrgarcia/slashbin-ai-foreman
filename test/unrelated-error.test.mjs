@@ -1,6 +1,7 @@
 // foreman#148: the SRE's "Not caused by this release, needs triage:" lines reach the EM as
 // `unrelated-error`, once per distinct signature, and never hold the release.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,8 +26,8 @@ const sreOut = (pr, errors) => [
 ].join("\n");
 
 function setup() {
-  setStatePath(mkdtempSync(join(tmpdir(), "ue-state-")));
-  const em = mkdtempSync(join(tmpdir(), "ue-em-"));
+  setStatePath(mkTmp("ue-state-"));
+  const em = mkTmp("ue-em-");
   const log = join(em, "calls.jsonl");
   mkdirSync(join(em, "bin"));
   writeFileSync(join(em, "bin/em.mjs"), `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n"); console.log("acted");`);
