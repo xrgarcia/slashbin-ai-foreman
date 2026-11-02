@@ -1,5 +1,6 @@
 // The review phase: hand an open PR to the Tech Lead, apply its outcome.
 
+import type { ReviewFallback } from "../plugins/contract.js";
 import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -140,6 +141,19 @@ async function reviewPass(
     reviewLogger.warn(`PR #${candidate.prNumber} CI still red after ${bounces} bounce(s) — reviewing anyway so a reviewer sees it`);
   }
 
+  // The candidate came from a snapshot that can be a refresh old; a PR merged or closed since is not
+  // reviewed (foreman#180). Unknown (GitHub cannot say) waits a pass rather than spend a review.
+  const prState = codeHost().readPrState(repoConfig, candidate.prNumber, reviewLogger);
+  if (prState !== "OPEN") {
+    if (prState === null) {
+      reviewLogger.info(`PR #${candidate.prNumber}: its state could not be read — review waits a pass`);
+    } else {
+      codeHost().forgetOpenPrs(repoConfig.githubRepo);
+      reviewLogger.info(`PR #${candidate.prNumber} is already ${prState.toLowerCase()} — no review started; the snapshot is dropped`);
+    }
+    return false;
+  }
+
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const transcriptPath = resolve(process.cwd(), "logs", "review", `${repoName}-cycle${cycleNumber}-${ts}.log`);
 
@@ -184,14 +198,17 @@ async function reviewPass(
     // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
     // failure is charged and the repo asks again after a backoff.agentUnavailable wait.
     const result = await agent.reviewPr(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress, noMerge)
-      .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
+      .catch((e: unknown): ReviewFallback => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${wait}` };
       reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
+      // A transient GitHub error is a silent tooling defer: the card is not moved to Blocked, so a blip
+      // that clears on the next pass leaves no stale hold behind (foreman#180).
+      if (result.transient) return false;
       // A wait is a Blocked card that says what clears it; the next review session moves it on.
       const why = `waiting on the Tech Lead: it could not take PR #${candidate.prNumber} (${result.reason}) — the review retries automatically in ${wait}`;
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
       return false;
     }
     reviewDefer.clear(repoName);
@@ -267,18 +284,18 @@ async function reviewPass(
     // limit still settles its labels. The card still goes to Blocked.
     if (result.upstreamLimit || isUpstreamBlocked("github")) {
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, isUpstreamBlocked("github"));
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
       return false;
     }
     const newCount = failures + 1;
     reviewFailureCount.set(repoName, newCount);
     if (newCount < repoFailure.maxFailures) {
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, false, `${newCount}/${repoFailure.maxFailures}`);
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
     } else {
       const pause = reviewFailurePause.start(repoName, repoFailure);
       const why = `review of PR #${candidate.prNumber} failed ${newCount}× — paused ${formatWait(pause)}: ${result.error}`;
-      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, reviewLogger);
+      for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
     }
     reviewLogger.warn(`Review failed (${newCount}/${repoFailure.maxFailures}) on PR #${candidate.prNumber}, not merged: ${result.error}`);
     events?.push({ message: `Review failed on ${repoConfig.githubRepo} PR #${candidate.prNumber}: ${result.error}`, level: "error" });
