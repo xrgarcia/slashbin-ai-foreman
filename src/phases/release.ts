@@ -38,6 +38,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues } from "../release-tracker.js";
 import { loadRepoState, saveRepoState, type ProdRelease, type RepoState } from "../state.js";
+import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
@@ -226,15 +227,16 @@ async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move,
     noteEpicClose(repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
   }
   const at = iso(now());
-  save(repoConfig, (st) => {
-    st.prodVerified = { ...(st.prodVerified ?? {}) };
-    for (const n of rel.issues) {
-      st.prodVerified[n] = {
+  for (const n of rel.issues) {
+    const saved = await updateIssueRecord(repoConfig, n, (d) => {
+      d.prodVerified = {
         pr: rel.pr, mergeSha: rel.mergeSha ?? "", at,
         ...(rel.tag ? { tag: rel.tag } : {}), ...(evidence ? { evidence } : {}),
       };
-    }
-  });
+    });
+    // Unrecorded, the promote stage cannot close #n on this verification: it queues it for release pending instead.
+    if (!saved) logger.warn(`#${n}: the production verification of release PR #${rel.pr} could not be recorded`);
+  }
   logger.info(`Release PR #${rel.pr} verified in production; closed ${rel.issues.map((n) => `#${n}`).join(", ")}`);
   if (rel.soaked) {
     dropRelease(repoConfig, rel.pr);
@@ -384,8 +386,7 @@ async function adoptSweepHolds(repoConfig: RepoConfig, logger: Logger): Promise<
  * stage did not deploy and whose issues it has not closed on a prod
  * verification. A PR naming no issue is not adopted (nothing to close).
  */
-function adoptMergedReleases(repoConfig: RepoConfig, st: RepoState, logger: Logger): void {
-  const verified = st.prodVerified ?? {};
+async function adoptMergedReleases(repoConfig: RepoConfig, st: RepoState, logger: Logger): Promise<void> {
   const tracked = new Set(Object.values(st.prodReleases ?? {}).flatMap((r) => r.issues));
   let prs: ReleasePrView[];
   try {
@@ -397,7 +398,11 @@ function adoptMergedReleases(repoConfig: RepoConfig, st: RepoState, logger: Logg
   for (const pr of [...prs].reverse()) {
     const key = `${repoConfig.githubRepo}#pr${pr.number}`;
     if (st.prodReleases?.[pr.number] || adoptChecked.has(key)) continue;
-    const named = releaseIssues(pr.body).filter((n) => n !== pr.number && !tracked.has(n) && !((verified[n]?.pr ?? 0) >= pr.number));
+    const candidates = releaseIssues(pr.body).filter((n) => n !== pr.number && !tracked.has(n));
+    // An issue whose record cannot be read may already be verified: not adopted this pass, looked at again the next.
+    const recorded = await loadIssueRecords(repoConfig, candidates);
+    const verified = fieldTable(recorded, "prodVerified");
+    const named = candidates.filter((n) => !recorded.unavailable.has(n) && !((verified[n]?.pr ?? 0) >= pr.number));
     if (named.length === 0) continue;
     // Only issues the Foreman's lifecycle owns (they carry the trigger label):
     // a `#N` in the body can be a PR or a passing mention.
@@ -592,7 +597,7 @@ async function soak(repoConfig: RepoConfig, config: AgentConfig, rel: ProdReleas
     }
     case "hold": {
       releaseBackoff.clear(key);
-      save(repoConfig, (st) => { for (const n of rel.issues) delete st.prodVerified?.[n]; });
+      for (const n of rel.issues) await updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
       await holdRelease(repoConfig, config, { ...rel, soaked: true, attempts: 0, phase: "soaking", hold: undefined },
         { hold: `soak:${v.hold}`, ...(v.evidence ? { evidence: v.evidence } : {}) }, "soakHeld", logger);
       return;
@@ -741,7 +746,7 @@ export async function tryRelease(
   if (now() - (lastAdoptScan.get(repoConfig.name) ?? 0) >= ADOPT_SCAN_MS) {
     lastAdoptScan.set(repoConfig.name, now());
     await adoptSweepHolds(repoConfig, rlog);
-    adoptMergedReleases(repoConfig, loadRepoState(repoConfig.name), rlog);
+    await adoptMergedReleases(repoConfig, loadRepoState(repoConfig.name), rlog);
     await blockOrphans(repoConfig, loadRepoState(repoConfig.name), rlog);
   }
 

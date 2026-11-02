@@ -3,7 +3,7 @@
 // Each pass reads what is stuck (src/unstick.ts: persisted state plus the
 // `stuck` events that recorded the in-memory stops), calls
 // `<emRepoPath>/bin/em.mjs unstick` once for each question not yet answered,
-// and records the outcome in `RepoState.unstick`. It never clears a block (the
+// and records the outcome in the issue's record (issue-records.ts; issue 0: `RepoState.repoUnstick`). It never clears a block (the
 // unblock checks do, when the cause is gone), never writes Paperclip, and runs
 // whether or not Paperclip is on. Without `emRepoPath` it does nothing.
 //
@@ -17,6 +17,7 @@ import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
 import type { UnstickOutcome } from "../plugins/contract.js";
 import { loadRepoState, saveRepoState } from "../state.js";
+import { fieldTable, loadIssueRecord, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
   EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
@@ -32,12 +33,29 @@ function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): 
   return resolve(process.cwd(), "logs", "unstick", `${repoConfig.name}-${what}-cycle${cycleNumber}-${ts}.log`);
 }
 
-/** Apply `fn` to the persisted table and save it (load and save are synchronous, so no other writer interleaves). */
-function mutate(repoName: string, fn: (table: Record<string, UnstickEntry>) => void): void {
-  const state = loadRepoState(repoName);
-  const table = { ...(state.unstick ?? {}) };
-  fn(table);
-  saveRepoState(repoName, { ...state, unstick: table });
+/**
+ * Apply `fn` to the persisted questions about `issue` (its record's table; issue 0: the repo's own) and save them.
+ * Resolves false when the record could not be read or saved, in which case nothing changed.
+ */
+async function mutate(repoConfig: RepoConfig, issue: number, fn: (table: Record<string, UnstickEntry>) => void): Promise<boolean> {
+  if (issue <= 0) {
+    const state = loadRepoState(repoConfig.name);
+    const table = { ...(state.repoUnstick ?? {}) };
+    fn(table);
+    saveRepoState(repoConfig.name, { ...state, repoUnstick: table });
+    return true;
+  }
+  return updateIssueRecord(repoConfig, issue, (d) => {
+    const table = { ...(d.unstick ?? {}) };
+    fn(table);
+    d.unstick = table;
+  });
+}
+
+/** The standing question `key` about `issue`; undefined when there is none or the record cannot be read. */
+async function entryOf(repoConfig: RepoConfig, issue: number, key: string): Promise<UnstickEntry | undefined> {
+  if (issue <= 0) return loadRepoState(repoConfig.name).repoUnstick?.[key];
+  return (await loadIssueRecord(repoConfig, issue))?.unstick?.[key];
 }
 
 const toStatus = (o: UnstickOutcome): UnstickEntry["status"] => (o.kind === "failed" ? "failed" : o.kind);
@@ -56,7 +74,25 @@ export async function tryUnstick(
   const log = base.child({ cycle: cycleNumber, repo: repoName, phase: "unstick" });
   try {
     const state = loadRepoState(repoName);
-    const candidates: UnstickCandidate[] = derivedCandidates(state, {
+
+    // The issues this pass looks at: the repo's open ones. When GitHub cannot be read there are none, and the
+    // pass keeps to what is held in state (a branch divergence, the questions about no issue) and prunes nothing it cannot see.
+    let issues: ReturnType<CodeHost["getOpenIssues"]> | null = null;
+    if (!isUpstreamBlocked("github")) {
+      try {
+        issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
+      } catch (err) {
+        log.warn(`Could not read open issues for the unstick pass: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const open = issues ? new Set(issues.map((i) => i.number)) : null;
+    // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
+    const loaded = await loadIssueRecords(repoConfig, open ?? []);
+    const candidates: UnstickCandidate[] = derivedCandidates({
+      verifyHeld: fieldTable(loaded, "verifyHeld"),
+      skipped: fieldTable(loaded, "skipped"),
+      branchBlock: state.branchBlock,
+    }, {
       verifyMaxAttempts: config.backoff.verifyRetry.maxAttempts,
       isDeployFailureHold,
       divergenceReason,
@@ -64,49 +100,43 @@ export async function tryUnstick(
 
     // The release gate is read off the board, not off state: an issue at
     // `pr approved` (and not yet `ready for prod release`) waits on the EM's
-    // outcome gate. When GitHub is unreachable the pass skips this kind and
-    // prunes nothing it cannot see.
-    let open: Set<number> | null = null;
-    if (!isUpstreamBlocked("github")) {
-      try {
-        const issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
-        open = new Set(issues.map((i) => i.number));
-        const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
-        for (const i of issues) {
-          if (codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)) {
-            candidates.push({ issue: i.number, kind: "release-gate", reason: RELEASE_GATE_REASON });
-          }
+    // outcome gate.
+    if (issues) {
+      const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
+      for (const i of issues) {
+        if (codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)) {
+          candidates.push({ issue: i.number, kind: "release-gate", reason: RELEASE_GATE_REASON });
         }
-      } catch (err) {
-        log.warn(`Could not read open issues for the release gate: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
     // Event-kind entries are candidates for as long as they stand.
-    for (const e of Object.values(state.unstick ?? {})) {
+    const standing = [...loaded.records.values()].flatMap((r) => Object.values(r.unstick ?? {})).concat(Object.values(state.repoUnstick ?? {}));
+    for (const e of standing) {
       if (EVENT_KINDS.has(e.kind)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
     }
 
     const live = new Set(candidates.map((c) => unstickKey(c.issue, c.kind, c.tag)));
     const now = new Date().toISOString();
-    mutate(repoName, (table) => {
-      for (const [key, e] of Object.entries(table)) {
-        // A derived question ends with its condition; an event question ends when its issue is no longer open.
-        const derivedGone = !EVENT_KINDS.has(e.kind) && !live.has(key);
-        const closed = EVENT_KINDS.has(e.kind) && open !== null && e.issue !== 0 && !open.has(e.issue);
-        if (derivedGone || closed) delete table[key];
-      }
-      for (const c of candidates) {
-        const key = unstickKey(c.issue, c.kind, c.tag);
-        const next = openEntry(table[key], c, now);
-        table[key] = next;
-      }
-    });
+    // One write per issue (and one for the repo's own questions). A derived question ends with its condition;
+    // an event question ends when its issue is no longer open, which a record of an open issue never shows.
+    const issuesInPlay = new Set<number>([0, ...loaded.records.keys(), ...candidates.map((c) => c.issue)]);
+    for (const n of issuesInPlay) {
+      if (loaded.unavailable.has(n)) continue;
+      const mine = candidates.filter((c) => c.issue === n);
+      await mutate(repoConfig, n, (table) => {
+        for (const [key, e] of Object.entries(table)) if (!EVENT_KINDS.has(e.kind) && !live.has(key)) delete table[key];
+        for (const c of mine) {
+          const key = unstickKey(c.issue, c.kind, c.tag);
+          table[key] = openEntry(table[key], c, now);
+        }
+      });
+    }
 
     let calls = 0;
     for (const c of candidates) {
       const key = unstickKey(c.issue, c.kind, c.tag);
-      const entry = loadRepoState(repoName).unstick?.[key];
+      const entry = await entryOf(repoConfig, c.issue, key);
       if (!entry || !needsCall(entry, c)) continue;
       const ac = new AbortController();
       activeRuns.set(ac, repoName);
@@ -120,7 +150,7 @@ export async function tryUnstick(
       calls++;
       log.info(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): ${outcome.kind}${outcome.detail ? ` — ${outcome.detail.slice(0, 200)}` : ""}`);
       let spent: UnstickEntry | undefined;
-      mutate(repoName, (table) => {
+      await mutate(repoConfig, c.issue, (table) => {
         const cur = table[key];
         // The reason changed while the call ran: it is a new question, answered next pass.
         if (!cur || cur.reason !== c.reason) return;
@@ -146,7 +176,7 @@ export async function tryUnstick(
         } else {
           try {
             (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
-            mutate(repoName, (table) => {
+            await mutate(repoConfig, c.issue, (table) => {
               const cur = table[key];
               if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
             });

@@ -9,7 +9,7 @@
 import test from "node:test";
 import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerPlugin, roleFor, qaFor, enabledFor } from "../dist/plugins/registry.js";
@@ -23,6 +23,7 @@ import { settleHumanMerge, resumeHumanMerges, HUMAN_MERGE_CLOSE_MARK } from "../
 import { registerWorkSource } from "../dist/work-source.js";
 import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { memoryRecords, seed } from "./issue-records.mjs";
 
 await startAgentPlugins();
 setStatePath(mkTmp("plugin-roles-"));
@@ -97,14 +98,31 @@ test("QA runs the registered plugin that covers the repo, on dev and locally", a
   assert.equal(qaRuns.length, 2, "a repo no plugin covers runs nothing");
 });
 
+// The unstick pass looks at the repo's open issues (their records hold the questions): a gh that lists #7 as open.
+const ghBin = mkTmp("roles-gh-");
+writeFileSync(join(ghBin, "gh"), `#!/bin/sh\necho '[{"number":7,"title":"t","labels":[]}]'\n`);
+chmodSync(join(ghBin, "gh"), 0o755);
+
 test("stuck work goes to the registered unstick plugin, never the EM CLI", async () => {
-  const repo = { name: "un", githubRepo: "o/un", repoPath: "/nonexistent", lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };
+  const savedPath = process.env.PATH;
+  process.env.FOREMAN_GITHUB_TOKEN ??= "test-token-not-real";
+  process.env.PATH = `${ghBin}:${savedPath}`;
+  try {
+    await stuckWork();
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});
+
+async function stuckWork() {
+  const repo = { name: "un", githubRepo: "o/un", repoPath: ghBin, lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };
   const config = { ...NONE, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } }, fakeUnstick: true };
-  saveRepoState("un", { ...loadRepoState("un"), verifyHeld: { 7: { heldAt: "t", prNumber: 5, reason: "acceptance-not-verified", attempts: 3 } } });
+  memoryRecords();
+  await seed(repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "acceptance-not-verified", attempts: 3 } });
   assert.equal(await tryUnstick(repo, config, logger, 1, { comment: () => {} }), 1);
   assert.deepEqual(unstickRuns, [[7, "verify-exhausted"]]);
   assert.equal(await tryUnstick(repo, { ...config, fakeUnstick: false }, logger, 2, { comment: () => {} }), 0, "no unstick plugin enabled: nothing runs");
-});
+}
 
 // --- No reviewer: the human-merge end state ---
 

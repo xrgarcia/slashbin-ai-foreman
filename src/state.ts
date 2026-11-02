@@ -3,71 +3,6 @@ import { dirname, join } from "node:path";
 import type { SavedRelease } from "./release-tracker.js";
 import type { UnstickEntry } from "./unstick.js";
 
-interface FailedIssue {
-  count: number;
-  lastError: string;
-}
-
-interface SkippedIssue {
-  lastSkippedAt: string; // ISO timestamp
-  reason: string;
-  // Consecutive times the agent has skipped this issue. Drives the ESCALATING
-  // back-off (a fixed snooze never gives up, so a permanently-unactionable issue
-  // costs one agent session per window forever — slashbin-ai-foreman#32).
-  // Optional for backward compat with state files written before this field existed;
-  // absent is read as 0, i.e. the original single-window behavior.
-  skipCount?: number;
-  // What the skip said it waits on (`owner/repo#N`), when it named one. Held
-  // under `backoff.skip.hold`, the issue runs again once this closes or merges.
-  // Absent (every entry written before it existed): held until the issue changes,
-  // with `lastSkippedAt` as the "changed since" baseline.
-  waitingOn?: string;
-  // Held: when a check let it run again (its issue changed, its `waiting_on`
-  // closed, a transient cleared). It is admitted until a session ends on it;
-  // `skipCount` stands, so the attempt cap counts every session.
-  releasedAt?: string;
-  // Held: when it used up `backoff.skip.maxAttempts` and was escalated for the
-  // EM's ruling. From then on only a person changing the issue releases it,
-  // and that release clears the entry, count included.
-  escalatedAt?: string;
-  // The issues blocked by this one (`owner/repo#N`) that were told, once, that
-  // this build ended with no PR and will not land by itself (dead-blocker.ts).
-  // Carried across repeat skips so a dependent hears it once, not per attempt.
-  deadBlockerTold?: string[];
-  // The subset of those with an EM handoff on record. Kept apart so a dependent
-  // told while its repo was outside the config is escalated on a later pass.
-  deadBlockerEscalated?: string[];
-}
-
-interface HeldIssue {
-  /** ISO timestamp of the review run that declared the hold. */
-  heldAt: string;
-  /** The PR whose review declared it. */
-  prNumber: number;
-  /** Why the reviewer withheld the outcome label, verbatim from the trailer. */
-  reason: string;
-}
-
-/** A merged PR whose dev verification did not pass (EM#440). */
-export interface VerifyHold {
-  /** ISO timestamp of the last verify attempt. */
-  heldAt: string;
-  prNumber: number;
-  /** The SRE's hold slug, or the error that left no verdict. */
-  reason: string;
-  /** Verify runs spent on this issue so far. */
-  attempts: number;
-  /** ISO time the SRE said the criterion becomes observable (`hold=wait-until-…`); not retried before it. */
-  retryAt?: string;
-  /** Legacy: holds written before 2026-10-31, when the Foreman filed its own rework issue. Read so they finish; never written. */
-  rework?: { issue: number | null; landed: boolean };
-  /**
-   * What the EM is shown on the first failure (`rework-decision`): the files the PR touched, the evidence links
-   * and the verdict tail. Set by a visual QA FAIL or a charged verification failure that returned a verdict.
-   */
-  decision?: { files: string[]; evidence: string[]; verdict: string };
-}
-
 /**
  * A release the release stage is carrying (EM#578), keyed by release PR. Kept
  * so a deploy that merged while the Foreman died is finished after the
@@ -116,36 +51,8 @@ export interface ProdRelease {
   adopted?: boolean;
 }
 
-/** A passed prod verification, per issue: the evidence the promote stage's 0-diff path may close on. */
-export interface ProdVerified {
-  pr: number;
-  mergeSha: string;
-  tag?: string;
-  evidence?: string;
-  /** ISO time it passed. */
-  at: string;
-}
-
 export interface RepoState {
   implemented: number[];
-  failed: Record<number, FailedIssue>;
-  // Issues the implementation agent declined to implement (e.g., investigation-only
-  // issues whose body explicitly says "no immediate code change"). The orchestrator
-  // applies a back-off so we don't re-attempt every cycle.
-  // Optional for backward compat with v2 state files written before this field existed.
-  skipped?: Record<number, SkippedIssue>;
-  // Issues whose reviewer DELIBERATELY withheld the outcome label (trailer
-  // `hold=`), e.g. an acceptance criterion that cannot be observed until a later
-  // time boundary. Distinct from a dropped label: the reviewer reported the hold,
-  // so neither the label reconciler nor dead-zone recovery may overwrite it — a
-  // deliberate decision must not be rubber-stamped by an automated verdict.
-  // Optional for backward compat with state files written before this field existed.
-  held?: Record<number, HeldIssue>;
-  // Issues at `pr merged` whose dev verification held or errored (EM#440). Kept
-  // apart from `held`, which the reconcile prunes for any issue not at `pr under
-  // review` / `pr pending actions`. The verify stage retries from here on a
-  // back-off and stops after its attempt cap; the card sits in Blocked meanwhile.
-  verifyHeld?: Record<number, VerifyHold>;
   // Feature branches whose commits were REJECTED — the last PR for the branch was
   // closed unmerged and the branch has not moved since. The reconciler refuses to
   // recreate a PR for them, and this records the head SHA it already alerted on so
@@ -164,20 +71,14 @@ export interface RepoState {
   // Releases the release stage is carrying, by release PR number (EM#578).
   // Optional for backward compat with state files written before it existed.
   prodReleases?: Record<number, ProdRelease>;
-  // Issues whose prod verification passed, by issue number: the evidence the
-  // promote stage needs before it closes an already-promoted issue.
-  prodVerified?: Record<number, ProdVerified>;
-  // Issues the promote stage already commented on for a promotion stall, so a
-  // stall that lasts days comments once, not every hour (EM#578).
-  promotionStallNoted?: number[];
   // The held release the promote stage last named in the log (issue numbers,
   // e.g. "1283"), so a release stopped for a person is WARNed once per change
   // rather than every stall check while it waits.
   promotionHeldNoted?: string;
-  // Stuck work the unstick stage has taken to the EM, keyed `<issue>:<kind>`
-  // (src/unstick.ts). Persisted so a restart does not call the EM again for the
-  // same reason, and so a failed call is retried to its cap across restarts.
-  unstick?: Record<string, UnstickEntry>;
+  // Repo-level questions put to the EM, keyed `0:<kind>[:<tag>]` (src/unstick.ts): they
+  // have no issue to keep a record on, so they wait here for the repo-level records of
+  // EM#1244 f4. The questions about one issue live in that issue's record.
+  repoUnstick?: Record<string, UnstickEntry>;
   // Revisions that pushed nothing by declaration, per PR number, at the head
   // they answered (src/no-commit-streak.ts). Persisted so a restart does not
   // reset a stalemate count (foreman#167).
@@ -254,7 +155,6 @@ export function saveCardBlock(id: string, block: CardBlockRecord | null): void {
 
 const EMPTY_REPO_STATE: RepoState = {
   implemented: [],
-  failed: {},
 };
 
 // FOREMAN_STATE_DIR is set by `npm test` only. Without it a test run in the live checkout
@@ -280,6 +180,7 @@ function loadRaw(): PersistedState {
       // Strip trackedPRs from any existing state
       for (const repoName of Object.keys(parsed.repos)) {
         delete parsed.repos[repoName].trackedPRs;
+        splitRepoLevelUnstick(parsed.repos[repoName]);
       }
       return parsed;
     }
@@ -287,13 +188,26 @@ function loadRaw(): PersistedState {
     // V1 format (flat) — migrate
     const v1State: RepoState = {
       implemented: Array.isArray(parsed.implemented) ? parsed.implemented : [],
-      failed: parsed.failed && typeof parsed.failed === "object" ? parsed.failed : {},
-      skipped: {},
     };
     return { version: 2, repos: { _migrated: v1State } };
   } catch {
     return { version: 2, repos: {} };
   }
+}
+
+/**
+ * The questions to the EM that name no issue (`issue: 0`) belong to the repo, not to an issue's record:
+ * move them out of the legacy `unstick` table into `repoUnstick`, where they stay.
+ */
+function splitRepoLevelUnstick(repo: Record<string, unknown>): void {
+  const legacy = repo.unstick as Record<string, UnstickEntry> | undefined;
+  if (!legacy) return;
+  const repoLevel = Object.entries(legacy).filter(([, e]) => e.issue === 0);
+  if (repoLevel.length === 0) return;
+  repo.repoUnstick = { ...(repo.repoUnstick as Record<string, UnstickEntry> | undefined), ...Object.fromEntries(repoLevel) };
+  const rest = Object.entries(legacy).filter(([, e]) => e.issue !== 0);
+  if (rest.length > 0) repo.unstick = Object.fromEntries(rest);
+  else delete repo.unstick;
 }
 
 function saveRaw(state: PersistedState): void {
@@ -340,10 +254,6 @@ function loadRepoStateCopy(repoName: string): RepoState {
     const repo = state.repos[repoName];
     return {
       implemented: [...repo.implemented],
-      failed: { ...repo.failed },
-      skipped: { ...(repo.skipped ?? {}) },
-      held: { ...(repo.held ?? {}) },
-      verifyHeld: { ...(repo.verifyHeld ?? {}) },
       rejectedBranches: { ...(repo.rejectedBranches ?? {}) },
       ...(repo.branchBlock ? { branchBlock: { ...repo.branchBlock, announced: [...repo.branchBlock.announced] } } : {}),
       // Dropping this re-announced an open release PR on every promotion pass:
@@ -351,10 +261,8 @@ function loadRepoStateCopy(repoName: string): RepoState {
       ...(repo.release ? { release: { ...repo.release, issues: [...repo.release.issues] } } : {}),
       // Dropped here, a merged release would be deployed again after a restart.
       prodReleases: Object.fromEntries(Object.entries(repo.prodReleases ?? {}).map(([k, v]) => [k, { ...v, issues: [...v.issues] }])),
-      prodVerified: { ...(repo.prodVerified ?? {}) },
-      ...(repo.promotionStallNoted ? { promotionStallNoted: [...repo.promotionStallNoted] } : {}),
       ...(repo.promotionHeldNoted ? { promotionHeldNoted: repo.promotionHeldNoted } : {}),
-      ...(repo.unstick ? { unstick: Object.fromEntries(Object.entries(repo.unstick).map(([k, v]) => [k, { ...v }])) } : {}),
+      ...(repo.repoUnstick ? { repoUnstick: Object.fromEntries(Object.entries(repo.repoUnstick).map(([k, v]) => [k, { ...v }])) } : {}),
       ...(repo.noCommitStreaks ? { noCommitStreaks: Object.fromEntries(Object.entries(repo.noCommitStreaks).map(([k, v]) => [k, { ...v }])) } : {}),
     };
   }
@@ -367,18 +275,12 @@ function loadRepoStateCopy(repoName: string): RepoState {
     saveRaw(state);
     return {
       implemented: [...migrated.implemented],
-      failed: { ...migrated.failed },
-      skipped: { ...(migrated.skipped ?? {}) },
-      held: { ...(migrated.held ?? {}) },
       rejectedBranches: { ...(migrated.rejectedBranches ?? {}) },
     };
   }
 
   return {
     implemented: [...EMPTY_REPO_STATE.implemented],
-    failed: { ...EMPTY_REPO_STATE.failed },
-    skipped: {},
-    held: {},
     rejectedBranches: {},
   };
 }
@@ -393,7 +295,7 @@ export function saveRepoState(repoName: string, repoState: RepoState): void {
   const baseline = (repoState as Baselined)[BASELINE];
   const disk = state.repos[repoName];
   if (!baseline || !disk) {
-    state.repos[repoName] = { ...repoState };
+    state.repos[repoName] = { ...(disk ? legacyFieldsOf(disk) : {}), ...repoState };
   } else {
     const merged: Record<string, unknown> = { ...disk };
     const mine = repoState as unknown as Record<string, unknown>;
@@ -408,4 +310,61 @@ export function saveRepoState(repoName: string, repoState: RepoState): void {
   saveRaw(state);
   // The caller may save the same copy again; its next save diffs from this one.
   (repoState as Baselined)[BASELINE] = baselineOf(repoState);
+}
+
+// --- The pre-f2 issue-keyed fields (EM#1244 f2) -------------------------------------------------
+// `.agent-state.json` used to hold the issue-keyed records. They now live in the work source's record
+// store; these two functions are the one-time import's only way to the old copy (legacy-records.ts),
+// and go with it when f4 deletes this file.
+
+/** The record fields the file used to hold per issue. */
+const LEGACY_ISSUE_FIELDS = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted"] as const;
+
+type LegacyRepo = Record<string, Record<string, unknown> | unknown[] | undefined>;
+
+function legacyFieldsOf(repo: object): Partial<RepoState> {
+  const from = repo as LegacyRepo;
+  return Object.fromEntries(LEGACY_ISSUE_FIELDS.filter((f) => from[f] !== undefined).map((f) => [f, from[f]]));
+}
+
+/** What the file still holds for each issue of `repoName`, as the record the store keeps. */
+export function legacyIssueEntries(repoName: string): Map<number, Record<string, unknown>> {
+  const repo = loadRaw().repos[repoName] as unknown as LegacyRepo | undefined;
+  const out = new Map<number, Record<string, unknown>>();
+  if (!repo) return out;
+  const entry = (n: number) => out.get(n) ?? out.set(n, {}).get(n)!;
+  for (const field of ["failed", "skipped", "held", "verifyHeld", "prodVerified"] as const) {
+    for (const [key, value] of Object.entries((repo[field] ?? {}) as Record<string, unknown>)) {
+      if (Number.isInteger(Number(key)) && Number(key) > 0) entry(Number(key))[field] = value;
+    }
+  }
+  for (const [key, value] of Object.entries((repo.unstick ?? {}) as Record<string, UnstickEntry>)) {
+    if (value.issue > 0) entry(value.issue).unstick = { ...(entry(value.issue).unstick as object | undefined), [key]: value };
+  }
+  for (const n of (repo.promotionStallNoted ?? []) as number[]) entry(n).promotionStallNoted = true;
+  return out;
+}
+
+/** Remove the legacy entries of `issues` from the file (they are in the store, or no longer matter). */
+export function dropLegacyIssueEntries(repoName: string, issues: ReadonlySet<number>): void {
+  const state = loadRaw();
+  const repo = state.repos[repoName] as unknown as LegacyRepo | undefined;
+  if (!repo || issues.size === 0) return;
+  for (const field of ["failed", "skipped", "held", "verifyHeld", "prodVerified"] as const) {
+    const table = repo[field] as Record<string, unknown> | undefined;
+    if (!table) continue;
+    const keep = Object.entries(table).filter(([k]) => !issues.has(Number(k)));
+    if (keep.length > 0) repo[field] = Object.fromEntries(keep);
+    else delete repo[field];
+  }
+  const unstick = repo.unstick as Record<string, UnstickEntry> | undefined;
+  if (unstick) {
+    const keep = Object.entries(unstick).filter(([, e]) => !issues.has(e.issue));
+    if (keep.length > 0) repo.unstick = Object.fromEntries(keep);
+    else delete repo.unstick;
+  }
+  const noted = ((repo.promotionStallNoted ?? []) as number[]).filter((n) => !issues.has(n));
+  if (noted.length > 0) repo.promotionStallNoted = noted;
+  else delete repo.promotionStallNoted;
+  saveRaw(state);
 }

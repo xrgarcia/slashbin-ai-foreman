@@ -7,7 +7,10 @@
 // `<emRepoPath>/bin/em.mjs unstick --repo <owner/name> --issue <N> --kind <kind>
 // --reason <text>` for each stuck issue and records the outcome here.
 //
-// Two sources feed one table, `RepoState.unstick`, keyed `<issue>:<kind>`:
+// Two sources feed one table, keyed `<issue>:<kind>`. An issue's questions live in
+// its record (issue-records.ts, `unstick`); the few that belong to no issue (issue 0:
+// `unrelated-error`, `epic-ready-to-close`) are `RepoState.repoUnstick`, which has no
+// record to live in until the repo itself can have one (EM#1244 f4):
 //  - DERIVED kinds are read off persisted state every pass (`derivedCandidates`):
 //    nothing relies on an event having fired, so a hold whose event came and
 //    went before a restart (cmneb_hr#38, 2026-10-20) is still found. Their
@@ -18,7 +21,9 @@
 //    `unblocked` event, the issue closing, or a new reason replaces them.
 
 import { createHash } from "node:crypto";
-import { loadRepoState, saveRepoState, type BranchBlock, type RepoState, type VerifyHold } from "./state.js";
+import { loadRepoState, saveRepoState, type BranchBlock } from "./state.js";
+import type { RepoConfig } from "./config.js";
+import { updateIssueRecord, type SkippedIssue, type VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
 
 /**
@@ -130,7 +135,12 @@ export function reworkDecisionReason(h: Pick<VerifyHold, "prNumber" | "reason" |
  * identical either way, so one episode is one question per issue.
  */
 export function derivedCandidates(
-  state: Pick<RepoState, "verifyHeld" | "skipped" | "branchBlock">,
+  state: {
+    /** The holds and skips of the issues read this pass, by issue number. */
+    verifyHeld?: Readonly<Record<number, VerifyHold>>;
+    skipped?: Readonly<Record<number, SkippedIssue>>;
+    branchBlock?: BranchBlock;
+  },
   opts: {
     verifyMaxAttempts: number;
     isDeployFailureHold: (reason: string) => boolean;
@@ -184,15 +194,24 @@ export function openEntry(prior: UnstickEntry | undefined, c: UnstickCandidate, 
   return { issue: c.issue, kind: c.kind, reason: c.reason, status: "pending", attempts: 0, since: now, ...(c.tag ? { tag: c.tag } : {}) };
 }
 
-/** An event reported work stuck: remember it for the stage's next pass. */
-export function noteStuck(repoName: string, issue: number, kind: UnstickKind, reason: string): void {
-  const state = loadRepoState(repoName);
-  const table = { ...(state.unstick ?? {}) };
+/** An event reported work stuck: remember it for the stage's next pass. Resolves false when it could not be recorded. */
+export async function noteStuck(repoConfig: RepoConfig, issue: number, kind: UnstickKind, reason: string): Promise<boolean> {
   const key = unstickKey(issue, kind);
-  const next = openEntry(table[key], { issue, kind, reason }, new Date().toISOString());
-  if (next === table[key]) return;
-  table[key] = next;
-  saveRepoState(repoName, { ...state, unstick: table });
+  const now = new Date().toISOString();
+  if (issue <= 0) {
+    const state = loadRepoState(repoConfig.name);
+    const table = { ...(state.repoUnstick ?? {}) };
+    const next = openEntry(table[key], { issue, kind, reason }, now);
+    if (next !== table[key]) saveRepoState(repoConfig.name, { ...state, repoUnstick: { ...table, [key]: next } });
+    return true;
+  }
+  return updateIssueRecord(repoConfig, issue, (d) => {
+    const table = { ...(d.unstick ?? {}) };
+    const next = openEntry(table[key], { issue, kind, reason }, now);
+    if (next === table[key]) return;
+    table[key] = next;
+    d.unstick = table;
+  });
 }
 
 /**
@@ -216,7 +235,7 @@ export function unrelatedSignature(error: string): string {
  */
 export function noteUnrelated(repoName: string, seen: { errors: readonly string[]; evidence: readonly string[] }, seenOn: string): number {
   const state = loadRepoState(repoName);
-  const table = { ...(state.unstick ?? {}) };
+  const table = { ...(state.repoUnstick ?? {}) };
   const now = new Date().toISOString();
   let added = 0;
   const evidence = seen.evidence.length ? ` Evidence: ${seen.evidence.slice(0, 4).join(" ")}` : "";
@@ -228,18 +247,14 @@ export function noteUnrelated(repoName: string, seen: { errors: readonly string[
     table[key] = openEntry(undefined, { issue: 0, kind: "unrelated-error", reason, tag }, now);
     added++;
   }
-  if (added > 0) saveRepoState(repoName, { ...state, unstick: table });
+  if (added > 0) saveRepoState(repoName, { ...state, repoUnstick: table });
   return added;
 }
 
 /** The block on `issue` was released (`unblocked`): its questions are over. */
-export function clearUnstick(repoName: string, issue: number): void {
-  const state = loadRepoState(repoName);
-  const table = state.unstick;
-  if (!table) return;
-  const keep = Object.fromEntries(Object.entries(table).filter(([, e]) => e.issue !== issue));
-  if (Object.keys(keep).length === Object.keys(table).length) return;
-  saveRepoState(repoName, { ...state, unstick: keep });
+export async function clearUnstick(repoConfig: RepoConfig, issue: number): Promise<boolean> {
+  if (issue <= 0) return true;
+  return updateIssueRecord(repoConfig, issue, (d) => { delete d.unstick; });
 }
 
 /** `label` with every regex metacharacter escaped. */
@@ -263,7 +278,7 @@ export function epicRefs(body: string, label: string | undefined): number[] {
  */
 export function noteEpicChildClosed(repoName: string, githubRepo: string, issue: number, epics: readonly number[], label: string): number {
   const state = loadRepoState(repoName);
-  const table = { ...(state.unstick ?? {}) };
+  const table = { ...(state.repoUnstick ?? {}) };
   const now = new Date().toISOString();
   let added = 0;
   for (const epic of epics) {
@@ -274,6 +289,6 @@ export function noteEpicChildClosed(repoName: string, githubRepo: string, issue:
     table[key] = openEntry(undefined, { issue: 0, kind: "epic-ready-to-close", reason, tag }, now);
     added++;
   }
-  if (added > 0) saveRepoState(repoName, { ...state, unstick: table });
+  if (added > 0) saveRepoState(repoName, { ...state, repoUnstick: table });
   return added;
 }

@@ -10,6 +10,7 @@ import { roleFor } from "../plugins/registry.js";
 import { hasStage } from "../stages.js";
 import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
 import { loadRepoState, saveRepoState } from "../state.js";
+import { fieldTable, loadIssueRecords, updateIssueRecord, type HeldIssue } from "../issue-records.js";
 import {
   CycleEvent,
   deadZoneAlerted,
@@ -106,11 +107,13 @@ export async function reconcileReviewOutcomeLabels(
   // overwrites a deliberate decision on a later cycle or after a restart. The
   // in-memory skip sets would not survive either.
   if (held.length > 0) {
-    const state = loadRepoState(repoConfig.name);
-    if (!state.held) state.held = {};
     const at = new Date().toISOString();
     for (const h of held) {
-      state.held[h.issue] = { heldAt: at, prNumber: h.pr, reason: h.reason };
+      // A hold that could not be saved is declared again on the next pass: the issue stays at its label.
+      if (!(await updateIssueRecord(repoConfig, h.issue, (d) => { d.held = { heldAt: at, prNumber: h.pr, reason: h.reason }; }))) {
+        logger.warn(`#${h.issue}: the reviewer's hold (PR #${h.pr}) could not be recorded; it is declared again next pass`);
+        continue;
+      }
       logger.info(
         `#${h.issue} held by the reviewer (PR #${h.pr}): ${h.reason} — leaving "${repoConfig.lifecycleLabels.prUnderReview}" in place, not re-verifying`,
       );
@@ -119,7 +122,6 @@ export async function reconcileReviewOutcomeLabels(
         level: "info",
       });
     }
-    saveRepoState(repoConfig.name, state);
   }
 
   return unresolved;
@@ -321,14 +323,21 @@ export async function runReconcileStage(
     // purpose. Auto-recovery would re-verify and label them anyway, replacing a
     // human-grade judgment ("this criterion is not observable until 03:00Z") with
     // an automated verdict. Surface them, never overwrite them.
-    const repoState = loadRepoState(repoConfig.name);
-    const heldIssues = repoState.held ?? {};
+    // An issue whose record cannot be read is not "unheld": leave it alone this cycle.
+    const loaded = await loadIssueRecords(repoConfig, stuck.map((s) => s.issueNumber));
+    const heldIssues = fieldTable(loaded, "held");
     const labels = repoConfig.lifecycleLabels;
 
     for (const s of stuck) {
+      if (loaded.unavailable.has(s.issueNumber)) continue;
       // Its PR merged — whatever happens to the label next.
       await notifyOnce("merged", repoConfig, [s.issueNumber], reconLogger);
-      const hold = heldIssues[s.issueNumber];
+      let hold: HeldIssue | undefined = heldIssues[s.issueNumber];
+      // A hold belongs to the PR whose review declared it. One left by an earlier PR is stale: this PR is a re-entry, and recovery is allowed.
+      if (hold && hold.prNumber !== s.prNumber) {
+        await updateIssueRecord(repoConfig, s.issueNumber, (d) => { delete d.held; });
+        hold = undefined;
+      }
       if (hold) {
         if (!seen.has(s.issueNumber)) {
           seen.add(s.issueNumber);
@@ -422,18 +431,9 @@ export async function runReconcileStage(
       }
     }
 
-    // A hold ends when the issue leaves the dead zone (someone set the label or
-    // closed it). Prune, or the record outlives the condition and would suppress
-    // recovery on a genuine re-entry months later.
-    const stale = Object.keys(heldIssues).map(Number).filter((n) => !current.has(n));
-    if (stale.length > 0) {
-      const fresh = loadRepoState(repoConfig.name);
-      if (fresh.held) {
-        for (const n of stale) delete fresh.held[n];
-        saveRepoState(repoConfig.name, fresh);
-        reconLogger.debug(`Cleared ${stale.length} resolved hold(s): #${stale.join(", #")}`);
-      }
-    }
+    // A hold ends when the issue leaves the dead zone (someone set the label or closed it). Nothing enumerates
+    // holds any more; one that outlives the condition is dropped above when its issue re-enters with a different PR.
+
   } catch (err) {
     reconLogger.debug(
       `Dead-zone detection failed for ${repoConfig.name}: ${err instanceof Error ? err.message : String(err)}`,

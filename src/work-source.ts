@@ -2,7 +2,8 @@ import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter 
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
-import { loadRepoState, type RepoState } from "./state.js";
+import { loadRepoState } from "./state.js";
+import { fieldTable, loadIssueRecords } from "./issue-records.js";
 import { clearUnstick, noteStuck } from "./unstick.js";
 import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
 
@@ -174,8 +175,8 @@ export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logg
   // end of it. State only; the stage reads it on its next pass.
   if (repoConfig) {
     try {
-      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) noteStuck(repoConfig.name, event.item.issueNumber, event.stuck, event.reason);
-      else if (event.kind === "unblocked") clearUnstick(repoConfig.name, event.item.issueNumber);
+      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) await noteStuck(repoConfig, event.item.issueNumber, event.stuck, event.reason);
+      else if (event.kind === "unblocked") await clearUnstick(repoConfig, event.item.issueNumber);
     } catch (err) {
       logger.debug(`unstick record skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -203,14 +204,18 @@ export function advance(
 }
 
 /**
- * Whether the Foreman's own state holds issue `n` back. A recorded branch
- * divergence holds every issue.
+ * Whether the Foreman holds issue `n` back, for each of `numbers`. A recorded branch divergence holds
+ * every issue; so does an unfinished release that names it, and any hold, skip, failure or EM question
+ * in its record. An issue whose record cannot be read is held: the answer is unknown, and a card must not
+ * be moved on an unknown (fail closed).
  */
-export function foremanHolds(state: RepoState): (n: number) => boolean {
+export async function foremanHolds(repoConfig: RepoConfig, numbers: readonly number[]): Promise<(n: number) => boolean> {
+  const state = loadRepoState(repoConfig.name);
   if (state.branchBlock) return () => true;
   const out = new Set<number>();
-  for (const table of [state.skipped, state.held, state.verifyHeld, state.failed]) for (const k of Object.keys(table ?? {})) out.add(Number(k));
-  for (const e of Object.values(state.unstick ?? {})) out.add(e.issue);
+  const loaded = await loadIssueRecords(repoConfig, numbers);
+  for (const n of loaded.unavailable) out.add(n);
+  for (const [n, r] of loaded.records) if (r.skipped || r.held || r.verifyHeld || r.failed || Object.keys(r.unstick ?? {}).length > 0) out.add(n);
   for (const r of Object.values(state.prodReleases ?? {})) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
   return (n) => out.has(n);
 }
@@ -228,9 +233,9 @@ export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): P
   const cards = source.cards && wantsCards() ? await source.cards(repoConfig, logger) : undefined;
   // Otherwise the closed items alone: a card the Foreman moved follows its issue to done.
   const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
-  const repoState = loadRepoState(repoConfig.name);
-  const held = repoState.verifyHeld ?? {};
-  const holds = foremanHolds(repoState);
+  const numbers = items.map((i) => i.item.issueNumber);
+  const holds = await foremanHolds(repoConfig, numbers);
+  const held = fieldTable(await loadIssueRecords(repoConfig, numbers), "verifyHeld");
   const read = source.states?.bind(source);
   await emit({
     kind: "snapshot",
