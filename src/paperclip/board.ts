@@ -11,6 +11,7 @@
 import {
   PAPERCLIP_FOREMAN_ROLE,
   paperclipBoardDefaults,
+  sameRepoName,
   type PaperclipConfig,
   type PaperclipStage,
 } from "./config.js";
@@ -66,13 +67,16 @@ export const BACKLOG_STATUS = "backlog";
  * other card (the EM repo's, an epic's, a repo the Foreman does not serve) is
  * another writer's. On the Foreman's cards another writer may set where the card
  * is filed (project, workspace, goal, parent, priority) and nothing else.
+ * With a registry (`registryUrl`), a repo matches under either owner spelling
+ * (`sameRepoName`), so a card survives an org move (#177).
  */
 export function foremanOwnsCard(
-  pcfg: { readonly ownsCards?: boolean; readonly repos?: readonly string[] | null },
+  pcfg: { readonly ownsCards?: boolean; readonly repos?: readonly string[] | null; readonly registryUrl?: string },
   servedRepos: readonly string[],
   repo: string,
 ): boolean {
-  return pcfg.ownsCards === true && servedRepos.includes(repo) && (!pcfg.repos || pcfg.repos.includes(repo));
+  const has = (list: readonly string[]) => list.includes(repo) || (!!pcfg.registryUrl && list.some((r) => sameRepoName(r, repo)));
+  return pcfg.ownsCards === true && has(servedRepos) && (!pcfg.repos || has(pcfg.repos));
 }
 
 /** The lease: the cards a running session holds in progress, renewed while any runs. */

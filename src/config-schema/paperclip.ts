@@ -210,6 +210,16 @@ export function paperclipBoardDefaults(): Pick<PaperclipConfig, "board" | "stage
 export type PaperclipConfig = Readonly<z.infer<typeof paperclipConfigSchema>>;
 
 /**
+ * True when two repo spellings name the same repo under either GitHub owner: the part after
+ * the slash, case-insensitive. Only with a registry configured (`registryUrl`), where an
+ * owner move is expected; the synchronous checks use it because they cannot ask the registry.
+ */
+export function sameRepoName(a: string, b: string): boolean {
+  const nameOf = (r: string) => r.slice(r.indexOf("/") + 1).toLowerCase();
+  return nameOf(a) === nameOf(b);
+}
+
+/**
  * The `paperclip` block with its AI_AGENT_PAPERCLIP_* overrides applied, one env
  * var per leaf. `statusMap`, `projects`, `repos` and the nested blocks have none.
  * Undefined when neither the file nor the env sets anything, so the schema's prefault applies. A file value that is not
@@ -288,8 +298,7 @@ function checkEnabled(pc: z.infer<typeof paperclipConfigSchema>, knownRepos?: Re
     // With a registry (`registryUrl`), either owner spelling of a configured repo is accepted: the
     // mirror compares them on identity keys at run time, and this check cannot ask the registry.
     // Matching on the repo name keeps a misspelled or unrelated repo rejected.
-    const nameOf = (r: string) => r.slice(r.indexOf("/") + 1).toLowerCase();
-    const known = (r: string) => knownRepos.includes(r) || (!!pc.registryUrl && knownRepos.some((k) => nameOf(k) === nameOf(r)));
+    const known = (r: string) => knownRepos.includes(r) || (!!pc.registryUrl && knownRepos.some((k) => sameRepoName(k, r)));
     const unknown = pc.repos.filter((r) => !known(r));
     if (unknown.length) throw new Error(`paperclip.repos ${unknown.map((r) => `"${r}"`).join(", ")} is not a configured githubRepo.`);
   }

@@ -27,6 +27,16 @@ test("foremanOwnsCard: a served, mirrored repo's card with ownsCards on; everyth
   assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["xrgarcia/jerky_service"] }, served, "xrgarcia/jerky_service"), true);
 });
 
+test("foremanOwnsCard: with a registry a moved repo matches under either owner; without one it stays exact (#177)", () => {
+  const served = ["xrgarcia/slashbin_data_receiver"];
+  const reg = { ownsCards: true, registryUrl: "https://registry.example/registry/mcp" };
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/slashbin_data_receiver"), true, "moved owner, registry set");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/Slashbin_Data_Receiver"), true, "case does not matter");
+  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "slashbin-io/slashbin_data_receiver"), false, "no registry: exact");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/slashbin_mcp_services"), false, "a different name is not owned");
+  assert.equal(foremanOwnsCard({ ...reg, repos: ["slashbin-io/slashbin_data_receiver"] }, served, "xrgarcia/slashbin_data_receiver"), true, "paperclip.repos under the other owner");
+});
+
 test("pickCard: the oldest row that is not cancelled, else the oldest; undated rows by list order, after dated ones", () => {
   const rows = [
     { id: "new-open", status: "todo", createdAt: "2026-10-15T10:00:05Z" },
