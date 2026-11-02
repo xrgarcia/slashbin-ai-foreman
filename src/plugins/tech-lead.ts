@@ -3,6 +3,7 @@ import type { Logger } from "../logger.js";
 import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS, SUMMARY_DISPLAY_LIMIT, type ReviewResult, type ReviewTrailer } from "../agent.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "../review-progress.js";
+import { isTransientGhError } from "../github/gh.js";
 import { cliTail, lastLine, parseReviewTrailerRecords, runAgentCli } from "./agent-cli.js";
 import type { ForemanPlugin, PromotionApproval, Reviewer, ReviewFallback } from "./contract.js";
 
@@ -102,9 +103,22 @@ export async function reviewViaTechLead(
   if (out.code === 3) {
     const reason = out.stdout.trim().split("\n").pop() || "Codex unavailable";
     logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — retried later`);
-    return { fallback: true, reason };
+    // Exit 3 with GitHub down ("GitHub unavailable after 4 attempts") is a network defer, silent like the
+    // exit-1 form below; Codex unavailable stays the visible wait it always was (foreman#180).
+    const githubDown = /github unavailable/i.test(out.stdout) || isTransientGhError(new Error(out.stderr));
+    return githubDown ? { fallback: true, reason, transient: true } : { fallback: true, reason };
   }
   if (out.timedOut) return { success: false, error: "Tech Lead review timed out" };
+  // A transient GitHub error inside the Tech Lead (`gh pr view` hit a TLS handshake timeout, 2026-11-02,
+  // foreman#180) is a network blip, not a failed review. The Tech Lead retries its own reads and exits 3
+  // when GitHub stays down; this is the same answer for a build that does not, or a failure it did not
+  // classify. Its writes are idempotent per head (a second run finds its own APPROVE and only merges),
+  // so offering the PR again is safe even when the failure came late.
+  if (out.code !== 0 && isTransientGhError(new Error(out.stderr))) {
+    const reason = `GitHub transport error inside the Tech Lead (exit ${out.code}): ${out.stderr.trim().slice(-200)}`;
+    logger.info(`Tech Lead PR #${prNumber}: ${reason} — deferred, not charged`);
+    return { fallback: true, reason, transient: true };
+  }
   if (out.code !== 0) {
     return { success: false, error: `Tech Lead review failed (exit ${out.code}): ${(out.stderr.trim() || out.stdout).trim().slice(-400)}` };
   }

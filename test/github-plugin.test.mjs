@@ -71,6 +71,7 @@ const pr = { number: 50, url: "https://github.com/example/fake/pull/50", title: 
   headRefName: "features", baseRefName: "develop", headRefOid: "abc", updatedAt: "2026-11-01T00:00:00Z", commits: [], files: [{ path: "a.ts" }] };
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(fs.existsSync(${JSON.stringify(F.issues)}) ? fs.readFileSync(${JSON.stringify(F.issues)}, "utf8") : "[]");
 else if (args[0] === "pr" && args[1] === "list") process.stdout.write(fs.existsSync(${JSON.stringify(F.prOpen)}) ? JSON.stringify([pr]) : "[]");
+else if (args[0] === "pr" && args[1] === "view" && args.join(" ").includes("--json state")) process.stdout.write(JSON.stringify({ state: "OPEN" }));
 else if (args[0] === "pr" && args[1] === "view") process.stdout.write("{}");
 else process.stdout.write("[]");
 `);

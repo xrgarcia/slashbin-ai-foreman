@@ -137,6 +137,7 @@ export function githubCodeHost(): CodeHost {
     findQaPendingPr: reviewQueue.findQaPendingPr,
     blockedAmong: reviewQueue.blockedAmong,
     readPrHeadSha: reviewFreshness.readPrHeadSha,
+    readPrState: reviewFreshness.readPrState,
     hasPendingRevisions: reviewQueue.hasPendingRevisions,
     escalatedReason: skipHold.escalatedReason,
     foremanLogin: skipHold.foremanLogin,
