@@ -315,11 +315,18 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
 const CLIENT_PREFIX = "client/";
 
 /**
+ * Whole-app build inputs, at the repo root or the client root: they change the compiled output of every page
+ * (slashbin-ai-foreman#181; Slashbin-console PR #1607). The same set as `BUILD_INPUT` in `slashbin_ai_qa`
+ * `lib/affected-pages.mjs`: keep the two in step.
+ */
+const BUILD_INPUT = /^(client\/)?(vite\.config\.[^/]+|react-compiler\.config\.[^/]+|tsconfig[^/]*\.json|package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|postcss\.config\.[^/]+|tailwind\.config\.[^/]+|index\.html)$/;
+
+/**
  * A PASS that captured no shot while the PR changed client code checked nothing, so it is never a verdict
  * (Slashbin-console PR #1589: QA could not read its lazy routes and passed 0 pages). Pure.
  */
 export function isVoidQaPass(shots: number, changed: readonly string[]): boolean {
-  return shots === 0 && changed.some((f) => f.startsWith(CLIENT_PREFIX));
+  return shots === 0 && changed.some((f) => f.startsWith(CLIENT_PREFIX) || BUILD_INPUT.test(f));
 }
 
 /** A PR comment opening with this is the EM's request to re-run QA on that merged PR. */
