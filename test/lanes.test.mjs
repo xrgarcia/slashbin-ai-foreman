@@ -214,15 +214,15 @@ test("state: two lanes saving one repo keep each other's fields", () => {
   build.implemented.push(41);
   saveRepoState("statesafe", build);
   // The release lane loaded before the build saved, and saves a field of its own.
-  saveRepoState("statesafe", { ...rel, prodVerified: { 41: { pr: 9, mergeSha: SHA, at: "2026-10-14T00:00:00Z" } } });
+  saveRepoState("statesafe", { ...rel, promotionHeldNoted: "41" });
   const after = loadRepoState("statesafe");
   assert.deepEqual(after.implemented, [41], "the release lane's stale copy did not erase the build's record");
-  assert.equal(after.prodVerified[41].pr, 9);
+  assert.equal(after.promotionHeldNoted, "41");
   // A copy saved twice diffs from its own last save.
   build.implemented.push(42);
   saveRepoState("statesafe", build);
   assert.deepEqual(loadRepoState("statesafe").implemented, [41, 42]);
-  assert.equal(loadRepoState("statesafe").prodVerified[41].pr, 9);
+  assert.equal(loadRepoState("statesafe").promotionHeldNoted, "41");
 });
 
 // --- (a) a long build does not delay the same repo's release --------------------

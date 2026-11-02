@@ -18,6 +18,7 @@ import {
 } from "../reconciler.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
+import { fieldTable, loadIssueRecord, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
 import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import {
@@ -115,13 +116,10 @@ export function reportLaunchThrew(err: unknown): never {
  * escalated for the EM's ruling, the card held Blocked at the approved stage.
  */
 async function escalateSkips(items: { n: number; reason: string }[], repoName: string, repoConfig: RepoConfig, repoLogger: Logger): Promise<void> {
-  const state = loadRepoState(repoName);
   const at = new Date().toISOString();
   for (const { n } of items) {
-    const entry = state.skipped?.[n];
-    if (entry) state.skipped![n] = { ...entry, escalatedAt: at };
+    await updateIssueRecord(repoConfig, n, (d) => { if (d.skipped) d.skipped = { ...d.skipped, escalatedAt: at }; });
   }
-  saveRepoState(repoName, state);
   for (const { n, reason } of items) {
     repoLogger.warn(`Escalated #${n} for the EM's ruling: ${reason}`);
     await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved" }, repoConfig, repoLogger);
@@ -139,7 +137,13 @@ async function escalateSkips(items: { n: number; reason: string }[], repoName: s
 async function tellDependents(issues: number[], reason: string, repoName: string, repoConfig: RepoConfig, managed: readonly RepoConfig[], repoLogger: Logger): Promise<void> {
   for (const n of issues) {
     try {
-      const entry = loadRepoState(repoName).skipped?.[n];
+      // An unreadable record is not an empty one: told again, the dependents would be commented twice.
+      const record = await loadIssueRecord(repoConfig, n);
+      if (!record) {
+        repoLogger.warn(`Could not read #${n}'s record — its dependents are checked next pass`);
+        continue;
+      }
+      const entry = record.skipped;
       const { told, failed, open } = codeHost().announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
       // The stopped issue is held visibly whether or not anything waits on it: with no
       // dependents it was held only by the Foreman's state, `approved` and unlabelled, and
@@ -174,9 +178,7 @@ async function tellDependents(issues: number[], reason: string, repoName: string
         escalated.push(t.ref);
         repoLogger.warn(`Told ${t.ref} its blocker #${n} is dead and escalated it: ${reason}`);
       }
-      const state = loadRepoState(repoName);
-      if (state.skipped?.[n]) state.skipped[n] = { ...state.skipped[n], deadBlockerTold: toldRefs, deadBlockerEscalated: escalated };
-      saveRepoState(repoName, state);
+      await updateIssueRecord(repoConfig, n, (d) => { if (d.skipped) d.skipped = { ...d.skipped, deadBlockerTold: toldRefs, deadBlockerEscalated: escalated }; });
     } catch (err) {
       repoLogger.warn(`Could not check what #${n} blocks: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -193,7 +195,9 @@ async function tellDependents(issues: number[], reason: string, repoName: string
 export async function deliverPendingHandoffs(repoConfig: RepoConfig, config: AgentConfig, repoLogger: Logger): Promise<void> {
   const managed = config.allRepos ?? config.repos;
   try {
-    const skipped = loadRepoState(repoConfig.name).skipped ?? {};
+    // The issues the repo has open: a held blocker keeps its blocked label and is among them.
+    const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger).map((i) => i.number);
+    const skipped = fieldTable(await loadIssueRecords(repoConfig, open), "skipped");
     for (const [key, entry] of Object.entries(skipped)) {
       const pending = (entry.deadBlockerTold ?? []).filter((ref) => {
         if ((entry.deadBlockerEscalated ?? []).includes(ref)) return false;
@@ -301,6 +305,13 @@ export async function tryBatchImplementation(
 
   const alreadyImplemented = new Set(repoState.implemented);
   handOff = handOff.filter((n) => !alreadyImplemented.has(n));
+  // What the Foreman holds each of these for. An issue whose record cannot be read is left out this cycle,
+  // not built: a hold or a skip on it may be exactly what the unreadable record says.
+  const recordsOfHandOff = await loadIssueRecords(repoConfig, handOff);
+  if (recordsOfHandOff.unavailable.size > 0) {
+    repoLogger.warn(`Records unreadable, leaving these alone this cycle: ${[...recordsOfHandOff.unavailable].map((n) => `#${n}`).join(", ")}`);
+    handOff = handOff.filter((n) => !recordsOfHandOff.unavailable.has(n));
+  }
   if (handOff.length === 0) {
     await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
@@ -335,7 +346,7 @@ export async function tryBatchImplementation(
     repoLogger.debug(`Open feature PR lookup failed — not queueing on it this cycle: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const skippedMap = repoState.skipped ?? {};
+  const skippedMap = fieldTable(recordsOfHandOff, "skipped");
   const now = Date.now();
   const stillBackedOff: { n: number; reason: string }[] = [];
   const resolvedTransient: { n: number; reason: string }[] = [];
@@ -374,15 +385,13 @@ export async function tryBatchImplementation(
   // A release buys one session: the entry stays, marked, so the next skip adds
   // to its count. A person's change to an escalated issue clears it instead.
   if (released.length > 0) {
-    const freed = loadRepoState(repoName);
-    freed.skipped = freed.skipped ?? {};
     const at = new Date().toISOString();
     for (const { n, reset } of released) {
-      if (reset) delete freed.skipped[n];
-      else if (freed.skipped[n]) freed.skipped[n] = { ...freed.skipped[n], releasedAt: at };
+      await updateIssueRecord(repoConfig, n, (d) => {
+        if (reset) delete d.skipped;
+        else if (d.skipped) d.skipped = { ...d.skipped, releasedAt: at };
+      });
     }
-    saveRepoState(repoName, freed);
-    repoState.skipped = freed.skipped;
     repoLogger.info(`Released ${released.length} held issue(s) for one session: ${released.map(({ n, by, reset }) => `#${n} (${by}${reset ? ", attempts reset" : ""})`).join("; ")}`);
     for (const { n, by } of released) {
       await releaseIfResolved("skip", { [by]: true }, [n], repoConfig, repoLogger);
@@ -393,11 +402,7 @@ export async function tryBatchImplementation(
     repoLogger.info(
       `Cleared ${resolvedTransient.length} resolved-transient skip entr${resolvedTransient.length === 1 ? "y" : "ies"}: ${resolvedTransient.map(({ n }) => `#${n}`).join(", ")}`,
     );
-    const healed = loadRepoState(repoName);
-    healed.skipped = healed.skipped ?? {};
-    for (const { n } of resolvedTransient) delete healed.skipped[n];
-    saveRepoState(repoName, healed);
-    repoState.skipped = healed.skipped;
+    for (const { n } of resolvedTransient) await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
     await releaseIfResolved("skip", { transientCauseGone: true }, resolvedTransient.map(({ n }) => n), repoConfig, repoLogger);
   }
   if (stillBackedOff.length > 0) {
@@ -498,7 +503,14 @@ export async function tryBatchImplementation(
   const merged = !featurePr && roleFor("verifier", config) !== undefined && config.buildWaitsForDevVerify
     ? [...labels].filter(([, names]) => names.includes(repoConfig.lifecycleLabels.prMerged)).map(([n]) => n)
     : [];
-  const verifying = devVerifyHolding(merged, loadRepoState(repoName).verifyHeld ?? {}, config.backoff.verifyRetry.maxAttempts);
+  // An unreadable record of a merged issue could be the very hold that queues the build: build nothing this cycle.
+  const mergedRecords = await loadIssueRecords(repoConfig, merged);
+  if (mergedRecords.unavailable.size > 0) {
+    repoLogger.warn(`Dev verification holds unreadable for ${[...mergedRecords.unavailable].map((n) => `#${n}`).join(", ")} — not building this cycle`);
+    return null;
+  }
+  const verifyHolds = fieldTable(mergedRecords, "verifyHeld");
+  const verifying = devVerifyHolding(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   // The fix a failed verification asks for is filed as a follow-up to it.
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (Slashbin-console#1340 behind #1338, 32 min, 2026-10-20).
@@ -506,7 +518,7 @@ export async function tryBatchImplementation(
   // a rework issue outside the batch starved while the verification waited on
   // it (Slashbin-console #1440 behind #1431, 2026-10-27).
   // A visual QA FAIL is capped at once (the EM decides), so it no longer holds the repo; its follow-up still goes first.
-  const followUpOf = verifying ?? visualDecisionHolder(merged, loadRepoState(repoName).verifyHeld ?? {}, config.backoff.verifyRetry.maxAttempts);
+  const followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   const fixes = !featurePr && followUpOf !== null ? followUpsToBuild(followUpOf, actionableIssues, handOff, titles) : [];
   if (fixes.length > 0) {
     actionableIssues.splice(0, actionableIssues.length, ...fixes);
@@ -662,11 +674,11 @@ export async function tryBatchImplementation(
         if (!updatedState.implemented.includes(issueNum)) {
           updatedState.implemented.push(issueNum);
         }
-        // Clear any prior skip record — if it's now implemented, the prior
-        // "blocked on investigation" state is resolved.
-        if (updatedState.skipped) delete updatedState.skipped[issueNum];
       }
       saveRepoState(repoName, updatedState);
+      // Clear any prior skip record — if it's now implemented, the prior
+      // "blocked on investigation" state is resolved.
+      for (const issueNum of issuesActuallyImplemented) await updateIssueRecord(repoConfig, issueNum, (d) => { delete d.skipped; });
 
       // Report each implemented item in review (on GitHub: the `prUnderReview`
       // label) so the EM knows the PR is ready. One item at a time, in order.
@@ -691,8 +703,8 @@ export async function tryBatchImplementation(
         codeHost().closeAlreadyLanded(repoConfig, n, reason);
         const landedState = loadRepoState(repoName);
         if (!landedState.implemented.includes(n)) landedState.implemented.push(n);
-        if (landedState.skipped) delete landedState.skipped[n];
         saveRepoState(repoName, landedState);
+        await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
         failureCount.set(repoName, 0);
         lastFailureReason.delete(repoName);
         failurePause.clear(repoName);
@@ -708,8 +720,6 @@ export async function tryBatchImplementation(
       // Record per-issue skip timestamps so the back-off filter at the top of
       // this function suppresses retries for backoffDelay(skipCount, backoff.skip).
       // Do NOT increment failureCount — this isn't an error.
-      const updatedState = loadRepoState(repoName);
-      if (!updatedState.skipped) updatedState.skipped = {};
       let skippedSet = result.skippedIssues && result.skippedIssues.length > 0
         ? result.skippedIssues
         : actionableIssues;
@@ -750,7 +760,7 @@ export async function tryBatchImplementation(
         });
         // They're out of the actionable set now — no skip record needed, and a
         // stale one would linger in state forever.
-        for (const n of mergedNums) delete updatedState.skipped[n];
+        for (const n of mergedNums) await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
         skippedSet = skippedSet.filter((n) => !mergedNums.includes(n));
       }
       // ------------------------------------------------------------------------
@@ -767,33 +777,42 @@ export async function tryBatchImplementation(
           repoLogger.debug(`Could not read ${codeHost().waitingOnLabel(waitingOn, repoConfig.githubRepo)}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      // The count each issue reached; an issue whose record could not be saved has none and is not escalated this pass.
+      const skipCounts = new Map<number, number>();
       for (const issueNum of skippedSet) {
         // Escalating per-issue back-off: a fixed snooze never gives up, so a
         // permanently-unactionable issue costs an agent session every window,
         // indefinitely. Count the consecutive skips; the filter at the top of
         // this function widens the window geometrically off this count.
-        const priorCount = updatedState.skipped[issueNum]?.skipCount ?? 0;
-        updatedState.skipped[issueNum] = {
-          lastSkippedAt: stamp,
-          reason,
-          skipCount: priorCount + 1,
-          ...(waitingOn ? { waitingOn: `${waitingOn.repo}#${waitingOn.number}` } : {}),
-          ...(updatedState.skipped[issueNum]?.deadBlockerTold ? { deadBlockerTold: updatedState.skipped[issueNum].deadBlockerTold } : {}),
-          ...(updatedState.skipped[issueNum]?.deadBlockerEscalated ? { deadBlockerEscalated: updatedState.skipped[issueNum].deadBlockerEscalated } : {}),
-        };
+        const saved = await updateIssueRecord(repoConfig, issueNum, (d) => {
+          const prior = d.skipped;
+          const skipCount = (prior?.skipCount ?? 0) + 1;
+          skipCounts.set(issueNum, skipCount);
+          d.skipped = {
+            lastSkippedAt: stamp,
+            reason,
+            skipCount,
+            ...(waitingOn ? { waitingOn: `${waitingOn.repo}#${waitingOn.number}` } : {}),
+            ...(prior?.deadBlockerTold ? { deadBlockerTold: prior.deadBlockerTold } : {}),
+            ...(prior?.deadBlockerEscalated ? { deadBlockerEscalated: prior.deadBlockerEscalated } : {}),
+          };
+        });
+        if (!saved) {
+          skipCounts.delete(issueNum);
+          repoLogger.warn(`#${issueNum}: the skip could not be recorded — the issue is offered again next cycle`);
+        }
       }
-      saveRepoState(repoName, updatedState);
       // The agent declined these; the source hears why. On GitHub this writes
       // nothing — the agent posts its own skip comment.
       // Held, the reason says what releases it.
       // At the attempt cap it is escalated for the EM's ruling instead.
       const blockedReason = skip.hold ? codeHost().heldReason(reason, repoConfig.githubRepo, waitingOn, waitingOnIsPr) : reason;
-      const outOfAttempts = skip.hold ? skippedSet.filter((n) => (updatedState.skipped![n]?.skipCount ?? 0) >= skip.maxAttempts) : [];
+      const outOfAttempts = skip.hold ? skippedSet.filter((n) => (skipCounts.get(n) ?? 0) >= skip.maxAttempts) : [];
       for (const n of skippedSet) {
         if (!outOfAttempts.includes(n)) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blockedReason }, repoConfig, repoLogger);
       }
       if (outOfAttempts.length > 0) {
-        await escalateSkips(outOfAttempts.map((n) => ({ n, reason: codeHost().escalatedReason(reason, updatedState.skipped![n].skipCount ?? 0) })), repoName, repoConfig, repoLogger);
+        await escalateSkips(outOfAttempts.map((n) => ({ n, reason: codeHost().escalatedReason(reason, skipCounts.get(n) ?? 0) })), repoName, repoConfig, repoLogger);
       }
       // A stop that holds other issues up says so to them (dead-blocker.ts).
       // A skip naming an open PR on the branch clears when that PR leaves (isResolvedTransientSkip): never a dead blocker.

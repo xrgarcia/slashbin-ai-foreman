@@ -30,6 +30,7 @@ import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { memoryRecords, seed, recordOf, breakRecords } from "./issue-records.mjs";
 import { registerPlugin, startPlugins } from "../dist/plugins/registry.js";
 
 await startAgentPlugins();
@@ -224,6 +225,7 @@ function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {
   resetReleaseStage();
   resetReleaseCarry();
   resetSignoff();
+  memoryRecords();
 }
 const gh = () => JSON.parse(readFileSync(GH_STATE, "utf8"));
 const ghCalls = () => readFileSync(GH_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -292,8 +294,8 @@ test("approve → deploy → pass: tagged, every issue closed with one comment, 
   const rs = loadRepoState("rel");
   assert.equal(rs.prodReleases[100].phase, "soaking");
   assert.equal(Date.parse(rs.prodReleases[100].soakAt) - Date.parse(rs.prodReleases[100].mergedAt), SOAK_DELAY_MS);
-  assert.equal(rs.prodVerified[5].mergeSha, MERGE);
-  assert.equal(rs.prodVerified[6].tag, tag);
+  assert.equal((await recordOf(repo, 5)).prodVerified.mergeSha, MERGE);
+  assert.equal((await recordOf(repo, 6)).prodVerified.tag, tag);
 
   // Before the soak is due nothing runs.
   assert.equal(await run(2), false);
@@ -301,7 +303,7 @@ test("approve → deploy → pass: tagged, every issue closed with one comment, 
 });
 
 // foreman#148: an error the SRE excluded during a production verification reaches the EM, and the release still ships.
-const unrelatedEntries = () => Object.values(loadRepoState("rel").unstick ?? {}).filter((e) => e.kind === "unrelated-error");
+const unrelatedEntries = () => Object.values(loadRepoState("rel").repoUnstick ?? {}).filter((e) => e.kind === "unrelated-error");
 const TRIAGE = (prefix) => [`${prefix}Evidence: https://example.test/pv-ev`, `${prefix}Not caused by this release, needs triage: billing: Expired API Key provided: rk_test_1234`].join("\n");
 
 test("the first prod deploy's excluded error reaches the EM with its evidence; the release still closes", async () => {
@@ -336,7 +338,7 @@ test("a prod verification's excluded error reaches the EM once; the release stil
 });
 
 // foreman#151: a prod close tells the EM the epic may be ready to close, once per epic and issue.
-const epicEntries = () => Object.values(loadRepoState("rel").unstick ?? {}).filter((e) => e.kind === "epic-ready-to-close");
+const epicEntries = () => Object.values(loadRepoState("rel").repoUnstick ?? {}).filter((e) => e.kind === "epic-ready-to-close");
 const setBodies = (bodies) => { const g = gh(); for (const [n, b] of Object.entries(bodies)) { g.issues[n].body = b; } writeFileSync(GH_STATE, JSON.stringify(g)); };
 
 test("closing an epic's child in production asks the EM whether the epic is ready to close; the release still closes", async () => {
@@ -384,7 +386,7 @@ test("a soak hold reopens the closed issues at `prod verification held` and forg
   const rs = loadRepoState("rel");
   assert.equal(rs.prodReleases[100].phase, "held");
   assert.equal(rs.prodReleases[100].soaked, true);
-  assert.equal(rs.prodVerified?.[5], undefined);
+  assert.equal((await recordOf(repo, 5)).prodVerified, undefined);
 });
 
 test("the Tech Lead refuses (exit 4): the issues are blocked with the reason, and the SRE never runs", async () => {
@@ -718,7 +720,7 @@ test("an issue that shipped unlisted joins the release at production's head afte
     prs: [mergedPr(90, "### Issues included\n- #4: Issue 4", OLD, 300), mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 120)],
     compareFiles: 0, prodHead: MERGE,
   }, { prod: VERIFY(100) });
-  editState((st) => { st.prodVerified = { 5: { pr: 100, mergeSha: MERGE, at: new Date().toISOString() } }; });
+  await seed(repo, 5, { prodVerified: { pr: 100, mergeSha: MERGE, at: new Date().toISOString() } });
   await run();
   assert.ok(!gh().issues[9].labels.includes("blocked"), "not blocked");
   assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/, "the head release now names it");
@@ -749,7 +751,8 @@ const promote = (cycle, active = true) => tryPromotion(repo, logger, cycle, acti
 
 test("promote, 0-file diff: closes only an issue prod-verified at production's head; the rest go to `release pending`", async () => {
   world({ issues: [issue(5, "ready for prod release"), issue(6, "ready for prod release")], compareFiles: 0, prodHead: MERGE });
-  editState((st) => { st.prodVerified = { 5: { pr: 100, mergeSha: MERGE, at: "2026-10-10T00:00:00Z" }, 6: { pr: 90, mergeSha: OLD, at: "2026-10-09T00:00:00Z" } }; });
+  await seed(repo, 5, { prodVerified: { pr: 100, mergeSha: MERGE, at: "2026-10-10T00:00:00Z" } });
+  await seed(repo, 6, { prodVerified: { pr: 90, mergeSha: OLD, at: "2026-10-09T00:00:00Z" } });
   await promote(1);
   const st = gh();
   assert.equal(st.issues[5].state, "CLOSED");
@@ -787,7 +790,7 @@ test("a promotion stall comments once on each issue waiting on EM verification, 
   const stall = commentsOn(5).filter((b) => b.includes("<!-- foreman:promotion-stall -->"));
   assert.equal(stall.length, 1, "deduped across checks");
   assert.match(stall[0], /Waiting on EM verification/);
-  assert.deepEqual(loadRepoState("rel").promotionStallNoted, [5]);
+  assert.equal((await recordOf(repo, 5)).promotionStallNoted, true);
 });
 
 /** A logger that keeps every line, by level. */
@@ -1299,4 +1302,98 @@ test("the release reaches its reviewer and deployer through the registry: a fake
   assert.deepEqual(agentCalls(), [], "neither the Tech Lead nor the SRE CLI ran");
   assertClosedVerified(5);
   assertClosedVerified(6);
+});
+
+// --- An unreadable issue record excludes the issue from the whole pass (EM#1244 f2) ----------------------
+// One owner (issue-records.ts `actionableIssues`) answers which issues a release pass may act on, before
+// anything comments, labels, closes, approves or deploys. These hold every release path to it.
+
+const trackedMerged = (issues) => editState((st) => {
+  st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues, phase: "merged", mergeSha: MERGE, mergedAt: new Date().toISOString(), attempts: 0, since: new Date().toISOString() } };
+});
+const untouched = (n) => {
+  const i = gh().issues[n];
+  assert.equal(i.state, "OPEN", `#${n} still open`);
+  assert.equal(commentsOn(n).length, 0, `#${n} not commented on`);
+};
+
+test("tracked merged release: an unreadable record means no verification, comment or close for any of its issues", async () => {
+  world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
+  trackedMerged([5, 6]);
+  breakRecords([6]);
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0, "the SRE never ran");
+  untouched(5); untouched(6);
+  assert.equal(loadRepoState("rel").prodReleases[100].phase, "merged", "it resumes when the record reads again");
+});
+
+test("tracked merged release: a record that cannot be saved leaves the issue open, never closed without its record", async () => {
+  world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
+  trackedMerged([5, 6]);
+  breakRecords([6], { saves: true });
+  await run();
+  assertClosedVerified(5);
+  untouched(6);
+  assert.equal(loadRepoState("rel").prodReleases[100].phase, "merged", "not soaking: verified again next pass");
+});
+
+test("open release: an unreadable record means no sign-off sync, Tech Lead approval or SRE deploy", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  breakRecords([6]);
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0);
+  assert.equal(loadRepoState("rel").prodReleases, undefined);
+  untouched(5); untouched(6);
+});
+
+test("orphan recovery: an unreadable record is neither joined to a release, commented on, nor blocked", async () => {
+  world({ issues: [issue(9, "release pending")], compareFiles: 0 });
+  breakRecords([9]);
+  await run();
+  assert.deepEqual(gh().issues[9].labels, ["approved", "release pending"]);
+  untouched(9);
+  const seedJoin = () => {
+    world({ issues: [issue(5, "prod verification held"), issue(9, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE });
+    editState((st) => {
+      st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: new Date().toISOString(),
+        attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() } };
+    });
+  };
+  seedJoin();
+  breakRecords([9]);
+  await run();
+  assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5], "not joined");
+  assert.doesNotMatch(gh().prs[100].body, /#9/);
+  untouched(9);
+});
+
+test("SRE sweep hold: an issue with an unreadable record keeps its blocked label and is looked at again", async () => {
+  world({
+    issues: [issue(8, "blocked")],
+    prs: [mergedPr(90, "- #8", MERGE, 120)],
+    comments: { 8: [{ url: "https://github.com/example/rel/issues/8#issuecomment-9", at: "2026-10-10T00:00:00Z",
+      body: "**Production release check needs a person.** Release https://github.com/example/rel/pull/90 held: healthcheck-red." }] },
+  }, { prod: VERIFY(90) });
+  breakRecords([8]);
+  await run();
+  assert.ok(gh().issues[8].labels.includes("blocked"));
+  assert.equal(commentsOn(8).length, 1, "only the SRE's own comment");
+  assert.equal(agentCalls().length, 0);
+});
+
+test("promote, 0-file diff: an unreadable record gets no event, label move, notification or close; readable ones proceed", async () => {
+  world({ issues: [issue(5, "ready for prod release"), issue(6, "ready for prod release")], compareFiles: 0, prodHead: MERGE });
+  await seed(repo, 5, { prodVerified: { pr: 100, mergeSha: MERGE, at: "2026-10-10T00:00:00Z" } });
+  await seed(repo, 6, { prodVerified: { pr: 100, mergeSha: MERGE, at: "2026-10-10T00:00:00Z" } });
+  breakRecords([6]);
+  await promote(1);
+  assert.equal(gh().issues[5].state, "CLOSED");
+  assert.equal(gh().issues[6].state, "OPEN");
+  assert.deepEqual(gh().issues[6].labels, ["approved", "ready for prod release"], "untouched");
+  assert.equal(commentsOn(6).length, 0);
+  // The legacy (no release stage) strip is held to the same rule.
+  world({ issues: [issue(6, "ready for prod release")], compareFiles: 0 });
+  breakRecords([6]);
+  await promote(1, false);
+  assert.deepEqual(gh().issues[6].labels, ["approved", "ready for prod release"]);
 });

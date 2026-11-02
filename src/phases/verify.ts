@@ -10,7 +10,7 @@ import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import { loadRepoState, saveRepoState, type VerifyHold } from "../state.js";
+import { fieldTable, loadIssueRecords, saveFieldChanges, type VerifyHold } from "../issue-records.js";
 import { noteUnrelated } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
@@ -264,15 +264,34 @@ export async function tryVerify(
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
   if (qaApplies(repoConfig, config)) await takeQaRerunRequests(repoConfig, config, vlog);
-  const waiting = codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
-  const state = loadRepoState(repoName);
-  const held: Record<number, VerifyHold> = { ...(state.verifyHeld ?? {}) };
+  const awaiting = codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
+  // The holds of the issues this pass looks at: the ones awaiting verification, and the repo's other open
+  // issues, whose holds are stale. An issue whose record cannot be read is left alone, not read as unheld.
+  let openNumbers: number[] = [];
+  try {
+    openNumbers = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog).map((i) => i.number);
+  } catch (err) {
+    vlog.debug(`Open issues unreadable — stale holds are not pruned this pass: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const loaded = await loadIssueRecords(repoConfig, [...openNumbers, ...awaiting]);
+  const waiting = awaiting.filter((n) => !loaded.unavailable.has(n));
+  if (waiting.length < awaiting.length) vlog.warn(`Records unreadable, not verifying ${awaiting.filter((n) => loaded.unavailable.has(n)).map((n) => `#${n}`).join(", ")} this pass`);
+  const held: Record<number, VerifyHold> = fieldTable(loaded, "verifyHeld");
+  // What the store holds, so a save writes only what changed since the last one.
+  const persisted: Record<number, VerifyHold> = { ...held };
+  const persist = async (): Promise<void> => {
+    const failed = new Set(await saveFieldChanges(repoConfig, "verifyHeld", persisted, held));
+    for (const n of new Set([...Object.keys(persisted), ...Object.keys(held)].map(Number))) {
+      if (failed.has(n)) continue;
+      if (held[n]) persisted[n] = held[n]; else delete persisted[n];
+    }
+  };
   // A hold outlives its label only by mistake: a person relabelled the issue,
   // or it closed. Drop those so a later `pr merged` starts fresh.
-  const stale = Object.keys(held).map(Number).filter((n) => !waiting.includes(n));
+  const stale = Object.keys(held).map(Number).filter((n) => !awaiting.includes(n));
   if (stale.length > 0) {
     for (const n of stale) delete held[n];
-    saveRepoState(repoName, { ...state, verifyHeld: held });
+    await persist();
   }
   if (waiting.length === 0) return false;
 
@@ -310,7 +329,7 @@ export async function tryVerify(
       }, [n], repoConfig, vlog);
     if (ok) { delete held[n]; released = true; }
   }
-  if (released) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });
+  if (released) await persist();
   const unmatched = waiting.filter((n) => !refs.some((r) => r.issueNumber === n) && !held[n]);
   for (const n of unmatched) {
     // Labelled merged, but no merged PR closes it — nothing to verify against.
@@ -319,7 +338,7 @@ export async function tryVerify(
     vlog.warn(`#${n}: ${reason} — needs a person`);
     await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, vlog);
   }
-  if (unmatched.length > 0) saveRepoState(repoName, { ...loadRepoState(repoName), verifyHeld: held });
+  if (unmatched.length > 0) await persist();
 
   const target = pickVerifyTarget(refs, held, Date.now(), verifyRetry);
   if (!target) return false;
@@ -358,13 +377,12 @@ export async function tryVerify(
 
     if (r.kind === "verdict" && r.pass) {
       verifyDefer.clear(repoName);
-      const after = loadRepoState(repoName);
-      const kept = { ...(after.verifyHeld ?? {}) };
+      const kept = { ...held };
       for (const n of target.issueNumbers) {
         await advance(itemOf(repoConfig, n), "verifyPassed", repoConfig, vlog);
         delete kept[n];
       }
-      saveRepoState(repoName, { ...after, verifyHeld: kept });
+      await saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
       if (!config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
         void runQaReport(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
@@ -385,13 +403,12 @@ export async function tryVerify(
       return false;
     }
     verifyDefer.clear(repoName);
-    const after = loadRepoState(repoName);
-    const kept = { ...(after.verifyHeld ?? {}) };
+    const kept = { ...held };
     if (plan.kind === "wait") {
       for (const n of target.issueNumbers) {
         kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts: kept[n]?.attempts ?? 0, retryAt: plan.retryAt };
       }
-      saveRepoState(repoName, { ...after, verifyHeld: kept });
+      await saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
       vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
       events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
@@ -419,7 +436,7 @@ export async function tryVerify(
       const d = prior ?? decision;
       kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts, ...(d ? { decision: d } : {}) };
     }
-    saveRepoState(repoName, { ...after, verifyHeld: kept });
+    await saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
     const final = attempts >= verifyRetry.maxAttempts;
     const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${verifyRetry.maxAttempts}` +
       (plan.kind === "decide" ? "; the EM decides the fix (a follow-up issue or a spec edit releases it)" : final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
