@@ -1,6 +1,7 @@
 // foreman#104: the Foreman carries out the EM's divergence ruling. Real git against
 // a fixture repo and a bare "remote" in a temp dir; the GitHub reads and comments are injected.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
@@ -23,7 +24,7 @@ const git = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio
 
 /** A bare remote plus the Foreman's clone, with `features` and `develop` diverged. */
 function fixture({ rejectFeaturePush = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "div-repair-"));
+  const root = mkTmp("div-repair-");
   const remote = join(root, "remote.git");
   const seed = join(root, "seed");
   const clone = join(root, "clone");
@@ -51,7 +52,7 @@ function fixture({ rejectFeaturePush = false } = {}) {
     writeFileSync(hook, '#!/bin/sh\nwhile read o n ref; do [ "$ref" = refs/heads/features ] && { echo "rejected by fixture hook" >&2; exit 1; }; done\nexit 0\n');
     chmodSync(hook, 0o755);
   }
-  setStatePath(mkdtempSync(join(tmpdir(), "div-state-")));
+  setStatePath(mkTmp("div-state-"));
   const repo = { name: "dr", githubRepo: "o/dr", repoPath: clone, baseBranch: "develop", featureBranch: "features", divergenceRulerLogin: RULER };
   saveRepoState("dr", { implemented: [], failed: {}, branchBlock: {
     featureBranch: "features", baseBranch: "develop", mergeBase, ahead: 1, behind: 1,
@@ -137,7 +138,7 @@ test("repair failure: one comment, block kept, the same ruling is not retried", 
 test("a merge conflict on branch-wins fails once and leaves the clone clean", async () => {
   const f = fixture();
   // Make the two sides conflict: both touch c.txt.
-  const other = mkdtempSync(join(tmpdir(), "div-other-"));
+  const other = mkTmp("div-other-");
   git(other, "clone", f.remote, "w");
   const w = join(other, "w");
   git(w, "checkout", "features"); writeFileSync(join(w, "c.txt"), "feature\n"); git(w, "add", "."); git(w, "commit", "-m", "f c"); git(w, "push", "origin", "features");

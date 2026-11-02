@@ -2,6 +2,7 @@
 // or broken file leaves the builder exactly as it was, and the config path is
 // resolved for every repo. Run with `npm test` after `npm run build`.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,7 +10,7 @@ import { tmpdir } from "node:os";
 import { mcpServerNames } from "../dist/agent.js";
 
 const quiet = { warn() {}, info() {}, debug() {}, error() {}, child() { return quiet; } };
-const dir = mkdtempSync(join(tmpdir(), "builder-mcp-"));
+const dir = mkTmp("builder-mcp-");
 
 test("server names are read from mcpServers", () => {
   const p = join(dir, "ok.json");
