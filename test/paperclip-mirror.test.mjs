@@ -1665,3 +1665,27 @@ test("identity: an owned snapshot for the moved repo leaves the existing card's 
   assert.equal(fake.rows[0].title, "slashbin-console#7 issue 7");
   assert.equal(fake.calls.filter((c) => c.method === "PATCH" && c.body && ("description" in c.body || "title" in c.body)).length, 0);
 });
+
+// foreman#180 (SLA-3368): a review failure that lands after GitHub moved the issue on is released by the next snapshot.
+test("a review-failure block anchored on inReview is released when the snapshot reads the issue at pendingVerification", async () => {
+  for (const snapshotFirst of [true, false]) {
+    const fake = fakePaperclip([heldRow(7, "x")]);
+    fake.rows[0].status = "in_review";
+    const { mirror } = mirrorOn(fake, OWNED);
+    const snap = (stage) => mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [{ item, stage, detail: stage, foremanHeld: false }], cards: [card(7, { stage })] }, logger());
+    if (snapshotFirst) await snap("pendingVerification");
+    await mirror.onEvent({ kind: "blocked", item, reason: "review of PR #8 failed", at: "inReview" }, logger());
+    assert.equal(fake.rows[0].status, "blocked");
+    await snap("pendingVerification");
+    assert.notEqual(fake.rows[0].status, "blocked", `snapshotFirst=${snapshotFirst}: the stale review block is released`);
+  }
+});
+
+test("a review-failure block stays while GitHub still reads the issue at inReview", async () => {
+  const fake = fakePaperclip([heldRow(7, "x")]);
+  const { mirror } = mirrorOn(fake, OWNED);
+  const snap = () => mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [{ item, stage: "inReview", detail: "inReview", foremanHeld: false }], cards: [card(7, { stage: "inReview" })] }, logger());
+  await mirror.onEvent({ kind: "blocked", item, reason: "review of PR #8 failed", at: "inReview" }, logger());
+  await snap();
+  assert.equal(fake.rows[0].status, "blocked");
+});

@@ -623,7 +623,7 @@ export class PaperclipMirror implements WorkObserver {
       case "claim": return this.onClaim(event.item);
       case "transition": return this.onState(event.item, event.from, event.to);
       case "prLink": return this.onPrLink(event.item, event.prUrl);
-      case "blocked": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.blocked, "changesRequested", event.owner);
+      case "blocked": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.blocked, "changesRequested", event.owner, event.at);
       case "escalated": return this.onBlocked(event.item, event.reason, undefined, undefined, PAPERCLIP_STEPS.escalated, event.at);
       case "verifyWaiting": return this.onVerifyWaiting(event.item, event.reason);
       case "unblocked": return this.onUnblocked(event.item, event.reason);
@@ -769,7 +769,7 @@ export class PaperclipMirror implements WorkObserver {
   /** Blocked, or (`step` escalated) parked for the EM's ruling in the stage that holder owns. */
   async onBlocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger,
     step: typeof PAPERCLIP_STEPS.blocked | typeof PAPERCLIP_STEPS.escalated = PAPERCLIP_STEPS.blocked,
-    at: PaperclipStage = "changesRequested", owner?: "sre"): Promise<void> {
+    at: PaperclipStage = "changesRequested", owner?: "sre", blockStage?: PaperclipStage): Promise<void> {
     if (sameItem(this.building, item)) this.building = null;
     this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
@@ -788,7 +788,10 @@ export class PaperclipMirror implements WorkObserver {
     // let the next snapshot read it as "moved on" and release the hold
     // (slashbin_data_receiver#41, 2026-10-14: the card sat In Review on the
     // Foreman for ten hours with nobody told).
-    this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : this.ghStage.get(id));
+    // A block that names its stage (a review failure: `inReview`) is anchored there, not on the last
+    // snapshot: the review can outlive its stage, and a block anchored on the stage GitHub already
+    // reached would never be released (foreman#180, SLA-3368 left Blocked at pendingVerification).
+    this.blockedAt.set(id, step === PAPERCLIP_STEPS.escalated ? at : (blockStage ?? this.ghStage.get(id)));
     // A needs-ruling hold outranks the stage updates that follow it until the ruling lands (Foreman #109).
     if (step === PAPERCLIP_STEPS.escalated) this.rulingHeld.add(id); else this.rulingHeld.delete(id);
     this.persistBlock(id);

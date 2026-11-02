@@ -103,7 +103,10 @@ export async function reviewViaTechLead(
   if (out.code === 3) {
     const reason = out.stdout.trim().split("\n").pop() || "Codex unavailable";
     logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — retried later`);
-    return { fallback: true, reason };
+    // Exit 3 with GitHub down ("GitHub unavailable after 4 attempts") is a network defer, silent like the
+    // exit-1 form below; Codex unavailable stays the visible wait it always was (foreman#180).
+    const githubDown = /github unavailable/i.test(out.stdout) || isTransientGhError(new Error(out.stderr));
+    return githubDown ? { fallback: true, reason, transient: true } : { fallback: true, reason };
   }
   if (out.timedOut) return { success: false, error: "Tech Lead review timed out" };
   // A transient GitHub error inside the Tech Lead (`gh pr view` hit a TLS handshake timeout, 2026-11-02,

@@ -90,8 +90,26 @@ test("auth, 404, 422 and rate-limit failures stay failures", async () => {
   }
 });
 
-test("exit 3 from the Tech Lead's own github-unavailable stays a plain fallback (no transient flag needed)", async () => {
+test("exit 3 from the Tech Lead's own github-unavailable is a transient defer; exit 3 for Codex stays the visible wait", async () => {
   const cfg = fakeTechLead('console.log("GitHub unavailable after 4 attempts — nothing written; retry later."); process.exit(3);');
   const r = await reviewViaTechLead(repo, cfg, 7, logger);
   assert.equal(r.fallback, true);
+  assert.equal(r.transient, true);
+  const codex = fakeTechLead('console.log("Codex first read failed (signed-out) — nothing written"); process.exit(3);');
+  const c = await reviewViaTechLead(repo, codex, 7, logger);
+  assert.equal(c.fallback, true);
+  assert.equal(c.transient, undefined);
+});
+
+test("exit 3 with a TLS timeout on stderr is deferred the same as exit 1", async () => {
+  const cfg = fakeTechLead('console.error("gh pr view 7: net/http: TLS handshake timeout"); console.log("retry later"); process.exit(3);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.transient, true);
+});
+
+test("HTTP 500 on stderr is deferred, transient, not a failure", async () => {
+  const cfg = fakeTechLead('console.error("review-pr failed: gh pr view 7: HTTP 500: Internal Server Error"); process.exit(1);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.fallback, true);
+  assert.equal(r.transient, true);
 });
