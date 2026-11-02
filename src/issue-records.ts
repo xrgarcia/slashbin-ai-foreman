@@ -8,11 +8,13 @@
 // issues it could not load, and the caller leaves those alone this cycle (fail
 // closed): a GitHub outage must never re-attempt a failed or held issue.
 
-import type { ItemRecord, RecordKey } from "./adapters.js";
+import type { ItemRecord, RecordKey, RecordKind } from "./adapters.js";
 import type { RepoConfig } from "./config.js";
 import { canonicalJson } from "./record-store.js";
 import { activeWorkSource } from "./plugins/registry.js";
 import type { UnstickEntry } from "./unstick.js";
+import type { NoCommitStreak, ProdRelease } from "./state.js";
+import type { SavedRelease } from "./release-tracker.js";
 
 export interface FailedIssue {
   count: number;
@@ -117,7 +119,7 @@ export interface IssueRecords {
 
 const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted"];
 
-const keyOf = (repoConfig: RepoConfig, number: number): RecordKey => ({ repo: repoConfig.githubRepo, kind: "issue", number });
+const keyOf = (repoConfig: RepoConfig, number: number, kind: RecordKind = "issue"): RecordKey => ({ repo: repoConfig.githubRepo, kind, number });
 
 /** Issues whose legacy `.agent-state.json` entry has not been imported yet, by repo: their store record is not the whole truth. */
 const unimported = new Map<string, Set<number>>();
@@ -132,11 +134,37 @@ function withheld(repoConfig: RepoConfig, n: number): boolean {
   return unimported.get(repoConfig.githubRepo)?.has(n) === true;
 }
 
+/** PRs whose legacy `.agent-state.json` entry has not been imported yet, by repo (the PR-keyed twin of `unimported`). */
+const unimportedPrs = new Map<string, Set<number>>();
+/** Branches whose legacy rejected-head entry could not be tied to a closed PR yet, by repo. */
+const unresolvedBranches = new Map<string, Set<string>>();
+
+/** Set by the one-time import (legacy-records.ts): the PRs of `githubRepo` whose legacy entry could not be saved. */
+export function setUnimportedPrs(githubRepo: string, prs: ReadonlySet<number>): void {
+  if (prs.size > 0) unimportedPrs.set(githubRepo, new Set(prs));
+  else unimportedPrs.delete(githubRepo);
+}
+
+/** Set by the one-time import: the rejected branches of `githubRepo` whose entry is still in the file. */
+export function setUnresolvedBranches(githubRepo: string, branches: ReadonlySet<string>): void {
+  if (branches.size > 0) unresolvedBranches.set(githubRepo, new Set(branches));
+  else unresolvedBranches.delete(githubRepo);
+}
+
+/** True while `branch`'s rejected-head entry has not been moved into a PR record: what the EM was told about it is unknown. */
+export function branchUnresolved(repoConfig: RepoConfig, branch: string): boolean {
+  return unresolvedBranches.get(repoConfig.githubRepo)?.has(branch) === true;
+}
+
+function prWithheld(repoConfig: RepoConfig, n: number): boolean {
+  return unimportedPrs.get(repoConfig.githubRepo)?.has(n) === true;
+}
+
 // One writer per record at a time: a change is load, edit, save, and lanes run side by side.
 const chains = new Map<string, Promise<unknown>>();
 
 function serially<T>(key: RecordKey, job: () => Promise<T>): Promise<T> {
-  const id = `${key.repo}#${key.number}`;
+  const id = `${key.repo}/${key.kind}#${key.number}`;
   const run = (chains.get(id) ?? Promise.resolve()).then(job, job);
   const tail = run.catch(() => undefined);
   chains.set(id, tail);
@@ -244,8 +272,85 @@ export async function saveFieldChanges<F extends Exclude<IssueField, "unstick">>
   return failed;
 }
 
+// ---- PR-keyed records (EM#1244 f3) ----
+
+/**
+ * Everything the Foreman records about one pull request. A field that is absent means "none"; the store keeps
+ * any other key it finds. A PR is at most a few of these at once (a release PR carries `release` and `tracked`).
+ */
+export interface PrRecord {
+  /** This PR is a release PR the release stage is carrying: its phase, issues and progress (was `prodReleases[pr]`). */
+  release?: ProdRelease;
+  /** The release PR was announced open and its end is not yet announced (was the single `release` pointer). */
+  tracked?: SavedRelease;
+  /** Consecutive no-commit revisions of this PR at one head (was `noCommitStreaks[pr]`). */
+  noCommit?: NoCommitStreak;
+  /** This PR was the last one closed unmerged on its branch, and the EM was alerted that the branch still stands at this head (was `rejectedBranches[branch]`). */
+  rejectedHead?: string;
+}
+
+export type PrField = keyof PrRecord;
+const PR_FIELDS: readonly PrField[] = ["release", "tracked", "noCommit", "rejectedHead"];
+
+/** What a read of several PRs found. `unavailable` is never "no record": nothing may act on those PRs this cycle. */
+export interface PrRecords {
+  readonly records: ReadonlyMap<number, PrRecord>;
+  readonly unavailable: ReadonlySet<number>;
+}
+
+/** The record of PR `n`; null when it cannot be read (never an empty record in its place). */
+export async function loadPrRecord(repoConfig: RepoConfig, n: number): Promise<PrRecord | null> {
+  const source = activeWorkSource();
+  if (!source || prWithheld(repoConfig, n)) return null;
+  const load = await source.loadRecord(keyOf(repoConfig, n, "pr"), repoConfig);
+  if (load.status === "unavailable") return null;
+  return load.status === "found" ? (load.record as PrRecord) : {};
+}
+
+/** The records of `numbers`, each read once; a PR that cannot be read is in `unavailable`, not in `records`. */
+export async function loadPrRecords(repoConfig: RepoConfig, numbers: Iterable<number>): Promise<PrRecords> {
+  const records = new Map<number, PrRecord>();
+  const unavailable = new Set<number>();
+  for (const n of new Set(numbers)) {
+    const record = await loadPrRecord(repoConfig, n);
+    if (record) records.set(n, record);
+    else unavailable.add(n);
+  }
+  return { records, unavailable };
+}
+
+/** Change PR `n`'s record: `change` edits a copy; the result is saved when it differs. Resolves `false` when it could not be read or saved, in which case nothing changed. */
+export function updatePrRecord(repoConfig: RepoConfig, n: number, change: (draft: PrRecord) => void): Promise<boolean> {
+  return editPr(repoConfig, n, change, false);
+}
+
+/** The one-time import's write: like `updatePrRecord`, but allowed on a PR still withheld for want of this very import. */
+export function importPrRecord(repoConfig: RepoConfig, n: number, change: (draft: PrRecord) => void): Promise<boolean> {
+  return editPr(repoConfig, n, change, true);
+}
+
+function editPr(repoConfig: RepoConfig, n: number, change: (draft: PrRecord) => void, importing: boolean): Promise<boolean> {
+  const key = keyOf(repoConfig, n, "pr");
+  return serially(key, async () => {
+    const source = activeWorkSource();
+    if (!source || (!importing && prWithheld(repoConfig, n))) return false;
+    const load = await source.loadRecord(key, repoConfig);
+    if (load.status === "unavailable") return false;
+    const before: ItemRecord = load.status === "found" ? load.record : {};
+    const draft = structuredClone(before) as PrRecord & Record<string, unknown>;
+    change(draft);
+    for (const f of PR_FIELDS) if (draft[f] === undefined) delete draft[f];
+    // A PR with no record and nothing to record stays that way: no comment for an empty record.
+    if (load.status === "absent" && Object.keys(draft).length === 0) return true;
+    if (canonicalJson(draft) === canonicalJson(before)) return true;
+    return source.saveRecord(key, draft, repoConfig);
+  });
+}
+
 /** Tests only: forget the import marks and any write still queued. */
 export function resetIssueRecordsForTests(): void {
+  unimportedPrs.clear();
+  unresolvedBranches.clear();
   unimported.clear();
   chains.clear();
 }

@@ -73,7 +73,7 @@ test("the agent is told how to declare it, in both prompt branches", () => {
 
 test("two declared no-commits on one head escalate instead of looping", () => {
   const block = orchestrator.slice(orchestrator.indexOf("if (result.noCommit)"), orchestrator.indexOf("if (result.noCommit)") + 2000);
-  assert.match(block, /recordNoCommit\(repoName, prNumber, head\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
+  assert.match(block, /recordNoCommit\(repoConfig, prNumber, head, streak\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
   assert.match(block, /MAX_CONSECUTIVE_NO_COMMIT/, "the cap must be applied, not just declared");
   assert.match(block, /events\.push/, "a stalemate nobody is told about looks exactly like an idle queue");
   assert.match(block, /level: "error"/, "two agents deadlocked is an error-level condition");
@@ -82,14 +82,14 @@ test("two declared no-commits on one head escalate instead of looping", () => {
 
 test("the no-commit streak clears on a real push, never on an idle pass (foreman#167)", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  assert.match(fn, /\} else \{\n\s+clearNoCommitStreak\(repoName, prNumber\);/, "a pushed revision ends the streak");
+  assert.match(fn, /\} else if \(streak\) \{\n\s+await clearNoCommitStreak\(repoConfig, prNumber\);/, "a pushed revision ends the streak");
   const idle = fn.slice(fn.indexOf("if (!pending) {"), fn.indexOf("return null;", fn.indexOf("if (!pending) {")));
-  assert.doesNotMatch(idle, /clearNoCommitStreak\(repoName, prNumber\)/, "a pass with no pending revision must not reset it");
+  assert.doesNotMatch(idle, /clearNoCommitStreak\(/, "a pass with no pending revision must not reset it");
 });
 
 test("an escalated stalemate stops launching revision sessions until the head moves", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  const skip = fn.indexOf("noCommitCount(repoName, prNumber, head) > MAX_CONSECUTIVE_NO_COMMIT");
+  const skip = fn.indexOf("noCommitCount(streak, head) > MAX_CONSECUTIVE_NO_COMMIT");
   assert.ok(skip > 0, "without it every cycle re-runs a paid revision that re-answers the same review");
   assert.ok(skip < fn.indexOf("revisePRFeedback("), "the skip must come before the session launches");
 });

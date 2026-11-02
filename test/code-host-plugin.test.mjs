@@ -121,7 +121,7 @@ test("verify: reads the pr merged issues through the code host plugin, never gh"
 });
 
 test("release: reaches the release PRs through the code host plugin, never gh", async () => {
-  assert.deepEqual(await viaFake(() => tryRelease(repo, config, quiet, 1)), ["getOpenIssues"]);
+  assert.deepEqual(await viaFake(() => tryRelease(repo, config, quiet, 1)), ["closedPrsForBranch"]);
 });
 
 test("reconcile: looks up stuck merged issues through the code host plugin, never gh", async () => {
