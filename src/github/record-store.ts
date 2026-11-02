@@ -46,8 +46,11 @@ export function parseRecordBody(body: string): ItemRecord | undefined {
   }
 }
 
-/** What the store knows of one item: the comment holding its record (null: none), and the record. */
-interface Entry { readonly commentId: number | null; readonly record: ItemRecord | null }
+/**
+ * What the store knows of one item: the comment holding its record (null: none), and the record as
+ * canonical JSON (null: none). Text, not an object, so no caller can mutate the comparison baseline.
+ */
+interface Entry { readonly commentId: number | null; readonly json: string | null }
 
 interface CommentRow { id: number; login?: string; body: string }
 
@@ -62,7 +65,7 @@ export class GitHubRecordStore {
   async loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad> {
     try {
       const entry = this.entryFor(key, repoConfig.repoPath);
-      return entry.record ? { status: "found", record: entry.record } : { status: "absent" };
+      return entry.json === null ? { status: "absent" } : { status: "found", record: JSON.parse(entry.json) as ItemRecord };
     } catch (err) {
       const { message, stderr } = formatGhError(err);
       return { status: "unavailable", reason: stderr.split("\n")[0] || message.split("\n")[0] };
@@ -74,13 +77,14 @@ export class GitHubRecordStore {
     const cwd = repoConfig.repoPath;
     try {
       const entry = this.entryFor(key, cwd);
-      if (entry.record && canonicalJson(entry.record) === canonicalJson(record)) return true;
+      const json = canonicalJson(record);
+      if (entry.json === json) return true;
       const body = recordBody(record);
       const commentId = entry.commentId === null
         ? Number(this.io.run(["api", "-X", "POST", `repos/${key.repo}/issues/${key.number}/comments`, "-f", `body=${body}`, "--jq", ".id"], cwd))
         : this.edit(key.repo, entry.commentId, body, cwd);
       if (!Number.isFinite(commentId)) return false;
-      this.cache.set(recordId(key), { commentId, record: JSON.parse(canonicalJson(record)) as ItemRecord });
+      this.cache.set(recordId(key), { commentId, json });
       return true;
     } catch {
       return false;
@@ -105,11 +109,11 @@ export class GitHubRecordStore {
       .filter((c) => c.login?.toLowerCase() === self);
     // Comments come oldest first; if a race ever left two, the oldest is the record.
     const comment = mine[0];
-    let entry: Entry = { commentId: null, record: null };
+    let entry: Entry = { commentId: null, json: null };
     if (comment) {
       const record = parseRecordBody(comment.body);
       if (!record) throw new Error(`the record comment ${comment.id} on ${key.repo}#${key.number} is unreadable`);
-      entry = { commentId: comment.id, record };
+      entry = { commentId: comment.id, json: canonicalJson(record) };
     }
     this.cache.set(id, entry);
     return entry;

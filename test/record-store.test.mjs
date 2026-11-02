@@ -84,6 +84,29 @@ test("a second save with a changed value edits the same comment", async () => {
   assert.deepEqual(await new GitHubRecordStore(io).loadRecord(pr(9), cfg), { status: "found", record: { n: 2 } });
 });
 
+for (const [field, before, after] of [["reason", "old", "changed"], ["attempts", 1, 2]]) {
+  test(`a loaded record edited in place (hold.${field}) and saved reaches the comment and a fresh process`, async () => {
+    const { io, calls, board } = fakeIo();
+    const store = new GitHubRecordStore(io);
+    assert.equal(await store.saveRecord(issue(9), { hold: { [field]: before } }, cfg), true);
+    const loaded = await store.loadRecord(issue(9), cfg);
+    loaded.record.hold[field] = after;
+    assert.equal(await store.saveRecord(issue(9), loaded.record, cfg), true);
+    assert.equal(writes(calls).length, 2, "the edit must PATCH the comment");
+    assert.equal([...board.values()].flat().length, 1, "exactly one record comment");
+    const fresh = await new GitHubRecordStore(io).loadRecord(issue(9), cfg);
+    assert.deepEqual(fresh.record, { hold: { [field]: after } });
+  });
+}
+
+test("editing a loaded record without saving changes nothing stored", async () => {
+  for (const store of [new GitHubRecordStore(fakeIo().io), new InMemoryRecordStore()]) {
+    await store.saveRecord(issue(10), { hold: { reason: "kept" } }, cfg);
+    (await store.loadRecord(issue(10), cfg)).record.hold.reason = "mutated";
+    assert.deepEqual((await store.loadRecord(issue(10), cfg)).record, { hold: { reason: "kept" } });
+  }
+});
+
 test("a PR record uses the issues comment endpoint", async () => {
   const { io, calls } = fakeIo();
   await new GitHubRecordStore(io).saveRecord(pr(12), { a: 1 }, cfg);
