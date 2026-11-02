@@ -127,9 +127,10 @@ async function swept(repoConfig: RepoConfig, logger: Logger): Promise<Sweep | nu
     const numbers = new Set<number>(hints.get(id) ?? []);
     if (hasStage(repoConfig)) {
       try {
-        for (const p of codeHost().closedPrsForBranch(id, repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.repoPath)) numbers.add(p.number);
-        const open = codeHost().findOpenPromotionPR(id, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
-        if (open) numbers.add(open.number);
+        // Every release PR there has ever been (open, merged, closed), in one complete listing that throws when it
+        // fails or may be cut short: a stored release or pointer can sit on any of them, however old, and a swallowed
+        // failure would read as "none". Each PR's record is then read once.
+        for (const p of codeHost().allPrsForBranch(id, repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.repoPath)) numbers.add(p.number);
       } catch (err) {
         logger.debug(`Could not list ${id}'s release PRs: ${err instanceof Error ? err.message : String(err)}`);
         return null;

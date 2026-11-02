@@ -73,7 +73,8 @@ test("the agent is told how to declare it, in both prompt branches", () => {
 
 test("two declared no-commits on one head escalate instead of looping", () => {
   const block = orchestrator.slice(orchestrator.indexOf("if (result.noCommit)"), orchestrator.indexOf("if (result.noCommit)") + 2000);
-  assert.match(block, /recordNoCommit\(repoConfig, prNumber, head, streak\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
+  const fn0 = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  assert.match(fn0, /const admitted = await recordNoCommit\(repoConfig, prNumber, head, prior\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
   assert.match(block, /MAX_CONSECUTIVE_NO_COMMIT/, "the cap must be applied, not just declared");
   assert.match(block, /events\.push/, "a stalemate nobody is told about looks exactly like an idle queue");
   assert.match(block, /level: "error"/, "two agents deadlocked is an error-level condition");
@@ -82,7 +83,7 @@ test("two declared no-commits on one head escalate instead of looping", () => {
 
 test("the no-commit streak clears on a real push, never on an idle pass (foreman#167)", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  assert.match(fn, /\} else if \(streak\) \{\n\s+await clearNoCommitStreak\(repoConfig, prNumber\);/, "a pushed revision ends the streak");
+  assert.match(fn, /\} else \{\n(?:\s*\/\/[^\n]*\n)?\s+await clearNoCommitStreak\(repoConfig, prNumber\);/, "a pushed revision ends the streak");
   const idle = fn.slice(fn.indexOf("if (!pending) {"), fn.indexOf("return null;", fn.indexOf("if (!pending) {")));
   assert.doesNotMatch(idle, /clearNoCommitStreak\(/, "a pass with no pending revision must not reset it");
 });
@@ -92,4 +93,14 @@ test("an escalated stalemate stops launching revision sessions until the head mo
   const skip = fn.indexOf("noCommitCount(streak, head) > MAX_CONSECUTIVE_NO_COMMIT");
   assert.ok(skip > 0, "without it every cycle re-runs a paid revision that re-answers the same review");
   assert.ok(skip < fn.indexOf("revisePRFeedback("), "the skip must come before the session launches");
+});
+
+test("a streak that cannot be saved admits no paid session: the round is saved before the session starts", () => {
+  const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  const admit = fn.indexOf("const admitted = await recordNoCommit(");
+  assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "saved before the paid session");
+  assert.match(fn.slice(admit, admit + 400), /if \(admitted === null\) \{[\s\S]{0,260}return null;/, "a failed save starts nothing, every pass");
+  assert.ok(admit < fn.indexOf('tryAcquire("claude")'), "and before the slot is taken");
+  assert.match(fn, /restoreNoCommitStreak\(repoConfig, prNumber, prior\)/, "a session that did not answer is not counted as a no-commit round");
+  assert.doesNotMatch(fn.slice(fn.indexOf("if (result.noCommit)"), fn.indexOf("if (result.noCommit)") + 300), /recordNoCommit\(/, "no second, post-session save that could fail after the money is spent");
 });

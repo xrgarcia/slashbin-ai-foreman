@@ -23,7 +23,7 @@ const repo = { name: "r", githubRepo: "example/r", repoPath: mkTmp("pr-records-r
 const NOW = "2026-11-01T12:00:00.000Z";
 const rel = (pr, phase = "soaking", extra = {}) => ({ pr, headSha: "a".repeat(40), issues: [pr + 1000], phase, attempts: 0, since: NOW, ...extra });
 
-let store, failSave, breakLoad, prStates, closedByBranch, throwClosed, realHost;
+let store, failSave, breakLoad, prStates, closedByBranch, throwClosed, releasePrs, throwAll, realHost;
 
 before(async () => {
   const bin = mkTmp("pr-records-gh-");
@@ -42,14 +42,16 @@ beforeEach(() => {
   prStates = new Map();
   closedByBranch = new Map();
   throwClosed = false;
+  releasePrs = [];
+  throwAll = false;
   const source = activeWorkSource();
   source.loadRecord = async (key, rc) => (key.kind === "pr" && breakLoad.has(key.number) ? { status: "unavailable" } : store.loadRecord(key, rc));
   source.saveRecord = async (key, record, rc) => (key.kind === "pr" && failSave.has(key.number) ? false : store.saveRecord(key, record, rc));
   const host = codeHost();
-  realHost = { getPrState: host.getPrState, closedPrsForBranch: host.closedPrsForBranch, findOpenPromotionPR: host.findOpenPromotionPR };
+  realHost = { getPrState: host.getPrState, closedPrsForBranch: host.closedPrsForBranch, allPrsForBranch: host.allPrsForBranch };
   host.getPrState = (_r, n) => prStates.get(n) ?? null;
   host.closedPrsForBranch = (_r, head) => { if (throwClosed) throw new Error("github is down"); return closedByBranch.get(head) ?? []; };
-  host.findOpenPromotionPR = () => null;
+  host.allPrsForBranch = () => { if (throwAll) throw new Error("github is down"); return releasePrs.map((number) => ({ number, state: "MERGED" })); };
   resetIssueRecordsForTests();
   resetReleaseTrackerForTests();
   resetNoCommitStreaksForTests();
@@ -156,7 +158,7 @@ test("an unavailable PR record fails closed everywhere it is read", async () => 
   await putRelease(repo, rel(10, "deploying"));
   await putRelease(repo, rel(11, "merged"));
   resetReleaseTrackerForTests();
-  closedByBranch.set("develop", [{ number: 10 }, { number: 11 }]); // the sweep's listing of the release PRs
+  releasePrs = [10, 11]; // the sweep's listing of the release PRs
   breakLoad.add(11); breakLoad.add(20);
   assert.equal(await loadPrRecord(repo, 11), null);
   const many = await loadPrRecords(repo, [10, 11]);
@@ -170,10 +172,30 @@ test("an unavailable PR record fails closed everywhere it is read", async () => 
   assert.equal((await foremanHolds(repo, [1011], quiet))(1011), true, "an issue of an unreadable release stays held");
 });
 
-test("a listing that fails means no release is known: nothing acts", async () => {
-  throwClosed = true;
+test("a listing that fails means no release is known: nothing acts, and the failure is not cached", async () => {
+  await putRelease(repo, rel(10, "merged"));
+  resetReleaseTrackerForTests();
+  throwAll = true;
   assert.equal(await loadReleases(repo, quiet), null);
   assert.equal((await foremanHolds(repo, [5], quiet))(5), true);
+  throwAll = false; releasePrs = [10];
+  assert.deepEqual((await loadReleases(repo, quiet)).releases.map((r) => r.pr), [10], "the next call lists again and recovers it");
+});
+
+test("discovery lists every release PR, with no window: a stored release behind any number of newer ones is recovered", async () => {
+  await putRelease(repo, rel(101, "held"));
+  resetReleaseTrackerForTests();
+  releasePrs = Array.from({ length: 400 }, (_, k) => 102 + k).concat([101]);
+  assert.deepEqual((await loadReleases(repo, quiet)).releases.map((r) => r.pr), [101]);
+  const host = readFileSync(join(srcDir, "github", "core-reads.ts"), "utf8");
+  const fn = host.slice(host.indexOf("export function allPrsForBranch"));
+  assert.match(fn.slice(0, 700), /"--state", "all"/, "closed, merged and open alike");
+  assert.doesNotMatch(fn.slice(0, 700), /--search|merged:>=|"--limit", "20"/, "no date window and no 20-record cut");
+  assert.match(fn.slice(0, 900), /prs\.length >= ALL_PRS_LIMIT\) throw/, "a listing that may have been cut short fails instead of passing as complete");
+  const tracker = readFileSync(join(srcDir, "release-tracker.ts"), "utf8");
+  const sweep = tracker.slice(tracker.indexOf("async function swept("), tracker.indexOf("export interface Releases"));
+  assert.match(sweep, /allPrsForBranch\(/);
+  assert.doesNotMatch(sweep, /findOpenPromotionPR\(|closedPrsForBranch\(/, "no listing that swallows its failure or cuts at 20 feeds the sweep");
 });
 
 test("a record survives a restart: nothing but the store carries it", async () => {
