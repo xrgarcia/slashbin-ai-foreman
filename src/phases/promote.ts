@@ -8,11 +8,10 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { trackRelease } from "../release-tracker.js";
 import { emit, advance } from "../work-source.js";
 import { loadRepoState, saveRepoState } from "../state.js";
 import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
-import { releaseIssues } from "../release-tracker.js";
+import { releaseIssues, followReleasePrs, loadReleases } from "../release-tracker.js";
 import { STALL_CHECK_CYCLE_INTERVAL, itemOf, lastStallCheckCycle, notifyOnce } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { PromotionIssue, ReleaseCarry } from "../code-host.js";
@@ -142,23 +141,7 @@ export function tryFileDependencyBatchIssue(
  * moment the SRE merges, so the board does not wait a pass.
  */
 export async function followRelease(repoConfig: RepoConfig, logger: Logger, owned = false): Promise<void> {
-  const repoName = repoConfig.name;
-  await trackRelease({
-    repo: repoConfig.githubRepo,
-    productionBranch: repoConfig.productionBranch,
-    saved: loadRepoState(repoName).release,
-    findOpenRelease: () =>
-      codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger),
-    releaseState: (pr) => codeHost().getPrState(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
-    save: (v) => {
-      const st = loadRepoState(repoName);
-      if (v) st.release = v;
-      else delete st.release;
-      saveRepoState(repoName, st);
-    },
-    emit: async (release) => { await emit({ kind: "release", release }, null, logger); },
-    owned,
-  });
+  await followReleasePrs(repoConfig, logger, async (release) => { await emit({ kind: "release", release }, null, logger); }, owned);
 }
 
 /** Marks the promote stage's one stall comment on an issue. */
@@ -281,10 +264,13 @@ function clearHeldNote(repoConfig: RepoConfig): void {
  * on the release PR when promote rewrites it, and are re-queued onto a new
  * one if the old one was closed unmerged.
  */
-function carriedIssues(repoConfig: RepoConfig, logger: Logger): PromotionIssue[] {
+async function carriedIssues(repoConfig: RepoConfig, logger: Logger): Promise<PromotionIssue[] | null> {
   const { releasePending } = repoConfig.lifecycleLabels;
   const merged = new Set<number>();
-  for (const r of Object.values(loadRepoState(repoConfig.name).prodReleases ?? {})) {
+  // A release whose record cannot be read may have merged: nothing is rewritten or re-queued until it can be read.
+  const loaded = await loadReleases(repoConfig, logger);
+  if (!loaded || loaded.unreadable.size > 0) return null;
+  for (const r of loaded.releases) {
     if (r.phase !== "deploying") for (const n of r.issues) merged.add(n);
   }
   return codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
@@ -330,7 +316,12 @@ export async function tryPromotion(
   let issues = codeHost().findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
   );
-  const carried = releaseActive ? carriedIssues(repoConfig, promoLogger) : [];
+  const carried = releaseActive ? await carriedIssues(repoConfig, promoLogger) : [];
+  if (carried === null) {
+    // Which issues the release stage carries is unknown (a release record cannot be read): promote rewrites no release PR on a guess.
+    promoLogger.info(`${repoName}: a release record cannot be read from the work source; promotion waits for a later cycle`);
+    return null;
+  }
   const queue = async (nums: number[]): Promise<void> => {
     for (const n of nums) await advance(itemOf(repoConfig, n), "releaseQueued", repoConfig, promoLogger);
   };

@@ -27,11 +27,12 @@ import { readPvResult, resetSignoff, configureIssueCache, productionDriftFiles, 
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
-import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
+import { setStatePath, loadRepoState } from "../dist/state.js";
 import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
-import { memoryRecords, seed, recordOf, breakRecords } from "./issue-records.mjs";
-import { registerPlugin, startPlugins } from "../dist/plugins/registry.js";
+import { memoryRecords, seed, recordOf, breakRecords, breakPrRecords, seedRelease, releaseOf } from "./issue-records.mjs";
+import { dropRelease, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
+import { registerPlugin, startPlugins, activeWorkSource } from "../dist/plugins/registry.js";
 
 await startAgentPlugins();
 
@@ -79,8 +80,8 @@ if (a[0] === "issue") {
 }
 if (a[0] === "pr") {
   if (a[1] === "list") {
-    const want = flag("--state") === "merged" ? "MERGED" : "OPEN";
-    let l = Object.values(st.prs).filter((p) => p.state === want);
+    const want = flag("--state") === "merged" ? "MERGED" : flag("--state") === "all" ? null : "OPEN";
+    let l = Object.values(st.prs).filter((p) => want === null || p.state === want);
     if (flag("--base")) l = l.filter((p) => p.baseRefName === flag("--base"));
     if (flag("--head")) l = l.filter((p) => p.headRefName === flag("--head"));
     const since = /^merged:>=(.+)$/.exec(flag("--search") || "");
@@ -231,7 +232,19 @@ const gh = () => JSON.parse(readFileSync(GH_STATE, "utf8"));
 const ghCalls = () => readFileSync(GH_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 const agentCalls = () => readFileSync(AGENT_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 const commentsOn = (n) => (gh().comments[n] ?? []).map((c) => c.body);
-const editState = (fn) => { const st = loadRepoState("rel"); fn(st); saveRepoState("rel", st); };
+// The releases the stage carries live on their PR's record (EM#1244 f3): these read and change them the way the
+// tests once read `prodReleases` in the state file.
+const RELEASE_PRS = [80, 90, 100, ...Array.from({ length: 32 }, (_, i) => 200 + i)];
+const prodReleases = async () => {
+  const out = {};
+  for (const n of RELEASE_PRS) { const r = await releaseOf(repo, n); if (r) out[n] = r; }
+  return out;
+};
+const editRel = async (pr, fn) => { const r = structuredClone(await releaseOf(repo, pr)); fn(r); await seedRelease(repo, r); };
+const setReleases = async (rels) => {
+  for (const n of RELEASE_PRS) if (!rels[n] && (await releaseOf(repo, n))) await dropRelease(repo, n);
+  for (const r of Object.values(rels)) await seedRelease(repo, r);
+};
 const run = (cycle = 1) => tryRelease(repo, config, logger, cycle);
 
 const DEPLOYED = (verify, rest = "") =>
@@ -291,9 +304,9 @@ test("approve → deploy → pass: tagged, every issue closed with one comment, 
   assertClosedVerified(5, { tag, evidence: "https://example.test/pv" });
   assertClosedVerified(6, { tag });
 
-  const rs = loadRepoState("rel");
-  assert.equal(rs.prodReleases[100].phase, "soaking");
-  assert.equal(Date.parse(rs.prodReleases[100].soakAt) - Date.parse(rs.prodReleases[100].mergedAt), SOAK_DELAY_MS);
+  const rs = await prodReleases();
+  assert.equal(rs[100].phase, "soaking");
+  assert.equal(Date.parse(rs[100].soakAt) - Date.parse(rs[100].mergedAt), SOAK_DELAY_MS);
   assert.equal((await recordOf(repo, 5)).prodVerified.mergeSha, MERGE);
   assert.equal((await recordOf(repo, 6)).prodVerified.tag, tag);
 
@@ -367,10 +380,10 @@ test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM n
 test("the soak runs once, 30 minutes on: a pass ends the release", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
   await run();
-  editState((st) => { st.prodReleases[100].soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
   assert.equal(await run(2), true);
   assert.deepEqual(agentCalls()[2], ["sre", "verify", "--mode", "soak", "--repo", REPO, "--pr", "100"]);
-  assert.equal(loadRepoState("rel").prodReleases?.[100], undefined, "settled");
+  assert.equal((await prodReleases())[100], undefined, "settled");
   assertClosedVerified(5);
   assert.equal(await run(3), false);
   assert.equal(agentCalls().length, 3, "soaked once");
@@ -379,13 +392,13 @@ test("the soak runs once, 30 minutes on: a pass ends the release", async () => {
 test("a soak hold reopens the closed issues at `prod verification held` and forgets their verification", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100, "error-rate-up") });
   await run();
-  editState((st) => { st.prodReleases[100].soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
   await run(2);
   assertHeld(5, "soak:error-rate-up");
   assertHeld(6, "soak:error-rate-up");
-  const rs = loadRepoState("rel");
-  assert.equal(rs.prodReleases[100].phase, "held");
-  assert.equal(rs.prodReleases[100].soaked, true);
+  const rs = await prodReleases();
+  assert.equal(rs[100].phase, "held");
+  assert.equal(rs[100].soaked, true);
   assert.equal((await recordOf(repo, 5)).prodVerified, undefined);
 });
 
@@ -429,7 +442,7 @@ test("SRE deploy exit 3 retries whatever its trailer says; nothing is blocked or
   assert.equal(agentCalls().length, 2);
   assert.deepEqual(gh().issues[5].labels, ["approved", "release pending"]);
   assert.deepEqual(commentsOn(5), []);
-  assert.equal(loadRepoState("rel").prodReleases?.[100], undefined);
+  assert.equal((await prodReleases())[100], undefined);
 });
 
 for (const hold of ["predeploy-post-failed", "merge-failed", "merge-refused", "dry-run"]) {
@@ -483,12 +496,12 @@ test("merged but held: reopened at `prod verification held`, re-verified on the 
   assertHeld(6, "healthcheck-red");
   assert.match(commentsOn(5).at(-1), /https:\/\/example\.test\/pv1/);
   assert.equal(gh().refs.length, 1, "a held release is tagged too");
-  const rel = loadRepoState("rel").prodReleases[100];
+  const rel = (await prodReleases())[100];
   assert.equal(rel.phase, "held");
   assert.ok(Date.parse(rel.retryAt) - Date.now() >= DEFAULT_BACKOFF.prodVerifyRetry.baseMs - 60_000, "on the prodVerifyRetry back-off");
 
   assert.equal(await run(2), false, "not before retryAt");
-  editState((st) => { st.prodReleases[100].retryAt = new Date(Date.now() - 1000).toISOString(); });
+  await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
   assert.equal(await run(3), true);
   assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
   const tag = gh().refs[0].ref.replace("refs/tags/", "");
@@ -501,7 +514,7 @@ test("a held release is due now once the production head moves, then the back-of
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed evidence=https://example.test/pv1"), prod: VERIFY(100, "publish-failed") });
   await run();
   const setHead = (sha) => { const st = gh(); st.prodHead = sha; writeFileSync(GH_STATE, JSON.stringify(st)); };
-  assert.equal(loadRepoState("rel").prodReleases[100].verifiedHead, MERGE, "the head at the hold is recorded");
+  assert.equal((await prodReleases())[100].verifiedHead, MERGE, "the head at the hold is recorded");
 
   resetReleaseStage();
   assert.equal(await run(2), false, "head unchanged: not due");
@@ -510,7 +523,7 @@ test("a held release is due now once the production head moves, then the back-of
   resetReleaseStage();
   assert.equal(await run(3), true, "head changed: due now");
   assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
-  const rel = loadRepoState("rel").prodReleases[100];
+  const rel = (await prodReleases())[100];
   assert.equal(rel.attempts, 2);
   assert.equal(rel.verifiedHead, "f".repeat(40));
   assert.ok(Date.parse(rel.retryAt) - Date.now() >= DEFAULT_BACKOFF.prodVerifyRetry.baseMs, "back-off resumes");
@@ -522,14 +535,14 @@ test("a held release is due now once the production head moves, then the back-of
 test("a hold persisted before heads were recorded is due on the first probe, then waits per head", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed"), prod: VERIFY(100, "publish-failed") });
   await run();
-  editState((st) => {
-    delete st.prodReleases[100].verifiedHead;
-    st.prodReleases[100].retryAt = new Date(Date.now() + 6 * 3_600_000).toISOString();
+  await editRel(100, (r) => {
+    delete r.verifiedHead;
+    r.retryAt = new Date(Date.now() + 6 * 3_600_000).toISOString();
   });
   resetReleaseStage();
   assert.equal(await run(2), true, "no recorded head: verified on the first probe, not after six hours");
   assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
-  assert.equal(loadRepoState("rel").prodReleases[100].verifiedHead, MERGE, "the head is recorded");
+  assert.equal((await prodReleases())[100].verifiedHead, MERGE, "the head is recorded");
 
   resetReleaseStage();
   assert.equal(await run(3), false, "same head on the next probe: the back-off holds");
@@ -539,17 +552,15 @@ test("a head change across many held releases is one head read; a hold in that p
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("hold", " hold=publish-failed"), prod: VERIFY(100, "publish-failed") });
   await run();
   const old = new Date(Date.now() + 3_600_000).toISOString();
-  editState((st) => {
-    for (let pr = 200; pr < 232; pr++) st.prodReleases[pr] = { pr, headSha: MERGE, issues: [], phase: "held", attempts: 1, retryAt: old, verifiedHead: MERGE, since: old };
-    st.prodReleases[100].retryAt = old;
-  });
+  for (let pr = 200; pr < 232; pr++) await seedRelease(repo, { pr, headSha: MERGE, issues: [], phase: "held", attempts: 1, retryAt: old, verifiedHead: MERGE, since: old });
+  await editRel(100, (r) => { r.retryAt = old; });
   const st0 = gh(); st0.prodHead = "e".repeat(40); writeFileSync(GH_STATE, JSON.stringify(st0));
   resetReleaseStage();
   const reads = () => ghCalls().filter((c) => c.some((x) => /\/commits\//.test(x))).length;
   const before = reads();
   assert.equal(await run(2), true, "a moved head makes a held release due");
   assert.equal(reads() - before, 1, "one head read for the pass, the hold included");
-  const rs = loadRepoState("rel").prodReleases;
+  const rs = await prodReleases();
   assert.ok(Object.values(rs).every((r) => r.verifiedHead === "e".repeat(40)), "every held release records the new head");
 });
 
@@ -557,10 +568,10 @@ test("a held re-verify that holds for the same reason comments once", async () =
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("fail"), prod: VERIFY(100, "prod-verify-failed") });
   await run();
   assertHeld(5, "prod-verify-failed");
-  editState((st) => { st.prodReleases[100].retryAt = new Date(Date.now() - 1000).toISOString(); });
+  await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
   await run(2);
   assert.equal(commentsOn(5).filter((b) => b.startsWith("**Production verification held")).length, 1);
-  assert.equal(loadRepoState("rel").prodReleases[100].attempts, 2);
+  assert.equal((await prodReleases())[100].attempts, 2);
 });
 
 test("a tag already on the merge commit is reused, never duplicated", async () => {
@@ -580,7 +591,7 @@ test("a tag already on the merge commit is reused, never duplicated", async () =
 
 test("the deploy is interrupted (Foreman restart): a release found merged is verified, not deployed again", async () => {
   world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
-  editState((st) => { st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5, 6], phase: "deploying", attempts: 0, since: new Date().toISOString() } }; });
+  await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5, 6], phase: "deploying", attempts: 0, since: new Date().toISOString() });
   assert.equal(await run(), true);
   assert.deepEqual(agentCalls().map((c) => c.slice(0, 3)), [["sre", "verify", "--mode"]]);
   assertClosedVerified(5);
@@ -596,10 +607,10 @@ test("adopts a release a person merged: no Tech Lead, no deploy, a prod verify, 
   assert.match(tag, /-pr90$/);
   assertClosedVerified(7, { tag });
   // Its soak is due: merged an hour ago.
-  assert.ok(Date.parse(loadRepoState("rel").prodReleases[90].soakAt) <= Date.now());
+  assert.ok(Date.parse((await prodReleases())[90].soakAt) <= Date.now());
 
   // Once verified, it is never adopted again.
-  editState((st) => { delete st.prodReleases; });
+  await setReleases({});
   resetReleaseStage();
   assert.equal(await run(2), false);
   assert.equal(agentCalls().length, 1);
@@ -634,7 +645,7 @@ test("a merged release naming no lifecycle issue, or older than 48 hours, is not
   });
   assert.equal(await run(), false);
   assert.deepEqual(agentCalls(), []);
-  assert.equal(loadRepoState("rel").prodReleases, undefined);
+  assert.deepEqual(await prodReleases(), {});
 });
 
 test("takes over an SRE sweep hold: `blocked` goes, `prod verification held` comes, and a pass closes it", async () => {
@@ -676,20 +687,18 @@ test("a `release pending` issue nothing can carry is blocked, never closed unver
 });
 
 test("a `release pending` issue the production release shipped joins that release instead of being blocked", async () => {
-  const seed = (phase) => {
+  const seedPhase = async (phase) => {
     world({ issues: [issue(5, "prod verification held"), issue(9, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE });
-    editState((st) => {
-      st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5], phase, mergeSha: MERGE, mergedAt: new Date().toISOString(),
-        attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() } };
-    });
+    await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase, mergeSha: MERGE, mergedAt: new Date().toISOString(),
+      attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() });
   };
-  seed("held");
+  await seedPhase("held");
   await run();
   const i = gh().issues[9];
   assert.ok(!i.labels.includes("blocked"), "not blocked");
   assert.ok(i.labels.includes("prod verification held"), "held with the release it joined");
   assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/, "the release PR now names it, so the SRE grades it");
-  assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5, 9]);
+  assert.deepEqual((await prodReleases())[100].issues, [5, 9]);
   assert.match(commentsOn(9)[0], /^\*\*Joined release PR #100\.\*\*/);
 
 });
@@ -699,17 +708,15 @@ test("an issue orphaned after its release passed rejoins it, and the release is 
     issues: [{ number: 5, title: "Issue 5", state: "CLOSED", labels: ["approved"] }, issue(9, "release pending")],
     prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE,
   }, { prod: VERIFY(100) });
-  editState((st) => {
-    st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5], phase: "soaking", mergeSha: MERGE, mergedAt: new Date().toISOString(),
-      attempts: 0, soakAt: new Date(Date.now() + 1_800_000).toISOString(), since: new Date().toISOString() } };
-  });
+  await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "soaking", mergeSha: MERGE, mergedAt: new Date().toISOString(),
+    attempts: 0, soakAt: new Date(Date.now() + 1_800_000).toISOString(), since: new Date().toISOString() });
   await run();
   assert.ok(!gh().issues[9].labels.includes("blocked"), "not blocked");
   assert.match(gh().prs[100].body, /- #5: Issue 5\n- #9: Issue 9\n/);
   assert.match(commentsOn(9)[0], /re-run production verification/);
   assert.deepEqual(agentCalls(), [["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]], "verified again, with #9 named");
   assertClosedVerified(9);
-  assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5, 9]);
+  assert.deepEqual((await prodReleases())[100].issues, [5, 9]);
   assert.deepEqual(commentsOn(5), [], "the issue the first pass closed is left alone");
 });
 
@@ -1308,9 +1315,7 @@ test("the release reaches its reviewer and deployer through the registry: a fake
 // One owner (issue-records.ts `actionableIssues`) answers which issues a release pass may act on, before
 // anything comments, labels, closes, approves or deploys. These hold every release path to it.
 
-const trackedMerged = (issues) => editState((st) => {
-  st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues, phase: "merged", mergeSha: MERGE, mergedAt: new Date().toISOString(), attempts: 0, since: new Date().toISOString() } };
-});
+const trackedMerged = (issues) => seedRelease(repo, { pr: 100, headSha: HEAD, issues, phase: "merged", mergeSha: MERGE, mergedAt: new Date().toISOString(), attempts: 0, since: new Date().toISOString() });
 const untouched = (n) => {
   const i = gh().issues[n];
   assert.equal(i.state, "OPEN", `#${n} still open`);
@@ -1319,22 +1324,22 @@ const untouched = (n) => {
 
 test("tracked merged release: an unreadable record means no verification, comment or close for any of its issues", async () => {
   world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
-  trackedMerged([5, 6]);
+  await trackedMerged([5, 6]);
   breakRecords([6]);
   assert.equal(await run(), false);
   assert.equal(agentCalls().length, 0, "the SRE never ran");
   untouched(5); untouched(6);
-  assert.equal(loadRepoState("rel").prodReleases[100].phase, "merged", "it resumes when the record reads again");
+  assert.equal((await prodReleases())[100].phase, "merged", "it resumes when the record reads again");
 });
 
 test("tracked merged release: a record that cannot be saved leaves the issue open, never closed without its record", async () => {
   world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
-  trackedMerged([5, 6]);
+  await trackedMerged([5, 6]);
   breakRecords([6], { saves: true });
   await run();
   assertClosedVerified(5);
   untouched(6);
-  assert.equal(loadRepoState("rel").prodReleases[100].phase, "merged", "not soaking: verified again next pass");
+  assert.equal((await prodReleases())[100].phase, "merged", "not soaking: verified again next pass");
 });
 
 test("open release: an unreadable record means no sign-off sync, Tech Lead approval or SRE deploy", async () => {
@@ -1342,7 +1347,7 @@ test("open release: an unreadable record means no sign-off sync, Tech Lead appro
   breakRecords([6]);
   assert.equal(await run(), false);
   assert.equal(agentCalls().length, 0);
-  assert.equal(loadRepoState("rel").prodReleases, undefined);
+  assert.deepEqual(await prodReleases(), {});
   untouched(5); untouched(6);
 });
 
@@ -1352,17 +1357,15 @@ test("orphan recovery: an unreadable record is neither joined to a release, comm
   await run();
   assert.deepEqual(gh().issues[9].labels, ["approved", "release pending"]);
   untouched(9);
-  const seedJoin = () => {
+  const seedJoin = async () => {
     world({ issues: [issue(5, "prod verification held"), issue(9, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20)], compareFiles: 0, prodHead: MERGE });
-    editState((st) => {
-      st.prodReleases = { 100: { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: new Date().toISOString(),
-        attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() } };
-    });
+    await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: new Date().toISOString(),
+      attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() });
   };
-  seedJoin();
+  await seedJoin();
   breakRecords([9]);
   await run();
-  assert.deepEqual(loadRepoState("rel").prodReleases[100].issues, [5], "not joined");
+  assert.deepEqual((await prodReleases())[100].issues, [5], "not joined");
   assert.doesNotMatch(gh().prs[100].body, /#9/);
   untouched(9);
 });
@@ -1396,4 +1399,81 @@ test("promote, 0-file diff: an unreadable record gets no event, label move, noti
   breakRecords([6]);
   await promote(1, false);
   assert.deepEqual(gh().issues[6].labels, ["approved", "ready for prod release"]);
+});
+
+// --- A release's record is saved before the irreversible step (EM#1244 f3) -----------------------------
+// The release lives on its PR's record. No deploy, merge or tag happens on the strength of a record that could
+// not be read, and a record that could not be saved stops the step it was recorded for.
+
+test("open release: an unreadable PR record means no approval and no deploy", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  breakPrRecords([100]);
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0, "neither the Tech Lead nor the SRE ran");
+  assert.equal(gh().prs[100].state, "OPEN");
+});
+
+test("open release: a record that cannot be saved means the deploy does not happen this pass", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  breakPrRecords([100], { saves: true });
+  await run();
+  assert.ok(!agentCalls().some((c) => c[0] === "sre" && c[1] === "deploy"), "no SRE deploy without 'deploying' on the record");
+  assert.equal(gh().prs[100].state, "OPEN");
+  assert.equal(gh().refs.length, 0, "and nothing tagged");
+});
+
+test("a restart after the deploy whose 'merged' record could not be saved verifies; it never deploys again", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), prod: VERIFY(100) });
+  const source = activeWorkSource();
+  const save = source.saveRecord;
+  source.saveRecord = async (key, record, rc) => (key.kind === "pr" && record?.release?.phase === "merged" ? false : save(key, record, rc));
+  await run();
+  assert.equal(gh().prs[100].state, "MERGED", "the SRE merged it");
+  assert.equal(agentCalls().filter((c) => c[0] === "sre" && c[1] === "deploy").length, 1);
+  assert.equal((await releaseOf(repo, 100)).phase, "deploying", "the record still says deploying");
+  assert.equal(gh().refs.length, 0, "nothing tagged on the strength of an unsaved 'merged'");
+  // The store recovers; the process restarts.
+  source.saveRecord = save;
+  resetReleaseStage();
+  resetReleaseTrackerForTests();
+  await run(2);
+  assert.equal(agentCalls().filter((c) => c[0] === "sre" && c[1] === "deploy").length, 1, "no second deploy");
+  assert.ok(agentCalls().some((c) => c[0] === "sre" && c[1] === "verify"), "it verifies the merged release instead");
+  assert.equal(gh().refs.length, 1);
+  assertClosedVerified(5);
+});
+
+// --- Review follow-up (xrgarcia/slashbin-ai-foreman#192) ----------------------------------------------
+
+test("orphan scan: while a release PR's record is unreadable, ownership is unknown: no issue is joined or blocked, and none needs unblocking after", async () => {
+  const old = new Date(Date.now() - 72 * 3_600_000).toISOString();
+  const seedOld = async () => {
+    world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 72 * 60)], compareFiles: 0, prodHead: MERGE });
+    await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: old, attempts: 0, since: old });
+  };
+  await seedOld();
+  breakPrRecords([100]);
+  await run();
+  assert.deepEqual(gh().issues[5].labels, ["approved", "release pending"], "not blocked as an orphan");
+  assert.deepEqual(commentsOn(5), [], "no orphan comment");
+});
+
+test("release discovery: a stored release behind any number of newer closed release PRs is recovered after a restart", async () => {
+  const old = new Date(Date.now() - 72 * 3_600_000).toISOString();
+  const newer = Array.from({ length: 30 }, (_, k) => mergedPr(101 + k, "newer", "f".repeat(40), 60));
+  world({ issues: [issue(5, "prod verification held")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 72 * 60), ...newer], compareFiles: 0, prodHead: MERGE });
+  await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: old, attempts: 1,
+    retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: old });
+  resetReleaseTrackerForTests();
+  const { loadReleases } = await import("../dist/release-tracker.js");
+  const found = await loadReleases(repo, logger);
+  assert.deepEqual(found.releases.map((r) => r.pr), [100], "found although 30 newer PRs were listed first");
+});
+
+test("release view: updating R releases is O(R), not O(R^2): the view is a map, ordered once per read", () => {
+  const src = readFileSync(new URL("../src/phases/release.ts", import.meta.url), "utf8");
+  const follow = src.slice(src.indexOf("const byPr = new Map"), src.indexOf("const view = "));
+  assert.match(follow, /byPr\.delete\(next\)/);
+  assert.match(follow, /byPr\.set\(next\.pr, next\)/);
+  assert.doesNotMatch(follow, /\.filter\(|\.sort\(/, "no per-update scan or sort");
 });

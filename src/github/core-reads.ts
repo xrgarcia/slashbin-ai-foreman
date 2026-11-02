@@ -59,6 +59,28 @@ export function closedPrsForBranch(repo: string, head: string, base: string, cwd
   return JSON.parse(json || "[]");
 }
 
+/** Most PRs one `head → base` listing may return before it is treated as incomplete. */
+export const ALL_PRS_LIMIT = 5000;
+
+/**
+ * EVERY PR `head → base`, open, merged and closed, with no date window (gh pages through the list). Throws on a
+ * failed read, and when the list reaches ALL_PRS_LIMIT: a listing that may have been cut short is not a listing.
+ */
+export function allPrsForBranch(repo: string, head: string, base: string, cwd: string): { number: number; state: string }[] {
+  const json = gh([
+    "pr", "list",
+    "--repo", repo,
+    "--head", head,
+    "--base", base,
+    "--state", "all",
+    "--json", "number,state",
+    "--limit", String(ALL_PRS_LIMIT),
+  ], cwd);
+  const prs = JSON.parse(json || "[]") as { number: number; state: string }[];
+  if (prs.length >= ALL_PRS_LIMIT) throw new Error(`${repo}: ${head} → ${base} lists ${prs.length}+ PRs; the listing may be incomplete`);
+  return prs;
+}
+
 /** Open a PR `head → base`; gh's output (the PR URL). Throws on failure. */
 export function createPr(config: RepoConfig, pr: { base: string; head: string; title: string; body: string }): string {
   return gh([
