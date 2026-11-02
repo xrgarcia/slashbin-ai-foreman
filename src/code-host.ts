@@ -563,6 +563,8 @@ export interface CodeHost {
   blockedAmong(config: RepoConfig, issueNumbers: ReadonlyArray<number>, logger: Logger): number[];
   /** The PR's current head SHA, or null when it cannot be read. */
   readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string | null;
+  /** The PR's state read live, or null when GitHub cannot say. */
+  readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED" | null;
   hasPendingRevisions(config: RepoConfig, logger: Logger): boolean;
 
   // Skip holds.

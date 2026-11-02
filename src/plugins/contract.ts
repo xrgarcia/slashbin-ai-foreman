@@ -44,7 +44,16 @@ export type { CodeHost } from "../code-host.js";
 // inside the plugin. ---
 
 /** A review that could not be taken and wrote nothing (Tech Lead exit 3): offered again later. */
-export type ReviewFallback = { fallback: true; reason: string };
+export type ReviewFallback = {
+  fallback: true;
+  reason: string;
+  /**
+   * The run died on a transient GitHub transport error (a TLS timeout, a 5xx) and may not have
+   * written. A tooling defer: the PR waits `backoff.agentUnavailable`, nothing is charged and the
+   * card is not moved to Blocked (foreman#180).
+   */
+  transient?: true;
+};
 
 /** How a reviewer answered a promotion approval. */
 export type PromotionApproval =
