@@ -51,7 +51,7 @@ for up to the longest run any watched repo is budgeted (the largest `maxDuration
 `reviewMaxDurationMs` if longer), so a restart does not kill a build mid-flight. Set
 `AI_AGENT_SHUTDOWN_DRAIN_MS` when you deliberately want a fast, work-destroying stop.
 
-**State.** What the Foreman has done and is waiting on is kept in `.agent-state.json`,
+**State.** What the Foreman has done and is waiting on is kept in the work source's records (one comment per issue, PR and repo),
 so a restart picks up where it left off.
 
 ## Back-offs

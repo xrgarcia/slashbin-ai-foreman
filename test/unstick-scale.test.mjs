@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords } from "./issue-records.mjs";

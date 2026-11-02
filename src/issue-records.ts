@@ -2,7 +2,7 @@
 // back for, and what it already told the EM about it. They live in the work
 // source's record store (adapters.ts `loadRecord` / `saveRecord`), one record per
 // issue holding every field below; a field that is absent means "none". Core
-// reads and writes them only through this module, never through state.ts.
+// reads and writes them only through this module. (EM#1244 f4 deleted state.ts and `.agent-state.json`.)
 //
 // A record that cannot be read is NOT an empty record. Every read reports the
 // issues it could not load, and the caller leaves those alone this cycle (fail
@@ -13,8 +13,61 @@ import type { RepoConfig } from "./config.js";
 import { canonicalJson } from "./record-store.js";
 import { activeWorkSource } from "./plugins/registry.js";
 import type { UnstickEntry } from "./unstick.js";
-import type { NoCommitStreak, ProdRelease } from "./state.js";
 import type { SavedRelease } from "./release-tracker.js";
+
+/**
+ * A release the release stage is carrying (EM#578), keyed by release PR. Kept
+ * so a deploy that merged while the Foreman died is finished after the
+ * restart (tagged and verified, never deployed twice), and so a held prod
+ * verification is retried on its back-off across restarts.
+ */
+export interface ProdRelease {
+  pr: number;
+  url?: string;
+  /** The head the Tech Lead approved and the SRE was asked to merge. */
+  headSha: string;
+  /** The issues the release carries (its `release pending` issues when it started). */
+  issues: number[];
+  /**
+   * `deploying`: handed to the SRE, outcome not yet read. `merged`: merged,
+   * tag and verdict not yet recorded. `held`: merged and tagged, prod
+   * verification held; re-verified on the prodVerifyRetry back-off.
+   * `soaking`: verified and its issues closed; the SRE's 30-minute soak runs
+   * once `soakAt` has passed, and the entry goes when it settles.
+   */
+  phase: "deploying" | "merged" | "held" | "soaking";
+  mergeSha?: string;
+  /** ISO time the Foreman saw the merge (no earlier than the merge itself). */
+  mergedAt?: string;
+  /** ISO time from which the soak may run: 30 minutes after `mergedAt`. */
+  soakAt?: string;
+  /** The soak ran (whatever it found): a release is soaked once, never again. */
+  soaked?: boolean;
+  tag?: string;
+  /** The last hold slug, so a re-verify that holds for the same reason comments once. */
+  hold?: string;
+  evidence?: string;
+  /** Prod verifications that did not pass. */
+  attempts: number;
+  /** ISO time before which a held release is not re-verified. */
+  retryAt?: string;
+  /** The production branch head at the last prod verification attempt; a different head makes a held release due now. */
+  verifiedHead?: string;
+  /** ISO time the release stage started it. */
+  since: string;
+  /**
+   * Merged by someone else (a person, or before this stage existed): the
+   * release stage adopted it for prod verification, soak and close, and never
+   * asked the Tech Lead or the SRE to deploy it.
+   */
+  adopted?: boolean;
+}
+
+/** Consecutive no-commit revisions on one PR head. A different head starts afresh. */
+export interface NoCommitStreak {
+  head: string;
+  count: number;
+}
 
 export interface FailedIssue {
   count: number;
@@ -105,6 +158,11 @@ export interface IssueRecord {
   prodVerified?: ProdVerified;
   /** The promote stage already commented on this issue's promotion stall (EM#578). */
   promotionStallNoted?: true;
+  /**
+   * The merge base of the branch divergence this issue was told about (EM#1244 f4, was `branchBlock.announced`).
+   * One divergence episode is one merge base, so the notice is posted once per issue per episode.
+   */
+  divergenceTold?: string;
 }
 
 /** The record fields that are one value per issue; `unstick` is a map inside the record. */
@@ -117,7 +175,10 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted", "divergenceTold"];
+
+/** A repo's own record is addressed with this number; no issue or PR is 0. */
+const REPO_RECORD_NUMBER = 0;
 
 const keyOf = (repoConfig: RepoConfig, number: number, kind: RecordKind = "issue"): RecordKey => ({ repo: repoConfig.githubRepo, kind, number });
 
@@ -347,9 +408,95 @@ function editPr(repoConfig: RepoConfig, n: number, change: (draft: PrRecord) => 
   });
 }
 
+// ---- Repo-level records (EM#1244 f4) ----
+
+/**
+ * A block an observer (the Paperclip mirror) put on one of its cards: why (`reason`, the card's unblock action),
+ * whose it is when not the stage's owner (`owner`, a role key), the stage its issue was at when it was blocked
+ * (`at`; null: not yet known), and whether it waits on an EM scope ruling (`ruling`). Kept so a restart re-reads
+ * them instead of guessing (EM#1150 f6).
+ */
+export interface CardBlockRecord {
+  reason?: string;
+  owner?: string;
+  at?: string | null;
+  ruling?: boolean;
+}
+
+/**
+ * The Foreman's facts about a repo that no issue or PR owns. A field that is absent means "none".
+ * A card block is here, not on an issue, because a card is Paperclip's and its uuid is the only key the
+ * mirror holds at restart; the block names the repo it belongs to, so each repo record carries its own.
+ */
+export interface RepoRecord {
+  /** The questions put to the EM that name no issue (`0:<kind>[:<tag>]`; was `repoUnstick`). */
+  unstick?: Record<string, UnstickEntry>;
+  /** Ids of the EM divergence rulings already carried out or failed (was `branchBlock.ruled`): a ruling is acted on once, never retried. */
+  divergenceRuled?: string[];
+  /** The Paperclip card blocks of this repo's cards, by card id (was `cardBlocks`). */
+  cardBlocks?: Record<string, CardBlockRecord>;
+}
+
+export type RepoField = keyof RepoRecord;
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks"];
+
+/** The repo record of `repoConfig`; null when it cannot be read (never an empty record in its place). */
+export async function loadRepoRecord(repoConfig: RepoConfig): Promise<RepoRecord | null> {
+  const source = activeWorkSource();
+  if (!source || repoRecordWithheld(repoConfig)) return null;
+  const load = await source.loadRecord(keyOf(repoConfig, REPO_RECORD_NUMBER, "repo"), repoConfig);
+  if (load.status === "unavailable") return null;
+  return load.status === "found" ? (load.record as RepoRecord) : {};
+}
+
+/** Change the repo's record: `change` edits a copy; the result is saved when it differs. Resolves `false` when it could not be read or saved, in which case nothing changed. */
+export function updateRepoRecord(repoConfig: RepoConfig, change: (draft: RepoRecord) => void): Promise<boolean> {
+  return editRepo(repoConfig, change, false);
+}
+
+/** The one-time import's write: like `updateRepoRecord`, but allowed while the repo record is still withheld for want of this very import. */
+export function importRepoRecord(repoConfig: RepoConfig, change: (draft: RepoRecord) => void): Promise<boolean> {
+  return editRepo(repoConfig, change, true);
+}
+
+function editRepo(repoConfig: RepoConfig, change: (draft: RepoRecord) => void, importing: boolean): Promise<boolean> {
+  const key = keyOf(repoConfig, REPO_RECORD_NUMBER, "repo");
+  return serially(key, async () => {
+    const source = activeWorkSource();
+    if (!source || (!importing && repoRecordWithheld(repoConfig))) return false;
+    const load = await source.loadRecord(key, repoConfig);
+    if (load.status === "unavailable") return false;
+    const before: ItemRecord = load.status === "found" ? load.record : {};
+    const draft = structuredClone(before) as RepoRecord & Record<string, unknown>;
+    change(draft);
+    for (const f of REPO_FIELDS) {
+      const v = draft[f];
+      if (v === undefined || (Array.isArray(v) ? v.length === 0 : typeof v === "object" && v !== null && Object.keys(v).length === 0)) delete draft[f];
+    }
+    // A repo with no record and nothing to record stays that way: no issue and no comment for an empty record.
+    if (load.status === "absent" && Object.keys(draft).length === 0) return true;
+    if (canonicalJson(draft) === canonicalJson(before)) return true;
+    return source.saveRecord(key, draft, repoConfig);
+  });
+}
+
+/** Repos whose legacy `.agent-state.json` repo-level entries (EM questions, card blocks) are not all imported yet. */
+const unimportedRepos = new Set<string>();
+
+/** Set by the one-time import (legacy-records.ts): true while a repo-level legacy entry of `githubRepo` could not be saved. */
+export function setRepoUnimported(githubRepo: string, pending: boolean): void {
+  if (pending) unimportedRepos.add(githubRepo);
+  else unimportedRepos.delete(githubRepo);
+}
+
+function repoRecordWithheld(repoConfig: RepoConfig): boolean {
+  return unimportedRepos.has(repoConfig.githubRepo);
+}
+
 /** Tests only: forget the import marks and any write still queued. */
 export function resetIssueRecordsForTests(): void {
   unimportedPrs.clear();
+  unimportedRepos.clear();
   unresolvedBranches.clear();
   unimported.clear();
   chains.clear();

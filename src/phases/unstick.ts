@@ -3,7 +3,7 @@
 // Each pass reads what is stuck (src/unstick.ts: persisted state plus the
 // `stuck` events that recorded the in-memory stops), calls
 // `<emRepoPath>/bin/em.mjs unstick` once for each question not yet answered,
-// and records the outcome in the issue's record (issue-records.ts; issue 0: `RepoState.repoUnstick`). It never clears a block (the
+// and records the outcome in the issue's record (issue-records.ts; issue 0: the repo's record). It never clears a block (the
 // unblock checks do, when the cause is gone), never writes Paperclip, and runs
 // whether or not Paperclip is on. Without `emRepoPath` it does nothing.
 //
@@ -16,8 +16,8 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
 import type { UnstickOutcome } from "../plugins/contract.js";
-import { loadRepoState, saveRepoState } from "../state.js";
-import { fieldTable, loadIssueRecord, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
+import { fieldTable, loadIssueRecord, loadIssueRecords, loadRepoRecord, updateIssueRecord, updateRepoRecord } from "../issue-records.js";
+import { standingDivergence } from "../divergence.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
   EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
@@ -39,11 +39,11 @@ function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): 
  */
 async function mutate(repoConfig: RepoConfig, issue: number, fn: (table: Record<string, UnstickEntry>) => void): Promise<boolean> {
   if (issue <= 0) {
-    const state = loadRepoState(repoConfig.name);
-    const table = { ...(state.repoUnstick ?? {}) };
-    fn(table);
-    saveRepoState(repoConfig.name, { ...state, repoUnstick: table });
-    return true;
+    return updateRepoRecord(repoConfig, (d) => {
+      const table = { ...(d.unstick ?? {}) };
+      fn(table);
+      d.unstick = table;
+    });
   }
   return updateIssueRecord(repoConfig, issue, (d) => {
     const table = { ...(d.unstick ?? {}) };
@@ -54,7 +54,7 @@ async function mutate(repoConfig: RepoConfig, issue: number, fn: (table: Record<
 
 /** The standing question `key` about `issue`; undefined when there is none or the record cannot be read. */
 async function entryOf(repoConfig: RepoConfig, issue: number, key: string): Promise<UnstickEntry | undefined> {
-  if (issue <= 0) return loadRepoState(repoConfig.name).repoUnstick?.[key];
+  if (issue <= 0) return (await loadRepoRecord(repoConfig))?.unstick?.[key];
   return (await loadIssueRecord(repoConfig, issue))?.unstick?.[key];
 }
 
@@ -73,8 +73,6 @@ export async function tryUnstick(
   const repoName = repoConfig.name;
   const log = base.child({ cycle: cycleNumber, repo: repoName, phase: "unstick" });
   try {
-    const state = loadRepoState(repoName);
-
     // The issues this pass looks at: the repo's open ones. When GitHub cannot be read there are none, and the
     // pass keeps to what is held in state (a branch divergence, the questions about no issue) and prunes nothing it cannot see.
     let issues: ReturnType<CodeHost["getOpenIssues"]> | null = null;
@@ -88,14 +86,21 @@ export async function tryUnstick(
     const open = issues ? new Set(issues.map((i) => i.number)) : null;
     // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
     const loaded = await loadIssueRecords(repoConfig, open ?? []);
+    // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
+    const repoRecord = await loadRepoRecord(repoConfig);
+    const standing = standingDivergence(repoConfig);
     const candidates: UnstickCandidate[] = derivedCandidates({
       verifyHeld: fieldTable(loaded, "verifyHeld"),
       skipped: fieldTable(loaded, "skipped"),
-      branchBlock: state.branchBlock,
+      ...(standing ? {
+        divergence: {
+          reason: divergenceReason(standing),
+          announced: [...loaded.records].filter(([, r]) => r.divergenceTold === standing.mergeBase).map(([n]) => n),
+        },
+      } : {}),
     }, {
       verifyMaxAttempts: config.backoff.verifyRetry.maxAttempts,
       isDeployFailureHold,
-      divergenceReason,
     });
 
     // The release gate is read off the board, not off state: an issue at
@@ -111,8 +116,8 @@ export async function tryUnstick(
     }
 
     // Event-kind entries are candidates for as long as they stand.
-    const standing = [...loaded.records.values()].flatMap((r) => Object.values(r.unstick ?? {})).concat(Object.values(state.repoUnstick ?? {}));
-    for (const e of standing) {
+    const standingQuestions = [...loaded.records.values()].flatMap((r) => Object.values(r.unstick ?? {})).concat(Object.values(repoRecord?.unstick ?? {}));
+    for (const e of standingQuestions) {
       if (EVENT_KINDS.has(e.kind)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
     }
 
@@ -125,7 +130,7 @@ export async function tryUnstick(
     for (const c of candidates) (byIssue.get(c.issue) ?? byIssue.set(c.issue, []).get(c.issue)!).push(c);
     const issuesInPlay = new Set<number>([0, ...loaded.records.keys(), ...byIssue.keys()]);
     for (const n of issuesInPlay) {
-      if (loaded.unavailable.has(n)) continue;
+      if (n === 0 ? repoRecord === null : loaded.unavailable.has(n)) continue;
       const mine = byIssue.get(n) ?? [];
       await mutate(repoConfig, n, (table) => {
         for (const [key, e] of Object.entries(table)) if (!EVENT_KINDS.has(e.kind) && !live.has(key)) delete table[key];

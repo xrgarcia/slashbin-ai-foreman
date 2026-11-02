@@ -18,7 +18,7 @@ import { runRepoPass } from "../dist/orchestrator.js";
 import { tryReview } from "../dist/phases/review.js";
 import { configureIssueCache } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { selectWork, workSourceFor, workSourceRefusal, drainObservers } from "../dist/work-source.js";
 import { registerPlugin, registeredPlugins, startPlugins, activeWorkSource, resetRegistryForTests, codeHost, codeHostRefusal } from "../dist/plugins/registry.js";
 import { registerBuiltinPlugins } from "../dist/plugins/index.js";

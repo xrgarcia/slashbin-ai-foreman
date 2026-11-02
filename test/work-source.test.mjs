@@ -16,7 +16,7 @@ import { loadConfig } from "../dist/config.js";
 import { runRepoPass } from "../dist/orchestrator.js";
 import { configureIssueCache, discoveryBatch } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { addObserver, drainObservers } from "../dist/work-source.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";

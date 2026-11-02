@@ -11,7 +11,8 @@ import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
 import { type BranchDivergence } from "../reconciler.js";
 import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
-import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
+import { loadIssueRecords, updateIssueRecord } from "../issue-records.js";
+import type { Divergence } from "../divergence.js";
 import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "../unblock.js";
 import { BackoffTracker } from "../backoff.js";
 import { codeHost } from "../plugins/registry.js";
@@ -83,14 +84,13 @@ export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boo
   return at > since;
 }
 
-/** The work item a repo-scoped issue number names. */
 /** One line: why a diverged feature branch holds an item back. */
-export function divergenceReason(block: BranchBlock): string {
+export function divergenceReason(block: Divergence): string {
   return `${block.featureBranch} diverged from ${block.baseBranch}, merge base ${block.mergeBase} — the EM rules which side wins and the Foreman carries it out`;
 }
 
 /** The comment each held-back issue gets, once per divergence episode. */
-export function divergenceNotice(repoConfig: RepoConfig, block: BranchBlock): string {
+export function divergenceNotice(repoConfig: RepoConfig, block: Divergence): string {
   const { featureBranch: f, baseBranch: b } = block;
   return [
     "<!-- foreman:branch-diverged -->",
@@ -107,30 +107,34 @@ export function divergenceNotice(repoConfig: RepoConfig, block: BranchBlock): st
 }
 
 /**
- * Record a diverged feature branch and announce it once per episode
- * (foreman#44). The first sighting warns; later cycles are debug. Each item
- * still waiting gets one comment per episode — an item approved mid-episode
- * gets its own when it first appears. A new merge base is a new episode.
+ * The waiting issues of `repoConfig` already told about the divergence with merge base `mergeBase`, read from
+ * their records. An issue whose record cannot be read is left out of both lists: it is neither told nor assumed
+ * told (the caller must not comment on it this pass).
+ */
+export async function toldAbout(repoConfig: RepoConfig, issues: readonly number[], mergeBase: string): Promise<{ told: number[]; fresh: number[] }> {
+  const loaded = await loadIssueRecords(repoConfig, issues);
+  const told: number[] = [];
+  const fresh: number[] = [];
+  for (const [n, r] of loaded.records) (r.divergenceTold === mergeBase ? told : fresh).push(n);
+  return { told, fresh };
+}
+
+/**
+ * Announce a diverged feature branch once per episode (foreman#44). The first sighting in a process warns;
+ * later cycles are debug. Each item still waiting gets one comment per episode, an item approved mid-episode
+ * its own when it first appears; a new merge base is a new episode. Whom it told lives on each issue's record
+ * (`divergenceTold`), saved BEFORE the comment so a crash between the two never posts it twice. Resolves with
+ * the issues now told about this episode.
  */
 export async function announceDivergence(
   repoConfig: RepoConfig,
   waiting: number[],
-  divergence: BranchDivergence,
+  block: Divergence,
   logger: Logger,
-): Promise<BranchBlock> {
-  const state = loadRepoState(repoConfig.name);
-  const prior = state.branchBlock;
-  const mergeBase = divergence.mergeBase ?? "";
-  const same = !!prior && prior.mergeBase === mergeBase
-    && prior.featureBranch === repoConfig.featureBranch && prior.baseBranch === repoConfig.baseBranch;
-  const block: BranchBlock = same
-    ? { ...prior!, ahead: divergence.ahead ?? prior!.ahead, behind: divergence.behind ?? prior!.behind }
-    : {
-      featureBranch: repoConfig.featureBranch, baseBranch: repoConfig.baseBranch, mergeBase,
-      ahead: divergence.ahead ?? 0, behind: divergence.behind ?? 0, since: new Date().toISOString(), announced: [],
-    };
-  const fresh = waiting.filter((n) => !block.announced.includes(n));
-  if (!same) {
+  first: boolean,
+): Promise<number[]> {
+  const { told, fresh } = await toldAbout(repoConfig, waiting, block.mergeBase);
+  if (first) {
     logger.warn(
       `Implementation on ${repoConfig.name} stopped — ${divergenceReason(block)} (${block.ahead} ahead, ${block.behind} behind). Announcing on ${fresh.map((n) => `#${n}`).join(", ") || "no waiting issue"}; this is the only warning for this episode`,
     );
@@ -138,17 +142,17 @@ export async function announceDivergence(
     logger.debug(`Implementation on ${repoConfig.name} still stopped — ${divergenceReason(block)}`);
   }
   for (const n of fresh) {
+    if (!(await updateIssueRecord(repoConfig, n, (d) => { d.divergenceTold = block.mergeBase; }))) continue;
     try {
       codeHost().commentOnIssue(repoConfig, n, divergenceNotice(repoConfig, block));
-      block.announced.push(n);
+      told.push(n);
     } catch (err) {
-      // Not recorded as announced, so the next cycle tries again.
+      // Not told after all: forget it, so the next cycle tries again.
+      await updateIssueRecord(repoConfig, n, (d) => { delete d.divergenceTold; });
       logger.warn(`Could not announce the divergence on #${n}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
     }
   }
-  state.branchBlock = block;
-  saveRepoState(repoConfig.name, state);
-  return block;
+  return told;
 }
 
 export function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {

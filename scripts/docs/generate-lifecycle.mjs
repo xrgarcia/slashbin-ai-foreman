@@ -199,7 +199,7 @@ out(
   "1. **Promote** moves each `ready for prod release` issue into the release PR and to `release pending`",
   "   (also when it updates an existing PR). When the base branch has nothing to promote (a 0-file diff),",
   "   the issue's work is already in production: it is closed only on evidence (a passed prod verification",
-  "   the release stage recorded for it, in `.agent-state.json`, at the commit production is at now);",
+  "   the release stage recorded for it, in the issue's record, at the commit production is at now);",
   "   otherwise it gets `release pending` and the release stage verifies it.",
   "   A release PR promotes all of the base branch (features accumulating there go out together), so before",
   "   promote opens or updates it, it reads the merges the base branch carries that production lacks. Each",

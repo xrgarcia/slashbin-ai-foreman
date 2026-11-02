@@ -307,10 +307,12 @@ export interface CardBlock {
   readonly ruling?: boolean;
 }
 
-/** Where the mirror keeps its blocks across a restart (the plugin: the Foreman's state file). */
+/** Where the mirror keeps its blocks across a restart (the plugin: each repo's own record in the work source). */
 export interface CardBlockStore {
-  load(): Record<string, CardBlock>;
-  save(id: string, block: CardBlock | null): void;
+  /** Null when the blocks cannot be read: the mirror then moves nothing, rather than guess a block is absent. */
+  load(): Promise<Record<string, CardBlock> | null>;
+  /** The repo is the card's (`githubRepo`); true when the store holds the change. */
+  save(id: string, block: CardBlock | null, repo?: string): Promise<boolean>;
 }
 
 export class PaperclipMirror implements WorkObserver {
@@ -394,6 +396,9 @@ export class PaperclipMirror implements WorkObserver {
   private readonly restoredBlocks = new Set<string>();
   /** Task id → the block last written to the store, as JSON, so an unchanged one is not rewritten. */
   private readonly savedBlocks = new Map<string, string>();
+  /** True once the store's blocks have been read back; a failed read is retried at the next snapshot. */
+  private blocksLoaded = false;
+  private blocksLoading: Promise<boolean> | null = null;
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
   /** The company's `issue` label id, once ensured (undefined until a label write needed it). */
@@ -442,7 +447,7 @@ export class PaperclipMirror implements WorkObserver {
   ) {
     this.comments = commentsOf(cfg);
     this.labels = { ...DEFAULT_HANDOFF_LABELS, ...labels };
-    this.restoreBlocks();
+    void this.ensureBlocks();
   }
 
   /**
@@ -452,15 +457,26 @@ export class PaperclipMirror implements WorkObserver {
    * card back to the Foreman (its stage read as moved on), and handed a failed
    * deploy's card from the SRE to the EM.
    */
-  private restoreBlocks(): void {
-    let blocks: Record<string, CardBlock> = {};
+  private ensureBlocks(): Promise<boolean> {
+    if (!this.blockStore || this.blocksLoaded) return Promise.resolve(true);
+    this.blocksLoading ??= this.restoreBlocks().finally(() => {
+      this.blocksLoading = null;
+    });
+    return this.blocksLoading;
+  }
+
+  private async restoreBlocks(): Promise<boolean> {
+    let blocks: Record<string, CardBlock> | null = null;
     try {
-      blocks = this.blockStore?.load() ?? {};
+      blocks = (await this.blockStore?.load()) ?? null;
     } catch {
-      return;
+      blocks = null;
     }
+    if (!blocks) return false;
     for (const [id, b] of Object.entries(blocks)) {
       if (!b || typeof b !== "object") continue;
+      // A block this process already made is newer than the one read back.
+      if (this.savedBlocks.has(id) || this.blockedReason.has(id) || this.blockedAt.has(id)) continue;
       if (typeof b.reason === "string") this.blockedReason.set(id, b.reason);
       if (typeof b.owner === "string") this.blockedOwner.set(id, b.owner);
       if ("at" in b) this.blockedAt.set(id, (b.at ?? undefined) as PaperclipStage | "done" | undefined);
@@ -468,6 +484,16 @@ export class PaperclipMirror implements WorkObserver {
       this.restoredBlocks.add(id);
       this.savedBlocks.set(id, JSON.stringify(b));
     }
+    this.blocksLoaded = true;
+    return true;
+  }
+
+  /** The repo (`githubRepo`) card `id` belongs to, from the identity key its row was read under. */
+  private repoOfCard(id: string): string | undefined {
+    const key = this.rowRepo.get(id);
+    if (key === undefined) return undefined;
+    for (const [repo, k] of this.repoKeys) if (k === key) return repo;
+    return this.identity ? undefined : key;
   }
 
   /** Write card `id`'s block as the maps now hold it, or forget it; only on a change, never throws. */
@@ -483,13 +509,22 @@ export class PaperclipMirror implements WorkObserver {
     };
     const json = block ? JSON.stringify(block) : null;
     if ((this.savedBlocks.get(id) ?? null) === json) return;
-    try {
-      this.blockStore.save(id, block);
-      if (json) this.savedBlocks.set(id, json);
+    const previous = this.savedBlocks.get(id);
+    // Marked saved first, so a burst of calls writes once; put back if the write fails, so the next call retries.
+    if (json) this.savedBlocks.set(id, json);
+    else this.savedBlocks.delete(id);
+    const revert = (): void => {
+      if (this.savedBlocks.get(id) !== (json ?? undefined)) return;
+      if (previous !== undefined) this.savedBlocks.set(id, previous);
       else this.savedBlocks.delete(id);
-    } catch {
-      // best-effort, like every state write: the block still holds in memory
-    }
+    };
+    void (async () => {
+      try {
+        if (!(await this.blockStore!.save(id, block, this.repoOfCard(id)))) revert();
+      } catch {
+        revert(); // best-effort: the block still holds in memory
+      }
+    })();
   }
 
   /** The Foreman's block on `id` is over: forget it, here and in the store. */
@@ -850,6 +885,11 @@ export class PaperclipMirror implements WorkObserver {
   async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
     await this.warm(_repo);
     this.snapshotRepos.add(this.keyNow(_repo));
+    // Blocks unread, a card's hold is unknown: place nothing this pass (fail closed).
+    if (!(await this.ensureBlocks())) {
+      this.logger.warn("Paperclip card blocks could not be read; the snapshot pass waits for the next one");
+      return;
+    }
     if (!(await this.ensureIndex())) return;
     const blocked = `status:${this.statusName("blocked")}`;
     const cards = read.cards;

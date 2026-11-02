@@ -17,7 +17,7 @@ import {
   type BranchDivergence,
 } from "../reconciler.js";
 import { backoffDelay, formatWait } from "../backoff.js";
-import { loadRepoState, saveRepoState, type BranchBlock } from "../state.js";
+import { observeDivergence, standingDivergence, type Divergence } from "../divergence.js";
 import { fieldTable, loadIssueRecord, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
 import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
@@ -25,6 +25,7 @@ import {
   CycleEvent,
   activeRuns,
   announceDivergence,
+  toldAbout,
   divergenceReason,
   failureCount,
   failurePause,
@@ -269,42 +270,10 @@ export async function tryBatchImplementation(
     return null;
   }
 
-  // Filter out issues already tracked as implemented in persistent state.
-  // This prevents infinite loops where the Foreman re-implements the same
-  // issues because the work source's PR check didn't match.
-  const repoState = loadRepoState(repoName);
-
-  // Self-heal the `implemented` cache (slashbin-ai-foreman #16/#18/#540 family).
-  //
-  // Invariant: `implemented[N]` must mean "a PR that delivers N exists".
-  // `selectWork` already authoritatively returns only approved
-  // issues with NO linked PR (open or merged) — it is the same check the
-  // orchestrator trusts to decide what to implement. So any N that is BOTH
-  // still in the offer (no delivering PR per the live check) AND in
-  // `repoState.implemented` is a stale, dead-zoned entry: a prior run recorded
-  // it without producing a delivering PR (PR creation failed, or its commit
-  // rode a foreign PR on the shared `features` branch). Left alone it is
-  // skipped forever with no recovery. The live no-linked-PR signal wins over
-  // the stale cache: prune so the issue is re-implemented this cycle.
-  //
-  // This cannot reintroduce the re-implement loop the cache guards against:
-  // that loop is "PR exists but the linkage check missed it" — here the same
-  // linkage check (selectWork) reports NO PR, so there is nothing to
-  // loop on; true loops remain bounded by failureCount/cooldown + skip back-off.
-  // Additive only — no state shape / .ai-agent.json / branch-model change.
-  const staleImplemented = repoState.implemented.filter((n) => handOff.includes(n));
-  if (staleImplemented.length > 0) {
-    repoLogger.warn(
-      `Self-heal: pruning ${staleImplemented.length} stale 'implemented' entr${staleImplemented.length === 1 ? "y" : "ies"} with no delivering PR — re-implementable: ${staleImplemented.map((n) => `#${n}`).join(", ")}`,
-    );
-    const healed = loadRepoState(repoName);
-    healed.implemented = healed.implemented.filter((n) => !staleImplemented.includes(n));
-    saveRepoState(repoName, healed);
-    repoState.implemented = healed.implemented;
-  }
-
-  const alreadyImplemented = new Set(repoState.implemented);
-  handOff = handOff.filter((n) => !alreadyImplemented.has(n));
+  // Whether an issue is already built is read off the board, never remembered (EM#1244 f4): `selectWork`
+  // offers only open, trigger-labelled issues in no lifecycle state with no open or merged PR, so an issue
+  // that was built (a PR, or a label past the trigger) is not in the offer. The `implemented` cache that
+  // used to filter here, and the self-heal that pruned every entry still in the offer, are gone with it.
   // What the Foreman holds each of these for. An issue whose record cannot be read is left out this cycle,
   // not built: a hold or a skip on it may be exactly what the unreadable record says.
   const recordsOfHandOff = await loadIssueRecords(repoConfig, handOff);
@@ -417,23 +386,25 @@ export async function tryBatchImplementation(
   // The repo's whole waiting set, every cycle that reaches here: an issue that
   // drops out of it has stopped waiting, which is how an observer clears it.
   // A recorded branch divergence holds everything else back too (foreman#44).
-  const waitingSet = (block: BranchBlock | undefined) => [
+  const waitingSet = (block: Divergence | null) => [
     ...acceptanceHolds,
     ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0], skipped: true })),
     ...(block ? handOff.map((n) => ({ item: itemOf(repoConfig, n), reason: divergenceReason(block) })) : []),
   ];
-  // A recorded block is re-checked read-only every pass: the fast-forward
-  // below sits behind the pending-revision gate and may not run for hours.
-  // The EM's ruling on a recorded divergence is carried out first (foreman#104);
-  // the release check below then sees the repaired branch.
-  if (repoState.branchBlock) await repairDivergence(repoConfig, repoLogger);
-  if (repoState.branchBlock && await releaseIfResolved("divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, repoState.branchBlock.announced, repoConfig, repoLogger)) {
-    const cleared = loadRepoState(repoName);
-    delete cleared.branchBlock;
-    saveRepoState(repoName, cleared);
-    repoState.branchBlock = undefined;
+  // A standing divergence is re-checked read-only every pass: the fast-forward below sits behind the
+  // pending-revision gate and may not run for hours. The divergence is what git shows (divergence.ts),
+  // not a stored block. The EM's ruling on it is carried out first (foreman#104); the release check
+  // below then sees the repaired branch.
+  let block = standingDivergence(repoConfig);
+  if (block) {
+    const { told } = await toldAbout(repoConfig, handOff, block.mergeBase);
+    await repairDivergence(repoConfig, repoLogger, block, told);
+    if (await releaseIfResolved("divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, told, repoConfig, repoLogger)) {
+      observeDivergence(repoConfig, null);
+      block = null;
+    }
   }
-  await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(repoState.branchBlock) }, null, repoLogger);
+  await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(block) }, null, repoLogger);
   // Labels rank the batch by priority. Unreadable, every issue ranks the
   // same and the oldest goes first.
   let labels = new Map<number, string[]>();
@@ -470,20 +441,21 @@ export async function tryBatchImplementation(
   const divergence: BranchDivergence = {};
   const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger, divergence);
   if (ffOutcome === "diverged") {
-    const block = await announceDivergence(repoConfig, handOff, divergence, repoLogger);
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(block) }, null, repoLogger);
+    const seen = observeDivergence(repoConfig, { ahead: divergence.ahead ?? 0, behind: divergence.behind ?? 0, mergeBase: divergence.mergeBase ?? "" });
+    const now = seen.now!;
+    await announceDivergence(repoConfig, handOff, now, repoLogger, seen.before?.mergeBase !== now.mergeBase);
+    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(now) }, null, repoLogger);
     return null;
   }
-  // "unknown" proves nothing either way, so a recorded block stands.
-  if (ffOutcome !== "unknown" && repoState.branchBlock) {
-    const cleared = loadRepoState(repoName);
-    delete cleared.branchBlock;
-    saveRepoState(repoName, cleared);
-    repoState.branchBlock = undefined;
-    repoLogger.info(
-      `${repoConfig.featureBranch} is reconciled with ${repoConfig.baseBranch} — implementation on ${repoName} resumes`,
-    );
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(undefined) }, null, repoLogger);
+  // "unknown" proves nothing either way, so a standing divergence stands.
+  if (ffOutcome !== "unknown") {
+    const { before } = observeDivergence(repoConfig, null);
+    if (before) {
+      repoLogger.info(
+        `${repoConfig.featureBranch} is reconciled with ${repoConfig.baseBranch} — implementation on ${repoName} resumes`,
+      );
+      await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(null) }, null, repoLogger);
+    }
   }
 
   // Gate: an open feature PR holds the branch. The skill builds straight on
@@ -668,14 +640,6 @@ export async function tryBatchImplementation(
         );
       }
 
-      // Persist implemented issue numbers to prevent re-implementation loops
-      const updatedState = loadRepoState(repoName);
-      for (const issueNum of issuesActuallyImplemented) {
-        if (!updatedState.implemented.includes(issueNum)) {
-          updatedState.implemented.push(issueNum);
-        }
-      }
-      saveRepoState(repoName, updatedState);
       // Clear any prior skip record — if it's now implemented, the prior
       // "blocked on investigation" state is resolved.
       for (const issueNum of issuesActuallyImplemented) await updateIssueRecord(repoConfig, issueNum, (d) => { delete d.skipped; });
@@ -688,7 +652,7 @@ export async function tryBatchImplementation(
         await advance(item, "implemented", repoConfig, repoLogger);
       }
 
-      repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")} in state`, { prUrl: result.prUrl });
+      repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")}`, { prUrl: result.prUrl });
       events?.push({ message: `Feature PR on ${repoConfig.githubRepo}: ${result.prUrl || "(commits added to existing PR)"}`, level: "info" });
     } else if (result.landed && result.landedIssue !== undefined && actionableIssues.includes(result.landedIssue)) {
       // Nothing to land: the issue's work is already on the feature branch. That
@@ -701,9 +665,6 @@ export async function tryBatchImplementation(
       const reason = result.landedReason ?? "no evidence given";
       try {
         codeHost().closeAlreadyLanded(repoConfig, n, reason);
-        const landedState = loadRepoState(repoName);
-        if (!landedState.implemented.includes(n)) landedState.implemented.push(n);
-        saveRepoState(repoName, landedState);
         await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
         failureCount.set(repoName, 0);
         lastFailureReason.delete(repoName);

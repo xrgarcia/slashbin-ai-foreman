@@ -20,17 +20,17 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { tryRelease, resetReleaseStage, SOAK_DELAY_MS } from "../dist/phases/release.js";
-import { tryPromotion } from "../dist/phases/promote.js";
+import { tryPromotion, resetHeldNotesForTests } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/plugins/sre.js";
 import { readPvResult, resetSignoff, configureIssueCache, productionDriftFiles, mergedPrNumber, resetReleaseCarry } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
-import { setStatePath, loadRepoState } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
-import { memoryRecords, seed, recordOf, breakRecords, breakPrRecords, seedRelease, releaseOf } from "./issue-records.mjs";
+import { memoryRecords, repoRecordOf, seed, recordOf, breakRecords, breakPrRecords, seedRelease, releaseOf } from "./issue-records.mjs";
 import { dropRelease, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
 import { registerPlugin, startPlugins, activeWorkSource } from "../dist/plugins/registry.js";
 
@@ -227,6 +227,7 @@ function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {
   resetReleaseCarry();
   resetSignoff();
   memoryRecords();
+  resetHeldNotesForTests();
 }
 const gh = () => JSON.parse(readFileSync(GH_STATE, "utf8"));
 const ghCalls = () => readFileSync(GH_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -316,7 +317,7 @@ test("approve → deploy → pass: tagged, every issue closed with one comment, 
 });
 
 // foreman#148: an error the SRE excluded during a production verification reaches the EM, and the release still ships.
-const unrelatedEntries = () => Object.values(loadRepoState("rel").repoUnstick ?? {}).filter((e) => e.kind === "unrelated-error");
+const unrelatedEntries = async () => Object.values((await repoRecordOf(repo)).unstick ?? {}).filter((e) => e.kind === "unrelated-error");
 const TRIAGE = (prefix) => [`${prefix}Evidence: https://example.test/pv-ev`, `${prefix}Not caused by this release, needs triage: billing: Expired API Key provided: rk_test_1234`].join("\n");
 
 test("the first prod deploy's excluded error reaches the EM with its evidence; the release still closes", async () => {
@@ -324,7 +325,7 @@ test("the first prod deploy's excluded error reaches the EM with its evidence; t
   world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `${TRIAGE("verify: ")}\n${d.out}` } });
   assert.equal(await run(), true);
   assertClosedVerified(5);
-  const u = unrelatedEntries();
+  const u = await unrelatedEntries();
   assert.equal(u.length, 1);
   assert.equal(u[0].issue, 0);
   assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-ev/);
@@ -335,7 +336,7 @@ test("a prod deploy whose evidence is only on its SRE_DEPLOY trailer still hands
   world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `verify: Not caused by this release, needs triage: billing: Expired API Key provided: rk_test_1234\n${d.out}` } });
   assert.equal(await run(), true);
   assertClosedVerified(5);
-  const u = unrelatedEntries();
+  const u = await unrelatedEntries();
   assert.equal(u.length, 1);
   assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-trailer/);
 });
@@ -345,13 +346,13 @@ test("a prod verification's excluded error reaches the EM once; the release stil
   world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: { ...v, out: `${TRIAGE("")}\n${v.out}` } });
   assert.equal(await run(), true);
   assertClosedVerified(7);
-  const u = unrelatedEntries();
+  const u = await unrelatedEntries();
   assert.equal(u.length, 1);
   assert.match(u[0].reason, /PR #90 \(prod\).*Evidence: https:\/\/example\.test\/pv-ev/);
 });
 
 // foreman#151: a prod close tells the EM the epic may be ready to close, once per epic and issue.
-const epicEntries = () => Object.values(loadRepoState("rel").repoUnstick ?? {}).filter((e) => e.kind === "epic-ready-to-close");
+const epicEntries = async () => Object.values((await repoRecordOf(repo)).unstick ?? {}).filter((e) => e.kind === "epic-ready-to-close");
 const setBodies = (bodies) => { const g = gh(); for (const [n, b] of Object.entries(bodies)) { g.issues[n].body = b; } writeFileSync(GH_STATE, JSON.stringify(g)); };
 
 test("closing an epic's child in production asks the EM whether the epic is ready to close; the release still closes", async () => {
@@ -359,12 +360,12 @@ test("closing an epic's child in production asks the EM whether the epic is read
   setBodies({ 5: "## References\n- engineering-manager #880" });
   assert.equal(await run(), true);
   assertClosedVerified(5);
-  const e = epicEntries();
+  const e = await epicEntries();
   assert.equal(e.length, 1, "only the issue that names an epic");
   assert.equal(e[0].issue, 0);
   assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
   assert.equal(await run(2), false);
-  assert.equal(epicEntries().length, 1, "a later cycle adds nothing");
+  assert.equal((await epicEntries()).length, 1, "a later cycle adds nothing");
 });
 
 test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
@@ -374,7 +375,7 @@ test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM n
   setBodies({ 5: "## References\n- engineering-manager #880" });
   assert.equal(await tryRelease(neutral.repos[0], neutral, logger, 1), true);
   assertClosedVerified(5);
-  assert.equal(epicEntries().length, 0);
+  assert.equal((await epicEntries()).length, 0);
 });
 
 test("the soak runs once, 30 minutes on: a pass ends the release", async () => {
@@ -856,7 +857,6 @@ test("a release stopped for a person names its issue and hold, once per change �
   assert.ok(!STALLED.test(warns[0]), "not reported as an unnamed stall");
   assert.match(warns[0], /release of #5 held: blocked after predeploy-stop on PR #100 — waiting on a person/);
   assert.match(warns[0], /release of #6 held: blocked after predeploy-stop on PR #100 — waiting on a person/);
-  assert.equal(loadRepoState("rel").promotionHeldNoted, "5,6");
 
   // The next check, unchanged: a debug line, no WARN, no comment read, nothing commented.
   log.clear();
@@ -878,7 +878,6 @@ test("a release stopped for a person names its issue and hold, once per change �
   assert.equal(again.length, 1);
   assert.match(again[0], /release of #5 held/);
   assert.ok(!/#6/.test(again[0]));
-  assert.equal(loadRepoState("rel").promotionHeldNoted, "5");
 });
 
 test("a held issue with no stop comment is still named, by the release PR that lists it", async () => {

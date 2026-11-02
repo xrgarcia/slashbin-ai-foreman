@@ -21,7 +21,7 @@ Historical design note. For current operation and state transitions, use
 
 `slashbin-ai-foreman#16`, `#18`, and the 2026-05-19 `Slashbin-console#540`
 incident are the same bug: an issue ends up in persistent
-`RepoState.implemented` (a permanent skip list) **without a PR that actually
+`RepoState.implemented` (a permanent skip list; deleted in EM#1244 f4, now derived from labels) **without a PR that actually
 delivers it**, and nothing ever removes it → the issue is skipped every
 implement cycle, forever ("self-locked", "manual EM cleanup every cycle").
 

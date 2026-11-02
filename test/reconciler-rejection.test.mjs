@@ -14,7 +14,6 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
-const state = readFileSync(join(root, "src/state.ts"), "utf-8");
 
 test("the reconciler looks up closed-unmerged PRs, not only open ones", () => {
   assert.match(
@@ -63,8 +62,8 @@ test("git failures carry stderr and distinguish a shutdown from a fault", () => 
 
 test("a rejected branch is announced once per head SHA, recorded on the rejected PR's record before the alert", () => {
   const phase = readFileSync(join(root, "src/phases/reconcile.ts"), "utf-8");
-  assert.doesNotMatch(state, /rejectedBranches\?: Record<string, string>/,
-    "the persisted record moved out of the state file (EM#1244 f3)");
+  assert.doesNotMatch(readFileSync(join(root, "src/legacy-records.ts"), "utf-8"), /rejectedBranches\?: Record<string, string>/,
+    "the persisted record moved out of the state file (EM#1244 f3); src/state.ts is gone (f4)");
   const block = phase.slice(phase.indexOf("for (const r of result.rejected"));
   assert.match(block.slice(0, 900), /record\.rejectedHead === r\.headSha/,
     "dedup must key on the head SHA so new commits re-alert");

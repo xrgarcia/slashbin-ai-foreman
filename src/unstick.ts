@@ -9,8 +9,7 @@
 //
 // Two sources feed one table, keyed `<issue>:<kind>`. An issue's questions live in
 // its record (issue-records.ts, `unstick`); the few that belong to no issue (issue 0:
-// `unrelated-error`, `epic-ready-to-close`) are `RepoState.repoUnstick`, which has no
-// record to live in until the repo itself can have one (EM#1244 f4):
+// `unrelated-error`, `epic-ready-to-close`) live in the repo's own record (`RepoRecord.unstick`):
 //  - DERIVED kinds are read off persisted state every pass (`derivedCandidates`):
 //    nothing relies on an event having fired, so a hold whose event came and
 //    went before a restart (cmneb_hr#38, 2026-10-20) is still found. Their
@@ -21,9 +20,8 @@
 //    `unblocked` event, the issue closing, or a new reason replaces them.
 
 import { createHash } from "node:crypto";
-import { loadRepoState, saveRepoState, type BranchBlock } from "./state.js";
 import type { RepoConfig } from "./config.js";
-import { updateIssueRecord, type SkippedIssue, type VerifyHold } from "./issue-records.js";
+import { updateIssueRecord, updateRepoRecord, type SkippedIssue, type VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
 
 /**
@@ -129,7 +127,7 @@ export function reworkDecisionReason(h: Pick<VerifyHold, "prNumber" | "reason" |
  * retries it itself, and calling the EM would race that. A deploy-failure hold
  * (`owner: "sre"`) is included — the EM hands it to the SRE and rules.
  *
- * Divergence is repo-level (`state.branchBlock`), not per issue. It is called
+ * Divergence is repo-level (derived from git, divergence.ts), not per issue. It is called
  * once for each issue the Foreman announced it on, so the EM sees a real issue;
  * with none announced, once for issue 0 (the repo). The kind and reason are
  * identical either way, so one episode is one question per issue.
@@ -139,13 +137,12 @@ export function derivedCandidates(
     /** The holds and skips of the issues read this pass, by issue number. */
     verifyHeld?: Readonly<Record<number, VerifyHold>>;
     skipped?: Readonly<Record<number, SkippedIssue>>;
-    branchBlock?: BranchBlock;
+    /** The divergence standing on the repo: its one-line reason (worded by phases/common.ts, which this module may not import: it would be a cycle through work-source) and the issues told about it. */
+    divergence?: { reason: string; announced: readonly number[] };
   },
   opts: {
     verifyMaxAttempts: number;
     isDeployFailureHold: (reason: string) => boolean;
-    /** Worded by the caller (phases/common.ts), which this module may not import: it would be a cycle through work-source. */
-    divergenceReason: (block: BranchBlock) => string;
   },
 ): UnstickCandidate[] {
   const out: UnstickCandidate[] = [];
@@ -169,11 +166,10 @@ export function derivedCandidates(
   for (const [key, s] of Object.entries(state.skipped ?? {})) {
     if (s.escalatedAt) out.push({ issue: Number(key), kind: "skip", reason: codeHost().escalatedReason(s.reason, s.skipCount ?? 0) });
   }
-  const b = state.branchBlock;
-  if (b) {
-    const reason = opts.divergenceReason(b);
-    const issues = b.announced.length > 0 ? b.announced : [0];
-    for (const issue of issues) out.push({ issue, kind: "divergence", reason });
+  const d = state.divergence;
+  if (d) {
+    const issues = d.announced.length > 0 ? d.announced : [0];
+    for (const issue of issues) out.push({ issue, kind: "divergence", reason: d.reason });
   }
   return out;
 }
@@ -199,11 +195,13 @@ export async function noteStuck(repoConfig: RepoConfig, issue: number, kind: Uns
   const key = unstickKey(issue, kind);
   const now = new Date().toISOString();
   if (issue <= 0) {
-    const state = loadRepoState(repoConfig.name);
-    const table = { ...(state.repoUnstick ?? {}) };
-    const next = openEntry(table[key], { issue, kind, reason }, now);
-    if (next !== table[key]) saveRepoState(repoConfig.name, { ...state, repoUnstick: { ...table, [key]: next } });
-    return true;
+    return updateRepoRecord(repoConfig, (d) => {
+      const table = { ...(d.unstick ?? {}) };
+      const next = openEntry(table[key], { issue, kind, reason }, now);
+      if (next === table[key]) return;
+      table[key] = next;
+      d.unstick = table;
+    });
   }
   return updateIssueRecord(repoConfig, issue, (d) => {
     const table = { ...(d.unstick ?? {}) };
@@ -233,22 +231,24 @@ export function unrelatedSignature(error: string): string {
  * outlives the issue it was seen on and never holds a release. Returns how many
  * were new.
  */
-export function noteUnrelated(repoName: string, seen: { errors: readonly string[]; evidence: readonly string[] }, seenOn: string): number {
-  const state = loadRepoState(repoName);
-  const table = { ...(state.repoUnstick ?? {}) };
+export async function noteUnrelated(repoConfig: RepoConfig, seen: { errors: readonly string[]; evidence: readonly string[] }, seenOn: string): Promise<number> {
   const now = new Date().toISOString();
   let added = 0;
   const evidence = seen.evidence.length ? ` Evidence: ${seen.evidence.slice(0, 4).join(" ")}` : "";
-  for (const error of seen.errors) {
-    const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
-    const key = unstickKey(0, "unrelated-error", tag);
-    if (table[key]) continue;
-    const reason = `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${evidence}`;
-    table[key] = openEntry(undefined, { issue: 0, kind: "unrelated-error", reason, tag }, now);
-    added++;
-  }
-  if (added > 0) saveRepoState(repoName, { ...state, repoUnstick: table });
-  return added;
+  const ok = await updateRepoRecord(repoConfig, (d) => {
+    const table = { ...(d.unstick ?? {}) };
+    added = 0;
+    for (const error of seen.errors) {
+      const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
+      const key = unstickKey(0, "unrelated-error", tag);
+      if (table[key]) continue;
+      const reason = `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${evidence}`;
+      table[key] = openEntry(undefined, { issue: 0, kind: "unrelated-error", reason, tag }, now);
+      added++;
+    }
+    if (added > 0) d.unstick = table;
+  });
+  return ok ? added : 0;
 }
 
 /** The block on `issue` was released (`unblocked`): its questions are over. */
@@ -276,19 +276,21 @@ export function epicRefs(body: string, label: string | undefined): number[] {
  * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
  * CLOSE check decides whether it was the last. Returns the entries added.
  */
-export function noteEpicChildClosed(repoName: string, githubRepo: string, issue: number, epics: readonly number[], label: string): number {
-  const state = loadRepoState(repoName);
-  const table = { ...(state.repoUnstick ?? {}) };
+export async function noteEpicChildClosed(repoConfig: RepoConfig, issue: number, epics: readonly number[], label: string): Promise<number> {
   const now = new Date().toISOString();
   let added = 0;
-  for (const epic of epics) {
-    const tag = `${epic}-${issue}`;
-    const key = unstickKey(0, "epic-ready-to-close", tag);
-    if (table[key]) continue;
-    const reason = `${githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`;
-    table[key] = openEntry(undefined, { issue: 0, kind: "epic-ready-to-close", reason, tag }, now);
-    added++;
-  }
-  if (added > 0) saveRepoState(repoName, { ...state, repoUnstick: table });
-  return added;
+  const ok = await updateRepoRecord(repoConfig, (d) => {
+    const table = { ...(d.unstick ?? {}) };
+    added = 0;
+    for (const epic of epics) {
+      const tag = `${epic}-${issue}`;
+      const key = unstickKey(0, "epic-ready-to-close", tag);
+      if (table[key]) continue;
+      const reason = `${repoConfig.githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`;
+      table[key] = openEntry(undefined, { issue: 0, kind: "epic-ready-to-close", reason, tag }, now);
+      added++;
+    }
+    if (added > 0) d.unstick = table;
+  });
+  return ok ? added : 0;
 }
