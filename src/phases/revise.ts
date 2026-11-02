@@ -14,6 +14,7 @@ import {
   clearNoCommitStreak,
   noCommitCount,
   prsWithNoCommitStreak,
+  readNoCommitStreak,
   recordNoCommit,
   stalemateHead,
 } from "../no-commit-streak.js";
@@ -66,7 +67,7 @@ export async function tryRevision(
     if (failures > 0) revisionFailureCount.set(repoName, 0);
     revisionEscalated.delete(repoName);
     revisionStoppedHead.delete(repoName);
-    forgetClosedPrStreaks(repoConfig, revLogger);
+    await forgetClosedPrStreaks(repoConfig, revLogger);
     return null;
   }
   const prNumber = pending.pr.number;
@@ -78,14 +79,21 @@ export async function tryRevision(
   const head = pending.pr.headRefOid ?? codeHost().readPrHeadSha(repoConfig, prNumber, revLogger) ?? "";
 
   // A stopped revision resumes when someone pushes to the PR out of band.
-  const stoppedAt = revisionStoppedHead.get(repoName) ?? stalemateHead(repoName, prNumber);
+  // Read once, up front: a streak that cannot be read is not "no streak", and a paid session is not started on a guess.
+  const read = await readNoCommitStreak(repoConfig, prNumber);
+  if (!read.ok) {
+    revLogger.info(`Skipping ${repoName} revision — PR #${prNumber}'s no-commit record cannot be read from the work source`);
+    return null;
+  }
+  let streak = read.streak;
+  const stoppedAt = revisionStoppedHead.get(repoName) ?? stalemateHead(streak);
   if (stoppedAt !== undefined) {
     const kind: BlockKind = failures >= maxFailures ? "revision-exhausted" : "revision-stalemate";
     if (await releaseIfResolved(kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
       revisionStoppedHead.delete(repoName);
       revisionFailureCount.set(repoName, 0);
       revisionEscalated.delete(repoName);
-      clearNoCommitStreak(repoName, prNumber);
+      if (streak && await clearNoCommitStreak(repoConfig, prNumber)) streak = undefined;
       failures = 0;
     }
   }
@@ -100,7 +108,7 @@ export async function tryRevision(
   // rule. Re-running the reviser only re-answers the same review — it launched a
   // paid session on 17 straight cycles for slashbin-io-worker PR #694
   // (2026-10-03). Clears when the head moves or the PR closes (foreman#167).
-  if (noCommitCount(repoName, prNumber, head) > MAX_CONSECUTIVE_NO_COMMIT) {
+  if (noCommitCount(streak, head) > MAX_CONSECUTIVE_NO_COMMIT) {
     revLogger.debug(`Skipping ${repoName} revision — PR #${prNumber} is in a no-commit stalemate awaiting the EM`);
     return null;
   }
@@ -167,8 +175,12 @@ export async function tryRevision(
       revisionEscalated.delete(repoName);
 
       if (result.noCommit) {
-        recordNoCommit(repoName, prNumber, head);
-        const seen = noCommitCount(repoName, prNumber, head);
+        // Recorded before the PR goes back to review or the EM is told: a streak that cannot be saved counts nothing.
+        const seen = await recordNoCommit(repoConfig, prNumber, head, streak);
+        if (seen === null) {
+          revLogger.warn(`PR #${pending.pr.number} revision made no commit but the streak could not be saved; the PR stays pending and is revised again`);
+          return null;
+        }
 
         // Second one on this head: the reviewer (or QA) keeps asking and the reviser
         // keeps answering "already correct". Neither is going to move. Stop, and say
@@ -198,8 +210,8 @@ export async function tryRevision(
         revLogger.info(
           `PR #${pending.pr.number} revision made no commit by declaration — returning it to review: ${result.noCommitReason}`,
         );
-      } else {
-        clearNoCommitStreak(repoName, prNumber);
+      } else if (streak) {
+        await clearNoCommitStreak(repoConfig, prNumber);
       }
 
       // Transition issue labels: `prPendingActions` → `prUnderReview`
@@ -262,10 +274,10 @@ export async function tryRevision(
 }
 
 /** A closed or merged PR's no-commit streak is over: forget every one whose PR is no longer open. */
-function forgetClosedPrStreaks(repoConfig: RepoConfig, logger: Logger): void {
-  for (const pr of prsWithNoCommitStreak(repoConfig.name)) {
+async function forgetClosedPrStreaks(repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  for (const pr of prsWithNoCommitStreak(repoConfig)) {
     const open = codeHost().isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
-    if (open === false) clearNoCommitStreak(repoConfig.name, pr);
+    if (open === false) await clearNoCommitStreak(repoConfig, pr);
     else if (open === null) logger.debug(`PR #${pr}: no-commit streak kept, GitHub could not say whether it is open`);
   }
 }

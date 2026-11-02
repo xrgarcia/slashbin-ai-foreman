@@ -53,24 +53,9 @@ export interface ProdRelease {
 
 export interface RepoState {
   implemented: number[];
-  // Feature branches whose commits were REJECTED — the last PR for the branch was
-  // closed unmerged and the branch has not moved since. The reconciler refuses to
-  // recreate a PR for them, and this records the head SHA it already alerted on so
-  // a standing rejection is announced ONCE rather than every reconcile pass.
-  // Keyed by branch name; the value is the alerted head SHA, so a NEW commit on the
-  // branch (different SHA) is a fresh condition and alerts again.
-  // Optional for backward compat with state files written before this field existed.
-  rejectedBranches?: Record<string, string>;
   // Set while the feature branch has diverged from its base. Optional for
   // backward compat with state files written before this field existed.
   branchBlock?: BranchBlock;
-  // The release PR (base → production) this repo's promoted issues wait on, so
-  // its merge is seen even when it lands while the daemon is down. Optional for
-  // backward compat with state files written before this field existed.
-  release?: SavedRelease;
-  // Releases the release stage is carrying, by release PR number (EM#578).
-  // Optional for backward compat with state files written before it existed.
-  prodReleases?: Record<number, ProdRelease>;
   // The held release the promote stage last named in the log (issue numbers,
   // e.g. "1283"), so a release stopped for a person is WARNed once per change
   // rather than every stall check while it waits.
@@ -79,10 +64,6 @@ export interface RepoState {
   // have no issue to keep a record on, so they wait here for the repo-level records of
   // EM#1244 f4. The questions about one issue live in that issue's record.
   repoUnstick?: Record<string, UnstickEntry>;
-  // Revisions that pushed nothing by declaration, per PR number, at the head
-  // they answered (src/no-commit-streak.ts). Persisted so a restart does not
-  // reset a stalemate count (foreman#167).
-  noCommitStreaks?: Record<number, NoCommitStreak>;
 }
 
 /** Consecutive no-commit revisions on one PR head. A different head starts afresh. */
@@ -254,16 +235,9 @@ function loadRepoStateCopy(repoName: string): RepoState {
     const repo = state.repos[repoName];
     return {
       implemented: [...repo.implemented],
-      rejectedBranches: { ...(repo.rejectedBranches ?? {}) },
       ...(repo.branchBlock ? { branchBlock: { ...repo.branchBlock, announced: [...repo.branchBlock.announced] } } : {}),
-      // Dropping this re-announced an open release PR on every promotion pass:
-      // trackRelease saw no saved release each time (foreman issue 74).
-      ...(repo.release ? { release: { ...repo.release, issues: [...repo.release.issues] } } : {}),
-      // Dropped here, a merged release would be deployed again after a restart.
-      prodReleases: Object.fromEntries(Object.entries(repo.prodReleases ?? {}).map(([k, v]) => [k, { ...v, issues: [...v.issues] }])),
       ...(repo.promotionHeldNoted ? { promotionHeldNoted: repo.promotionHeldNoted } : {}),
       ...(repo.repoUnstick ? { repoUnstick: Object.fromEntries(Object.entries(repo.repoUnstick).map(([k, v]) => [k, { ...v }])) } : {}),
-      ...(repo.noCommitStreaks ? { noCommitStreaks: Object.fromEntries(Object.entries(repo.noCommitStreaks).map(([k, v]) => [k, { ...v }])) } : {}),
     };
   }
 
@@ -275,13 +249,11 @@ function loadRepoStateCopy(repoName: string): RepoState {
     saveRaw(state);
     return {
       implemented: [...migrated.implemented],
-      rejectedBranches: { ...(migrated.rejectedBranches ?? {}) },
     };
   }
 
   return {
     implemented: [...EMPTY_REPO_STATE.implemented],
-    rejectedBranches: {},
   };
 }
 
@@ -318,7 +290,11 @@ export function saveRepoState(repoName: string, repoState: RepoState): void {
 // and go with it when f4 deletes this file.
 
 /** The record fields the file used to hold per issue. */
-const LEGACY_ISSUE_FIELDS = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted"] as const;
+const LEGACY_ISSUE_FIELDS = [
+  "failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted",
+  // and the PR-keyed ones of EM#1244 f3
+  "rejectedBranches", "release", "prodReleases", "noCommitStreaks",
+] as const;
 
 type LegacyRepo = Record<string, Record<string, unknown> | unknown[] | undefined>;
 
@@ -366,5 +342,53 @@ export function dropLegacyIssueEntries(repoName: string, issues: ReadonlySet<num
   const noted = ((repo.promotionStallNoted ?? []) as number[]).filter((n) => !issues.has(n));
   if (noted.length > 0) repo.promotionStallNoted = noted;
   else delete repo.promotionStallNoted;
+  saveRaw(state);
+}
+
+// --- The pre-f3 PR-keyed fields (EM#1244 f3) ------------------------------------------------------
+// `rejectedBranches`, `release`, `prodReleases` and `noCommitStreaks` now live on the PR's record in the
+// work source (issue-records.ts `PrRecord`). Like the issue accessors above, these two functions are the
+// one-time import's only way to the old copy, and go with it when f4 deletes this file.
+
+/** What the file still holds that is keyed by a pull request or a branch. */
+export interface LegacyPrEntries {
+  /** `prodReleases`, by release PR number. */
+  releases: Map<number, ProdRelease>;
+  /** The single `release` pointer: the release PR announced open and not yet announced finished. */
+  tracked?: SavedRelease;
+  /** `noCommitStreaks`, by PR number. */
+  streaks: Map<number, NoCommitStreak>;
+  /** `rejectedBranches`: branch name to the head SHA the EM was alerted on. */
+  rejected: Map<string, string>;
+}
+
+export function legacyPrEntries(repoName: string): LegacyPrEntries {
+  const repo = loadRaw().repos[repoName] as unknown as Record<string, unknown> | undefined;
+  const out: LegacyPrEntries = { releases: new Map(), streaks: new Map(), rejected: new Map() };
+  if (!repo) return out;
+  for (const [k, v] of Object.entries((repo.prodReleases ?? {}) as Record<string, ProdRelease>)) if (Number(k) > 0) out.releases.set(Number(k), v);
+  for (const [k, v] of Object.entries((repo.noCommitStreaks ?? {}) as Record<string, NoCommitStreak>)) if (Number(k) > 0) out.streaks.set(Number(k), v);
+  for (const [k, v] of Object.entries((repo.rejectedBranches ?? {}) as Record<string, string>)) if (typeof v === "string") out.rejected.set(k, v);
+  const tracked = repo.release as SavedRelease | undefined;
+  if (tracked && Number(tracked.pr) > 0) out.tracked = tracked;
+  return out;
+}
+
+/** Remove legacy PR-keyed entries from the file (they are in the store, or no longer matter). */
+export function dropLegacyPrEntries(repoName: string, drop: { releases?: ReadonlySet<number>; streaks?: ReadonlySet<number>; rejected?: ReadonlySet<string>; tracked?: boolean }): void {
+  const state = loadRaw();
+  const repo = state.repos[repoName] as unknown as Record<string, unknown> | undefined;
+  if (!repo) return;
+  const prune = (field: string, gone: ReadonlySet<string | number> | undefined) => {
+    const table = repo[field] as Record<string, unknown> | undefined;
+    if (!table || !gone || gone.size === 0) return;
+    const keep = Object.entries(table).filter(([k]) => !gone.has(k) && !gone.has(Number(k)));
+    if (keep.length > 0) repo[field] = Object.fromEntries(keep);
+    else delete repo[field];
+  };
+  prune("prodReleases", drop.releases);
+  prune("noCommitStreaks", drop.streaks);
+  prune("rejectedBranches", drop.rejected);
+  if (drop.tracked) delete repo.release;
   saveRaw(state);
 }

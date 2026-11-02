@@ -46,7 +46,7 @@ test("every block kind is wired into the orchestrator", () => {
 test("a stopped revision records the head it stopped on, and resumes before the retry-cap skip", () => {
   // Retries exhausted: in memory. A no-commit stalemate: its persisted streak's head (src/no-commit-streak.ts).
   assert.equal((src.match(/revisionStoppedHead\.set\(repoName, pending\.pr\.headRefOid\)/g) ?? []).length, 1);
-  assert.match(src, /revisionStoppedHead\.get\(repoName\) \?\? stalemateHead\(repoName, prNumber\)/);
+  assert.match(src, /revisionStoppedHead\.get\(repoName\) \?\? stalemateHead\(streak\)/);
   const resume = src.indexOf("A stopped revision resumes when someone pushes");
   const cap = src.indexOf("Check if this repo has exceeded revision failure retries");
   assert.ok(resume > 0 && resume < cap);

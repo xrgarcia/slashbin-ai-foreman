@@ -4,6 +4,7 @@ import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { loadRepoState } from "./state.js";
 import { fieldTable, loadIssueRecords } from "./issue-records.js";
+import { loadReleases } from "./release-tracker.js";
 import { clearUnstick, noteStuck } from "./unstick.js";
 import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
 
@@ -209,14 +210,17 @@ export function advance(
  * in its record. An issue whose record cannot be read is held: the answer is unknown, and a card must not
  * be moved on an unknown (fail closed).
  */
-export async function foremanHolds(repoConfig: RepoConfig, numbers: readonly number[]): Promise<(n: number) => boolean> {
+export async function foremanHolds(repoConfig: RepoConfig, numbers: readonly number[], logger: Logger): Promise<(n: number) => boolean> {
   const state = loadRepoState(repoConfig.name);
   if (state.branchBlock) return () => true;
+  // A release whose record cannot be read may be holding any issue: unknown, so every card is held.
+  const releases = await loadReleases(repoConfig, logger);
+  if (!releases || releases.unreadable.size > 0) return () => true;
   const out = new Set<number>();
   const loaded = await loadIssueRecords(repoConfig, numbers);
   for (const n of loaded.unavailable) out.add(n);
   for (const [n, r] of loaded.records) if (r.skipped || r.held || r.verifyHeld || r.failed || Object.keys(r.unstick ?? {}).length > 0) out.add(n);
-  for (const r of Object.values(state.prodReleases ?? {})) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
+  for (const r of releases.releases) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
   return (n) => out.has(n);
 }
 
@@ -234,7 +238,7 @@ export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): P
   // Otherwise the closed items alone: a card the Foreman moved follows its issue to done.
   const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
   const numbers = items.map((i) => i.item.issueNumber);
-  const holds = await foremanHolds(repoConfig, numbers);
+  const holds = await foremanHolds(repoConfig, numbers, logger);
   const held = fieldTable(await loadIssueRecords(repoConfig, numbers), "verifyHeld");
   const read = source.states?.bind(source);
   await emit({
