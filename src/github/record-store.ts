@@ -11,6 +11,7 @@
 import type { ItemRecord, RecordKey, RecordLoad } from "../adapters.js";
 import type { RepoConfig } from "../config.js";
 import { canonicalJson, isItemRecord, recordId } from "../record-store.js";
+import { formatGhError } from "./cache.js";
 import { gh } from "./gh.js";
 import { foremanLogin } from "./skip-hold.js";
 
@@ -63,7 +64,8 @@ export class GitHubRecordStore {
       const entry = this.entryFor(key, repoConfig.repoPath);
       return entry.record ? { status: "found", record: entry.record } : { status: "absent" };
     } catch (err) {
-      return { status: "unavailable", reason: err instanceof Error ? err.message.split("\n")[0] : String(err) };
+      const { message, stderr } = formatGhError(err);
+      return { status: "unavailable", reason: stderr.split("\n")[0] || message.split("\n")[0] };
     }
   }
 
