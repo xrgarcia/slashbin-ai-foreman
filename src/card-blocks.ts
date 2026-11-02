@@ -1,4 +1,5 @@
 import type { RepoConfig } from "./config.js";
+import { legacyCardBlocksPending } from "./legacy-records.js";
 import { loadRepoRecord, updateRepoRecord, type CardBlockRecord } from "./issue-records.js";
 
 // The Paperclip mirror's card blocks, kept in each repo's own record (issue-records.ts `RepoRecord.cardBlocks`):
@@ -19,6 +20,8 @@ export function createCardBlockStore(repos: () => readonly RepoConfig[]): CardBl
   const byName = (githubRepo: string): RepoConfig | undefined => repos().find((r) => r.githubRepo === githubRepo);
   return {
     async load() {
+      // Blocks still in the legacy file are not in any record yet: the set read now would be incomplete, so none is read.
+      if (legacyCardBlocksPending()) return null;
       const out: Record<string, CardBlockRecord> = {};
       for (const repo of repos()) {
         const record = await loadRepoRecord(repo);
@@ -42,11 +45,13 @@ export function createCardBlockStore(repos: () => readonly RepoConfig[]): CardBl
       });
       if (!ok) return false;
       const was = home.get(id);
+      // A block filed under another repo (the import files them all under the first one) leaves that record: moved to
+      // its card's own repo, or cleared. Left there it would come back at the next restart. If that fails, `home` keeps
+      // pointing at the old record so the retry removes it.
+      const old = was && was !== target.githubRepo ? byName(was) : undefined;
+      if (old && !(await updateRepoRecord(old, (d) => { const b = { ...(d.cardBlocks ?? {}) }; delete b[id]; d.cardBlocks = b; }))) return false;
       if (block) home.set(id, target.githubRepo);
       else home.delete(id);
-      // A block that moved to its card's own repo (the import files them under the first repo) leaves its old record.
-      const old = was && was !== target.githubRepo ? byName(was) : undefined;
-      if (block && old) await updateRepoRecord(old, (d) => { const b = { ...(d.cardBlocks ?? {}) }; delete b[id]; d.cardBlocks = b; });
       return true;
     },
   };

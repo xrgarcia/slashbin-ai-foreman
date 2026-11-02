@@ -70,7 +70,7 @@ export class PaperclipPlugin implements ForemanPlugin {
 
   private begin(config: AgentConfig, ctx: PluginContext): void {
     const { logger } = ctx;
-    this.repos = config.repos;
+    this.repos = config.allRepos ?? config.repos;
     this.mirror = new PaperclipMirror(
       new PaperclipClient({
         url: config.paperclip.url,
@@ -100,7 +100,7 @@ export class PaperclipPlugin implements ForemanPlugin {
   /** A reload whose file changed hands the mirror the new mapping, then publishes it. */
   reconfigure(fresh: AgentConfig, ctx: PluginContext): void {
     if (!this.mirror) return;
-    this.repos = fresh.repos;
+    this.repos = fresh.allRepos ?? fresh.repos;
     const text = ctx.configText();
     if (text === null || text === this.mirroredText) return;
     if (this.mirror.reconfigure(fresh.paperclip)) {

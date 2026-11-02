@@ -312,6 +312,7 @@ test("import: a record that cannot be read counts as live, so nothing in the fil
 test("import: a branch block is carried over only while git still shows its episode", async () => {
   writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } }, b: { branchBlock: { reason: "diverged", mergeBase: "old", announced: [8], ruled: ["comment:2"] } } } });
   observeDivergence(repoA, { ahead: 1, behind: 1, mergeBase: "abc" });
+  observeDivergence(repoB, null);
   await runImport();
   assert.deepEqual((await loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
   assert.equal((await loadIssueRecord(repoA, 7)).divergenceTold, "abc", "an issue already told stays told");
@@ -344,4 +345,69 @@ test("src/state.ts is gone and nothing but the import reads or writes .agent-sta
   const code = (p) => readFileSync(p, "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
   const touching = files.filter((p) => /agent-state\.json/.test(code(p))).map((p) => p.slice(src.length + 1)).sort();
   assert.deepEqual(touching.filter((n) => !["state-dir.ts"].includes(n)), []);
+});
+
+// --- review of PR 195: the cutover loses nothing, unknown is never obsolete, pending reads are unavailable -------
+
+test("import: one repo's pass keeps every other configured repo's entries (--repo narrows the lanes, not the file)", async () => {
+  legacy();
+  writeLegacy({ repos: { a: { repoUnstick: { "0:x": question("x", "a's") } }, b: { repoUnstick: { "0:y": question("y", "b's") }, held: { 5: { reason: "r" } } }, ws: { implemented: [1] } }, cardBlocks: { c1: block("blocked: x") } });
+  await importLegacyRecords(repoA, quiet, cfgs); // the daemon narrowed to repo a
+  assert.deepEqual(Object.keys(await (async () => (await loadRepoRecord(repoA)).unstick)()), ["0:x"]);
+  assert.ok(fileState().repos.b.repoUnstick["0:y"], "b's question is still in the file");
+  assert.ok(fileState().repos.b.held, "and its issue hold");
+  assert.equal(fileState().repos.ws, undefined, "an orphan (no configured repo of that name) is dropped");
+  assert.deepEqual(await loadRepoRecord(repoB), {});
+  await importLegacyRecords(repoB, quiet, cfgs); // b's own pass later
+  assert.deepEqual(Object.keys((await loadRepoRecord(repoB)).unstick), ["0:y"]);
+  assert.equal(existsSync(legacyFile()), false, "the file goes when every configured repo's entries have moved");
+  const orch = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "orchestrator.ts"), "utf8");
+  assert.match(orch, /importLegacyRecords\(repoConfig, logger, config\.allRepos \?\? config\.repos\)/);
+});
+
+// repoG: a repo with a base and a feature branch whose checkout git cannot read.
+const repoG = { ...repoA, baseBranch: "main", featureBranch: "features" };
+test("import: git unreadable keeps the branch block's history for the retry; unknown is never obsolete", async () => {
+  writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } } } });
+  await importLegacyRecords(repoG, quiet, cfgs); // repoG is no git checkout: readDivergence is undefined
+  assert.ok(fileState().repos.a.branchBlock, "the episode stays in the file");
+  assert.equal(await loadRepoRecord(repoA), null, "and the repo reads as unreadable until it is settled");
+  resetLegacyImportForTests();
+  observeDivergence(repoG, { ahead: 1, behind: 1, mergeBase: "abc" }); // git is readable now and still shows it
+  await importLegacyRecords(repoG, quiet, cfgs);
+  assert.deepEqual((await loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
+  assert.equal((await loadIssueRecord(repoA, 7)).divergenceTold, "abc");
+  assert.equal(existsSync(legacyFile()), false);
+});
+
+test("import: a pending card block makes its repo and the block store unavailable, before the import and while a save fails", async () => {
+  writeLegacy({ cardBlocks: { c1: block("blocked: x") } });
+  const blocks = createCardBlockStore(() => cfgs);
+  assert.equal(await blocks.load(), null, "the import has not run: the blocks read now are not the whole set");
+  failSave = true;
+  await importLegacyRecords(repoA, quiet, cfgs);
+  assert.ok(fileState().cardBlocks.c1, "the block stays in the file");
+  assert.equal(await loadRepoRecord(repoA), null, "its home repo reads unavailable, not {}");
+  assert.equal(await blocks.load(), null);
+  failSave = false;
+  resetLegacyImportForTests();
+  await importLegacyRecords(repoA, quiet, cfgs);
+  assert.deepEqual(await blocks.load(), { c1: block("blocked: x") });
+  assert.deepEqual(await loadRepoRecord(repoA), { cardBlocks: { c1: block("blocked: x") } });
+});
+
+test("card blocks: a cleared imported block stays cleared after a restart, whichever repo the import filed it under", async () => {
+  writeLegacy({ cardBlocks: { c1: block("blocked: x") } });
+  await importLegacyRecords(repoA, quiet, cfgs);
+  const blocks = createCardBlockStore(() => cfgs);
+  assert.deepEqual(Object.keys(await blocks.load()), ["c1"]);
+  assert.equal(await blocks.save("c1", null, "example/b"), true, "the card belongs to repo b");
+  assert.equal((await loadRepoRecord(repoA)).cardBlocks, undefined, "and the first repo's copy is gone");
+  assert.deepEqual(await createCardBlockStore(() => cfgs).load(), {});
+});
+
+test("issue-records: issue, PR and repo records go through one mutation pipeline", () => {
+  const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "issue-records.ts"), "utf8");
+  assert.equal((text.match(/source\.saveRecord\(/g) ?? []).length, 1);
+  assert.equal((text.match(/mutateRecord</g) ?? []).length, 4, "the definition and the three kinds");
 });
