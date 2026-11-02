@@ -63,3 +63,35 @@ test("the configured label names reach the Tech Lead as they reach Claude", asyn
   assert.equal(r.fallback, true);
   assert.match(r.reason, /labels go \{"prUnderReview":"in-review","prPendingActions":"needs-changes"\}/);
 });
+
+// foreman#180: a transient GitHub error inside the Tech Lead is a defer, never a charged failure.
+test("a non-zero exit whose stderr is a TLS handshake timeout is deferred like exit 3, flagged transient", async () => {
+  const cfg = fakeTechLead('console.error(\'review-pr failed: gh pr view 7: Post "https://api.github.com/graphql": net/http: TLS handshake timeout\'); process.exit(1);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.fallback, true);
+  assert.equal(r.transient, true);
+  assert.match(r.reason, /TLS handshake timeout/);
+});
+
+test("5xx, ECONNRESET, ENOTFOUND and dial tcp on stderr are deferred", async () => {
+  for (const msg of ["HTTP 502: Bad Gateway", "read ECONNRESET", "getaddrinfo ENOTFOUND api.github.com", "dial tcp 140.82.1.1:443: i/o timeout"]) {
+    const cfg = fakeTechLead(`console.error(${JSON.stringify(`review-pr failed: ${msg}`)}); process.exit(1);`);
+    const r = await reviewViaTechLead(repo, cfg, 7, logger);
+    assert.equal(r.fallback, true, msg);
+  }
+});
+
+test("auth, 404, 422 and rate-limit failures stay failures", async () => {
+  for (const msg of ["HTTP 401: Bad credentials", "HTTP 404: Not Found", "HTTP 422: Validation Failed", "API rate limit exceeded", "merge conflicts"]) {
+    const cfg = fakeTechLead(`console.error(${JSON.stringify(`review-pr failed: ${msg}`)}); process.exit(1);`);
+    const r = await reviewViaTechLead(repo, cfg, 7, logger);
+    assert.equal("fallback" in r, false, msg);
+    assert.equal(r.success, false, msg);
+  }
+});
+
+test("exit 3 from the Tech Lead's own github-unavailable stays a plain fallback (no transient flag needed)", async () => {
+  const cfg = fakeTechLead('console.log("GitHub unavailable after 4 attempts — nothing written; retry later."); process.exit(3);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.fallback, true);
+});

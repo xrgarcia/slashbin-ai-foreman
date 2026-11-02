@@ -185,6 +185,20 @@ export function returnedToReviewSinceVerdict(
   }
 }
 
+/**
+ * The PR's state read live (never from a snapshot): OPEN, MERGED or CLOSED, or null when GitHub
+ * cannot say. The review phase asks before it starts a review (foreman#180).
+ */
+export function readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED" | null {
+  try {
+    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "state"], config.repoPath) || "{}") as { state?: string };
+    return data.state === "OPEN" || data.state === "MERGED" || data.state === "CLOSED" ? data.state : null;
+  } catch (err) {
+    logger.debug(`readPrState lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 /** The PR's head commit sha, or null when GitHub cannot say. */
 export function readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string | null {
   try {
