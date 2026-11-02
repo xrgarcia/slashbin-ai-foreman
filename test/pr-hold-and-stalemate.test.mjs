@@ -13,7 +13,8 @@ import { tryRevision } from "../dist/phases/revise.js";
 import { tryReview } from "../dist/phases/review.js";
 import { tryQaBeforeMerge } from "../dist/phases/qa-before-merge.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath, loadRepoState } from "../dist/state.js";
+import { setStatePath } from "../dist/state.js";
+import { memoryRecords, prRecordOf } from "./issue-records.mjs";
 import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plugins/registry.js";
 import { GitHubPlugin } from "../dist/plugins/github.js";
 import { checkoutPathFor } from "../dist/review-checkout.js";
@@ -97,6 +98,7 @@ after(() => {
 
 beforeEach(() => {
   reviewed = 0;
+  memoryRecords();
   for (const f of [F.world, F.ghLog, F.claudeLog]) rmSync(f, { force: true });
   world({ labels: ["approved"], head: SHA, reviews: [] });
 });
@@ -129,7 +131,7 @@ test("#1597: QA FAIL → no-commit → a pass with no pending revision → QA FA
   assert.equal(await tryRevision(repo, config, logger, 3, events2), null, "the second no-commit does not relabel");
   assert.equal(claudeRuns(), 2);
   assert.ok(events2.some((e) => e.level === "error" && /answered 2 review rounds with no code change/.test(e.message)), JSON.stringify(events2));
-  assert.deepEqual(loadRepoState(repo.name).noCommitStreaks, { [PR]: { head: SHA, count: 2 } }, "persisted, so a restart keeps it");
+  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 2 }, "persisted on the PR's record, so a restart keeps it");
 
   assert.equal(await tryRevision(repo, config, logger, 4, []), null);
   assert.equal(claudeRuns(), 2, "no further session on the stalled head");
@@ -144,12 +146,12 @@ test("a push that moves the head clears the stalemate and revise runs again", as
   await tryRevision(repo, config, logger, 2, []);
   labelIssue(LABELS.pending);
   await tryRevision(repo, config, logger, 3, []);
-  assert.equal(loadRepoState(repo.name).noCommitStreaks[PR].count, 2, "stalled");
+  assert.equal((await prRecordOf(repo, PR)).noCommit.count, 2, "stalled");
 
   world({ head: NEW_SHA });
   assert.ok(await tryRevision(repo, config, logger, 4, []), "the new head is revised and goes back to review");
   assert.equal(claudeRuns(), 3);
-  assert.deepEqual(loadRepoState(repo.name).noCommitStreaks, { [PR]: { head: NEW_SHA, count: 1 } }, "the old head's streak is gone");
+  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: NEW_SHA, count: 1 }, "the old head's streak is gone");
 });
 
 test("a QA FAIL that stands on the same head is a review round: the third goes to needsRuling", () => {

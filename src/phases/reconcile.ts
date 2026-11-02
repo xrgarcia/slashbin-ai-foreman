@@ -9,7 +9,7 @@ import { reconcileRepo } from "../reconciler.js";
 import { roleFor } from "../plugins/registry.js";
 import { hasStage } from "../stages.js";
 import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
-import { loadRepoState, saveRepoState } from "../state.js";
+import { branchUnresolved, loadPrRecord, updatePrRecord } from "../issue-records.js";
 import { fieldTable, loadIssueRecords, updateIssueRecord, type HeldIssue } from "../issue-records.js";
 import {
   CycleEvent,
@@ -272,10 +272,18 @@ export async function runReconcileStage(
     // automatically could discard legitimate unmerged work, so the Foreman reports
     // and a human decides. See slashbin-ai-foreman#24.
     for (const r of result.rejected ?? []) {
-      const state = loadRepoState(repoConfig.name);
-      const alreadyAlerted = (state.rejectedBranches ?? {})[r.branch];
-      if (alreadyAlerted === r.headSha) continue;
+      // What the EM was told lives on the rejected PR's record. One that cannot be read (or whose legacy entry is
+      // not imported yet) is not "never told": the branch is left for a later cycle rather than alerted twice.
+      if (branchUnresolved(repoConfig, r.branch)) continue;
+      const record = await loadPrRecord(repoConfig, r.prNumber);
+      if (!record) {
+        reconLogger.debug(`PR #${r.prNumber}'s record cannot be read; the alert for ${r.branch} waits`);
+        continue;
+      }
+      if (record.rejectedHead === r.headSha) continue;
 
+      // Recorded before the alert goes out: an alert whose record could not be saved is sent on a later cycle, never twice.
+      if (!(await updatePrRecord(repoConfig, r.prNumber, (d) => { d.rejectedHead = r.headSha; }))) continue;
       const issues = r.issueNumbers.length > 0
         ? ` (issues ${r.issueNumbers.map((n) => `#${n}`).join(", ")})`
         : "";
@@ -291,10 +299,6 @@ export async function runReconcileStage(
           `Revert the diff off \`${r.branch}\`, or those commits ride along in the next PR from this branch. ${r.prUrl}`,
         level: "warn",
       });
-
-      const fresh = loadRepoState(repoConfig.name);
-      fresh.rejectedBranches = { ...(fresh.rejectedBranches ?? {}), [r.branch]: r.headSha };
-      saveRepoState(repoConfig.name, fresh);
     }
   } catch (err) {
     reconLogger.error("Reconciliation failed", {

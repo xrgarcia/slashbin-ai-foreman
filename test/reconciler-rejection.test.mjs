@@ -11,11 +11,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { orchestratorSource } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
-const orchestrator = orchestratorSource();
 const state = readFileSync(join(root, "src/state.ts"), "utf-8");
 
 test("the reconciler looks up closed-unmerged PRs, not only open ones", () => {
@@ -63,13 +61,18 @@ test("git failures carry stderr and distinguish a shutdown from a fault", () => 
   );
 });
 
-test("a rejected branch is announced once per head SHA, not every cycle", () => {
-  assert.match(state, /rejectedBranches\?: Record<string, string>/,
-    "no persisted record — the alert would repeat every reconcile pass");
-  const block = orchestrator.slice(orchestrator.indexOf("for (const r of result.rejected"));
-  assert.match(block.slice(0, 1800), /alreadyAlerted === r\.headSha/,
+test("a rejected branch is announced once per head SHA, recorded on the rejected PR's record before the alert", () => {
+  const phase = readFileSync(join(root, "src/phases/reconcile.ts"), "utf-8");
+  assert.doesNotMatch(state, /rejectedBranches\?: Record<string, string>/,
+    "the persisted record moved out of the state file (EM#1244 f3)");
+  const block = phase.slice(phase.indexOf("for (const r of result.rejected"));
+  assert.match(block.slice(0, 900), /record\.rejectedHead === r\.headSha/,
     "dedup must key on the head SHA so new commits re-alert");
-  assert.match(block.slice(0, 2400), /saveRepoState/, "the alert must be recorded");
+  const save = block.indexOf("updatePrRecord(");
+  const alert = block.indexOf("events.push");
+  assert.ok(save > 0 && save < alert, "the head is recorded before the alert goes out; a failed save sends nothing");
+  assert.match(block.slice(0, save), /loadPrRecord\(/, "an unreadable record is not 'never told'");
+  assert.match(block.slice(0, save), /branchUnresolved\(/, "a branch whose legacy entry is not imported yet waits");
 });
 
 test("the reconciler never force-pushes or resets a shared branch on its own", () => {
