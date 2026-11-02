@@ -3,6 +3,7 @@
 // (Paperclip cannot edit a comment), gated by the comment toggles, and never
 // able to fail a review. Fake Tech Lead, fake Paperclip — no network.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -136,7 +137,7 @@ const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return t
 process.env.TECHLEAD_GITHUB_KEY ||= "test-token-not-real";
 
 function fakeTechLead(script) {
-  const dir = mkdtempSync(join(tmpdir(), "fake-tech-lead-"));
+  const dir = mkTmp("fake-tech-lead-");
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/tech-lead.mjs"), script);
   return { techLeadPath: dir, emRepoPath: "/em", reviewMaxDurationMs: 30_000 };

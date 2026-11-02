@@ -1,13 +1,14 @@
 // The one shared PR-comment lookup: async, all pages, prefix (QA) or substring (carry, sign-off) matching.
 // `gh` is a stub on PATH that prints two pages of bodies after a delay.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hasCommentStartingWith, hasCommentContaining, commentBodies } from "../dist/github/pr-comments.js";
 
-const dir = mkdtempSync(join(tmpdir(), "fake-gh-"));
+const dir = mkTmp("fake-gh-");
 const page = (...bodies) => bodies.map((b) => JSON.stringify(b)).join("\n");
 writeFileSync(join(dir, "gh"), `#!/bin/sh\nsleep 0.3\ncat <<'EOF'\n${page("first page", "## QA Report (report-only)\\n\\nV")}\n${page("page two: <!-- foreman-carried pr=9 --> inside", "last")}\nEOF\n`);
 chmodSync(join(dir, "gh"), 0o755);

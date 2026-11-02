@@ -1,5 +1,6 @@
 // foreman#105: a hold whose EM calls all fail is surfaced once, on the issue.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,8 +17,8 @@ const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return 
 process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
 
 function setup(exitCode = 1) {
-  setStatePath(mkdtempSync(join(tmpdir(), "giveup-state-")));
-  const em = mkdtempSync(join(tmpdir(), "giveup-em-"));
+  setStatePath(mkTmp("giveup-state-"));
+  const em = mkTmp("giveup-em-");
   mkdirSync(join(em, "bin"));
   writeFileSync(join(em, "bin/em.mjs"), `console.error("${"x".repeat(900)} session PARSE_ERROR"); process.exit(${exitCode});`);
   const repo = { name: "gr", githubRepo: "o/gr", repoPath: join(em, "no-such-clone"), lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };

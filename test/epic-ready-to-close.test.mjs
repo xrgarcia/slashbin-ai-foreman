@@ -1,6 +1,7 @@
 // foreman#151: a child closed in production asks the EM whether its epic is ready
 // to close, once per epic and closed issue; the EM's check decides.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,8 +33,8 @@ test("no epicRefLabel: no epic is parsed from any body", () => {
 });
 
 test("two children of one epic: two EM calls, one per close; a repeat close adds none", async () => {
-  setStatePath(mkdtempSync(join(tmpdir(), "erc-state-")));
-  const em = mkdtempSync(join(tmpdir(), "erc-em-"));
+  setStatePath(mkTmp("erc-state-"));
+  const em = mkTmp("erc-em-");
   const log = join(em, "calls.jsonl");
   mkdirSync(join(em, "bin"));
   writeFileSync(join(em, "bin/em.mjs"), `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n"); console.log("acted");`);

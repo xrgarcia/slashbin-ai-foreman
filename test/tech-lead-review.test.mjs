@@ -4,6 +4,7 @@
 // Codex: exit 3 means "wrote nothing" and MUST come back as a fallback so the
 // Claude review runs; any other failure must NOT, because it may have written.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return 
 const repo = { name: "r", githubRepo: "o/r" };
 
 function fakeTechLead(script) {
-  const dir = mkdtempSync(join(tmpdir(), "fake-tech-lead-"));
+  const dir = mkTmp("fake-tech-lead-");
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/tech-lead.mjs"), script);
   return { techLeadPath: dir, emRepoPath: "/em", reviewMaxDurationMs: 30_000 };

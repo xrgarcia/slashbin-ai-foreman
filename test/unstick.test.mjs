@@ -2,6 +2,7 @@
 // `npm test`. The whole-pass behaviour is proved by the EM's acceptance script
 // (scripts/slashbin-ai/foreman-103-unstick-acceptance.mjs); these pin the parts.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -82,7 +83,7 @@ test("unstickStageReady needs only emRepoPath, not Paperclip", () => {
 });
 
 function fakeEm(script) {
-  const dir = mkdtempSync(join(tmpdir(), "fake-em-"));
+  const dir = mkTmp("fake-em-");
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/em.mjs"), script);
   return { emRepoPath: dir, sessionEnv: [] };
@@ -90,7 +91,7 @@ function fakeEm(script) {
 
 test("unstickViaEm: argv, cwd and token; exit codes map to outcomes", async () => {
   process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
-  const log = join(mkdtempSync(join(tmpdir(), "em-log-")), "argv.json");
+  const log = join(mkTmp("em-log-"), "argv.json");
   const body = (code) => `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), token: Boolean(process.env.EM_GITHUB_TOKEN), foreman: Boolean(process.env.FOREMAN_GITHUB_TOKEN) })); console.log("done"); process.exit(${code});`;
   for (const [code, kind] of [[0, "invoked"], [2, "escalated"], [3, "declined"], [1, "failed"], [7, "failed"]]) {
     const cfg = fakeEm(body(code));

@@ -3,6 +3,7 @@
 // `npm run build` now stamps dist/ with its source, and daemon mode refuses a
 // stamp that is missing or dirty.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ import { join } from "node:path";
 import { buildRefusal } from "../dist/build-info.js";
 
 function distWith(info) {
-  const d = mkdtempSync(join(tmpdir(), "build-info-"));
+  const d = mkTmp("build-info-");
   if (info !== undefined) writeFileSync(join(d, "build-info.json"), JSON.stringify(info));
   return d;
 }
