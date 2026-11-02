@@ -2,7 +2,7 @@
 // translates the core lifecycle (lifecycle.ts) into issue labels and back,
 // and is the only module that knows which label means which stage.
 
-import type { ItemState, SnapshotCard, WaitingItem, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
+import type { ItemRecord, ItemState, RecordKey, RecordLoad, SnapshotCard, WaitingItem, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import {
   closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, gh, ghKeyed, hasLabel,
@@ -17,6 +17,7 @@ import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
 import { acceptanceVerdict } from "./github/acceptance-gate.js";
 import { announceHold, parseReadiness, type HoldKind, readIssueBody, unmetReadiness } from "./github/readiness.js";
 import { holdReasons, issueStates, recentlyClosed } from "./github/cards.js";
+import { GitHubRecordStore } from "./github/record-store.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
 export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
@@ -143,6 +144,17 @@ export function closedWins(open: readonly SnapshotCard[], closed: readonly Snaps
 }
 
 export class GitHubIssueConnector implements WorkSourceAdapter {
+  /** Durable per-item records, kept as one Foreman comment on the issue or PR (github/record-store.ts). */
+  private readonly records = new GitHubRecordStore();
+
+  loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad> {
+    return this.records.loadRecord(key, repoConfig);
+  }
+
+  saveRecord(key: RecordKey, record: ItemRecord, repoConfig: RepoConfig): Promise<boolean> {
+    return this.records.saveRecord(key, record, repoConfig);
+  }
+
   async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
     return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
   }
