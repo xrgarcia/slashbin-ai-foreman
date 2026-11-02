@@ -11,6 +11,7 @@ import type { Logger } from "../logger.js";
 import { trackRelease } from "../release-tracker.js";
 import { emit, advance } from "../work-source.js";
 import { loadRepoState, saveRepoState } from "../state.js";
+import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { releaseIssues } from "../release-tracker.js";
 import { STALL_CHECK_CYCLE_INTERVAL, itemOf, lastStallCheckCycle, notifyOnce } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
@@ -171,14 +172,16 @@ const STALL_MARK = "<!-- foreman:promotion-stall -->";
  * so a later stall comments again. With nobody to comment on, the log line is
  * the record.
  */
-function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): void {
+async function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
-  const waiting = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+  const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const waiting = open
     .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel))
     .map((i) => i.number);
-  const st = loadRepoState(repoConfig.name);
-  const noted = new Set((st.promotionStallNoted ?? []).filter((n) => waiting.includes(n)));
-  const fresh = waiting.filter((n) => !noted.has(n));
+  // An issue whose record cannot be read may already have been commented on: it is left alone this pass.
+  const loaded = await loadIssueRecords(repoConfig, open.map((i) => i.number));
+  const noted = new Set(waiting.filter((n) => loaded.records.get(n)?.promotionStallNoted === true));
+  const fresh = waiting.filter((n) => loaded.records.has(n) && !noted.has(n));
   // A held release names the work: `noteHeldRelease` already said whose it is.
   if (waiting.length === 0 && held.length === 0) {
     logger.warn(
@@ -203,11 +206,13 @@ function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: 
       logger.warn(`Promotion stall: could not comment on #${n}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const next = [...noted].sort((a, b) => a - b);
-  if (next.join() !== (st.promotionStallNoted ?? []).join()) {
-    if (next.length > 0) st.promotionStallNoted = next;
-    else delete st.promotionStallNoted;
-    saveRepoState(repoConfig.name, st);
+  // A mark outlives its stall on an issue that left `pr approved`: dropped here, so a later stall comments again.
+  for (const { number: n } of open) {
+    if (loaded.unavailable.has(n)) continue;
+    const mark = noted.has(n);
+    if (mark !== (loaded.records.get(n)?.promotionStallNoted === true)) {
+      await updateIssueRecord(repoConfig, n, (d) => { if (mark) d.promotionStallNoted = true; else delete d.promotionStallNoted; });
+    }
   }
 }
 
@@ -367,7 +372,7 @@ export async function tryPromotion(
           detail = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}; ` +
             `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`;
         }
-        noteStall(repoConfig, files, promoLogger, held);
+        await noteStall(repoConfig, files, promoLogger, held);
         await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail }, null, promoLogger);
       } else if (drift) {
         if (drift.developAheadFiles > 0) {
@@ -455,7 +460,12 @@ export async function tryPromotion(
     // Safe: `ready for prod release` is only applied after the feature PR merges to
     // develop, so develop-content == main-content ⇒ that work IS in main.
     if (issues.length === 0) return null;  // carried only: the release stage owns them
-    const nums = issues.map((i) => i.number);
+    // An unreadable record is not "no verification": that issue is untouched this pass (no close, no queue,
+    // no label strip, no notification, no event), and the issues below are the readable ones only.
+    const recorded = await loadIssueRecords(repoConfig, issues.map((i) => i.number));
+    const nums = issues.map((i) => i.number).filter((n) => !recorded.unavailable.has(n));
+    if (nums.length < issues.length) promoLogger.warn(`Already promoted: ${issues.length - nums.length} issue(s) with an unreadable record left alone this pass`);
+    if (nums.length === 0) return null;
     if (releaseActive) {
       // In main, but "in main" is not "verified in production" (EM#578). An
       // issue closes here only on evidence: a prod verification the release
@@ -466,7 +476,7 @@ export async function tryPromotion(
       try { head = codeHost().productionHead(repoConfig); } catch (err) {
         promoLogger.warn(`Could not read ${repoConfig.productionBranch}'s head: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const verified = loadRepoState(repoName).prodVerified ?? {};
+      const verified = fieldTable(recorded, "prodVerified");
       const close = nums.filter((n) => head !== null && verified[n]?.mergeSha === head);
       const pending = nums.filter((n) => !close.includes(n));
       promoLogger.info(
@@ -487,7 +497,7 @@ export async function tryPromotion(
     // set. We do NOT close them — the EM still owns outcome verification; an open
     // issue with no lifecycle label is inert and stays visible for that close.
     promoLogger.warn(
-      `Already promoted — ${issues.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but ${repoConfig.baseBranch} has 0 file changes vs ${repoConfig.productionBranch}, ` +
+      `Already promoted — ${nums.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but ${repoConfig.baseBranch} has 0 file changes vs ${repoConfig.productionBranch}, ` +
       `so their work is already in ${repoConfig.productionBranch}: ${nums.map((n) => `#${n}`).join(", ")}. ` +
       `Stripping the label (nothing left to promote). They remain open for EM outcome-verification + close.`,
     );
