@@ -11,6 +11,7 @@ import type { Logger } from "../logger.js";
 import { trackRelease } from "../release-tracker.js";
 import { emit, advance } from "../work-source.js";
 import { loadRepoState, saveRepoState } from "../state.js";
+import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { releaseIssues } from "../release-tracker.js";
 import { STALL_CHECK_CYCLE_INTERVAL, itemOf, lastStallCheckCycle, notifyOnce } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
@@ -171,14 +172,16 @@ const STALL_MARK = "<!-- foreman:promotion-stall -->";
  * so a later stall comments again. With nobody to comment on, the log line is
  * the record.
  */
-function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): void {
+async function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
-  const waiting = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+  const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const waiting = open
     .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel))
     .map((i) => i.number);
-  const st = loadRepoState(repoConfig.name);
-  const noted = new Set((st.promotionStallNoted ?? []).filter((n) => waiting.includes(n)));
-  const fresh = waiting.filter((n) => !noted.has(n));
+  // An issue whose record cannot be read may already have been commented on: it is left alone this pass.
+  const loaded = await loadIssueRecords(repoConfig, open.map((i) => i.number));
+  const noted = new Set(waiting.filter((n) => loaded.records.get(n)?.promotionStallNoted === true));
+  const fresh = waiting.filter((n) => loaded.records.has(n) && !noted.has(n));
   // A held release names the work: `noteHeldRelease` already said whose it is.
   if (waiting.length === 0 && held.length === 0) {
     logger.warn(
@@ -203,11 +206,13 @@ function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: 
       logger.warn(`Promotion stall: could not comment on #${n}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const next = [...noted].sort((a, b) => a - b);
-  if (next.join() !== (st.promotionStallNoted ?? []).join()) {
-    if (next.length > 0) st.promotionStallNoted = next;
-    else delete st.promotionStallNoted;
-    saveRepoState(repoConfig.name, st);
+  // A mark outlives its stall on an issue that left `pr approved`: dropped here, so a later stall comments again.
+  for (const { number: n } of open) {
+    if (loaded.unavailable.has(n)) continue;
+    const mark = noted.has(n);
+    if (mark !== (loaded.records.get(n)?.promotionStallNoted === true)) {
+      await updateIssueRecord(repoConfig, n, (d) => { if (mark) d.promotionStallNoted = true; else delete d.promotionStallNoted; });
+    }
   }
 }
 
@@ -367,7 +372,7 @@ export async function tryPromotion(
           detail = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}; ` +
             `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`;
         }
-        noteStall(repoConfig, files, promoLogger, held);
+        await noteStall(repoConfig, files, promoLogger, held);
         await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail }, null, promoLogger);
       } else if (drift) {
         if (drift.developAheadFiles > 0) {
@@ -466,9 +471,12 @@ export async function tryPromotion(
       try { head = codeHost().productionHead(repoConfig); } catch (err) {
         promoLogger.warn(`Could not read ${repoConfig.productionBranch}'s head: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const verified = loadRepoState(repoName).prodVerified ?? {};
-      const close = nums.filter((n) => head !== null && verified[n]?.mergeSha === head);
-      const pending = nums.filter((n) => !close.includes(n));
+      // An unreadable record is not "no verification": that issue is neither closed nor queued this pass.
+      const recorded = await loadIssueRecords(repoConfig, nums);
+      const verified = fieldTable(recorded, "prodVerified");
+      const readable = nums.filter((n) => !recorded.unavailable.has(n));
+      const close = readable.filter((n) => head !== null && verified[n]?.mergeSha === head);
+      const pending = readable.filter((n) => !close.includes(n));
       promoLogger.info(
         `Already promoted — ${nums.length} issue(s) labeled '${repoConfig.lifecycleLabels.readyForProd}' with ${repoConfig.baseBranch} at 0 file changes vs ${repoConfig.productionBranch}` +
         (close.length > 0 ? `; closing ${close.map((n) => `#${n}`).join(", ")} (prod-verified at ${head?.slice(0, 10)})` : "") +

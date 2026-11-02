@@ -51,6 +51,8 @@ function fakeSource() {
     selectEligible: async (rc) => { calls.selectEligible++; return [{ issueNumber: 7, repo: rc.githubRepo }, { issueNumber: 8, repo: rc.githubRepo }]; },
     record: async (e) => { calls.records.push(e); return true; },
     snapshot: async () => [],
+    loadRecord: async () => ({ status: "absent" }),
+    saveRecord: async () => true,
   };
   return { calls, plugin: { id: "fake-source", roles: ["workSource"], enabled: (c) => c.workSource === "fake", workSource } };
 }

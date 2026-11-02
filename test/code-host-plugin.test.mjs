@@ -48,6 +48,8 @@ const workSource = {
   selectEligible: async () => [],
   record: async () => false,
   snapshot: async () => [],
+  loadRecord: async () => ({ status: "absent" }),
+  saveRecord: async () => true,
 };
 
 const FakeCodeHostPlugin = {
@@ -107,7 +109,7 @@ test("the registry hands the core the configured code host, not GitHub's", () =>
 
 test("implement: reaches the PRs through the code host plugin, never gh", async () => {
   const c = await viaFake(() => tryBatchImplementation(repo, config, quiet, 1));
-  assert.deepEqual(c, ["findOpenFeaturePR", "getOpenIssues", "discoveryBatch"]);
+  assert.deepEqual(c, ["getOpenIssues", "findOpenFeaturePR", "getOpenIssues", "discoveryBatch"]);
 });
 
 test("review: reaches the PRs through the code host plugin, never gh", async () => {
