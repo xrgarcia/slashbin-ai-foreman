@@ -460,7 +460,12 @@ export async function tryPromotion(
     // Safe: `ready for prod release` is only applied after the feature PR merges to
     // develop, so develop-content == main-content ⇒ that work IS in main.
     if (issues.length === 0) return null;  // carried only: the release stage owns them
-    const nums = issues.map((i) => i.number);
+    // An unreadable record is not "no verification": that issue is untouched this pass (no close, no queue,
+    // no label strip, no notification, no event), and the issues below are the readable ones only.
+    const recorded = await loadIssueRecords(repoConfig, issues.map((i) => i.number));
+    const nums = issues.map((i) => i.number).filter((n) => !recorded.unavailable.has(n));
+    if (nums.length < issues.length) promoLogger.warn(`Already promoted: ${issues.length - nums.length} issue(s) with an unreadable record left alone this pass`);
+    if (nums.length === 0) return null;
     if (releaseActive) {
       // In main, but "in main" is not "verified in production" (EM#578). An
       // issue closes here only on evidence: a prod verification the release
@@ -471,12 +476,9 @@ export async function tryPromotion(
       try { head = codeHost().productionHead(repoConfig); } catch (err) {
         promoLogger.warn(`Could not read ${repoConfig.productionBranch}'s head: ${err instanceof Error ? err.message : String(err)}`);
       }
-      // An unreadable record is not "no verification": that issue is neither closed nor queued this pass.
-      const recorded = await loadIssueRecords(repoConfig, nums);
       const verified = fieldTable(recorded, "prodVerified");
-      const readable = nums.filter((n) => !recorded.unavailable.has(n));
-      const close = readable.filter((n) => head !== null && verified[n]?.mergeSha === head);
-      const pending = readable.filter((n) => !close.includes(n));
+      const close = nums.filter((n) => head !== null && verified[n]?.mergeSha === head);
+      const pending = nums.filter((n) => !close.includes(n));
       promoLogger.info(
         `Already promoted — ${nums.length} issue(s) labeled '${repoConfig.lifecycleLabels.readyForProd}' with ${repoConfig.baseBranch} at 0 file changes vs ${repoConfig.productionBranch}` +
         (close.length > 0 ? `; closing ${close.map((n) => `#${n}`).join(", ")} (prod-verified at ${head?.slice(0, 10)})` : "") +
@@ -495,7 +497,7 @@ export async function tryPromotion(
     // set. We do NOT close them — the EM still owns outcome verification; an open
     // issue with no lifecycle label is inert and stays visible for that close.
     promoLogger.warn(
-      `Already promoted — ${issues.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but ${repoConfig.baseBranch} has 0 file changes vs ${repoConfig.productionBranch}, ` +
+      `Already promoted — ${nums.length} issue(s) still labeled '${repoConfig.lifecycleLabels.readyForProd}' but ${repoConfig.baseBranch} has 0 file changes vs ${repoConfig.productionBranch}, ` +
       `so their work is already in ${repoConfig.productionBranch}: ${nums.map((n) => `#${n}`).join(", ")}. ` +
       `Stripping the label (nothing left to promote). They remain open for EM outcome-verification + close.`,
     );

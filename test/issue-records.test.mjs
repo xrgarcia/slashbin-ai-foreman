@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { activeWorkSource } from "../dist/plugins/registry.js";
+import { activeWorkSource, codeHost } from "../dist/plugins/registry.js";
 import { InMemoryRecordStore } from "../dist/record-store.js";
 import { loadIssueRecord, loadIssueRecords, updateIssueRecord, resetIssueRecordsForTests } from "../dist/issue-records.js";
 import { importLegacyRecords, mergeLegacy, resetLegacyImportForTests } from "../dist/legacy-records.js";
@@ -119,6 +119,29 @@ test("a failed save leaves the legacy entry, withholds the issue, and the next i
   assert.deepEqual(await loadIssueRecord(repo, 1), { skipped: skip, unstick: { "1:needs-ruling": question(1, "r1") } }, "the others moved");
   // The store recovers; a later import (here, a restart) moves the rest.
   failSave.clear();
+  resetLegacyImportForTests();
+  await importLegacyRecords(repo, quiet);
+  assert.deepEqual(await loadIssueRecord(repo, 2), { held });
+  assert.deepEqual(fileIssues(), []);
+});
+
+test("a lookup that throws during the import leaves every legacy issue unavailable until the import completes", async () => {
+  legacyState();
+  const host = codeHost();
+  const real = host.openIssueLabels;
+  host.openIssueLabels = () => { throw new Error("github is down"); };
+  try {
+    await importLegacyRecords(repo, quiet);
+  } finally {
+    host.openIssueLabels = real;
+  }
+  assert.deepEqual(fileIssues(), [1, 2, 4, 5, 6, 7], "nothing was removed from the file");
+  for (const n of [1, 2, 4, 6, 7]) assert.equal(await loadIssueRecord(repo, n), null, `#${n} reads as unreadable, not as empty`);
+  assert.equal((await foremanHolds(repo, [1, 2]))(2), true);
+  // The source recovers inside the retry window: still withheld, because the import has not run again.
+  await importLegacyRecords(repo, quiet);
+  assert.equal(await loadIssueRecord(repo, 1), null);
+  // The retry window passes (a restart stands in for it): the import completes and releases each issue.
   resetLegacyImportForTests();
   await importLegacyRecords(repo, quiet);
   assert.deepEqual(await loadIssueRecord(repo, 2), { held });

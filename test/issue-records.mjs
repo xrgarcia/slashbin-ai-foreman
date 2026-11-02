@@ -25,3 +25,13 @@ export async function seed(repoConfig, n, fields) {
 
 /** Issue `n`'s record as the Foreman reads it. */
 export const recordOf = async (repoConfig, n) => (await loadIssueRecord(repoConfig, n)) ?? {};
+
+/** After `memoryRecords()`: loads of these issues' records answer `unavailable`; `saves` makes only their saves fail. */
+export function breakRecords(numbers, { saves = false } = {}) {
+  const source = activeWorkSource();
+  const broken = new Set(numbers);
+  const load = source.loadRecord;
+  const save = source.saveRecord;
+  if (!saves) source.loadRecord = async (key, rc) => (broken.has(key.number) ? { status: "unavailable" } : load(key, rc));
+  else source.saveRecord = async (key, record, rc) => (broken.has(key.number) ? false : save(key, record, rc));
+}
