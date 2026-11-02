@@ -4,6 +4,7 @@
 // first sight, and a card's block survives a restart. Fake Paperclip, fake
 // GitHub reads: no network.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -330,7 +331,7 @@ test("blocks: a restored block the Foreman's state no longer holds is released (
 });
 
 test("blocks: the state file keeps and forgets a card's block", () => {
-  setStatePath(mkdtempSync(join(tmpdir(), "card-blocks-")));
+  setStatePath(mkTmp("card-blocks-"));
   assert.deepEqual(loadCardBlocks(), {});
   saveCardBlock("r7", { reason: "blocked: x", owner: "sre", at: "merged" });
   saveCardBlock("r8", { at: null, ruling: true });

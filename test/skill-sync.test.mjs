@@ -11,6 +11,7 @@
 // golden repo, so the commit, the ff and the undo are exercised, not described.
 
 import { test, beforeEach } from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
@@ -89,7 +90,7 @@ function cfgFor(goldenPath, over = {}) {
 let tmp;
 beforeEach(() => {
   ss.resetSkillSyncCache();
-  tmp = mkdtempSync(join(tmpdir(), "skill-sync-"));
+  tmp = mkTmp("skill-sync-");
 });
 
 // --- Drift detection ---
@@ -267,7 +268,7 @@ test("a sync pushed with the work stays", () => {
 // --- Default off ---
 
 test("default config: skill sync is off, and an off config touches nothing", () => {
-  const dir = mkdtempSync(join(tmpdir(), "skill-sync-cfg-"));
+  const dir = mkTmp("skill-sync-cfg-");
   const repo = makeRepo(tmp, {});
   const cfgPath = join(dir, ".ai-agent.json");
   writeFileSync(cfgPath, JSON.stringify({ repoPath: repo, githubRepo: "o/svc" }));

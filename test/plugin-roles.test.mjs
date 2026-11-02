@@ -7,6 +7,7 @@
 //     verifier) to approved, then (no deployer, no promote) its issue closes, each
 //     step a lifecycle move; a verifier stops it at `pr merged`, a promote stage at approved.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +25,7 @@ import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 
 await startAgentPlugins();
-setStatePath(mkdtempSync(join(tmpdir(), "plugin-roles-")));
+setStatePath(mkTmp("plugin-roles-"));
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return logger; } };
 const NONE = { qaRepos: [], stages: [], paperclip: { enabled: false } };

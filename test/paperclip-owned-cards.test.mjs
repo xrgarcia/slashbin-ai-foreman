@@ -4,6 +4,7 @@
 // hold reason read from GitHub, and the snapshot carrying every card only when
 // an observer owns them.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -80,7 +81,7 @@ test("holdReason: the labeller's newest comment from 15 minutes before the label
 });
 
 test("publishSnapshot: the cards are read and carried only while an observer owns them", async () => {
-  setStatePath(mkdtempSync(join(tmpdir(), "owned-cards-")));
+  setStatePath(mkTmp("owned-cards-"));
   let cardReads = 0;
   const card = { item: { issueNumber: 1, repo: "o/r" }, title: "t", url: "u", state: "open", stage: null };
   registerWorkSource({
