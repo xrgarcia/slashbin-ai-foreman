@@ -16,11 +16,12 @@ import * as releaseSignoff from "../github/release-signoff.js";
 import * as release from "../github/release.js";
 import * as reports from "../github/reports.js";
 import * as reviewQueue from "../github/review-queue.js";
+import { BackoffTracker } from "../backoff.js";
 import * as reviewFreshness from "../github/review-freshness.js";
 import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
 import { gh } from "../github/gh.js";
-import { clearActivity, configureGitHubState, recordActivity, setGitHubStateRepos, takeGitHubStateUsage } from "../github-state.js";
+import { fleetState } from "../github-state.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import type { ForemanPlugin, PluginRole } from "./contract.js";
 
@@ -36,14 +37,15 @@ export const GITHUB_WORK_SOURCE = "github";
  */
 export function githubCodeHost(identity: skipHold.ForemanIdentity = new skipHold.ForemanIdentity()): CodeHost {
   const signoff = new releaseSignoff.ReleaseSignoff();
+  const approvedUnmerged = new BackoffTracker();
   return {
     configureIssueCache: cache.configureIssueCache,
     // The fleet state reads with the Foreman token from the daemon's cwd, as before.
-    configureState: (opts) => configureGitHubState({ ...opts, run: (args) => gh(args, process.cwd()) }),
-    setStateRepos: setGitHubStateRepos,
-    takeStateUsage: takeGitHubStateUsage,
-    recordActivity,
-    clearActivity,
+    configureState: (opts) => fleetState.configure({ ...opts, run: (args) => gh(args, process.cwd()) }),
+    setStateRepos: (repos) => fleetState.setRepos(repos),
+    takeStateUsage: () => fleetState.takeUsage(),
+    recordActivity: (repo, issueNumber, step, prUrl) => fleetState.recordActivity(repo, issueNumber, step, prUrl),
+    clearActivity: (repo, issueNumber) => fleetState.clearActivity(repo, issueNumber),
 
     issueLastEditedAt: coreReads.issueLastEditedAt,
     issueCommentRows: coreReads.issueCommentRows,
@@ -136,7 +138,7 @@ export function githubCodeHost(identity: skipHold.ForemanIdentity = new skipHold
     readLatestReviewBody: reports.readLatestReviewBody,
     readPrDigest: reports.readPrDigest,
     readRulingState: reports.readRulingState,
-    findPRsNeedingReview: reviewQueue.findPRsNeedingReview,
+    findPRsNeedingReview: (config, reviewerLogin, logger) => reviewQueue.findPRsNeedingReview(config, reviewerLogin, logger, approvedUnmerged),
     findPendingRevisions: reviewQueue.findPendingRevisions,
     findQaPendingPr: reviewQueue.findQaPendingPr,
     blockedAmong: reviewQueue.blockedAmong,

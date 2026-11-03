@@ -3,8 +3,8 @@
 import type { RepoConfig } from "../config.js";
 import { isBuildInFlight } from "../build-in-flight.js";
 import type { Logger } from "../logger.js";
-import { isGitHubStateEnabled, stateOpenIssues } from "../github-state.js";
-import { findOpenPrs, getOpenIssues, hasLabel, issueCacheTtlMs } from "./cache.js";
+import { fleetState } from "../github-state.js";
+import { findOpenPrs, getOpenIssues, hasLabel, reads } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
 import { extractImplementedIssues } from "./discovery.js";
 import { BackoffTracker, backoffSettings } from "../backoff.js";
@@ -105,23 +105,23 @@ export function hasPendingRevisions(
  * unmerged for five hours, holding its repo's implement queue. It is offered
  * again once the approval is one `backoff.approvedUnmerged` window old, then
  * after each longer window while it stays open (an author hold keeps it open on
- * purpose). Keyed by the approval: a new verdict starts the count again.
+ * purpose). Keyed by the approval: a new verdict starts the count again. `waits`
+ * is the code host's own tracker, so the count lives as long as the plugin.
  */
-export const approvedUnmergedWaits = new BackoffTracker();
-
 export function approvedUnmergedDue(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
+  waits: BackoffTracker,
   now = Date.now(),
 ): boolean {
   const at = currentApprovalMs(config, prNumber, reviewerLogin, logger);
   if (at === null) return false;
   const w = backoffSettings().approvedUnmerged;
   const key = `${config.githubRepo}#${prNumber}@${at}`;
-  if (now - at < w.baseMs || approvedUnmergedWaits.waiting(key, now)) return false;
-  approvedUnmergedWaits.start(key, w, now);
+  if (now - at < w.baseMs || waits.waiting(key, now)) return false;
+  waits.start(key, w, now);
   logger.warn(`${config.name}: PR #${prNumber} was approved but is still open — the merge never happened; offering it to the reviewer again`);
   return true;
 }
@@ -154,6 +154,7 @@ export function findPRsNeedingReview(
   config: RepoConfig,
   reviewerLogin: string | undefined,
   logger: Logger,
+  waits: BackoffTracker,
 ): ReviewCandidate | null {
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
@@ -162,7 +163,7 @@ export function findPRsNeedingReview(
     // Exclude issues also labeled `pr pending actions` — the revise phase owns those.
     const reviewable = issues.filter((i) => !hasLabel(i, prPendingActions));
     if (reviewable.length === 0) {
-      return adoptOrphanedReviewCandidate(config, reviewerLogin, logger);
+      return adoptOrphanedReviewCandidate(config, reviewerLogin, logger, waits);
     }
 
     // Confirm an open feature PR exists (features → develop).
@@ -191,7 +192,7 @@ export function findPRsNeedingReview(
           logger.warn(`${config.name}: PR #${pr.number} has a current CHANGES_REQUESTED verdict but its issues are still "${prUnderReview}" — stranded; the review phase sends them to revise`);
           return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [], stranded: true };
         }
-        if (approvedUnmergedDue(config, pr.number, reviewerLogin, logger)) {
+        if (approvedUnmergedDue(config, pr.number, reviewerLogin, logger, waits)) {
           return { prNumber: pr.number, prUrl: pr.url, issueNumbers: reviewable.map((i) => i.number), adopted: [] };
         }
         logger.debug(`${config.name}: PR #${pr.number} already has a current ${reviewerLogin ?? "reviewer"} review — skipping re-review`);
@@ -279,6 +280,7 @@ export function adoptOrphanedReviewCandidate(
   config: RepoConfig,
   reviewerLogin: string | undefined,
   logger: Logger,
+  waits: BackoffTracker,
 ): ReviewCandidate | null {
   const prs: { number: number; url: string; title: string; body: string }[] = findOpenPrs(
     config.githubRepo,
@@ -295,7 +297,7 @@ export function adoptOrphanedReviewCandidate(
   }
 
   if (hasFreshReview(config, pr.number, reviewerLogin, logger)
-    && !approvedUnmergedDue(config, pr.number, reviewerLogin, logger)) return null;
+    && !approvedUnmergedDue(config, pr.number, reviewerLogin, logger, waits)) return null;
 
   const { prUnderReview, prPendingActions, readyForProd } = config.lifecycleLabels;
   // A keyword reference or a `(#N)` title suffix, never a bare `#N`: prose in the
@@ -313,8 +315,8 @@ export function adoptOrphanedReviewCandidate(
   // This probe runs on every idle cycle while a feature PR waits for review.
   // With the fleet state on, the open-issue list already answers "open, and
   // with which labels" for every ref — absent from it means not open.
-  const known = issueCacheTtlMs > 0 && isGitHubStateEnabled(config.githubRepo)
-    ? new Map(stateOpenIssues(config.githubRepo).map((i) => [i.number, i]))
+  const known = reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo)
+    ? new Map(fleetState.openIssues(config.githubRepo).map((i) => [i.number, i]))
     : null;
   const adopted: number[] = [];
   // An open approved issue the PR names, adoptable or not: one in revise or
