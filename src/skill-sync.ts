@@ -28,11 +28,12 @@
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Logger } from "./logger.js";
+import { slugify } from "./foreman-branch.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const BUILTIN_SKILLS_DIR = join(PACKAGE_ROOT, "skills");
@@ -301,6 +302,13 @@ export type SyncOutcome =
   | { status: "failed"; error: string }
   | { status: "synced"; sha: string; skills: string[]; subject: string };
 
+export type DeliverOutcome =
+  | { status: "current" }
+  | { status: "exists"; branch: string }
+  | { status: "skipped"; reason: string }
+  | { status: "failed"; error: string }
+  | { status: "delivered"; branch: string; sha: string; skills: string[]; subject: string };
+
 /**
  * The exact ref a session's issue branch starts from: the skill-sync commit THIS session's sync just made, else
  * `origin/<base>` resolved to a SHA after a fetch. Never derived from where local `<base>` points, so unrelated
@@ -494,6 +502,81 @@ export class SkillSync {
       // Leave the index as it was found, so the session does not inherit a half-staged sync.
       try { git(["reset", "--quiet"], cwd); } catch { /* the session's Phase 0 reports a broken checkout */ }
       return { status: "failed", error };
+    }
+  }
+  /**
+   * Human lane: deliver the golden skills to a repo the Foreman does not implement in, for one
+   * `approved-for-human` issue. The person works the issue directly (the unified implement skill's
+   * direct mode, branch `feature/<N>-<slug>`); this puts the current skills on that very branch
+   * before they start, and never builds, opens a PR or labels anything.
+   *
+   * It touches NO working tree, index, local branch or checkout: the commit is built with git
+   * plumbing in a throwaway index on top of `origin/<base>` and pushed as a new branch. The clone
+   * may be the person's own, so nothing here may move under them. It never force-pushes, and it
+   * does nothing when `origin/<base>` already carries the current skills or when the issue already
+   * has a `feature/<N>-*` branch on origin (the person started it, or it was delivered before: the
+   * direct-mode skill resumes that branch, and a second push would diverge it).
+   *
+   * Never throws: anything it cannot do is `skipped` or `failed`, and the issue is untouched.
+   */
+  deliverSkillsForIssue(
+    cfg: SkillSyncConfig,
+    repo: SkillSyncRepo,
+    issue: { number: number; title: string },
+    logger: Logger,
+  ): DeliverOutcome {
+    const golden = this.currentGolden(cfg, logger);
+    if (!golden) return { status: "skipped", reason: "golden source unreadable" };
+    const names = skillsFor(cfg, golden, repo.skillSyncSkills);
+    if (names.length === 0) return { status: "current" };
+    const cwd = repo.repoPath;
+    const fb = repo.baseBranch;
+    const target = cfg.targetDir.replace(/\/+$/, "");
+    let scratch: string | null = null;
+    try {
+      git(["fetch", "--quiet", "origin", fb], cwd);
+      const baseSha = git(["rev-parse", `origin/${fb}`], cwd);
+      const have = repoSkillsAt(cwd, baseSha, target, names);
+      const stale = compareSkills(golden, names, have).filter((d) => d.state !== "current").map((d) => d.skill);
+      if (stale.length === 0) return { status: "current" };
+
+      const existing = git(["ls-remote", "--heads", "origin", `feature/${issue.number}-*`], cwd);
+      if (existing) return { status: "exists", branch: existing.split("\n")[0].split("\t")[1]?.replace(/^refs\/heads\//, "") ?? `feature/${issue.number}-*` };
+
+      // A throwaway index: the clone's own index and working tree are never read or written.
+      scratch = mkdtempSync(join(tmpdir(), "foreman-skill-deliver-"));
+      const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
+      const gi = (args: string[], input?: Buffer): string =>
+        execFileSync("git", args, { cwd, env, input, encoding: "utf8", stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], timeout: 60_000 }).trim();
+      gi(["read-tree", baseSha]);
+      for (const skill of stale) {
+        const want = golden.skills.get(skill)!;
+        const base = `${target}/${skill}`;
+        for (const p of have.get(skill)?.keys() ?? []) if (!want.has(p)) gi(["update-index", "--force-remove", "--", `${base}/${p}`]);
+        for (const [p, bytes] of want) {
+          const oid = gi(["hash-object", "-w", "--stdin"], bytes);
+          gi(["update-index", "--add", "--cacheinfo", `100644,${oid},${base}/${p}`]);
+        }
+      }
+      const tree = gi(["write-tree"]);
+      const subject = `chore(skills): sync ${stale.join(", ")} from ${golden.label}@${golden.version} (#${issue.number})`;
+      const body =
+        stale.map((s) => `${target}/${s} <- ${golden.label}:${golden.origin.get(s)} @ ${golden.version}`).join("\n") +
+        "\n\nCopied byte for byte by the Foreman's skill sync (src/skill-sync.ts) onto this issue's branch,\n" +
+        "so the direct-mode session starts on the current skills. Do not hand-edit this copy:\n" +
+        "change the golden source, and the next issue here brings it over.";
+      const sha = git(["commit-tree", tree, "-p", baseSha, "-m", subject, "-m", body], cwd);
+      const branch = `feature/${issue.number}-${slugify(issue.title) || "issue"}`;
+      // No force: a branch that appeared since the check above makes this fail, which is the right answer.
+      git(["push", "--quiet", "origin", `${sha}:refs/heads/${branch}`], cwd);
+      logger.info(`Skill delivery: ${subject} — pushed ${sha.slice(0, 9)} to ${branch} (no PR; the person's direct-mode session resumes it)`);
+      return { status: "delivered", branch, sha, skills: stale, subject };
+    } catch (err) {
+      const error = firstLine(err);
+      logger.warn(`Skill delivery to ${repo.name} #${issue.number} failed: ${error}`);
+      return { status: "failed", error };
+    } finally {
+      if (scratch) { try { rmSync(scratch, { recursive: true, force: true }); } catch { /* a temp dir */ } }
     }
   }
 }

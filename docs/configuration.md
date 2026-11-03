@@ -373,7 +373,7 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 ### `stages`
 
-Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick`
+Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick` → `skill-deliver`
 
 The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the ten built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
@@ -422,6 +422,7 @@ Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
 - `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
 - `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
+- `syncOnly`: A human-lane repo (registry lane `human`): the Foreman does not implement, review, revise, release or label anything there. It only delivers the golden skills, per `approved-for-human` issue, as a `feature/<N>-<slug>` branch the person's direct-mode session resumes. Needs skillSync.
 
 ```json
 {

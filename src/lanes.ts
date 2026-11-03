@@ -29,6 +29,7 @@ const LANE_OF: Record<StageType, string> = {
   "branch-sync": "branch-sync",
   dependabot: "dependabot",
   unstick: "unstick",
+  "skill-deliver": "skill-deliver",
 };
 
 export interface Lane {

@@ -237,6 +237,8 @@ export async function foremanHolds(rt: ForemanRuntime, repoConfig: RepoConfig, n
  */
 export async function publishSnapshot(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
   if (!wantsSnapshot()) return;
+  // A sync-only (human-lane) repo is never mirrored: no snapshot reaches an observer, so no card is made for it.
+  if (repoConfig.syncOnly) return;
   const source = workSourceFor(repoConfig);
   const items = await source.snapshot(repoConfig, logger);
   // Every card, not only the lifecycle's, read only when an observer writes them all.
