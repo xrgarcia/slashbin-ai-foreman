@@ -445,7 +445,7 @@ Release the block on GitHub, where the Foreman looks, and the card follows on it
 
 A card labelled `approved-for-human` waits on a person, not on a stage's owner. The plugin
 never reads GitHub; the work source's cards carry each open issue's labels, and the card sync
-(`syncCard` in `mirror.ts`, with `ownsCards` on) asks `assigneeFor(cfg, { labels, repo })` in
+(`syncCard` in `snapshot-sync.ts`, with `ownsCards` on) asks `assigneeFor(cfg, { labels, repo })` in
 `board.ts` who holds a card that is in no lifecycle stage. A closed card stays nobody's.
 
 | The item | Assignee |
