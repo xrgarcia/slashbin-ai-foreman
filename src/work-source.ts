@@ -214,13 +214,11 @@ export function advance(
 }
 
 /**
- * Whether the Foreman holds issue `n` back, for each of `numbers`. A recorded branch divergence holds
- * every issue; so does an unfinished release that names it, and any hold, skip, failure or EM question
+ * Whether the Foreman holds issue `n` back, for each of `numbers`. An unfinished release that names it, and any hold, skip, failure or EM question
  * in its record. An issue whose record cannot be read is held: the answer is unknown, and a card must not
  * be moved on an unknown (fail closed).
  */
 export async function foremanHolds(rt: ForemanRuntime, repoConfig: RepoConfig, numbers: readonly number[], logger: Logger): Promise<(n: number) => boolean> {
-  if (rt.divergence.standing(repoConfig)) return () => true;
   // A release whose record cannot be read may be holding any issue: unknown, so every card is held.
   const releases = await rt.releases.loadReleases(repoConfig, logger);
   if (!releases || releases.unreadable.size > 0) return () => true;

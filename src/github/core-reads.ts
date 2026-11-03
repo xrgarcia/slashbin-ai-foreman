@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import type { IssueTextRow } from "../code-host.js";
 import type { RepoConfig } from "../config.js";
 import { gh } from "./gh.js";
+import { branchPrefixOf, isForemanOwnedHead, isLegacyFeatureHead } from "../foreman-branch.js";
 
 /** `lastEditedAt` of issue `n` as GraphQL returns it: undefined when absent, null when never edited. Throws on a failed read. */
 export function issueLastEditedAt(repoConfig: RepoConfig, n: number): string | null | undefined {
@@ -105,20 +106,43 @@ export function createLabel(repo: RepoConfig, name: string, color: string): void
 }
 
 /**
- * The open feature PR's URL, asked of gh directly with the ambient auth: the
- * implement session's fallback when its output names no PR. Outside runGh, as it
- * always was; the caller checks the GitHub back-off first. Undefined when none.
+ * The open Foreman-owned PR's URL (a head in `branches` first, else any Foreman head), asked of
+ * gh directly with the ambient auth: the implement session's fallback when its output names no
+ * PR. Outside runGh, as it always was; the caller checks the GitHub back-off first. Undefined
+ * when none. Heads are filtered through the one ownership test, so a human branch never answers.
  */
-export function featurePrUrlFallback(config: RepoConfig): string | undefined {
+export function featurePrUrlFallback(config: RepoConfig, branches: readonly string[] = []): string | undefined {
   const fallback = spawnSync("gh", [
     "pr", "list",
     "--repo", config.githubRepo,
-    "--head", config.featureBranch,
     "--base", config.baseBranch,
     "--state", "open",
-    "--limit", "1",
-    "--json", "url",
-    "--jq", ".[0].url",
+    "--limit", "100",
+    "--json", "url,headRefName",
   ], { cwd: config.repoPath, encoding: "utf-8", timeout: 15_000 });
-  return fallback.stdout?.trim();
+  try {
+    const prs = JSON.parse(fallback.stdout || "[]") as { url: string; headRefName: string }[];
+    const owned = prs.filter((p) => isForemanOwnedHead(config, p.headRefName));
+    return (owned.find((p) => branches.includes(p.headRefName)) ?? owned[0])?.url;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Delete a merged Foreman PR's head branch (#208). Only a head the Foreman owns by PREFIX is
+ * ever deleted: a human-named head, the legacy shared featureBranch, the base and the production
+ * branch are refused (false). True when the ref is gone (already-gone counts). Throws on a failed call.
+ */
+export function deleteMergedBranch(config: RepoConfig, head: string): boolean {
+  if (!head.startsWith(branchPrefixOf(config)) || !isForemanOwnedHead(config, head)) return false;
+  if (isLegacyFeatureHead(config, head) || head === config.baseBranch || head === config.productionBranch) return false;
+  try {
+    gh(["api", "-X", "DELETE", `repos/${config.githubRepo}/git/refs/heads/${head}`], config.repoPath);
+  } catch (err) {
+    const msg = err instanceof Error ? `${err.message} ${(err as { stderr?: unknown }).stderr ?? ""}` : String(err);
+    if (/Reference does not exist|HTTP 422|HTTP 404|Not Found/i.test(msg)) return true;
+    throw err;
+  }
+  return true;
 }

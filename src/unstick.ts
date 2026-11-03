@@ -128,18 +128,12 @@ export function reworkDecisionReason(h: Pick<VerifyHold, "prNumber" | "reason" |
  * retries it itself, and calling the EM would race that. A deploy-failure hold
  * (`owner: "sre"`) is included — the EM hands it to the SRE and rules.
  *
- * Divergence is repo-level (derived from git, divergence.ts), not per issue. It is called
- * once for each issue the Foreman announced it on, so the EM sees a real issue;
- * with none announced, once for issue 0 (the repo). The kind and reason are
- * identical either way, so one episode is one question per issue.
  */
 export function derivedCandidates(
   state: {
     /** The holds and skips of the issues read this pass, by issue number. */
     verifyHeld?: Readonly<Record<number, VerifyHold>>;
     skipped?: Readonly<Record<number, SkippedIssue>>;
-    /** The divergence standing on the repo: its one-line reason (worded by phases/common.ts, which this module may not import: it would be a cycle through work-source) and the issues told about it. */
-    divergence?: { reason: string; announced: readonly number[] };
   },
   opts: {
     verifyMaxAttempts: number;
@@ -166,11 +160,6 @@ export function derivedCandidates(
   }
   for (const [key, s] of Object.entries(state.skipped ?? {})) {
     if (s.escalatedAt) out.push({ issue: Number(key), kind: "skip", reason: codeHost().escalatedReason(s.reason, s.skipCount ?? 0) });
-  }
-  const d = state.divergence;
-  if (d) {
-    const issues = d.announced.length > 0 ? d.announced : [0];
-    for (const issue of issues) out.push({ issue, kind: "divergence", reason: d.reason });
   }
   return out;
 }

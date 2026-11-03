@@ -13,6 +13,7 @@ import { CycleEvent, REVIEW_ROUNDS_ALERT, activeRuns, itemOf, pausedByBlockedLab
 import { reportLaunchThrew } from "./implement.js";
 import { codeHost } from "../plugins/registry.js";
 import type { PendingRevisionInfo } from "../code-host.js";
+import { isForemanOwnedHead } from "../foreman-branch.js";
 import type { ForemanRuntime } from "../runtime.js";
 
 export async function tryRevision(
@@ -51,6 +52,12 @@ export async function tryRevision(
     return null;
   }
   const prNumber = pending.pr.number;
+  // Push target = the PR's own head, and only when it is Foreman-owned. A human-named head is never revised.
+  const headBranch = pending.pr.headRefName;
+  if (!headBranch || !isForemanOwnedHead(repoConfig, headBranch)) {
+    revLogger.debug(`Skipping ${repoName} revision — PR #${prNumber} head "${headBranch}" is not Foreman-owned`);
+    return null;
+  }
 
   // The EM's `blocked` label on the PR's issue pauses revise (docs/em-coordination.md §1).
   if (pausedByBlockedLabel(rt, repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
@@ -127,7 +134,7 @@ export async function tryRevision(
   // the head unchanged (below). A marker left by a pass that failed after this is of unknown outcome: neither
   // counted nor consumed, and the next admission replaces it, so at most one is ever outstanding per PR.
   const prior = streak;
-  const beforeSha = codeHost().getRemoteBranchSha(repoConfig.githubRepo, repoConfig.featureBranch, repoConfig.repoPath, revLogger);
+  const beforeSha = codeHost().getRemoteBranchSha(repoConfig.githubRepo, headBranch, repoConfig.repoPath, revLogger);
   if (isUnconfirmed(prior, head)) {
     // An earlier attempt on this head has no confirming read, and this pass could read the branch: settle it
     // (neither counted nor consumed) and pay for nothing this pass. One unconfirmed attempt per head, then a free pass.
@@ -159,7 +166,7 @@ export async function tryRevision(
     const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
     const result = await revisePRFeedback(
       rt.trust, repoConfig, revLogger, runAbort.signal,
-      pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha,
+      pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha, headBranch,
     ).catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success

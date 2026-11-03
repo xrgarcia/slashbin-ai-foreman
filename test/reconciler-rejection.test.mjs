@@ -20,10 +20,10 @@ const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
 test("the reconciler looks up closed-unmerged PRs, not only open ones", () => {
   assert.match(
     reconciler,
-    /function findLastClosedUnmergedPR/,
+    /function readClosedPrs/,
     "no closed-unmerged lookup — a rejected PR is invisible again",
   );
-  const fn = reconciler.slice(reconciler.indexOf("function findLastClosedUnmergedPR"));
+  const fn = reconciler.slice(reconciler.indexOf("function readClosedPrs"));
   assert.match(fn.slice(0, 900), /codeHost\(\)\.closedPrsForBranch\(/, "the lookup must query closed PRs");
   const host = readFileSync(join(root, "src/github/core-reads.ts"), "utf-8");
   const closed = host.slice(host.indexOf("function closedPrsForBranch"));
@@ -52,7 +52,7 @@ test("git failures carry stderr and distinguish a shutdown from a fault", () => 
     "a signal-killed fetch must be reported as cancelled, not failed — unless our own timeout killed it");
   assert.match(reconciler, /timedOut = e\?\.code === "ETIMEDOUT"/,
     "Node's execFileSync timeout also sends SIGTERM; ETIMEDOUT is what tells it apart (foreman#61)");
-  const fetchCatch = reconciler.slice(reconciler.indexOf('git(["fetch", "origin"]'));
+  const fetchCatch = reconciler.slice(reconciler.indexOf('git(["fetch", "origin", "--prune"]'));
   assert.match(fetchCatch.slice(0, 900), /if \(failure\.cancelled\)/,
     "the fetch catch must branch on cancellation");
   assert.doesNotMatch(

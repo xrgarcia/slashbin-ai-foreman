@@ -90,7 +90,7 @@ const changes = [
 ];
 
 test("the title carries the idempotency prefix, the count and the major count", () => {
-  const { title } = buildDependencyBatchIssue("features", changes);
+  const { title } = buildDependencyBatchIssue("develop", changes);
   assert.ok(title.startsWith(DEPENDENCY_BATCH_TITLE_PREFIX),
     "the prefix IS the at-most-one-open-issue mechanism — a title that loses it files a duplicate every cycle");
   assert.match(title, /2 dependency updates/);
@@ -98,14 +98,14 @@ test("the title carries the idempotency prefix, the count and the major count", 
 });
 
 test("a batch with no major says so instead of claiming one", () => {
-  const { title, body } = buildDependencyBatchIssue("features", [changes[1]]);
+  const { title, body } = buildDependencyBatchIssue("develop", [changes[1]]);
   assert.doesNotMatch(title, /major\)/);
   assert.match(body, /None of these crosses a major version/);
   assert.match(title, /1 dependency update\b/, "singular, not '1 dependency updates'");
 });
 
 test("every PR appears in the table and in References", () => {
-  const { body } = buildDependencyBatchIssue("features", changes);
+  const { body } = buildDependencyBatchIssue("develop", changes);
   for (const c of changes) {
     assert.ok(body.includes(`| #${c.number} |`), `PR #${c.number} missing from the table`);
     assert.ok(body.includes(`- #${c.number}`), `PR #${c.number} missing from References`);
@@ -115,13 +115,13 @@ test("every PR appears in the table and in References", () => {
 test("the body demands the app be STARTED, not merely built", () => {
   // This is the whole point of the change. A body that only says "build" would
   // reproduce the CI-rollup gate the issue exists to replace.
-  const { body } = buildDependencyBatchIssue("features", changes);
+  const { body } = buildDependencyBatchIssue("develop", changes);
   assert.match(body, /Start the application and confirm it serves/);
   assert.match(body, /Exercise the flows/);
 });
 
 test("the body carries the flight-gate sections the approval gate requires", () => {
-  const { body } = buildDependencyBatchIssue("features", changes);
+  const { body } = buildDependencyBatchIssue("develop", changes);
   // Match whole lines: `## Problem` is the first line of the body, so a
   // "\n## Problem\n" test would fail on a body that is perfectly correct.
   const headings = new Set(body.split("\n").map((l) => l.trim()));
@@ -135,12 +135,12 @@ test("the body carries the flight-gate sections the approval gate requires", () 
 });
 
 test("a grouped PR renders as 'read the PR' rather than a fabricated version", () => {
-  const { body } = buildDependencyBatchIssue("features", [describeDependencyPR(315, "chore(deps): bump qs and express")]);
+  const { body } = buildDependencyBatchIssue("develop", [describeDependencyPR(315, "chore(deps): bump qs and express")]);
   assert.match(body, /grouped — read the PR/);
   assert.ok(body.includes("qs, express"));
 });
 
-test("the feature branch name is taken from config, never hardcoded", () => {
+test("the landing branch name is taken from the caller, never hardcoded", () => {
   const { title, body } = buildDependencyBatchIssue("wip", changes);
   assert.match(title, /on `wip`/);
   assert.ok(body.includes("`wip`"));

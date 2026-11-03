@@ -3,7 +3,7 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { fleetState } from "../github-state.js";
-import { findOpenPrs, getOpenIssues, hasLabel, reads } from "./cache.js";
+import { findOpenForemanPrs, getOpenIssues, hasLabel, reads } from "./cache.js";
 import { gh, isBackoffRefusal } from "./gh.js";
 import { extractImplementedIssues } from "./discovery.js";
 import { BackoffTracker, backoffSettings } from "../backoff.js";
@@ -55,12 +55,8 @@ export function findPendingRevisions(
 
     if (issues.length === 0) return null;
 
-    // Confirm there's an open feature PR (features → develop)
-    const prs: PendingRevisionPR[] = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
+    // Confirm there's an open feature PR (a Foreman-owned head into base)
+    const prs: PendingRevisionPR[] = findOpenForemanPrs(config, 1);
     if (prs.length > 0) {
       logger.info(`Found ${issues.length} issue(s) pending revision with open PR #${prs[0].number}: ${issues.map(i => `#${i.number}`).join(", ")}`);
       return { issueNumbers: issues.map(i => i.number), pr: prs[0] };
@@ -169,12 +165,8 @@ export function findPRsNeedingReview(
       return adoptOrphanedReviewCandidate(config, reviewerLogin, logger, waits, isBuildInFlight);
     }
 
-    // Confirm an open feature PR exists (features → develop).
-    const prs: { number: number; url: string }[] = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
+    // Confirm an open feature PR exists (a Foreman-owned head into base).
+    const prs: { number: number; url: string }[] = findOpenForemanPrs(config, 1);
     if (prs.length === 0) {
       logger.debug(`${config.name}: ${reviewable.length} issue(s) labeled "${prUnderReview}" but no open feature PR`);
       return null;
@@ -234,11 +226,7 @@ export function findQaPendingPr(
 ): QaPendingPr | null {
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
-    const prs: { number: number }[] = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
+    const prs: { number: number }[] = findOpenForemanPrs(config, 1);
     if (prs.length === 0 || isBuildInFlight(config.name)) return null;
     const pr = prs[0];
     const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
@@ -287,11 +275,7 @@ export function adoptOrphanedReviewCandidate(
   waits: BackoffTracker,
   isBuildInFlight: BuildProbe,
 ): ReviewCandidate | null {
-  const prs: { number: number; url: string; title: string; body: string }[] = findOpenPrs(
-    config.githubRepo,
-    config.repoPath,
-    { head: config.featureBranch, base: config.baseBranch, limit: 1 },
-  );
+  const prs: { number: number; url: string; title: string; body: string }[] = findOpenForemanPrs(config, 1);
   if (prs.length === 0) return null;
   const pr = prs[0];
   // Mid-build the PR has no review label yet by design; adopting it now reviews

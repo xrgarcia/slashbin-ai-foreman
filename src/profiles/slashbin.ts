@@ -24,8 +24,6 @@ export const slashbinProfile: ConfigProfile = {
     "mcp__railway__*",
     "mcp__slashbin-ai-knowledge__*",
   ],
-  // The EM's GitHub account: the only author whose divergence ruling is honoured.
-  divergenceRulerLogin: "slashbin-engineering-manager",
   // Issue bodies name their epic as `engineering-manager #N` under `## References`.
   epicRefLabel: "engineering-manager",
   // Slashbin's Paperclip fork credits a write to an agent through this header.

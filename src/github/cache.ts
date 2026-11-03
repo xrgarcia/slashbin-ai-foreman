@@ -4,6 +4,7 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { fleetState } from "../github-state.js";
 import { gh } from "./gh.js";
+import { isForemanOwnedHead } from "../foreman-branch.js";
 import type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
 export type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
 
@@ -270,6 +271,35 @@ export function findOpenPrs(
       (opts.base === undefined || p.baseRefName === opts.base),
   );
   return opts.limit === undefined ? matches : matches.slice(0, opts.limit);
+}
+
+/**
+ * Open PRs into `config.baseBranch` whose head is Foreman-owned (branchPrefix, or the legacy
+ * featureBranch), newest first. The ONE way the Foreman finds its own PRs (#208): a human-named
+ * head never appears here, so nothing downstream can revise, reconcile or push to it.
+ */
+export function findOpenForemanPrs(config: RepoConfig, limit?: number): PrSnapshot[] {
+  const matches = getOpenPrs(config.githubRepo, config.repoPath)
+    .filter((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
+  return limit === undefined ? matches : matches.slice(0, limit);
+}
+
+/** The first open Foreman-owned PR the fleet state knows about; undefined is "ask GitHub", never "no PR" (see knownOpenPr). */
+export function knownOpenForemanPr(
+  config: RepoConfig,
+): { number: number; url: string; headRefOid: string; headRefName: string } | undefined {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(config.githubRepo)) return undefined;
+  const pr = fleetState.openPrs(config.githubRepo)
+    .find((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
+  return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid, headRefName: pr.headRefName } : undefined;
+}
+
+/** The first open Foreman-owned PR's head commit and last update, or null when the state cannot say. */
+export function openForemanPrVersion(config: RepoConfig): string | null {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(config.githubRepo)) return null;
+  const pr = fleetState.openPrs(config.githubRepo)
+    .find((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
+  return pr ? `${pr.number}:${pr.headRefOid}@${pr.updatedAt}` : null;
 }
 
 /**

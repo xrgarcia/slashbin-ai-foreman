@@ -53,7 +53,7 @@ export function dependentRef(d: Dependent, own: string): string {
  * with `prBlockingSkip` (phases/implement.ts), which owns that wording.
  */
 export function isDeadBlockerReason(reason: string): boolean {
-  return !/diverged from origin\//i.test(reason);
+  return true;
 }
 
 /** The comment left on a dependent whose blocker will not land. */
@@ -81,7 +81,7 @@ export function alreadyLandedComment(reason: string, baseBranch: string): string
 
 /** Close `num` as completed, commenting the evidence first. Throws on a failed write. */
 export function closeAlreadyLanded(config: RepoConfig, num: number, reason: string): void {
-  gh(["issue", "comment", String(num), "--repo", config.githubRepo, "--body", alreadyLandedComment(reason, config.featureBranch)], config.repoPath);
+  gh(["issue", "comment", String(num), "--repo", config.githubRepo, "--body", alreadyLandedComment(reason, config.baseBranch)], config.repoPath);
   gh(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
 }
 

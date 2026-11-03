@@ -15,7 +15,6 @@ export interface ConfigProfile {
   readonly qaRepos?: readonly string[];
   readonly qaSecretsRunner?: string;
   readonly reviewAllowedTools?: readonly string[];
-  readonly divergenceRulerLogin?: string;
   readonly epicRefLabel?: string;
   readonly paperclip?: { readonly commentAuthorHeader?: string };
 }

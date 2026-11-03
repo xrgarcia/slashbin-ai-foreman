@@ -190,24 +190,6 @@ test("card blocks: any repo's record unreadable makes the whole load null, and a
   assert.equal(await blocks.save("c3", block("three"), "nowhere/else"), false, "keeping one with no repo to hold it is not");
 });
 
-// --- derived: the branch block --------------------------------------------------------------------------
-
-test("branch block: derived from the last git observation, held in memory only, ends when git shows it reconciled", async () => {
-  assert.equal(rt.divergence.standing(repoA), null);
-  const first = rt.divergence.observe(repoA, { ahead: 2, behind: 1, mergeBase: "abc" });
-  assert.equal(first.before, null);
-  assert.equal(first.now.mergeBase, "abc");
-  assert.equal(rt.divergence.standing(repoA).mergeBase, "abc");
-  assert.equal(rt.divergence.standing(repoB), null, "per repo");
-  assert.equal((await foremanHolds(rt, repoA, [7], quiet))(7), true, "a standing divergence holds the repo's issues");
-  assert.equal((await foremanHolds(rt, repoB, [7], quiet))(7), false);
-  assert.equal(rt.divergence.observe(repoA, { ahead: 2, behind: 1, mergeBase: "abc" }).before.mergeBase, "abc", "the same episode");
-  rt.divergence.observe(repoA, null);
-  assert.equal(rt.divergence.standing(repoA), null);
-  assert.equal((await foremanHolds(rt, repoA, [7], quiet))(7), false);
-  assert.deepEqual(await rt.records.loadRepoRecord(repoA), {}, "the block itself was never stored");
-});
-
 test("branch block: the issues told and the rulings carried out are the only persisted parts", async () => {
   await rt.records.updateIssueRecord(repoA, 7, (d) => { d.divergenceTold = "abc"; });
   await rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["comment:1"]; });
@@ -306,15 +288,11 @@ test("import: a record that cannot be read counts as live, so nothing in the fil
   assert.equal(existsSync(legacyFile()), false);
 });
 
-test("import: a branch block is carried over only while git still shows its episode", async () => {
-  writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } }, b: { branchBlock: { reason: "diverged", mergeBase: "old", announced: [8], ruled: ["comment:2"] } } } });
-  rt.divergence.observe(repoA, { ahead: 1, behind: 1, mergeBase: "abc" });
-  rt.divergence.observe(repoB, null);
+test("import: a legacy branch block is dropped, not carried (the divergence machinery is retired, foreman#208)", async () => {
+  writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } } } });
   await runImport();
-  assert.deepEqual((await rt.records.loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
-  assert.equal((await rt.records.loadIssueRecord(repoA, 7)).divergenceTold, "abc", "an issue already told stays told");
-  assert.deepEqual(await rt.records.loadRepoRecord(repoB), {}, "repo b is reconciled: its block is dropped");
-  assert.equal((await rt.records.loadIssueRecord(repoB, 8)) ?.divergenceTold, undefined);
+  assert.deepEqual(await rt.records.loadRepoRecord(repoA), {}, "nothing carried into the record");
+  assert.equal((await rt.records.loadIssueRecord(repoA, 7))?.divergenceTold, undefined, "and no issue marked told");
   assert.equal(existsSync(legacyFile()), false);
 });
 
@@ -360,21 +338,6 @@ test("import: one repo's pass keeps every other configured repo's entries (--rep
   assert.equal(existsSync(legacyFile()), false, "the file goes when every configured repo's entries have moved");
   const orch = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "orchestrator.ts"), "utf8");
   assert.match(orch, /importLegacyRecords\(repoConfig, logger, config\.allRepos \?\? config\.repos\)/);
-});
-
-// repoG: a repo with a base and a feature branch whose checkout git cannot read.
-const repoG = { ...repoA, baseBranch: "main", featureBranch: "features" };
-test("import: git unreadable keeps the branch block's history for the retry; unknown is never obsolete", async () => {
-  writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } } } });
-  await rt.legacy.importLegacyRecords(repoG, quiet, cfgs); // repoG is no git checkout: readDivergence is undefined
-  assert.ok(fileState().repos.a.branchBlock, "the episode stays in the file");
-  assert.equal(await rt.records.loadRepoRecord(repoA), null, "and the repo reads as unreadable until it is settled");
-  rt = new ForemanRuntime();
-  rt.divergence.observe(repoG, { ahead: 1, behind: 1, mergeBase: "abc" }); // git is readable now and still shows it
-  await rt.legacy.importLegacyRecords(repoG, quiet, cfgs);
-  assert.deepEqual((await rt.records.loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
-  assert.equal((await rt.records.loadIssueRecord(repoA, 7)).divergenceTold, "abc");
-  assert.equal(existsSync(legacyFile()), false);
 });
 
 test("import: a pending card block makes its repo and the block store unavailable, before the import and while a save fails", async () => {

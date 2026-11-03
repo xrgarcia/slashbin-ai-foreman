@@ -46,13 +46,6 @@ test("a no-merged-pr hold is stuck at once (it is born at its cap)", () => {
   assert.equal(c[0].kind, "verify-no-pr");
 });
 
-test("divergence: once per announced issue, or issue 0 when none", () => {
-  const standing = (announced) => ({ divergence: { reason: "features diverged", announced } });
-  assert.deepEqual(derivedCandidates(standing([7, 8]), opts).map((c) => [c.issue, c.kind, c.reason]), [[7, "divergence", "features diverged"], [8, "divergence", "features diverged"]]);
-  assert.deepEqual(derivedCandidates(standing([]), opts).map((c) => [c.issue, c.kind]), [[0, "divergence"]]);
-  assert.deepEqual(derivedCandidates({}, opts), [], "no standing divergence, no question");
-});
-
 test("an escalated skip is stuck; an unescalated one is not", () => {
   const c = derivedCandidates({ skipped: { 3: { lastSkippedAt: "t", reason: "x", skipCount: 9, escalatedAt: "t" }, 4: { lastSkippedAt: "t", reason: "x", skipCount: 1 } } }, opts);
   assert.deepEqual(c.map((x) => [x.issue, x.kind]), [[3, "skip"]]);

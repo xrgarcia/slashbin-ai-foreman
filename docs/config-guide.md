@@ -48,7 +48,8 @@ For a single repo, set fields at the root level:
 | `prompt` | `AI_AGENT_PROMPT` | *(built-in)* | Custom prompt template ([variables](skills.md#prompt-template-variables)) |
 | `baseBranch` | `AI_AGENT_BASE_BRANCH` | `develop` | PR target branch |
 | `productionBranch` | `AI_AGENT_PRODUCTION_BRANCH` | `main` | Branch promotion PRs target; sync PRs merge it back into `baseBranch` |
-| `featureBranch` | `AI_AGENT_FEATURE_BRANCH` | `features` | Branch to commit to |
+| `branchPrefix` | `AI_AGENT_BRANCH_PREFIX` | `foreman/` | Prefix of each issue's own branch (`<prefix><issue>-<slug>`) |
+| `featureBranch` | `AI_AGENT_FEATURE_BRANCH` | `features` | Legacy shared branch: never pushed to; a PR from it is still Foreman-owned |
 | `maxTurns` | `AI_AGENT_MAX_TURNS` | `30` | Max agent turns per issue |
 | `maxDurationMs` | `AI_AGENT_MAX_DURATION_MS` | `1800000` (30 min) | Max implementation time |
 | `model` | `AI_AGENT_MODEL` | CLI default | Model for implement/revise. Cascades to every repo that sets no `model` of its own |

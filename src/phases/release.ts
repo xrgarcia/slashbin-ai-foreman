@@ -792,7 +792,7 @@ export async function tryRelease(
 ): Promise<boolean> {
   // One reviewer approval and one deployer deploy (EM#578): without both the stage does not run.
   if (!roleFor("deployer", config) || !roleFor("reviewer", config)) return false;
-  if (repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch) return false;
+  if (repoConfig.baseBranch === repoConfig.productionBranch) return false;
   if (isUpstreamBlocked("github")) return false;
   const rlog = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "release" });
   rt.memory.passHead.delete(repoConfig.name);

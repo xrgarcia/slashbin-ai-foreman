@@ -207,8 +207,9 @@ test("R2: every held cycle and a restart emit it, one comment throughout; fixing
 test("every waiting emit in the implement stage carries the acceptance holds", () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "implement.ts"), "utf8");
   const emits = src.match(/kind: "waiting"[^\n]*/g);
-  assert.ok(emits.length >= 5);
-  for (const e of emits) assert.match(e, /acceptanceHolds|waitingSet\(/, e);
-  assert.match(src, /const waitingSet = \(block[^\n]*\n\s*\.\.\.acceptanceHolds/);
+  // #208: the divergence/fast-forward re-emits are gone, so three remain (two early exits and the repo's waiting set).
+  assert.ok(emits.length >= 3);
+  for (const e of emits) assert.match(e, /acceptanceHolds|items: waiting\b/, e);
+  assert.match(src, /const waiting = \[\n\s*\.\.\.acceptanceHolds/);
 });
 

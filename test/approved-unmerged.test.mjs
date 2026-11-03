@@ -55,7 +55,7 @@ let n = 0;
 // A fresh repo name per case: open-issue and open-PR lists are cached per repo.
 function arrange({ approvedMinAgo = 300, state = "APPROVED", issues = [{ number: 1270, state: "OPEN", title: "t", labels: [{ name: "approved" }, { name: "pr under review" }] }] } = {}) {
   const repo = `example/r${++n}`;
-  const pr = { number: 1271, url: `https://github.com/${repo}/pull/1271`, title: "feat: implement #1270", body: "Closes #1270", headRefName: "features", baseRefName: "develop", headRefOid: "e389c50", updatedAt: ago(approvedMinAgo) };
+  const pr = { number: 1271, url: `https://github.com/${repo}/pull/1271`, title: "feat: implement #1270", body: "Closes #1270", headRefName: "foreman/1270-implement", baseRefName: "develop", headRefOid: "e389c50", updatedAt: ago(approvedMinAgo) };
   writeFileSync(ghState, JSON.stringify({ pr, issues, committed: ago(approvedMinAgo + 2),
     reviews: [{ author: { login: TL }, state, submittedAt: ago(approvedMinAgo) }] }));
   const p = join(tmp, `cfg${n}.json`);

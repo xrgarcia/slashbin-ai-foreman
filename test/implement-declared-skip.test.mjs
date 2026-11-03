@@ -40,9 +40,10 @@ test("the declared skip is checked BEFORE any PR attribution", () => {
 
 test("a declared skip is only honoured when the branch did not move", () => {
   const block = between(fn, "const declaredSkip =", "const prMatch");
-  assert.match(block, /getRemoteBranchSha/,
+  assert.match(block, /movedBranch\(\)/,
     "without a SHA check the trailer is taken on trust, which is the assumption that should never be load-bearing");
-  assert.match(block, /beforeSha !== afterSha/, "the guard must compare, not merely fetch");
+  assert.match(fn, /after && after !== before/, "the guard must compare each candidate branch's sha before and after, not merely fetch");
+  assert.match(fn, /getRemoteBranchSha/, "the shas come from the remote");
   assert.match(block, /skipped: true/, "the no-movement case must return a skip");
   assert.ok(/logger\.warn/.test(block),
     "a trailer contradicted by real commits must be visible, not silently dropped");

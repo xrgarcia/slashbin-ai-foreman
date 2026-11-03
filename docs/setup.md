@@ -34,7 +34,7 @@ Foreman edits code in that checkout and pushes from it.
 
 | Branch | Default | What it is |
 |---|---|---|
-| feature | `features` | Where the Foreman commits its work |
+| work | `foreman/<issue>-<slug>` | One branch per issue, cut from base and deleted after merge (`branchPrefix`) |
 | base | `develop` | Where finished work is merged and tested |
 | production | `main` | What is live; the Foreman opens promotion PRs into it |
 
@@ -87,7 +87,7 @@ Add only what differs from the defaults:
 
 | If… | Set |
 |---|---|
-| Your branches are not `features` / `develop` / `main` | `featureBranch`, `baseBranch`, `productionBranch` (top level, or per repo) |
+| Your branches are not `develop` / `main`, or you want another branch prefix | `baseBranch`, `productionBranch`, `branchPrefix` (top level, or per repo) |
 | Work should start on a label other than `approved` | `triggerLabel` |
 | You want different names for the progress labels | `lifecycleLabels` — [configuration.md](configuration.md) |
 | Your "on hold" label or your priority labels differ | the `github` block: `blockedLabel`, `priorityLabels` |
@@ -112,7 +112,7 @@ The doctor (`npm run doctor`, read-only) prints one line per check:
 ```
 PASS  config — /srv/foreman/.ai-agent.json loads: 2 repo(s)
 WARN  TECHLEAD_GITHUB_KEY — unset — branch-sync PRs will open but not merge; …
-FAIL  api: branches — missing on GitHub: feature "features". Create them, or set …
+FAIL  api: branches — missing on GitHub: base "develop". Create them, or set …
 ```
 
 Fix each FAIL as it says and run it again. WARNs are things that will not work but
@@ -129,5 +129,5 @@ To run it as a service that survives reboots, see
 ## Giving it work
 
 Label an issue on a configured repo with the trigger label (`approved` by default).
-On its next cycle the Foreman builds it on the feature branch, opens a PR, and moves
+On its next cycle the Foreman builds it on its own branch, opens a PR, and moves
 the issue through the progress labels — [lifecycle.md](lifecycle.md) shows each one.
