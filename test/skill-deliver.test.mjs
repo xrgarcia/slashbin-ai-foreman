@@ -191,6 +191,9 @@ test("stage wiring: a sync-only repo runs only skill-deliver, others never run i
   const orch = readFileSync(join(root, "src", "orchestrator.ts"), "utf8");
   assert.match(orch, /!!repoConfig\.syncOnly !== delivers\) return \{ processed: 0/);
   assert.ok(orch.indexOf("!!repoConfig.syncOnly !== delivers") < orch.indexOf("onboardRepo"), "the sync-only gate runs before onboarding");
+  assert.match(orch, /if \(!repoConfig\.syncOnly\) \{\s*if \(config\.onboarding[\s\S]*?importLegacyRecords/, "onboarding and the records import are skipped for a sync-only repo");
+  assert.match(orch, /!repoConfig\.syncOnly && \(snapshot === "always"/, "a sync-only lane pass publishes no board snapshot");
+  assert.match(readFileSync(join(root, "src", "work-source.ts"), "utf8"), /if \(repoConfig\.syncOnly\) return;/, "publishSnapshot itself refuses a sync-only repo");
   const stage = readFileSync(join(root, "src", "phases", "skill-deliver.ts"), "utf8");
   assert.doesNotMatch(stage, /addLabel|createPR|commentOnIssue|advance\(|emit\(/, "the human lane gets no PR, label, comment or card move");
   assert.match(readFileSync(join(root, "src", "plugins", "paperclip.ts"), "utf8"), /filter\(\(r\) => !r\.syncOnly\)/);
