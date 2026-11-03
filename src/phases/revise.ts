@@ -15,8 +15,10 @@ import {
   noCommitCount,
   prsWithNoCommitStreak,
   readNoCommitStreak,
+  admitRevision,
+  isUnconfirmed,
+  resolveUnconfirmed,
   recordNoCommit,
-  restoreNoCommitStreak,
   stalemateHead,
 } from "../no-commit-streak.js";
 import {
@@ -141,17 +143,26 @@ export async function tryRevision(
     return null;
   }
 
-  // Admission: the round is counted and saved BEFORE the paid session starts, as a no-commit round until the
-  // session shows it committed. A streak that cannot be saved admits no session (a record store that rejects
-  // writes would otherwise let every pass pay for a round nothing can count), and the cap is durable at once.
+  // Admission. The branch sha is read FIRST: a read that fails throws here, before anything is written, so the pass
+  // fails closed with nothing to take back (an outage that blocks reads also blocks the write that would undo a
+  // save). Then an in-flight marker is saved for this head, and a marker that cannot be saved admits no session.
+  // The marker is not a round; a round counts only when the session completed and a successful read after it shows
+  // the head unchanged (below). A marker left by a pass that failed after this is of unknown outcome: neither
+  // counted nor consumed, and the next admission replaces it, so at most one is ever outstanding per PR.
   const prior = streak;
-  const admitted = await recordNoCommit(repoConfig, prNumber, head, prior);
-  if (admitted === null) {
-    revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s no-commit record cannot be saved to the work source`);
+  const beforeSha = codeHost().getRemoteBranchSha(repoConfig.githubRepo, repoConfig.featureBranch, repoConfig.repoPath, revLogger);
+  if (isUnconfirmed(prior, head)) {
+    // An earlier attempt on this head has no confirming read, and this pass could read the branch: settle it
+    // (neither counted nor consumed) and pay for nothing this pass. One unconfirmed attempt per head, then a free pass.
+    if (!await resolveUnconfirmed(repoConfig, prNumber, head, prior)) revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s unconfirmed attempt cannot be settled in the work source`);
+    return null;
+  }
+  if (!await admitRevision(repoConfig, prNumber, head, prior)) {
+    revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s revision marker cannot be saved to the work source`);
     return null;
   }
   // Invoke the revision skill with specific PR and issue context
-  if (!tryAcquire("claude")) { await restoreNoCommitStreak(repoConfig, prNumber, prior); return null; }
+  if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   buildStarted(repoName);
@@ -164,22 +175,15 @@ export async function tryRevision(
   let report: SessionReport | undefined;
 
   try {
-    // A read that fails (the branch sha before or after the session, the QA lines) throws out of this block: the
-    // pass fails closed and no round was answered, so the round admitted above is handed back before the throw
-    // leaves. Counting it would make two GitHub outages a no-commit stalemate nobody earned.
-    let result: Awaited<ReturnType<typeof revisePRFeedback>>;
-    try {
-      await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
-      // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
-      const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
-      result = await revisePRFeedback(
-        repoConfig, revLogger, runAbort.signal,
-        pending.pr.number, pending.issueNumbers, qaFeedback,
-      ).catch(reportLaunchThrew);
-    } catch (err) {
-      await restoreNoCommitStreak(repoConfig, prNumber, prior);
-      throw err;
-    }
+    // A read that fails (the branch sha after the session, the QA lines) throws out of here: the pass fails closed,
+    // the marker saved at admission stays as it is (outcome unknown), and nothing is written to take back.
+    await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
+    // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
+    const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
+    const result = await revisePRFeedback(
+      repoConfig, revLogger, runAbort.signal,
+      pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha,
+    ).catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
       ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
@@ -194,8 +198,13 @@ export async function tryRevision(
       revisionEscalated.delete(repoName);
 
       if (result.noCommit) {
-        // Counted and saved at admission, before the session: the PR goes back to review or the EM is told on that record.
-        const seen = admitted;
+        // The session completed and the read after it showed the head unchanged: the round counts now. A count that
+        // cannot be saved leaves the marker and the issue where they are (unconfirmed), to be answered on a later pass.
+        const seen = await recordNoCommit(repoConfig, prNumber, head, prior);
+        if (seen === null) {
+          revLogger.warn(`PR #${pending.pr.number}'s no-commit round could not be saved to the work source — not advancing it; the next pass answers it`);
+          return null;
+        }
 
         // Second one on this head: the reviewer (or QA) keeps asking and the reviser
         // keeps answering "already correct". Neither is going to move. Stop, and say
@@ -226,7 +235,7 @@ export async function tryRevision(
           `PR #${pending.pr.number} revision made no commit by declaration — returning it to review: ${result.noCommitReason}`,
         );
       } else {
-        // It committed: the round admitted above was not a no-commit one.
+        // It committed: the marker admitted above was not a no-commit round.
         await clearNoCommitStreak(repoConfig, prNumber);
       }
 
@@ -240,8 +249,7 @@ export async function tryRevision(
       revLogger.info("PR revision succeeded");
       return pending;
     } else {
-      // The session did not answer: the round admitted above is not a no-commit one.
-      await restoreNoCommitStreak(repoConfig, prNumber, prior);
+      // The session did not answer: the marker admitted above stays, and is not a round.
       // An upstream limit refused the run — not a defect, so it charges no retry.
       // The card still goes to Blocked: the work has stopped, and the board says why.
       if (result.upstreamLimit || isUpstreamBlocked("github")) {
