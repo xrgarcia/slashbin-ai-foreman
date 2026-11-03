@@ -43,7 +43,7 @@ import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
-import { noteUnrelated, noteEpicChildClosed, epicRefs } from "../unstick.js";
+import { noteUnrelated, noteEpicChildClosed, epicRefs, settleHandoffs, handoffSubject } from "../unstick.js";
 import { codeHost } from "../plugins/registry.js";
 import { releaseTagName } from "../config-schema/github.js";
 import type { ReleasePrView } from "../code-host.js";
@@ -112,7 +112,7 @@ function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): string
 async function fromVerifyResult(r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger): Promise<Verdict> {
   if (r.kind === "error") return { kind: "defer", reason: r.error };
   // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
-  if (r.unrelated) await noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr} (prod)`);
+  if (r.unrelated) await noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr} (prod)`, handoffSubject(repoConfig.githubRepo, pr));
   const evidence = evidenceFor(repoConfig, pr, logger);
   if (r.pass) return { kind: "pass", ...(evidence ? { evidence } : {}) };
   return holdVerdict(r.reason ?? "prod-verify-held", evidence);
@@ -585,6 +585,8 @@ async function mergedVerdict(repoConfig: RepoConfig, config: AgentConfig, rel: P
 /** Act on a verdict for a release that has merged (first verification, or a held re-verify). */
 async function settle(repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, v: Verdict, logger: Logger): Promise<void> {
   const key = `${repoConfig.githubRepo}#${rel.pr}`;
+  // The gate: nothing settles (pass, hold, wait, defer, prodReverified) while an unrelated-error report for this PR is unsaved.
+  await settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, rel.pr));
   switch (v.kind) {
     case "pass":
       releaseBackoff.clear(key);
@@ -612,6 +614,8 @@ async function soak(repoConfig: RepoConfig, config: AgentConfig, rel: ProdReleas
   const path = transcript(repoConfig, `soak-pr${rel.pr}`, cycleNumber);
   logger.info(`Release PR #${rel.pr}: SRE 30-minute soak, transcript: ${path}`);
   const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "soak"));
+  // The gate: neither a clean soak nor "no soak to run" drops the release while a report for this PR is unsaved.
+  await settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, rel.pr));
   if (r.kind === "nothing") {
     logger.info(`Release PR #${rel.pr}: no soak to run (${r.reason}); done`);
     await dropRelease(repoConfig, rel.pr, logger);
@@ -769,7 +773,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     try { mergeSha = codeHost().viewReleasePr(repoConfig, pr.number).mergeSha; } catch { /* read again next pass */ }
   }
   const merged: ProdRelease = { ...rel, phase: "merged", mergedAt: iso(now()), ...(mergeSha ? { mergeSha } : {}) };
-  if (r.unrelated) await noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)`);
+  if (r.unrelated) await noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)`, handoffSubject(repoConfig.githubRepo, pr.number));
   logger.info(`Release PR #${pr.number} merged by the SRE as ${short(mergeSha ?? undefined)} (verify=${tr.verify}${tr.hold ? `, hold=${tr.hold}` : ""})`);
   // The PR is merged. If "merged" cannot be recorded the "deploying" record stands: the next pass reads the PR as
   // MERGED, moves it to merged and verifies it, so the release is neither deployed again nor skipped.
