@@ -3,10 +3,10 @@
 import test from "node:test";
 import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setStateDir as setStatePath, stateDir as stateDirPath } from "../dist/state-dir.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { memoryRecords, repoRecordOf, recordOf, breakRecords } from "./issue-records.mjs";
 import { activeWorkSource } from "../dist/plugins/registry.js";
 import { dirname } from "node:path";
@@ -89,55 +89,21 @@ test("two PRs with the same signature plus one distinct: exactly two EM calls, n
   assert.equal(calls().length, 2);
 });
 
-// EM#1244 f5 review (Foreman PR #197): the SRE's report has no durable source to re-read (its PR comment is
-// model-written prose, its structured list is the SRE's local results file), so it is saved AT RECEIPT to an outbox
-// on disk and drained into the repo's record. R1-R4: it stays recoverable until saved, without the error recurring.
-const outboxFile = () => join(stateDirPath(), ".handoff-outbox.json");
-const outboxLeft = () => (existsSync(outboxFile()) ? JSON.parse(readFileSync(outboxFile(), "utf8")).length : 0);
-for (const [name, saves] of [["R1: the repo record is unavailable", false], ["R2: the repo record cannot be saved", true]]) {
-  test(`${name}: noteUnrelated does not throw, the report waits in the outbox, and after recovery it is recorded once without recurring`, async () => {
-    const { repo, config, calls } = setup();
+// EM#1244 f5 review (Foreman PR #197): the hand-off is written before the event that raised it is acknowledged.
+for (const [name, saves] of [["the repo record is unavailable", false], ["the repo record cannot be saved", true]]) {
+  test(`${name}: noteUnrelated throws, nothing is dropped, and after recovery the same error is recorded once`, async () => {
+    const { repo } = setup();
     const source = activeWorkSource();
     const [load, save] = [source.loadRecord, source.saveRecord];
     breakRecords([0], { saves, kind: "repo" });
     const seen = parseUnrelatedErrors(sreOut(5, [stripe("1111")]));
-    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), 0, "acknowledged at once: nothing is lost");
-    assert.equal(outboxLeft(), 1, "saved at receipt, on disk");
-    assert.equal(await tryUnstick(repo, config, logger, 1, {}), 0, "the record is still down: the pass records nothing and asks no one");
+    await assert.rejects(noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), (e) => e.name === "HandoffNotSaved");
     source.loadRecord = load; source.saveRecord = save;
     assert.equal(Object.keys((await repoRecordOf(repo)).unstick ?? {}).length, 0, "nothing half-written");
-    // The error never recurs: the next unstick pass drains the outbox into the record and asks the EM once.
-    assert.equal(await tryUnstick(repo, config, logger, 2, {}), 1);
-    assert.equal(outboxLeft(), 0);
-    assert.equal(calls().length, 1);
-    assert.match(calls()[0][calls()[0].indexOf("--reason") + 1], /first seen on o\/ue PR #5 \(dev\).*Evidence: https:\/\/github\.com\/o\/ue\/pull\/5#issuecomment-1/, "with its PR and evidence");
-    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), 0, "a recurrence adds nothing");
-    assert.equal(await tryUnstick(repo, config, logger, 3, {}), 0);
-    assert.equal(calls().length, 1, "one entry per distinct signature");
+    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), 1, "the same report, raised once the record is back");
+    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), 0, "and not again");
   });
 }
-
-test("R3: the outbox survives a restart; two reports of one signature while down are one entry", async () => {
-  const { repo, config, calls } = setup();
-  const source = activeWorkSource();
-  const [load, save] = [source.loadRecord, source.saveRecord];
-  breakRecords([0], { saves: true, kind: "repo" });
-  await noteUnrelated(repo, parseUnrelatedErrors(sreOut(5, [stripe("1111")])), "o/ue PR #5 (dev)");
-  await noteUnrelated(repo, parseUnrelatedErrors(sreOut(6, [stripe("2222"), "worker: redis timeout"])), "o/ue PR #6 (dev)");
-  assert.equal(outboxLeft(), 2, "one entry per distinct signature, even before it is drained");
-  source.loadRecord = load; source.saveRecord = save;
-  const { drainHandoffs } = await import("../dist/unstick.js?restart");
-  assert.equal(await drainHandoffs(repo), 2, "a fresh module instance (a restart) still finds it on disk: two distinct signatures");
-  assert.equal(await tryUnstick(repo, config, logger, 1, {}), 2);
-  assert.equal(calls().length, 2);
-  assert.equal(await drainHandoffs(repo), 0);
-});
-
-test("R4: if even the outbox cannot be written, noteUnrelated throws HandoffNotSaved so the event is not acknowledged", async () => {
-  const { repo } = setup();
-  mkdirSync(outboxFile(), { recursive: true }); // a directory where the file belongs: the write fails
-  await assert.rejects(noteUnrelated(repo, parseUnrelatedErrors(sreOut(5, [stripe("1111")])), "o/ue PR #5 (dev)"), (e) => e.name === "HandoffNotSaved");
-});
 
 test("dev verify raises the unrelated-error hand-off before the card advances, and lets its failure out", () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "verify.ts"), "utf8");

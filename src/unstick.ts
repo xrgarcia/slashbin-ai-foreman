@@ -20,9 +20,6 @@
 //    `unblocked` event, the issue closing, or a new reason replaces them.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { stateDir } from "./state-dir.js";
 import type { RepoConfig } from "./config.js";
 import { updateIssueRecord, updateRepoRecord, type SkippedIssue, type VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
@@ -266,83 +263,18 @@ async function persistHandoffs(
   return added;
 }
 
-// The SRE's unrelated-error report has no durable source the Foreman can re-read: it exists only on the stdout of
-// the one SRE run that printed it (the PR comment the SRE posts is written by the model and does not carry the
-// list; the structured list is in the SRE's own local ledger, a file of another repo). A run is not repeated
-// for it, and the error need not recur. So it is saved AT RECEIPT, before anything is done with the verdict: first
-// to a local outbox file (write-ahead, survives a restart), then to the repo record, and it leaves the outbox
-// only once the record holds it. A record that cannot be read or saved therefore loses nothing: the entry stays
-// in the outbox and `drainHandoffs` (every unstick pass) saves it when the record is healthy again.
-
-interface OutboxEntry { repo: string; kind: "unrelated-error"; tag: string; reason: string }
-
-const outboxPath = () => join(stateDir(), ".handoff-outbox.json");
-
-function readOutbox(): OutboxEntry[] {
-  if (!existsSync(outboxPath())) return [];
-  const parsed: unknown = JSON.parse(readFileSync(outboxPath(), "utf8"));
-  if (!Array.isArray(parsed)) throw new Error("the hand-off outbox is not a list");
-  return parsed as OutboxEntry[];
-}
-
-/** Whole-file replace through a rename, so a crash leaves the old file or the new one, never half of one. */
-function writeOutbox(entries: readonly OutboxEntry[]): void {
-  const tmp = `${outboxPath()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(entries, null, 2) + "\n");
-  renameSync(tmp, outboxPath());
-}
-
-const sameEntry = (a: OutboxEntry, b: OutboxEntry) => a.repo === b.repo && a.kind === b.kind && a.tag === b.tag;
-
-/**
- * Save the repo's outbox hand-offs to its record; each leaves the outbox only once the record holds it. Resolves
- * how many were new in the record. Never throws: a record that cannot be read or saved leaves them in the outbox.
- */
-export async function drainHandoffs(repoConfig: RepoConfig): Promise<number> {
-  let mine: OutboxEntry[];
-  try {
-    mine = readOutbox().filter((e) => e.repo === repoConfig.githubRepo);
-  } catch {
-    return 0;
-  }
-  if (mine.length === 0) return 0;
-  let added: number;
-  try {
-    added = await persistHandoffs(repoConfig, "unrelated-error", mine);
-  } catch (err) {
-    if (err instanceof HandoffNotSaved) return 0;
-    throw err;
-  }
-  try {
-    writeOutbox(readOutbox().filter((e) => !mine.some((m) => sameEntry(e, m))));
-  } catch { /* the entry is in the record; a second drain finds it there and removes it */ }
-  return added;
-}
-
 /**
  * Raise `unrelated-error` once per distinct signature per repo, with the PR and the SRE's evidence links, never again for
  * a signature it has already raised, from any PR. Repo-level (issue 0), so it
- * outlives the issue it was seen on and never holds a release. The report is durable the moment this is called
- * (see the outbox above); resolves how many were recorded now (0 when the record is not healthy: they follow on
- * `drainHandoffs`). Throws HandoffNotSaved only when not even the outbox can be written, so the caller fails closed
- * with nothing acknowledged.
+ * outlives the issue it was seen on and never holds a release. Returns how many
+ * were new; throws HandoffNotSaved when it could not be saved (see persistHandoffs).
  */
 export async function noteUnrelated(repoConfig: RepoConfig, seen: { errors: readonly string[]; evidence: readonly string[] }, seenOn: string): Promise<number> {
   const evidence = seen.evidence.length ? ` Evidence: ${seen.evidence.slice(0, 4).join(" ")}` : "";
-  const entries: OutboxEntry[] = seen.errors.map((error) => ({
-    repo: repoConfig.githubRepo,
-    kind: "unrelated-error" as const,
+  return persistHandoffs(repoConfig, "unrelated-error", seen.errors.map((error) => ({
     tag: createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12),
     reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${evidence}`,
-  }));
-  if (entries.length === 0) return 0;
-  try {
-    const kept = readOutbox();
-    writeOutbox([...kept, ...entries.filter((e) => !kept.some((k) => sameEntry(k, e)))]);
-  } catch {
-    throw new HandoffNotSaved("unrelated-error", repoConfig.githubRepo);
-  }
-  return drainHandoffs(repoConfig);
+  })));
 }
 
 /** The block on `issue` was released (`unblocked`): its questions are over. */
