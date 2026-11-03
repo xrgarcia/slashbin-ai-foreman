@@ -164,13 +164,22 @@ export async function tryRevision(
   let report: SessionReport | undefined;
 
   try {
-    await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
-    // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
-    const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
-    const result = await revisePRFeedback(
-      repoConfig, revLogger, runAbort.signal,
-      pending.pr.number, pending.issueNumbers, qaFeedback,
-    ).catch(reportLaunchThrew);
+    // A read that fails (the branch sha before or after the session, the QA lines) throws out of this block: the
+    // pass fails closed and no round was answered, so the round admitted above is handed back before the throw
+    // leaves. Counting it would make two GitHub outages a no-commit stalemate nobody earned.
+    let result: Awaited<ReturnType<typeof revisePRFeedback>>;
+    try {
+      await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
+      // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
+      const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
+      result = await revisePRFeedback(
+        repoConfig, revLogger, runAbort.signal,
+        pending.pr.number, pending.issueNumbers, qaFeedback,
+      ).catch(reportLaunchThrew);
+    } catch (err) {
+      await restoreNoCommitStreak(repoConfig, prNumber, prior);
+      throw err;
+    }
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
       ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }

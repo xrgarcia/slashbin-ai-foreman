@@ -35,9 +35,11 @@ before(() => {
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
 const fs = require("fs");
 const S = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, "utf8"));
-if (S.fail === "network") { process.stderr.write("error connecting to api.github.com\\n"); process.exit(1); }
-if (S.fail === "5xx") { process.stderr.write("HTTP 502: Bad Gateway (https://api.github.com/x)\\n"); process.exit(1); }
-if (S.fail === "404") { process.stderr.write("HTTP 404: Not Found\\n"); process.exit(1); }
+// The failures echo the request URL, as gh does: a branch named "fix-404" puts "404" in every message.
+const url = process.argv.slice(2).find((x) => x.startsWith("repos/")) || "x";
+if (S.fail === "network") { process.stderr.write('Get "https://api.github.com/' + url + '": dial tcp: lookup api.github.com: no such host\\n'); process.exit(1); }
+if (S.fail === "5xx") { process.stdout.write("HTTP/2.0 502 Bad Gateway\\n\\n"); process.stderr.write("gh: Bad Gateway (https://api.github.com/" + url + ") (HTTP 502)\\n"); process.exit(1); }
+if (S.fail === "404") { process.stdout.write("HTTP/2.0 404 Not Found\\n\\n"); process.stderr.write("gh: Branch not found (HTTP 404)\\n"); process.exit(1); }
 const a = process.argv.slice(2).join(" ");
 if (a.includes("branches/")) process.stdout.write("a".repeat(40));
 else if (a.includes("--json state")) process.stdout.write(JSON.stringify({ state: "OPEN" }));
@@ -98,6 +100,17 @@ test("the same reads answer when GitHub does (the throw is the failure, not the 
 test("a branch that does not exist is null (a 404), not a failure and not a sha", () => {
   setFail("404");
   assert.equal(reads.getRemoteBranchSha(), null);
+});
+
+test("only the response's own 404 is absence: a branch named fix-404 whose read fails still throws (EM#1244 f5 review R1)", () => {
+  for (const fail of ["network", "5xx"]) {
+    setFail(fail);
+    assert.throws(() => branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), `${fail} on fix-404`);
+  }
+  setFail("404");
+  assert.equal(branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), null, "a real 404 on fix-404 is absence");
+  setFail(null);
+  assert.equal(branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), "a".repeat(40));
 });
 
 test("the core keeps no transient classifier, no retry and no sleep: gh() and the plugins own them", () => {

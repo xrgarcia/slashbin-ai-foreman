@@ -396,6 +396,47 @@ test("import: a pending card block makes its repo and the block store unavailabl
   assert.deepEqual(await loadRepoRecord(repoA), { cardBlocks: { c1: block("blocked: x") } });
 });
 
+test("import: migrating n card blocks saves the record once and copies O(n) entries (EM#1244 f5 review)", async () => {
+  const sizes = [];
+  for (const n of [100, 200]) {
+    setStateDir(mkTmp("repo-records-state-"));
+    store = new InMemoryRecordStore();
+    resetIssueRecordsForTests();
+    resetLegacyImportForTests();
+    const source = activeWorkSource();
+    let saves = 0, entries = 0;
+    source.saveRecord = async (key, record, rc) => {
+      if (key.kind === "repo") { saves++; entries += Object.keys(record.cardBlocks ?? {}).length; }
+      return store.saveRecord(key, record, rc);
+    };
+    await updateRepoRecord(repoA, (d) => { d.cardBlocks = { kept: block("already stored") }; });
+    saves = 0; entries = 0;
+    const legacy = Object.fromEntries(Array.from({ length: n }, (_, i) => [`c${i}`, block(`legacy ${i}`)]));
+    legacy.kept = block("the legacy copy loses");
+    legacy.junk = "not a block";
+    writeLegacy({ cardBlocks: legacy });
+    await importLegacyRecords(repoA, quiet, cfgs);
+    assert.equal(saves, 1, `${n} blocks, one save`);
+    sizes.push(entries);
+    const got = (await loadRepoRecord(repoA)).cardBlocks;
+    assert.equal(Object.keys(got).length, n + 1, "every block survived");
+    assert.equal(got.kept.reason, "already stored", "a value already stored wins");
+    assert.equal(existsSync(legacyFile()), false, "the exhausted legacy file is gone");
+  }
+  assert.deepEqual(sizes, [101, 201], "block entries serialized grow linearly, not as n squared");
+});
+
+test("import: a card-block save that fails keeps every block in the file for the retry", async () => {
+  writeLegacy({ cardBlocks: { c1: block("a"), c2: block("b"), bad: 7 } });
+  failSave = true;
+  await importLegacyRecords(repoA, quiet, cfgs);
+  assert.deepEqual(Object.keys(fileState().cardBlocks).sort(), ["c1", "c2"], "unsaved blocks stay; only the entry that is no block left");
+  failSave = false;
+  resetLegacyImportForTests();
+  await importLegacyRecords(repoA, quiet, cfgs);
+  assert.deepEqual(Object.keys((await loadRepoRecord(repoA)).cardBlocks).sort(), ["c1", "c2"]);
+});
+
 test("card blocks: a cleared imported block stays cleared after a restart, whichever repo the import filed it under", async () => {
   writeLegacy({ cardBlocks: { c1: block("blocked: x") } });
   await importLegacyRecords(repoA, quiet, cfgs);

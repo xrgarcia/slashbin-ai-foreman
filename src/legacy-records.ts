@@ -442,13 +442,20 @@ async function moveCardBlocks(home: RepoConfig, logger: Logger): Promise<number>
   }
   // Withheld until settled: the repo whose record will hold them must not read as one with none.
   setRepoUnimported(home.githubRepo, true, "cardBlocks");
-  let moved = 0, pending = 0;
+  // One pass over the file's blocks, one save of the record, one rewrite of the file: O(n) however many blocks.
+  // A value already in the record wins; an entry that is not a block is dropped; a save that fails leaves every
+  // block in the file, to be retried whole.
+  const valid: Record<string, unknown> = {};
+  const junk: string[] = [];
   for (const [id, block] of Object.entries(blocks)) {
-    if (!block || typeof block !== "object") { editLegacyFile((f) => { delete f.cardBlocks?.[id]; }); continue; }
-    const ok = await importRepoRecord(home, (d) => { d.cardBlocks = { [id]: block, ...(d.cardBlocks ?? {}) }; });
-    if (ok) { moved++; editLegacyFile((f) => { delete f.cardBlocks?.[id]; }); }
-    else pending++;
+    if (block && typeof block === "object") valid[id] = block; else junk.push(id);
   }
+  const ids = Object.keys(valid);
+  let moved = 0, pending = 0;
+  const ok = ids.length === 0 || await importRepoRecord(home, (d) => { d.cardBlocks = { ...valid, ...(d.cardBlocks ?? {}) } as typeof d.cardBlocks; });
+  if (ok) moved = ids.length; else pending = ids.length;
+  const gone = ok ? [...ids, ...junk] : junk;
+  if (gone.length > 0) editLegacyFile((f) => { for (const id of gone) delete f.cardBlocks?.[id]; });
   setRepoUnimported(home.githubRepo, pending > 0, "cardBlocks");
   logger.info(`Legacy card blocks: ${moved} moved to ${home.githubRepo}'s record${pending > 0 ? `, ${pending} not saved yet` : ""}`);
   return pending;
