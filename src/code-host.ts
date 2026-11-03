@@ -441,7 +441,7 @@ export interface CodeHost {
     body: string;
 };
   createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): number | null;
-  dependencyBatchBases(baseBranch: string | undefined, productionBranch: string): string[];
+  dependencyBatchBases(baseBranch: string | undefined, productionBranch: string, legacyFeatureBranch?: string): string[];
   describeDependencyPR(number: number, title: string): DependencyChange;
   fetchOpenAlertPackages(repo: string, cwd: string): Set<string>;
   findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): PrSnapshot[];

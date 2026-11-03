@@ -176,3 +176,12 @@ test("the label comes from config, never hardcoded", () => {
   assert.equal(args[args.indexOf("--label") + 1], "go");
   assert.ok(!args.includes("approved"));
 });
+
+test("batch instructions merge into the issue's own branch and deliver via its PR, never merge into base locally (#208 review S2)", async () => {
+  const { buildDependencyBatchIssue } = await import("../dist/github.js");
+  const { body } = buildDependencyBatchIssue("develop", [{ number: 1, packages: ["x"], from: "1.0.0", to: "1.0.1", major: false }], undefined, "develop");
+  assert.match(body, /Merge the Dependabot branches into \*\*this issue's own assigned branch\*\*/);
+  assert.match(body, /Never merge into `develop` locally/);
+  assert.doesNotMatch(body, /Merge the branches into `develop` locally/);
+  assert.match(body, /own PR into `develop`/);
+});
