@@ -302,6 +302,45 @@ export type SyncOutcome =
   | { status: "synced"; sha: string; skills: string[]; subject: string };
 
 /**
+ * The exact ref a session's issue branch starts from: the skill-sync commit THIS session's sync just made, else
+ * `origin/<base>` resolved to a SHA after a fetch. Never derived from where local `<base>` points, so unrelated
+ * unpublished local commits cannot ride into the branch. Never throws: unresolvable falls back to the ref name.
+ */
+export function resolveStartRef(repo: Pick<SkillSyncRepo, "repoPath" | "baseBranch">, outcome: SyncOutcome | null): string {
+  if (outcome?.status === "synced") return outcome.sha;
+  try {
+    git(["fetch", "--quiet", "origin", repo.baseBranch], repo.repoPath);
+    return git(["rev-parse", `origin/${repo.baseBranch}`], repo.repoPath);
+  } catch {
+    return `origin/${repo.baseBranch}`;
+  }
+}
+
+/**
+ * Hygiene only (correctness does not depend on it: the session starts from `resolveStartRef`). Make local `<base>` equal `origin/<base>` (fetch, then fast-forward only) before every session, sync or not: the
+ * next skill sync commits on a level base. Never throws. Local commits origin lacks are left alone (reported, not discarded).
+ */
+export function alignLocalBase(repo: Pick<SkillSyncRepo, "repoPath" | "baseBranch">, logger: Logger): { status: "level" | "fast-forwarded" | "ahead" | "skipped"; reason?: string } {
+  const cwd = repo.repoPath;
+  const fb = repo.baseBranch;
+  try {
+    if (git(["status", "--porcelain", "--untracked-files=no"], cwd)) return { status: "skipped", reason: "the checkout has uncommitted changes" };
+    git(["fetch", "--quiet", "origin", fb], cwd);
+    if (git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) !== fb) git(["checkout", "--quiet", fb], cwd);
+    const ahead = Number(git(["rev-list", "--count", `origin/${fb}..HEAD`], cwd));
+    const behind = Number(git(["rev-list", "--count", `HEAD..origin/${fb}`], cwd));
+    if (ahead > 0) {
+      logger.warn(`Local ${fb} has ${ahead} commit(s) origin/${fb} does not — left as is`);
+      return { status: "ahead", reason: `local ${fb} has ${ahead} commit(s) origin/${fb} does not` };
+    }
+    if (behind > 0) { git(["merge", "--quiet", "--ff-only", `origin/${fb}`], cwd); return { status: "fast-forwarded" }; }
+    return { status: "level" };
+  } catch (err) {
+    return { status: "skipped", reason: firstLine(err) };
+  }
+}
+
+/**
  * The skill sync's memory for one daemon: the cached golden, the last
  * unreadable-golden error, and which drift each repo was last told about.
  */
@@ -474,7 +513,7 @@ export function settleSkillSync(repo: SkillSyncRepo, outcome: SyncOutcome, logge
     // Pushed with the work = reachable from some remote branch (the session's own foreman/<N>-<slug>, usually).
     let pushed = false;
     try { pushed = git(["branch", "-r", "--contains", outcome.sha], cwd).split("\n").some((l) => l.trim().startsWith("origin/")); } catch { /* unknown: treated as unpushed */ }
-    // The sync commit was made on local <base> and the issue branch cut from it. Either way the local base must go
+    // The sync commit was made on local <base> (the session starts from its sha, not from local <base>). Either way the local base must go
     // back to origin/<base>: left ahead, the next sync would skip ("local base has a commit origin does not").
     if (git(["rev-parse", fb], cwd) === outcome.sha) {
       if (git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) === fb) git(["reset", "--quiet", "--keep", `${outcome.sha}~1`], cwd);

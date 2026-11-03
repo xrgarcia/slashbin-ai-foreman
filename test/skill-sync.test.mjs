@@ -313,3 +313,72 @@ test("the builtin source reads the package's own skills", () => {
   assert.ok(g.skills.has("implement") && g.skills.has("revise"));
   assert.equal(g.label, "slashbin-ai-agent");
 });
+
+// foreman#208 (Tech Lead, #210): the session starts from an EXACT ref (the session's own sync commit, else origin/<base> as a SHA),
+// never from local <base>, so unrelated unpublished local commits cannot ride into the branch.
+function localCommits(repo, n) { for (let i = 0; i < n; i++) { put(repo, `unrelated-${i}.txt`, "x\n"); git(repo, "add", "-A"); git(repo, "commit", "--quiet", "-m", `unrelated ${i}`); } }
+const inBranch = (repo, branch, file) => git(repo, "ls-tree", "-r", "--name-only", branch).split("\n").includes(file);
+
+for (const n of [1, 2]) {
+  test(`start ref excludes ${n} unrelated unpublished local-base commit(s): fresh and resume`, () => {
+    const repo = makeRepo(tmp, CURRENT);
+    const origin = git(repo, "rev-parse", "origin/develop");
+    localCommits(repo, n);
+    const start = ss.resolveStartRef({ repoPath: repo, baseBranch: "develop" }, { status: "current" });
+    assert.equal(start, origin, "origin/<base> as a SHA, not where local base points");
+    // fresh: git checkout -B <branch> <startRef>
+    git(repo, "checkout", "--quiet", "-B", "foreman/9-x", start);
+    for (let i = 0; i < n; i++) assert.ok(!inBranch(repo, "foreman/9-x", `unrelated-${i}.txt`), "fresh branch has no foreign commit");
+    // resume: published work on origin/<branch>, then merge the start ref
+    put(repo, "work.txt", "w\n"); git(repo, "add", "-A"); git(repo, "commit", "--quiet", "-m", "work");
+    git(repo, "push", "--quiet", "origin", "foreman/9-x");
+    git(repo, "checkout", "--quiet", "develop");
+    git(repo, "checkout", "--quiet", "-B", "foreman/9-x", "origin/foreman/9-x");
+    git(repo, "merge", "--quiet", "--no-edit", start);
+    for (let i = 0; i < n; i++) assert.ok(!inBranch(repo, "foreman/9-x", `unrelated-${i}.txt`), "resumed branch has no foreign commit");
+    assert.ok(inBranch(repo, "foreman/9-x", "work.txt"), "published commits kept");
+    git(repo, "merge-base", "--is-ancestor", "origin/foreman/9-x", "HEAD");
+  });
+}
+
+test("the session's own sync commit IS the start ref: included, with unrelated local-base commits still excluded", () => {
+  const cfg = cfgFor(makeGolden(tmp));
+  const repo = makeRepo(tmp, CURRENT);
+  put(repo, ".claude/skills/clean-code/SKILL.md", "stale\n");
+  git(repo, "add", "-A"); git(repo, "commit", "--quiet", "-m", "stale copy"); git(repo, "push", "--quiet", "origin", "develop");
+  const origin = git(repo, "rev-parse", "origin/develop");
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, baseBranch: "develop" }, [5], logger());
+  assert.equal(out.status, "synced");
+  const start = ss.resolveStartRef({ repoPath: repo, baseBranch: "develop" }, out);
+  assert.equal(start, out.sha);
+  assert.equal(git(repo, "rev-parse", `${start}~1`), origin, "exactly origin/<base> + the one sync commit");
+  localCommits(repo, 2); // foreign commits made after the sync, on local develop
+  git(repo, "checkout", "--quiet", "-B", "foreman/5-x", start);
+  assert.equal(git(repo, "rev-parse", "HEAD"), out.sha);
+  assert.ok(!inBranch(repo, "foreman/5-x", "unrelated-0.txt"));
+});
+
+test("local base is fast-forwarded when behind (hygiene only)", () => {
+  const repo = makeRepo(tmp, CURRENT);
+  const seed = join(tmp, "seed");
+  put(seed, "src.txt", "someone else's work\n");
+  git(seed, "add", "-A"); git(seed, "commit", "--quiet", "-m", "z");
+  git(seed, "push", "--quiet", "origin", "develop");
+  assert.equal(ss.alignLocalBase({ repoPath: repo, baseBranch: "develop" }, logger()).status, "fast-forwarded");
+  assert.equal(git(repo, "rev-parse", "develop"), git(repo, "rev-parse", "origin/develop"));
+});
+
+test("local base ahead of origin is reported and left alone", () => {
+  const repo = makeRepo(tmp, CURRENT);
+  put(repo, "local.txt", "x\n"); git(repo, "add", "-A"); git(repo, "commit", "--quiet", "-m", "local");
+  const r = ss.alignLocalBase({ repoPath: repo, baseBranch: "develop" }, logger());
+  assert.equal(r.status, "ahead");
+});
+
+test("the implement phase aligns local base before the sync and the session", () => {
+  const src = readFileSync(join(root, "src/phases/implement.ts"), "utf8");
+  const align = src.indexOf("alignLocalBase(repoConfig, repoLogger)");
+  assert.ok(align > 0 && align < src.indexOf("skillSync = rt.skillSync.syncSkillsForIssue(") && align < src.indexOf("await implementApprovedIssues("));
+  const start = src.indexOf("resolveStartRef(repoConfig, skillSync)");
+  assert.ok(start > src.indexOf("skillSync = rt.skillSync.syncSkillsForIssue(") && start < src.indexOf("await implementApprovedIssues("), "the start ref is resolved after the sync, before the session");
+});
