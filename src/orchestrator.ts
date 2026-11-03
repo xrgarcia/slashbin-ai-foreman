@@ -8,6 +8,7 @@ import { getQueuedSessionCount, lanesFor, setSessionLimit, stageNeedsCheckout, s
 import { CycleEvent, activeRuns } from "./phases/common.js";
 import { tryCustomStage } from "./phases/custom.js";
 import { tryBatchImplementation } from "./phases/implement.js";
+import { trySkillDeliver } from "./phases/skill-deliver.js";
 import { tryFileDependencyBatchIssue, tryPromotion, trySyncDrift } from "./phases/promote.js";
 import { runReconcileStage } from "./phases/reconcile.js";
 import { tryRelease } from "./phases/release.js";
@@ -163,6 +164,10 @@ export async function runLanePass(
   logger: Logger,
   snapshot: SnapshotPolicy = "always",
 ): Promise<RepoCycleResult> {
+  // A sync-only (human-lane) repo runs the skill-deliver stage and nothing else; every other repo never runs it.
+  // Checked first: no onboarding (it would create labels), no records import, no board snapshot for a human repo.
+  const delivers = lane.stages.some((s) => !isCustomStage(s) && s.type === "skill-deliver");
+  if (!!repoConfig.syncOnly !== delivers) return { processed: 0, lastImplementation: null, events: [] };
   // No lane runs on a repo before it is onboarded: its labels exist (onboarding.ts).
   if (config.onboarding && !(await rt.onboarding.onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
   // The legacy per-issue entries of `.agent-state.json` move into the record store once, before any lane reads a record.
@@ -191,7 +196,7 @@ export async function runRepoPass(
   const results = await Promise.all(
     lanesFor(config.stages).map((lane) => runLanePass(rt, repoConfig, config, lane, logger, "never")),
   );
-  await publishBoard(rt, repoConfig, logger.child({ repo: repoConfig.name }));
+  if (!repoConfig.syncOnly) await publishBoard(rt, repoConfig, logger.child({ repo: repoConfig.name }));
   return {
     processed: results.reduce((n, r) => n + r.processed, 0),
     lastImplementation: results.find((r) => r.lastImplementation)?.lastImplementation ?? null,
@@ -402,6 +407,12 @@ async function runStage(
     //    Paperclip. Never clears a block. ---
     case "unstick":
       processed += await tryUnstick(rt, repoConfig, config, base, cycleNumber);
+      break;
+
+    // --- Human lane: put the golden skills on an `approved-for-human` issue's
+    //    feature branch. Sync-only repos only (runLanePass); never builds. ---
+    case "skill-deliver":
+      processed += await trySkillDeliver(rt, repoConfig, config, base, events);
       break;
   }
   return { result: { outcome: "ok" }, processed, lastImplementation };

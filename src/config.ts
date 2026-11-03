@@ -90,6 +90,10 @@ const repoEntrySchema = z.object({
   // The skills this repo's copy follows when skillSync is on, in place of
   // skillSync.skills. [] opts the repo out of skill sync.
   skillSyncSkills: z.array(z.string()).optional(),
+  // A human-lane repo (registry lane `human`): the Foreman does not implement, review, revise,
+  // release or label anything there. It only delivers the golden skills, per `approved-for-human`
+  // issue, as a `feature/<N>-<slug>` branch the person's direct-mode session resumes. Needs skillSync.
+  syncOnly: z.boolean().optional(),
 });
 
 export const configSchema = z.object({
@@ -488,6 +492,8 @@ export interface RepoConfig {
   dependabot: DependabotConfig;
   /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
   skillSyncSkills?: readonly string[];
+  /** Sync-only (human lane): only the `skill-deliver` stage runs here; see the repo schema. */
+  syncOnly?: boolean;
   /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
   lifecycleLabels: LifecycleLabels;
   /** The fleet-wide GitHub conventions (`github` block) — the global value. */
@@ -566,7 +572,7 @@ export interface AgentConfig {
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
   github: GithubConventions;
-  /** The stages each repo pass runs, in order. Defaults to the ten built-ins. */
+  /** The stages each repo pass runs, in order. Defaults to the eleven built-ins. */
   stages: readonly StageEntry[];
   /** The work-source plugin's id (default `github`). Optional so a hand-built test config means the default. */
   workSource?: string;
@@ -811,6 +817,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         reviewerLogin: entry.reviewerLogin ?? parsed.reviewerLogin,
         dependencyPreApproved: entry.dependencyPreApproved ?? false,
         ...(entry.skillSyncSkills ? { skillSyncSkills: Object.freeze([...entry.skillSyncSkills]) } : {}),
+        ...(entry.syncOnly ? { syncOnly: true } : {}),
         ...globals,
       };
     });
