@@ -15,6 +15,8 @@ import { HOLD_PREFIX, holdReason } from "../dist/github/cards.js";
 import { addObserver, drainObservers, publishSnapshot, registerWorkSource, wantsCards } from "../dist/work-source.js";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 
@@ -94,13 +96,13 @@ test("publishSnapshot: the cards are read and carried only while an observer own
   const repoConfig = { name: "r", githubRepo: "o/r" };
   try {
     assert.equal(wantsCards(), false);
-    await publishSnapshot(repoConfig, logger);
+    await publishSnapshot(rt, repoConfig, logger);
     await drainObservers();
     assert.equal(cardReads, 0);
     assert.equal("cards" in seen.at(-1), false);
     owns = true;
     assert.equal(wantsCards(), true);
-    await publishSnapshot(repoConfig, logger);
+    await publishSnapshot(rt, repoConfig, logger);
     await drainObservers();
     assert.equal(cardReads, 1);
     assert.deepEqual(seen.at(-1).cards, [card]);

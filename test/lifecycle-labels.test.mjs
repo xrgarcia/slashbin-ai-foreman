@@ -20,6 +20,8 @@ import { configureIssueCache } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { transition } from "../dist/lifecycle.js";
 import { revisePRFeedback } from "../dist/agent.js";
+import { ClaudeTrust } from "../dist/claude-trust.js";
+const trust = new ClaudeTrust();
 import { createLogger } from "../dist/logger.js";
 import { setCodeHost } from "../dist/plugins/registry.js";
 import { githubCodeHost } from "../dist/plugins/github.js";
@@ -211,7 +213,7 @@ test("dead-zone recovery never moves an issue backwards from a later stage", asy
 
 test("every claude session receives FOREMAN_TRIGGER_LABEL and FOREMAN_LIFECYCLE_LABELS", async () => {
   const c = load({ triggerLabel: "build-me", lifecycleLabels: { prUnderReview: "in-review" } });
-  await revisePRFeedback(c.repos[0], logger, undefined, 1, [9]);
+  await revisePRFeedback(trust, c.repos[0], logger, undefined, 1, [9]);
   const env = JSON.parse(readFileSync(CLAUDE_ENV, "utf8"));
   assert.equal(env.FOREMAN_TRIGGER_LABEL, "build-me");
   assert.deepEqual(JSON.parse(env.FOREMAN_LIFECYCLE_LABELS), { ...c.lifecycleLabels });

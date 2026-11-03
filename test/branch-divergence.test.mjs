@@ -34,7 +34,7 @@ test("the reconciler no longer warns every cycle — the orchestrator announces 
 
 test("an episode is keyed on the merge base and an unknown result never clears it", () => {
   assert.match(orchestrator, /seen\.before\?\.mergeBase !== now\.mergeBase/);
-  assert.match(orchestrator, /ffOutcome !== "unknown"\) \{\s*const \{ before \} = observeDivergence\(repoConfig, null\)/);
+  assert.match(orchestrator, /ffOutcome !== "unknown"\) \{\s*const { before } = rt\.divergence\.observe\(repoConfig, null\)/);
 });
 
 test("a recorded block is re-checked read-only before the pending-revision gate", () => {

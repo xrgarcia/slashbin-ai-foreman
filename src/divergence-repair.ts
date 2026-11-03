@@ -26,7 +26,7 @@
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { divergenceStillHolds, formatGitError, git } from "./reconciler.js";
-import { loadRepoRecord, updateRepoRecord } from "./issue-records.js";
+import type { IssueRecordStore } from "./issue-records.js";
 import type { Divergence } from "./divergence.js";
 import { codeHost } from "./plugins/registry.js";
 import type { CodeHost } from "./code-host.js";
@@ -118,6 +118,7 @@ export interface RepairDeps {
  * block kept, ruling never retried). Never throws.
  */
 export async function repairDivergence(
+  records: IssueRecordStore,
   repoConfig: RepoConfig,
   logger: Logger,
   block: Divergence,
@@ -130,7 +131,7 @@ export async function repairDivergence(
     return "none";
   }
   // The rulings already handled are the repo record's: unreadable, none may be acted on (fail closed).
-  const record = await loadRepoRecord(repoConfig);
+  const record = await records.loadRepoRecord(repoConfig);
   if (!record) return "none";
   let ruling: Ruling | null;
   try {
@@ -144,7 +145,7 @@ export async function repairDivergence(
   // Recorded before any git runs: a crash mid-repair must not retry the ruling.
   // If it cannot be saved it is not carried out: an unrecorded ruling could run twice.
   const id = ruling.id;
-  if (!(await updateRepoRecord(repoConfig, (d) => { d.divergenceRuled = [...new Set([...(d.divergenceRuled ?? []), id])]; }))) {
+  if (!(await records.updateRepoRecord(repoConfig, (d) => { d.divergenceRuled = [...new Set([...(d.divergenceRuled ?? []), id])]; }))) {
     logger.warn(`EM ruling ${id} on ${repoConfig.name} could not be recorded — not carried out this cycle`);
     return "none";
   }

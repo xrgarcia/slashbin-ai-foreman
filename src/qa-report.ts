@@ -71,8 +71,6 @@ export function qaReportBody(pr: number, outcome: QaOutcome): string {
   return head + lines.join("\n");
 }
 
-const inFlight = new Set<string>();
-
 /**
  * The one way every QA caller runs it: make the cache directory, run, and turn a throw into an `errored`
  * outcome (the checker failing, never a verdict). Each caller keeps its own posting and decision.
@@ -87,31 +85,36 @@ export async function executeQa(repo: string, pr: number, deps: Pick<QaDeps, "ru
   }
 }
 
-/**
- * Check PR `pr` once and post the report. Never throws and never rejects: a failed
- * read, run, parse or post is a log line (and, where the PR can still be told, an
- * "errored" comment). At most one report per PR: an existing comment with the heading,
- * or a run already in flight in this process, ends it.
- */
-export async function runQaReport(repo: string, pr: number, deps: QaDeps, logger: Logger): Promise<void> {
-  const key = `${repo}#${pr}`;
-  if (inFlight.has(key)) return;
-  inFlight.add(key);
-  // Yield first: the caller's turn ends before any of this work starts.
-  await new Promise<void>((r) => setImmediate(r));
-  try {
-    if (await deps.hasReport(pr)) {
-      logger.info(`QA: ${key} already has a report; not running again`);
-      return;
+/** The report-only QA runs in flight for one daemon: one report per PR at a time. */
+export class QaReports {
+  private readonly inFlight = new Set<string>();
+
+  /**
+   * Check PR `pr` once and post the report. Never throws and never rejects: a failed
+   * read, run, parse or post is a log line (and, where the PR can still be told, an
+   * "errored" comment). At most one report per PR: an existing comment with the heading,
+   * or a run already in flight in this process, ends it.
+   */
+  async run(repo: string, pr: number, deps: QaDeps, logger: Logger): Promise<void> {
+    const key = `${repo}#${pr}`;
+    if (this.inFlight.has(key)) return;
+    this.inFlight.add(key);
+    // Yield first: the caller's turn ends before any of this work starts.
+    await new Promise<void>((r) => setImmediate(r));
+    try {
+      if (await deps.hasReport(pr)) {
+        logger.info(`QA: ${key} already has a report; not running again`);
+        return;
+      }
+      const outcome = await executeQa(repo, pr, deps);
+      if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
+      else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
+      await deps.post(pr, qaReportBody(pr, outcome));
+    } catch (e) {
+      logger.warn(`QA: ${key} report not posted: ${String(e).slice(0, 300)}`);
+    } finally {
+      this.inFlight.delete(key);
     }
-    const outcome = await executeQa(repo, pr, deps);
-    if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
-    else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
-    await deps.post(pr, qaReportBody(pr, outcome));
-  } catch (e) {
-    logger.warn(`QA: ${key} report not posted: ${String(e).slice(0, 300)}`);
-  } finally {
-    inFlight.delete(key);
   }
 }
 

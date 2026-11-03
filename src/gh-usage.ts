@@ -21,8 +21,11 @@ export function ghResource(args: string[]): GhResource {
   return "graphql";
 }
 
+/** Process-wide: the gh call counters measure the process's one GitHub token budget. */
 let counts = { graphql: 0, core: 0 };
+/** Process-wide: per-subcommand gh counts for the same process-wide budget. */
 let bySubcommand: Record<string, number> = {};
+/** Process-wide: the one usage-report timer. */
 let timer: ReturnType<typeof setInterval> | null = null;
 
 /** Count one spawned `gh` process. */

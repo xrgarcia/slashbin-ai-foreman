@@ -25,6 +25,8 @@ import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { loadRepoState, saveRepoState } from "./_legacy-state.mjs";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, seed } from "./issue-records.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 await startAgentPlugins();
 setStatePath(mkTmp("plugin-roles-"));
@@ -118,11 +120,12 @@ test("stuck work goes to the registered unstick plugin, never the EM CLI", async
 async function stuckWork() {
   const repo = { name: "un", githubRepo: "o/un", repoPath: ghBin, lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };
   const config = { ...NONE, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } }, fakeUnstick: true };
+  rt = new ForemanRuntime();
   memoryRecords();
-  await seed(repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "acceptance-not-verified", attempts: 3 } });
-  assert.equal(await tryUnstick(repo, config, logger, 1, { comment: () => {} }), 1);
+  await seed(rt, repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "acceptance-not-verified", attempts: 3 } });
+  assert.equal(await tryUnstick(rt, repo, config, logger, 1, { comment: () => {} }), 1);
   assert.deepEqual(unstickRuns, [[7, "verify-exhausted"]]);
-  assert.equal(await tryUnstick(repo, { ...config, fakeUnstick: false }, logger, 2, { comment: () => {} }), 0, "no unstick plugin enabled: nothing runs");
+  assert.equal(await tryUnstick(rt, repo, { ...config, fakeUnstick: false }, logger, 2, { comment: () => {} }), 0, "no unstick plugin enabled: nothing runs");
 }
 
 // --- No reviewer: the human-merge end state ---
@@ -159,7 +162,7 @@ test("no reviewer, verifier, deployer or promote stage: a human-merged PR moves 
   const moves = recordMoves();
   const comments = [];
   try {
-    const r = await settleHumanMerge(REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, { comment: (_r, n, body) => comments.push([n, body]), hasComment: async () => false });
+    const r = await settleHumanMerge(rt, REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, { comment: (_r, n, body) => comments.push([n, body]), hasComment: async () => false });
     assert.equal(r, "closed");
     assert.deepEqual(moves, ["humanMerged", "humanMergedApproved", "closedNoRelease"]);
     assert.equal(comments.length, 1);
@@ -174,7 +177,7 @@ test("no reviewer, with a verifier: the human merge stops at `pr merged` for dev
   const moves = recordMoves();
   const comments = [];
   try {
-    const r = await settleHumanMerge(REPO, { ...NONE, srePath: "/x" }, { issueNumber: 12, prNumber: 34 }, logger, { comment: (...a) => comments.push(a), hasComment: async () => false });
+    const r = await settleHumanMerge(rt, REPO, { ...NONE, srePath: "/x" }, { issueNumber: 12, prNumber: 34 }, logger, { comment: (...a) => comments.push(a), hasComment: async () => false });
     assert.equal(r, "merged");
     assert.deepEqual(moves, ["humanMerged"]);
     assert.equal(comments.length, 0);
@@ -187,7 +190,7 @@ test("no reviewer or verifier, with a promote stage: the human merge stops at ap
   const moves = recordMoves();
   const comments = [];
   try {
-    const r = await settleHumanMerge(REPO, { ...NONE, stages: [{ type: "promote" }] }, { issueNumber: 12, prNumber: 34 }, logger, { comment: (...a) => comments.push(a), hasComment: async () => false });
+    const r = await settleHumanMerge(rt, REPO, { ...NONE, stages: [{ type: "promote" }] }, { issueNumber: 12, prNumber: 34 }, logger, { comment: (...a) => comments.push(a), hasComment: async () => false });
     assert.equal(r, "approved");
     assert.deepEqual(moves, ["humanMerged", "humanMergedApproved"]);
     assert.equal(comments.length, 0);
@@ -199,7 +202,7 @@ test("no reviewer or verifier, with a promote stage: the human merge stops at ap
 test("a move the source refuses stops the human merge where it is", async () => {
   registerWorkSource({ record: async () => false });
   try {
-    assert.equal(await settleHumanMerge(REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, { comment: () => assert.fail("no comment") }), null);
+    assert.equal(await settleHumanMerge(rt, REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, { comment: () => assert.fail("no comment") }), null);
   } finally {
     registerWorkSource(null);
   }
@@ -209,10 +212,10 @@ test("resume, no reviewer or verifier: an issue left at `pr merged` by a failed 
   const box = commentBox();
   const moves = recordMoves(["humanMergedApproved"]);
   try {
-    assert.equal(await settleHumanMerge(REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, box), "merged", "pass 1 stops at merged");
+    assert.equal(await settleHumanMerge(rt, REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, box), "merged", "pass 1 stops at merged");
     assert.deepEqual(moves, ["humanMerged"]);
     assert.equal(box.posted.length, 0);
-    const done = await resumeHumanMerges(REPO, { ...NONE }, logger, { ...box, ...pass("pr merged") });
+    const done = await resumeHumanMerges(rt, REPO, { ...NONE }, logger, { ...box, ...pass("pr merged") });
     assert.deepEqual(done, [{ issueNumber: 12, prNumber: 34, settled: "closed" }]);
     assert.deepEqual(moves, ["humanMerged", "humanMergedApproved", "closedNoRelease"]);
     assert.equal(box.posted.length, 1);
@@ -226,10 +229,10 @@ test("resume, nothing releases: an issue left at `pr approved` by a failed close
   const box = commentBox();
   const moves = recordMoves(["closedNoRelease"]);
   try {
-    assert.equal(await settleHumanMerge(REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, box), "approved", "pass 1 stops at approved");
+    assert.equal(await settleHumanMerge(rt, REPO, { ...NONE }, { issueNumber: 12, prNumber: 34 }, logger, box), "approved", "pass 1 stops at approved");
     assert.deepEqual(moves, ["humanMerged", "humanMergedApproved"]);
     assert.equal(box.posted.length, 1, "pass 1 commented before the close it failed");
-    const done = await resumeHumanMerges(REPO, { ...NONE }, logger, { ...box, ...pass("pr approved") });
+    const done = await resumeHumanMerges(rt, REPO, { ...NONE }, logger, { ...box, ...pass("pr approved") });
     assert.deepEqual(done, [{ issueNumber: 12, prNumber: 34, settled: "closed" }]);
     assert.deepEqual(moves, ["humanMerged", "humanMergedApproved", "closedNoRelease"]);
     assert.equal(box.posted.length, 1, "the retried close does not comment again");
@@ -242,10 +245,10 @@ test("resume leaves alone: any reviewer or verifier config, `pr approved` with a
   const box = commentBox();
   const moves = recordMoves();
   try {
-    assert.deepEqual(await resumeHumanMerges(REPO, { ...NONE, techLeadPath: "/x" }, logger, { ...box, ...pass("pr merged") }), [], "reviewer: no-op");
-    assert.deepEqual(await resumeHumanMerges(REPO, { ...NONE, srePath: "/x" }, logger, { ...box, ...pass("pr merged") }), [], "verifier owns `pr merged`");
-    assert.deepEqual(await resumeHumanMerges(REPO, { ...NONE, stages: [{ type: "promote" }] }, logger, { ...box, ...pass("pr approved") }), [], "promote releases `pr approved`");
-    assert.deepEqual(await resumeHumanMerges(REPO, { ...NONE }, logger, { ...box, ...pass("pr merged"), mergedToBase: () => [] }), [], "never merged: untouched");
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, techLeadPath: "/x" }, logger, { ...box, ...pass("pr merged") }), [], "reviewer: no-op");
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, srePath: "/x" }, logger, { ...box, ...pass("pr merged") }), [], "verifier owns `pr merged`");
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, stages: [{ type: "promote" }] }, logger, { ...box, ...pass("pr approved") }), [], "promote releases `pr approved`");
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE }, logger, { ...box, ...pass("pr merged"), mergedToBase: () => [] }), [], "never merged: untouched");
     assert.deepEqual(moves, []);
     assert.equal(box.posted.length, 0);
   } finally {

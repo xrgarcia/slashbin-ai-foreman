@@ -17,6 +17,8 @@ import {
 import { PaperclipPlugin } from "../dist/plugins/paperclip.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 let tmp, ghLog, saved;
@@ -109,7 +111,7 @@ async function passWith(observer) {
   if (observer) addObserver({ ...observer, onEvent: async (e) => { events.push(e); } });
   rmSync(ghLog, { force: true });
   const config = load();
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   await drainObservers();
   return { events, calls: ghCalls() };
 }
@@ -218,7 +220,7 @@ test("reload: a plugin that fails to start does not stop the others or join the 
 
 test("Paperclip: a reload that switches it on starts the mirror, one that switches it off stops it", async () => {
   resetRegistryForTests();
-  const plugin = new PaperclipPlugin();
+  const plugin = new PaperclipPlugin({ records: rt.records, legacy: rt.legacy });
   registerPlugin(plugin);
   const on = { ...load({ paperclip: { enabled: true, companyId: "c", agentId: "a" } }) };
   await startPlugins(load(), ctx);
@@ -265,7 +267,7 @@ for (const [field, value] of [
 ]) {
   test(`Paperclip: a reload changing ${field} delivers to the new mirror, which carries the new value`, async () => {
     resetRegistryForTests();
-    const plugin = new PaperclipPlugin();
+    const plugin = new PaperclipPlugin({ records: rt.records, legacy: rt.legacy });
     registerPlugin(plugin);
     const base = { enabled: true, url: "http://127.0.0.1:9/old", companyId: "c", agentId: "a" };
     let text = "v1";

@@ -27,6 +27,8 @@ import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const CID = "company-1";
 const AGENT = "agent-1";
@@ -284,7 +286,7 @@ test("publishSnapshot: carries the state reader, and the closed items when the c
   const seen = [];
   addObserver({ onEvent: async (e) => { seen.push(e); }, wantsSnapshot: () => true });
   try {
-    await publishSnapshot({ name: "r", githubRepo: REPO }, logger());
+    await publishSnapshot(rt, { name: "r", githubRepo: REPO }, logger());
     await drainObservers();
     const e = seen.at(-1);
     assert.deepEqual(e.closed, [{ item: { issueNumber: 7, repo: REPO }, state: "completed" }]);

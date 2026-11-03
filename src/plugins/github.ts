@@ -35,7 +35,10 @@ export const GITHUB_WORK_SOURCE = "github";
  * Its memory (the sign-off gate's, the Foreman login) lives in this call's
  * objects, so each code host built has its own.
  */
-export function githubCodeHost(identity: skipHold.ForemanIdentity = new skipHold.ForemanIdentity()): CodeHost {
+export function githubCodeHost(
+  identity: skipHold.ForemanIdentity = new skipHold.ForemanIdentity(),
+  isBuildInFlight: reviewQueue.BuildProbe = () => false,
+): CodeHost {
   const signoff = new releaseSignoff.ReleaseSignoff();
   const approvedUnmerged = new BackoffTracker();
   return {
@@ -138,9 +141,9 @@ export function githubCodeHost(identity: skipHold.ForemanIdentity = new skipHold
     readLatestReviewBody: reports.readLatestReviewBody,
     readPrDigest: reports.readPrDigest,
     readRulingState: reports.readRulingState,
-    findPRsNeedingReview: (config, reviewerLogin, logger) => reviewQueue.findPRsNeedingReview(config, reviewerLogin, logger, approvedUnmerged),
+    findPRsNeedingReview: (config, reviewerLogin, logger) => reviewQueue.findPRsNeedingReview(config, reviewerLogin, logger, approvedUnmerged, isBuildInFlight),
     findPendingRevisions: reviewQueue.findPendingRevisions,
-    findQaPendingPr: reviewQueue.findQaPendingPr,
+    findQaPendingPr: (config, reviewerLogin, logger) => reviewQueue.findQaPendingPr(config, reviewerLogin, logger, isBuildInFlight),
     blockedAmong: reviewQueue.blockedAmong,
     readPrHeadSha: reviewFreshness.readPrHeadSha,
     readPrState: reviewFreshness.readPrState,
@@ -165,13 +168,18 @@ export function githubCodeHost(identity: skipHold.ForemanIdentity = new skipHold
  * connector; the core reaches both roles through the registry.
  */
 export class GitHubPlugin implements ForemanPlugin {
+  /** @param isBuildInFlight the runtime's build probe; a plugin built without one never sees a build in flight. */
+  constructor(isBuildInFlight: reviewQueue.BuildProbe = () => false) {
+    this.codeHost = githubCodeHost(this.identity, isBuildInFlight);
+  }
+
   readonly id = "github";
   readonly roles = ["workSource", "codeHost"] as const;
   /** The Foreman login, read once, shared by both roles. */
   private readonly identity = new skipHold.ForemanIdentity();
   /** The connector the daemon uses; it holds its own announce-once and hold memory. */
   readonly workSource = new GitHubIssueConnector(this.identity);
-  readonly codeHost = githubCodeHost(this.identity);
+  readonly codeHost: CodeHost;
 
   enabled(config: AgentConfig): boolean {
     return this.fills("workSource", config) || this.fills("codeHost", config);

@@ -12,6 +12,8 @@ import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plu
 import { TechLeadPlugin } from "../dist/plugins/tech-lead.js";
 import { tryReview } from "../dist/phases/review.js";
 import { addObserver, drainObservers } from "../dist/work-source.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
 const tmp = mkdtempSync(join(tmpdir(), "review-transient-defer-"));
@@ -67,7 +69,7 @@ after(() => { resetRegistryForTests(); rmSync(tmp, { recursive: true, force: tru
 async function run(name) {
   events.length = 0;
   const repo = config.repos.find((r) => r.name === name);
-  const result = await tryReview(repo, { ...config, techLeadPath: join(tmp, name) }, quiet, 1);
+  const result = await tryReview(rt, repo, { ...config, techLeadPath: join(tmp, name) }, quiet, 1);
   await drainObservers();
   return { result, blocked: events.filter((e) => e.kind === "blocked") };
 }

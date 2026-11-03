@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildEnded, buildStarted, isBuildInFlight } from "../dist/build-in-flight.js";
+import { ForemanRuntime } from "../dist/runtime.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(root, p), "utf-8");
@@ -24,14 +24,15 @@ test("a failed open-PR or closed-PR lookup is unknown, and the reconciler skips 
 });
 
 test("a build in flight is counted per repo and cleared only when every build ends", () => {
-  assert.equal(isBuildInFlight("acme"), false);
-  buildStarted("acme");
-  buildStarted("acme");
-  buildEnded("acme");
-  assert.equal(isBuildInFlight("acme"), true);
-  buildEnded("acme");
-  assert.equal(isBuildInFlight("acme"), false);
-  assert.equal(isBuildInFlight("other"), false);
+  const rt = new ForemanRuntime();
+  assert.equal(rt.builds.isInFlight("acme"), false);
+  rt.builds.started("acme");
+  rt.builds.started("acme");
+  rt.builds.ended("acme");
+  assert.equal(rt.builds.isInFlight("acme"), true);
+  rt.builds.ended("acme");
+  assert.equal(rt.builds.isInFlight("acme"), false);
+  assert.equal(rt.builds.isInFlight("other"), false);
 });
 
 test("the review stage does not adopt an unlabeled PR while that repo is building", () => {
@@ -41,8 +42,8 @@ test("the review stage does not adopt an unlabeled PR while that repo is buildin
   assert.ok(fn.indexOf("isBuildInFlight(config.name)") < fn.indexOf("adopted.push"));
   for (const p of ["src/phases/implement.ts", "src/phases/revise.ts"]) {
     const s = src(p);
-    assert.match(s, /activeRuns\.set\(runAbort, repoName\);\n\s*buildStarted\(repoName\);/, p);
-    assert.match(s, /activeRuns\.delete\(runAbort\);\n\s*buildEnded\(repoName\);/, p);
+    assert.match(s, /activeRuns\.set\(runAbort, repoName\);\n\s*rt\.builds\.started\(repoName\);/, p);
+    assert.match(s, /activeRuns\.delete\(runAbort\);\n\s*rt\.builds\.ended\(repoName\);/, p);
   }
 });
 

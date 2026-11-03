@@ -29,23 +29,6 @@ import type { Logger } from "./logger.js";
 
 export type TrustOutcome = "already" | "trusted" | "skipped" | "disabled";
 
-// Off until the Foreman's entry point configures it from `trustManagedRepos`
-// (the daemon on start and reload, `--once` before its cycle). Code that calls
-// the phases directly — the test suite, a library consumer — never writes to the
-// operator's Claude config unless it opts in here.
-let enabled = false;
-/** Paths already logged as trusted this process, so each is said once. */
-const announced = new Set<string>();
-
-/** Turn the feature on or off (config `trustManagedRepos`, default on). */
-export function configureClaudeTrust(opts: { enabled: boolean }): void {
-  enabled = opts.enabled;
-}
-
-export function claudeTrustEnabled(): boolean {
-  return enabled;
-}
-
 /** Where the Claude Code process with this env reads its global config. */
 export function claudeConfigPath(env: Record<string, string | undefined> = process.env): string {
   const dir = env.CLAUDE_CONFIG_DIR;
@@ -101,66 +84,6 @@ function trustKeys(dir: string): string[] {
   return real === abs ? [abs] : [abs, real];
 }
 
-/**
- * Make sure Claude Code trusts `dir`. Writes only when the flag is missing.
- * Never throws: a failure here must not stop a session, only leave it as it was.
- */
-export function ensureClaudeTrust(
-  dir: string,
-  logger: Logger,
-  env: Record<string, string | undefined> = process.env,
-  reason = "managed repo",
-): TrustOutcome {
-  if (!enabled) return "disabled";
-  const keys = trustKeys(dir);
-  const path = keys[0];
-  const file = claudeConfigPath(env);
-
-  const first = readConfig(file);
-  if (!first.ok) {
-    logger.warn(`Claude Code trust: ${file} ${first.reason} — not touching it; ${path} stays untrusted`);
-    return "skipped";
-  }
-  if (isTrusted(first.cfg, keys)) return "already";
-
-  // Re-read right before the write: a running Claude process may have rewritten
-  // the file since the check, and its change must survive ours.
-  const fresh = readConfig(file);
-  if (!fresh.ok) {
-    logger.warn(`Claude Code trust: ${file} ${fresh.reason} — not touching it; ${path} stays untrusted`);
-    return "skipped";
-  }
-  if (isTrusted(fresh.cfg, keys)) return "already";
-
-  const cfg = fresh.cfg;
-  const projects = (cfg.projects && typeof cfg.projects === "object" && !Array.isArray(cfg.projects)
-    ? cfg.projects
-    : {}) as Record<string, Record<string, unknown>>;
-  for (const k of keys) projects[k] = { ...(projects[k] ?? {}), hasTrustDialogAccepted: true };
-  cfg.projects = projects;
-
-  const tmp = `${file}.trust-${process.pid}-${Date.now()}`;
-  try {
-    writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: fresh.mode ?? 0o600 });
-    renameSync(tmp, file);
-  } catch (err) {
-    try { unlinkSync(tmp); } catch { /* never created */ }
-    logger.warn(`Claude Code trust: could not write ${file} (${err instanceof Error ? err.message : String(err)}); ${path} stays untrusted`);
-    return "skipped";
-  }
-
-  const check = readConfig(file);
-  if (!check.ok || !isTrusted(check.cfg, keys)) {
-    logger.warn(`Claude Code trust: wrote ${file} but ${path} does not read back as trusted — a concurrent writer may have replaced it; will retry before the next session`);
-    return "skipped";
-  }
-  if (!announced.has(`${file}\0${path}`)) {
-    announced.add(`${file}\0${path}`);
-    logger.info(`trusted ${path} for Claude Code (${reason})`);
-  }
-  return "trusted";
-}
-
 /** Read-only: what Claude Code's config says about `dir` (the doctor's check). */
 export function claudeTrustStatus(
   dir: string,
@@ -171,21 +94,97 @@ export function claudeTrustStatus(
   return isTrusted(r.cfg, trustKeys(dir)) ? "trusted" : "untrusted";
 }
 
-/** Trust every configured repo checkout (daemon start and each config reload). */
-export function trustManagedRepos(
-  repos: readonly { repoPath: string }[],
-  logger: Logger,
-  env: Record<string, string | undefined> = process.env,
-): void {
-  if (!enabled) return;
-  for (const r of repos) {
-    if (!existsSync(r.repoPath)) continue; // not cloned yet; the pre-spawn check covers it
-    ensureClaudeTrust(r.repoPath, logger, env);
-  }
-}
+/**
+ * One runtime's Claude Code trust: whether the feature is on, and which paths it has already said it trusted.
+ *
+ * Off until the Foreman's entry point configures it from `trustManagedRepos` (the daemon on start and reload,
+ * `--once` before its cycle). Code that calls the phases directly — the test suite, a library consumer — never
+ * writes to the operator's Claude config unless it opts in with `configure`.
+ */
+export class ClaudeTrust {
+  private enabled = false;
+  /** Paths already logged as trusted this process, so each is said once. */
+  private readonly announced = new Set<string>();
 
-/** Test seam: forget which paths were announced and switch back off. */
-export function resetClaudeTrustForTests(): void {
-  announced.clear();
-  enabled = false;
+  /** Turn the feature on or off (config `trustManagedRepos`, default on). */
+  configure(opts: { enabled: boolean }): void {
+    this.enabled = opts.enabled;
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  /**
+   * Make sure Claude Code trusts `dir`. Writes only when the flag is missing.
+   * Never throws: a failure here must not stop a session, only leave it as it was.
+   */
+  ensure(
+    dir: string,
+    logger: Logger,
+    env: Record<string, string | undefined> = process.env,
+    reason = "managed repo",
+  ): TrustOutcome {
+    if (!this.enabled) return "disabled";
+    const keys = trustKeys(dir);
+    const path = keys[0];
+    const file = claudeConfigPath(env);
+
+    const first = readConfig(file);
+    if (!first.ok) {
+      logger.warn(`Claude Code trust: ${file} ${first.reason} — not touching it; ${path} stays untrusted`);
+      return "skipped";
+    }
+    if (isTrusted(first.cfg, keys)) return "already";
+
+    // Re-read right before the write: a running Claude process may have rewritten
+    // the file since the check, and its change must survive ours.
+    const fresh = readConfig(file);
+    if (!fresh.ok) {
+      logger.warn(`Claude Code trust: ${file} ${fresh.reason} — not touching it; ${path} stays untrusted`);
+      return "skipped";
+    }
+    if (isTrusted(fresh.cfg, keys)) return "already";
+
+    const cfg = fresh.cfg;
+    const projects = (cfg.projects && typeof cfg.projects === "object" && !Array.isArray(cfg.projects)
+      ? cfg.projects
+      : {}) as Record<string, Record<string, unknown>>;
+    for (const k of keys) projects[k] = { ...(projects[k] ?? {}), hasTrustDialogAccepted: true };
+    cfg.projects = projects;
+
+    const tmp = `${file}.trust-${process.pid}-${Date.now()}`;
+    try {
+      writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: fresh.mode ?? 0o600 });
+      renameSync(tmp, file);
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* never created */ }
+      logger.warn(`Claude Code trust: could not write ${file} (${err instanceof Error ? err.message : String(err)}); ${path} stays untrusted`);
+      return "skipped";
+    }
+
+    const check = readConfig(file);
+    if (!check.ok || !isTrusted(check.cfg, keys)) {
+      logger.warn(`Claude Code trust: wrote ${file} but ${path} does not read back as trusted — a concurrent writer may have replaced it; will retry before the next session`);
+      return "skipped";
+    }
+    if (!this.announced.has(`${file}\0${path}`)) {
+      this.announced.add(`${file}\0${path}`);
+      logger.info(`trusted ${path} for Claude Code (${reason})`);
+    }
+    return "trusted";
+  }
+
+  /** Trust every configured repo checkout (daemon start and each config reload). */
+  trustManagedRepos(
+    repos: readonly { repoPath: string }[],
+    logger: Logger,
+    env: Record<string, string | undefined> = process.env,
+  ): void {
+    if (!this.enabled) return;
+    for (const r of repos) {
+      if (!existsSync(r.repoPath)) continue; // not cloned yet; the pre-spawn check covers it
+      this.ensure(r.repoPath, logger, env);
+    }
+  }
 }

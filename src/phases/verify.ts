@@ -8,13 +8,14 @@ import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
-import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps, runQaReport } from "../qa-report.js";
+import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import { fieldTable, loadIssueRecords, saveFieldChanges, type VerifyHold } from "../issue-records.js";
-import { noteUnrelated, settleHandoffs, handoffSubject } from "../unstick.js";
+import { fieldTable, type VerifyHold } from "../issue-records.js";
+import { handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 /**
  * Whether new commits on base may reopen an exhausted hold. Not one the SRE
@@ -176,9 +177,6 @@ export function evidenceLinks(summary: string, max = 8): string[] {
   return [...new Set(urls.map((u) => u.replace(/[.,;:]+$/, "")))].slice(0, max);
 }
 
-/** Per repo: the verify stage waiting after the SRE could not run at all (backoff.agentUnavailable). */
-export const verifyDefer = new BackoffTracker();
-
 /**
  * The merged PR to verify this pass, or null. Pure, exported for tests.
  *
@@ -217,7 +215,7 @@ export function pickVerifyTarget(
  * whose merged PR carries a comment opening `**EM QA re-run` newer than every QA Report, goes back to
  * `pr merged`, so this stage verifies it again and runs the QA gate on dev. Best effort: a failed read moves nothing.
  */
-async function takeQaRerunRequests(repoConfig: RepoConfig, config: AgentConfig, vlog: Logger): Promise<void> {
+async function takeQaRerunRequests(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, vlog: Logger): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
   const approved = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)
     .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)).map((i) => i.number);
@@ -233,7 +231,7 @@ async function takeQaRerunRequests(repoConfig: RepoConfig, config: AgentConfig, 
       continue;
     }
     vlog.info(`QA re-run: the EM asked for QA again on PR #${pr}; ${issues.map((n) => `#${n}`).join(", ")} back to verification`);
-    for (const n of issues) await advance(itemOf(repoConfig, n), "qaRerun", repoConfig, vlog);
+    for (const n of issues) await advance(rt, itemOf(repoConfig, n), "qaRerun", repoConfig, vlog);
   }
 }
 
@@ -249,6 +247,7 @@ async function takeQaRerunRequests(repoConfig: RepoConfig, config: AgentConfig, 
  * one waiting on a named time, costs no attempt — see verifyHoldPlan.
  */
 export async function tryVerify(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
@@ -259,11 +258,11 @@ export async function tryVerify(
   if (!verifier) return false;
   if (isUpstreamBlocked("github")) return false;
   const repoName = repoConfig.name;
-  if (verifyDefer.waiting(repoName)) return false;
+  if (rt.memory.verifyDefer.waiting(repoName)) return false;
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
-  if (qaApplies(repoConfig, config)) await takeQaRerunRequests(repoConfig, config, vlog);
+  if (qaApplies(repoConfig, config)) await takeQaRerunRequests(rt, repoConfig, config, vlog);
   const awaiting = codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
   // The holds of the issues this pass looks at: the ones awaiting verification, and the repo's other open
   // issues, whose holds are stale. An issue whose record cannot be read is left alone, not read as unheld.
@@ -273,14 +272,14 @@ export async function tryVerify(
   } catch (err) {
     vlog.debug(`Open issues unreadable — stale holds are not pruned this pass: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const loaded = await loadIssueRecords(repoConfig, [...openNumbers, ...awaiting]);
+  const loaded = await rt.records.loadIssueRecords(repoConfig, [...openNumbers, ...awaiting]);
   const waiting = awaiting.filter((n) => !loaded.unavailable.has(n));
   if (waiting.length < awaiting.length) vlog.warn(`Records unreadable, not verifying ${awaiting.filter((n) => loaded.unavailable.has(n)).map((n) => `#${n}`).join(", ")} this pass`);
   const held: Record<number, VerifyHold> = fieldTable(loaded, "verifyHeld");
   // What the store holds, so a save writes only what changed since the last one.
   const persisted: Record<number, VerifyHold> = { ...held };
   const persist = async (): Promise<void> => {
-    const failed = new Set(await saveFieldChanges(repoConfig, "verifyHeld", persisted, held));
+    const failed = new Set(await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, held));
     for (const n of new Set([...Object.keys(persisted), ...Object.keys(held)].map(Number))) {
       if (failed.has(n)) continue;
       if (held[n]) persisted[n] = held[n]; else delete persisted[n];
@@ -319,8 +318,8 @@ export async function tryVerify(
     }
     const kind: BlockKind = exhausted ? "verify-exhausted" : "verify-held";
     const ok = noPr
-      ? await releaseIfResolved("verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
-      : await releaseIfResolved(kind, {
+      ? await releaseIfResolved(rt, "verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
+      : await releaseIfResolved(rt, kind, {
         specEdited: issueEditedSince(repoConfig, n, h.heldAt),
         ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
         // Exhausted on a reason that no longer charges (it joined TOOLING_HOLDS after the
@@ -336,7 +335,7 @@ export async function tryVerify(
     const reason = `"${repoConfig.lifecycleLabels.prMerged}" but no merged PR into ${repoConfig.baseBranch} closes it`;
     held[n] = { heldAt: new Date().toISOString(), prNumber: 0, reason: "no-merged-pr", attempts: verifyRetry.maxAttempts };
     vlog.warn(`#${n}: ${reason} — needs a person`);
-    await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, vlog);
+    await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: reason }, repoConfig, vlog);
   }
   if (unmatched.length > 0) await persist();
 
@@ -355,14 +354,14 @@ export async function tryVerify(
   events?.push({ message: `Verifying ${repoConfig.githubRepo} PR #${target.prNumber} in dev (issues: ${issues})`, level: "info" });
 
   try {
-    await emit({ kind: "session", session: { ...session, status: "started" } }, null, vlog);
+    await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, vlog);
     const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
     // Held in memory until the record has them; the gate runs on EVERY result, so a clean re-verification cannot advance past an unsaved report.
     const subject = handoffSubject(repoConfig.githubRepo, target.prNumber);
-    if (sre.kind === "verdict" && sre.unrelated) await noteUnrelated(repoConfig, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`, subject);
-    else await settleHandoffs(repoConfig, subject);
+    if (sre.kind === "verdict" && sre.unrelated) await rt.handoffs.noteUnrelated(repoConfig, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`, subject);
+    else await rt.handoffs.settleHandoffs(repoConfig, subject);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.
@@ -373,22 +372,22 @@ export async function tryVerify(
     if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) || qaAgain)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
       const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
-      await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
+      await emit(rt, { kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
       r = await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
-      await emit({ kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed" } }, null, vlog);
+      await emit(rt, { kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed" } }, null, vlog);
     }
 
     if (r.kind === "verdict" && r.pass) {
-      verifyDefer.clear(repoName);
+      rt.memory.verifyDefer.clear(repoName);
       const kept = { ...held };
       for (const n of target.issueNumbers) {
-        await advance(itemOf(repoConfig, n), "verifyPassed", repoConfig, vlog);
+        await advance(rt, itemOf(repoConfig, n), "verifyPassed", repoConfig, vlog);
         delete kept[n];
       }
-      await saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
+      await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
       if (!config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
-        void runQaReport(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
+        void rt.qaReports.run(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
       events?.push({ message: `✅ ${repoConfig.githubRepo} PR #${target.prNumber} verified in dev — ${issues} → "${repoConfig.lifecycleLabels.prApproved}"`, level: "info" });
@@ -398,25 +397,25 @@ export async function tryVerify(
     const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
     const plan = r.kind === "verdict" ? verifyHoldPlan(reason) : { kind: "charge" as const };
     if (plan.kind === "defer") {
-      const wait = formatWait(verifyDefer.start(repoName, agentUnavailable));
+      const wait = formatWait(rt.memory.verifyDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
       vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
       const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
-      for (const n of target.issueNumbers) await emit({ kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
+      for (const n of target.issueNumbers) await emit(rt, { kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       return false;
     }
-    verifyDefer.clear(repoName);
+    rt.memory.verifyDefer.clear(repoName);
     const kept = { ...held };
     if (plan.kind === "wait") {
       for (const n of target.issueNumbers) {
         kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts: kept[n]?.attempts ?? 0, retryAt: plan.retryAt };
       }
-      await saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
+      await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
       vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
       events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
       const why = `waiting until ${plan.retryAt.slice(0, 16)}Z: the SRE says PR #${target.prNumber} is not observable before then (${reason}) — dev verification resumes automatically then`;
-      for (const n of target.issueNumbers) await emit({ kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
+      for (const n of target.issueNumbers) await emit(rt, { kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       return false;
     }
     // The EM decides every post-merge fix (Ray, 2026-10-31): the Foreman files nothing. A visual QA FAIL is held at
@@ -439,18 +438,18 @@ export async function tryVerify(
       const d = prior ?? decision;
       kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts, ...(d ? { decision: d } : {}) };
     }
-    await saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
+    await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
     const final = attempts >= verifyRetry.maxAttempts;
     const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${verifyRetry.maxAttempts}` +
       (plan.kind === "decide" ? "; the EM decides the fix (a follow-up issue or a spec edit releases it)" : final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
-    for (const n of target.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, ...(isDeployFailureHold(reason) ? { owner: "sre" as const } : {}) }, repoConfig, vlog);
+    for (const n of target.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why, ...(isDeployFailureHold(reason) ? { owner: "sre" as const } : {}) }, repoConfig, vlog);
     ended = { status: "failed", detail: why };
     vlog.warn(`${repoName}: ${why}`);
     events?.push({ message: `⏸️ ${repoConfig.githubRepo} ${issues}: ${why}`, level: final ? "error" : "warn" });
     return false;
   } finally {
     activeRuns.delete(runAbort);
-    await emit({ kind: "session", session: { ...session, ...ended } }, null, vlog);
+    await emit(rt, { kind: "session", session: { ...session, ...ended } }, null, vlog);
   }
 }
 

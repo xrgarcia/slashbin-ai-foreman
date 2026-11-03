@@ -23,6 +23,8 @@ import { tryReview } from "../dist/phases/review.js";
 import { tryVerify } from "../dist/phases/verify.js";
 import { tryRelease } from "../dist/phases/release.js";
 import { runReconcileStage } from "../dist/phases/reconcile.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
 const tmp = mkdtempSync(join(tmpdir(), "code-host-plugin-"));
@@ -108,22 +110,22 @@ test("the registry hands the core the configured code host, not GitHub's", () =>
 });
 
 test("implement: reaches the PRs through the code host plugin, never gh", async () => {
-  const c = await viaFake(() => tryBatchImplementation(repo, config, quiet, 1));
+  const c = await viaFake(() => tryBatchImplementation(rt, repo, config, quiet, 1));
   assert.deepEqual(c, ["getOpenIssues", "findOpenFeaturePR", "getOpenIssues", "discoveryBatch"]);
 });
 
 test("review: reaches the PRs through the code host plugin, never gh", async () => {
-  assert.deepEqual(await viaFake(() => tryReview(repo, config, quiet, 1)), ["findPRsNeedingReview"]);
+  assert.deepEqual(await viaFake(() => tryReview(rt, repo, config, quiet, 1)), ["findPRsNeedingReview"]);
 });
 
 test("verify: reads the pr merged issues through the code host plugin, never gh", async () => {
-  assert.deepEqual(await viaFake(() => tryVerify(repo, config, quiet, 1)), ["findIssuesAwaitingVerify"]);
+  assert.deepEqual(await viaFake(() => tryVerify(rt, repo, config, quiet, 1)), ["findIssuesAwaitingVerify"]);
 });
 
 test("release: reaches the release PRs through the code host plugin, never gh", async () => {
-  assert.deepEqual(await viaFake(() => tryRelease(repo, config, quiet, 1)), ["allPrsForBranch"]);
+  assert.deepEqual(await viaFake(() => tryRelease(rt, repo, config, quiet, 1)), ["allPrsForBranch"]);
 });
 
 test("reconcile: looks up stuck merged issues through the code host plugin, never gh", async () => {
-  assert.deepEqual(await viaFake(() => runReconcileStage(repo, config, quiet, [])), ["findStuckMergedIssues"]);
+  assert.deepEqual(await viaFake(() => runReconcileStage(rt, repo, config, quiet, [])), ["findStuckMergedIssues"]);
 });

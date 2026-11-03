@@ -9,6 +9,8 @@ import { tryUnstick } from "../dist/phases/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords } from "./issue-records.mjs";
 import { mkTmp } from "./tmp-dir.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 await startAgentPlugins();
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
@@ -22,6 +24,7 @@ process.env.PATH = `${ghBin}:${process.env.PATH}`;
 
 test("one release-gate candidate per open issue: no array of that size is filtered once per issue", async () => {
   setStatePath(mkTmp("scale-state-"));
+  rt = new ForemanRuntime();
   memoryRecords();
   const em = mkTmp("scale-em-");
   mkdirSync(join(em, "bin"));
@@ -32,7 +35,7 @@ test("one release-gate candidate per open issue: no array of that size is filter
   let big = 0;
   Array.prototype.filter = function (...a) { if (this.length >= N) big++; return realFilter.apply(this, a); };
   try {
-    await tryUnstick(repo, config, logger, 1);
+    await tryUnstick(rt, repo, config, logger, 1);
   } finally {
     Array.prototype.filter = realFilter;
   }

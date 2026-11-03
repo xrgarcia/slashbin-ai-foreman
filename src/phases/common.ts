@@ -11,12 +11,12 @@ import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
 import { type BranchDivergence } from "../reconciler.js";
 import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
-import { loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import type { Divergence } from "../divergence.js";
 import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "../unblock.js";
 import { BackoffTracker } from "../backoff.js";
 import { codeHost } from "../plugins/registry.js";
 import type { ReviewOutcome } from "../code-host.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 /**
  * Why a run stopped, worded for the card. Every stop — the first failure, a
@@ -41,6 +41,7 @@ export function stoppedReason(what: string, result: { error?: string; upstreamLi
  * the caller clears its own state. Returns whether the block was resolved.
  */
 export async function releaseIfResolved(
+  rt: ForemanRuntime,
   kind: BlockKind,
   facts: BlockFacts,
   items: readonly number[],
@@ -51,7 +52,7 @@ export async function releaseIfResolved(
   if (!check) return false;
   const why = unblockedReason(check);
   logger.info(`${kind} block on ${items.map((n) => `#${n}`).join(", ") || repoConfig.name} resolved — ${why}`);
-  for (const n of items) await emit({ kind: "unblocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, logger);
+  for (const n of items) await emit(rt, { kind: "unblocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, logger);
   return true;
 }
 
@@ -111,8 +112,8 @@ export function divergenceNotice(repoConfig: RepoConfig, block: Divergence): str
  * their records. An issue whose record cannot be read is left out of both lists: it is neither told nor assumed
  * told (the caller must not comment on it this pass).
  */
-export async function toldAbout(repoConfig: RepoConfig, issues: readonly number[], mergeBase: string): Promise<{ told: number[]; fresh: number[] }> {
-  const loaded = await loadIssueRecords(repoConfig, issues);
+export async function toldAbout(rt: ForemanRuntime, repoConfig: RepoConfig, issues: readonly number[], mergeBase: string): Promise<{ told: number[]; fresh: number[] }> {
+  const loaded = await rt.records.loadIssueRecords(repoConfig, issues);
   const told: number[] = [];
   const fresh: number[] = [];
   for (const [n, r] of loaded.records) (r.divergenceTold === mergeBase ? told : fresh).push(n);
@@ -127,13 +128,14 @@ export async function toldAbout(repoConfig: RepoConfig, issues: readonly number[
  * the issues now told about this episode.
  */
 export async function announceDivergence(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   waiting: number[],
   block: Divergence,
   logger: Logger,
   first: boolean,
 ): Promise<number[]> {
-  const { told, fresh } = await toldAbout(repoConfig, waiting, block.mergeBase);
+  const { told, fresh } = await toldAbout(rt, repoConfig, waiting, block.mergeBase);
   if (first) {
     logger.warn(
       `Implementation on ${repoConfig.name} stopped — ${divergenceReason(block)} (${block.ahead} ahead, ${block.behind} behind). Announcing on ${fresh.map((n) => `#${n}`).join(", ") || "no waiting issue"}; this is the only warning for this episode`,
@@ -142,13 +144,13 @@ export async function announceDivergence(
     logger.debug(`Implementation on ${repoConfig.name} still stopped — ${divergenceReason(block)}`);
   }
   for (const n of fresh) {
-    if (!(await updateIssueRecord(repoConfig, n, (d) => { d.divergenceTold = block.mergeBase; }))) continue;
+    if (!(await rt.records.updateIssueRecord(repoConfig, n, (d) => { d.divergenceTold = block.mergeBase; }))) continue;
     try {
       codeHost().commentOnIssue(repoConfig, n, divergenceNotice(repoConfig, block));
       told.push(n);
     } catch (err) {
       // Not told after all: forget it, so the next cycle tries again.
-      await updateIssueRecord(repoConfig, n, (d) => { delete d.divergenceTold; });
+      await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.divergenceTold; });
       logger.warn(`Could not announce the divergence on #${n}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
     }
   }
@@ -199,13 +201,6 @@ export function reviewReport(
   };
 }
 
-// Merged / promoted events already delivered to observers this process, keyed
-// `<kind>:<owner/repo>#<n>`. Several paths can see the same merge (the review's
-// own trailer, a failed-but-landed review, dead-zone detection on every later
-// pass, the implement stage's already-merged sweep), and a promotion whose
-// label strip failed is seen again next cycle. An observer gets each once.
-export const observerEventsSent = new Set<string>();
-
 /**
  * Tell the observers the outcome a review agent wrote on GitHub itself. The
  * agent labels `pr approved` / `pr pending actions` directly, so no state
@@ -214,9 +209,9 @@ export const observerEventsSent = new Set<string>();
  * Issues still at `pr under review` carry no outcome and are left to the
  * reconcile, which reports its own.
  */
-export async function reportReviewOutcomes(repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
+export async function reportReviewOutcomes(rt: ForemanRuntime, repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
   for (const [n, outcome] of codeHost().readReviewOutcomes(repoConfig, issueNumbers, logger)) {
-    await advance(itemOf(repoConfig, n), reviewMove(workStateOf(outcome)), repoConfig, logger, { observed: true });
+    await advance(rt, itemOf(repoConfig, n), reviewMove(workStateOf(outcome)), repoConfig, logger, { observed: true });
   }
 }
 
@@ -226,6 +221,7 @@ export async function reportReviewOutcomes(repoConfig: RepoConfig, issueNumbers:
  * error); with no observer registered this does nothing at all.
  */
 export async function notifyOnce(
+  rt: ForemanRuntime,
   kind: "merged" | "promoted",
   repoConfig: RepoConfig,
   issueNumbers: number[],
@@ -233,9 +229,9 @@ export async function notifyOnce(
 ): Promise<void> {
   for (const n of issueNumbers) {
     const key = `${kind}:${repoConfig.githubRepo}#${n}`;
-    if (observerEventsSent.has(key)) continue;
-    observerEventsSent.add(key);
-    await emit({ kind, item: itemOf(repoConfig, n) }, repoConfig, logger);
+    if (rt.memory.observerEventsSent.has(key)) continue;
+    rt.memory.observerEventsSent.add(key);
+    await emit(rt, { kind, item: itemOf(repoConfig, n) }, repoConfig, logger);
   }
 }
 
@@ -246,24 +242,9 @@ export async function notifyOnce(
 // not repo: a repo's lanes run side by side (see lanes.ts), so one repo can have
 // a build, a review and a release in flight at once, and a repo key would let
 // the first to finish erase the others from the shutdown drain.
+/** Process-wide: the shutdown drain aborts every run in the process, whichever runtime started it. */
 export const activeRuns = new Map<AbortController, string>();
 
-// Per-repo consecutive implement failures. At `backoff.repoFailure.maxFailures`
-// the repo's implement stage pauses (failurePause), longer each time it trips.
-export const failureCount = new Map<string, number>();
-export const failurePause = new BackoffTracker();
-export const revisionFailureCount = new Map<string, number>();
-// Repos whose revision retries are exhausted AND already escalated. Without this
-// the cap was reached silently: the count hit maxFailures, every later cycle took
-// the `debug` skip branch, and the stuck PR sat there with nobody told. The set is
-// cleared the moment a revision succeeds or the pending feedback clears, so a repo
-// that recovers escalates again if it breaks again.
-export const revisionEscalated = new Set<string>();
-// The PR head SHA revision stopped on after its retries were exhausted, per
-// repo. A different head later means someone pushed to the PR out of band: the
-// `revision-exhausted` unblock check (src/unblock.ts) resumes on it. A no-commit
-// stalemate's head is persisted with its streak (src/no-commit-streak.ts).
-export const revisionStoppedHead = new Map<string, string>();
 // A PR sent back this many times is probably not converging: each round answers
 // the last finding and the reviewer finds a new one in the answer. The retry cap
 // above counts only FAILED revisions, so a spiral of successful ones was silent —
@@ -273,33 +254,8 @@ export const revisionStoppedHead = new Map<string, string>();
 // 3, not 4 (2026-10-14): jerky_service PR 148 took ~35 min a round and four
 // rounds before a ruling — a fourth round is two hours spent before anyone rules.
 export const REVIEW_ROUNDS_ALERT = 3;
-export const reviewRoundsAlerted = new Set<string>();
-export const reviewFailureCount = new Map<string, number>();
-export const reviewFailurePause = new BackoffTracker();
 
-// Last cycle on which each repo checked whether an empty ready-for-prod set is
-// actually a stall. Rate-limits one compare API call per repo; see tryPromotion.
-export const lastStallCheckCycle = new Map<string, number>();
 export const STALL_CHECK_CYCLE_INTERVAL = 12;
-
-/** Per-repo set of issue numbers already alerted as dead-zoned, so a STANDING
- *  condition alerts once instead of every reconcile cycle. Cleared per-issue when
- *  the issue leaves the dead-zone, so a genuine re-entry alerts again. */
-export const deadZoneAlerted = new Map<string, Set<number>>();
-
-/** Per-repo set of issue numbers we already attempted to auto-recover, so a
- *  repo whose verification is INDETERMINATE (unmapped service, verifier crash)
- *  does not re-spend a multi-minute deploy poll on every cycle, forever. */
-export const deadZoneRecoveryAttempted = new Map<string, Set<number>>();
-
-export const lastFailureReason = new Map<string, string>(); // per-repo last failure for retry context
-
-/**
- * Per repo, the issues held in the build queue and what holds them (an open
- * feature PR, or a merge awaiting dev verification). Observers hear "queued"
- * once per hold, not once per cycle.
- */
-export const queuedBehind = new Map<string, Map<number, string>>();
 
 /**
  * The lifecycle state a review run's own trailer implies for the issues its PR
@@ -332,16 +288,13 @@ export function workStateOf(outcome: ReviewOutcome): "approved" | "merged" | "ch
   return outcome === "prApproved" ? "approved" : outcome === "prMerged" ? "merged" : "changesRequested";
 }
 
-/** `phase:owner/repo#pr` already logged as paused by the blocked label, so a standing hold logs once. */
-const blockedPauseNoted = new Set<string>();
-
 /**
  * Whether the EM holds PR `pr`: one of its issues carries `github.blockedLabel`, so `phase` (review, QA
  * before the merge, revise) does not act on it until the label is lifted. Slashbin-console PR #1597 ran
  * three more QA FAILs and revises after its issue was labelled (foreman#167). Issues that cannot be read
  * pause it for this pass: an unknown hold is not a lifted one.
  */
-export function pausedByBlockedLabel(repoConfig: RepoConfig, phase: string, pr: number, issueNumbers: ReadonlyArray<number>, logger: Logger): boolean {
+export function pausedByBlockedLabel(rt: ForemanRuntime, repoConfig: RepoConfig, phase: string, pr: number, issueNumbers: ReadonlyArray<number>, logger: Logger): boolean {
   const key = `${phase}:${repoConfig.githubRepo}#${pr}`;
   let held: number[];
   try {
@@ -351,11 +304,11 @@ export function pausedByBlockedLabel(repoConfig: RepoConfig, phase: string, pr: 
     return true;
   }
   if (held.length === 0) {
-    blockedPauseNoted.delete(key);
+    rt.memory.blockedPauseNoted.delete(key);
     return false;
   }
-  if (!blockedPauseNoted.has(key)) {
-    blockedPauseNoted.add(key);
+  if (!rt.memory.blockedPauseNoted.has(key)) {
+    rt.memory.blockedPauseNoted.add(key);
     logger.info(`PR #${pr} paused: ${held.map((n) => `#${n}`).join(", ")} carries "${repoConfig.github.blockedLabel}" — no ${phase} until it is lifted`);
   }
   return true;

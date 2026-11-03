@@ -25,6 +25,8 @@ import { registerBuiltinPlugins } from "../dist/plugins/index.js";
 import { GitHubPlugin } from "../dist/plugins/github.js";
 import { checkoutPathFor } from "../dist/review-checkout.js";
 import { createLogger } from "../dist/logger.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const logger = createLogger({ format: "text", level: "error" });
@@ -137,7 +139,7 @@ test("a fake work source registered as a plugin is the one selection and impleme
   assert.deepEqual((await selectWork(config.repos[0], config, logger)).map((w) => w.issueNumber), [7], "selection");
   fake.calls.selectWork = 0;
 
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   await drainObservers();
   const prompt = JSON.parse(readFileSync(F.claudeLog, "utf8").trim().split("\n")[0]).prompt;
   assert.match(prompt, /no others: #7\./, "the session builds the fake source's item, not GitHub's #1");
@@ -166,7 +168,7 @@ test("review counts the fake work source's queue to keep its checkout; nothing f
   for (const p of [new GitHubPlugin(), fake.plugin, reviewer]) registerPlugin(p);
   await startPlugins(config, ctx);
 
-  await tryReview(config.repos[0], config, logger, 1);
+  await tryReview(rt, config.repos[0], config, logger, 1);
   assert.equal(reviewed, 1, "the review ran (the checkout bookkeeping follows it)");
   assert.equal(fake.calls.selectEligible, 1, "review asked the fake for the approved queue");
   assert.deepEqual(githubCalls, [], "no GitHubIssueConnector behind the fake");
