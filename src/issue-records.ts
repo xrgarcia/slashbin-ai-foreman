@@ -67,6 +67,8 @@ export interface ProdRelease {
 export interface NoCommitStreak {
   head: string;
   count: number;
+  /** A paid session was admitted at `head` and its outcome is not known yet: not a round, never counted (no-commit-streak.ts). */
+  inflight?: true;
 }
 
 export interface FailedIssue {

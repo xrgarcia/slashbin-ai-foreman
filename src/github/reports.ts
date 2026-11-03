@@ -23,7 +23,7 @@ export function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, 
   return out;
 }
 
-/** A PR's title and diff stat, for a session summary. Null when it could not be read. */
+/** A PR's title and diff stat, for a session summary. Display only: null when it could not be read, and no decision rests on it. */
 export function readPrDigest(
   repo: string,
   pr: string | number,
@@ -40,20 +40,15 @@ export function readPrDigest(
   }
 }
 
-/** The paths a PR changed. Empty when it could not be read. */
+/** The paths a PR changed. Throws when it could not be read: an unread list is never "no UI files" (EM#1244 f5). */
 export function prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): string[] {
-  try {
-    const j = JSON.parse(gh(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
-    return Array.isArray(j.files) ? j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean) : [];
-  } catch (err) {
-    logger.debug(`prChangedFiles: gh pr view ${pr} failed: ${formatGhError(err).message}`);
-    return [];
-  }
+  const j = JSON.parse(gh(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
+  return Array.isArray(j.files) ? j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean) : [];
 }
 
 /**
  * The body of the newest review posted on `pr` at or after `since` (ISO), the
- * one a review session just wrote. Null when there is none or the read failed.
+ * one a review session just wrote. Display only: null when there is none or the read failed, and no decision rests on it.
  */
 export function readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): string | null {
   try {
@@ -98,17 +93,12 @@ export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: Readon
   };
 }
 
-/** A PR's ruling state, read from its reviews and comments. Null on a failed read. */
-export function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState | null {
-  try {
+/** A PR's ruling state, read from its reviews and comments. Throws on a failed read (EM#1244 f5). */
+export function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState {
     const lines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
     const reviews = lines(gh(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
       `.[] | {id, state, at: (.submitted_at // ""), escalate: ((.body // "") | contains("${TECH_LEAD_ESCALATE_MARKER}"))} | @json`], cwd)) as ReviewFact[];
     const comments = lines(gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
       `.[] | {at: .created_at, head: ((.body // "") | .[0:140])} | @json`], cwd)) as CommentFact[];
     return rulingState(reviews, comments);
-  } catch (err) {
-    logger.debug(`readRulingState: PR #${pr} failed: ${formatGhError(err).message}`);
-    return null;
-  }
 }

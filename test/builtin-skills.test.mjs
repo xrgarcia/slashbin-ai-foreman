@@ -35,7 +35,7 @@ before(() => {
   writeFileSync(join(bin, "claude"),
     `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(capture)}, process.argv[3]);\n` +
     `process.stdout.write("done\\n");\n`);
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho '[]'\n");
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\ncase \"$*\" in *branches/*) printf 0000000000000000000000000000000000000000;; *) echo '[]';; esac\n");
   chmodSync(join(bin, "claude"), 0o755);
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;

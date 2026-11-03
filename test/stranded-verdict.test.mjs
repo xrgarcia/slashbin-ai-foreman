@@ -36,8 +36,8 @@ test("only the latest verdict counts, and only CHANGES_REQUESTED strands", () =>
   assert.match(body, /byReviewer\(r, reviewerLogin\)/);
 });
 
-test("lookup failure keeps the skip instead of sending work to revise blind", () => {
-  assert.match(body, /catch \(err\)[\s\S]*return false;/);
+test("a lookup failure throws and fails the pass instead of sending work to revise blind (EM#1244 f5)", () => {
+  assert.doesNotMatch(body, /catch \(/);
 });
 
 test("the review phase reports stranded issues inReview → changesRequested and does not review", () => {

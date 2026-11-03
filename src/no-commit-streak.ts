@@ -53,8 +53,40 @@ export function stalemateHead(streak: NoCommitStreak | undefined): string | unde
 }
 
 /**
- * Count one more no-commit revision on PR `pr` at `head`, after `streak` (a head the streak has not seen starts
- * it at one). Resolves the new count, or null when it could not be saved.
+ * Admit a paid revision session on PR `pr` at `head`: save an in-flight marker (the count it already has at
+ * `head`, unchanged, flagged `inflight`) BEFORE the session starts. A marker that cannot be saved admits no
+ * session (a record store that rejects writes would otherwise let every pass pay for a round nothing can
+ * track). The marker is not a round: nothing is added to the count, so nothing ever has to be taken back, and a
+ * pass that fails after this (an unreadable branch sha, a crash) leaves a marker whose outcome is unknown, which
+ * is neither counted nor consumed. One marker at most is outstanding per PR: the next admission replaces it.
+ * False when it could not be saved.
+ */
+export async function admitRevision(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
+  const count = noCommitCount(streak, head);
+  const ok = await updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true }; });
+  if (ok) seenOf(repoConfig).add(pr);
+  return ok;
+}
+
+/**
+ * Resolve an unconfirmed marker at `head`: an earlier admission left it (its session finished or died with no
+ * successful read after it), and this pass has just READ the branch successfully. The earlier attempt is neither
+ * counted nor consumed, so the marker is dropped keeping the count it had, and THIS pass launches nothing: that is
+ * what bounds paid retries to one unconfirmed attempt per head, resolved on the next readable pass. False when the
+ * resolution could not be saved (the marker stays; the next pass tries again).
+ */
+export async function resolveUnconfirmed(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
+  const count = noCommitCount(streak, head);
+  return updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count }; else delete d.noCommit; });
+}
+
+/** True when `streak` is an unconfirmed marker for `head`. */
+export const isUnconfirmed = (streak: NoCommitStreak | undefined, head: string): boolean => !!streak && streak.head === head && streak.inflight === true;
+
+/**
+ * Count the round the in-flight marker stood for: the session completed AND a successful read after it showed
+ * the head still `head`, by declaration, so the caller only asks once it has both. Resolves the new count, or
+ * null when it could not be saved (the marker stays, the round stays unconfirmed).
  */
 export async function recordNoCommit(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<number | null> {
   const count = noCommitCount(streak, head) + 1;
@@ -62,17 +94,6 @@ export async function recordNoCommit(repoConfig: RepoConfig, pr: number, head: s
   if (!ok) return null;
   seenOf(repoConfig).add(pr);
   return count;
-}
-
-/**
- * Put PR `pr`'s streak back as it was before a round was admitted (`recordNoCommit` ahead of a session): the
- * session failed, or never ran. False when that could not be saved; the round then stays counted, which can
- * only make the stalemate come sooner, never later.
- */
-export async function restoreNoCommitStreak(repoConfig: RepoConfig, pr: number, prior: NoCommitStreak | undefined): Promise<boolean> {
-  const ok = await updatePrRecord(repoConfig, pr, (d) => { if (prior) d.noCommit = prior; else delete d.noCommit; });
-  if (ok && !prior) seenOf(repoConfig).delete(pr);
-  return ok;
 }
 
 /** Forget PR `pr`'s streak: it pushed a commit, or someone pushed to it. False when that could not be saved. */

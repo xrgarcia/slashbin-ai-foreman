@@ -18,13 +18,8 @@ export function verifyPRExists(
   cwd: string,
   logger?: Logger,
 ): boolean {
-  try {
-    const prs = findOpenPrs(repo, cwd, { head: headBranch, base: baseBranch, limit: 1 });
-    return prs.length > 0;
-  } catch (err) {
-    logger?.warn("verifyPRExists: gh pr list failed", { ...formatGhError(err), repo, headBranch, baseBranch });
-    return false;
-  }
+  // A failed read throws (EM#1244 f5): "could not look" is never "there is no PR".
+  return findOpenPrs(repo, cwd, { head: headBranch, base: baseBranch, limit: 1 }).length > 0;
 }
 
 /**
@@ -37,9 +32,9 @@ export function verifyPRExists(
  * batch but the orchestrator must NOT label the unpicked issues as
  * `pr under review`, or they get stuck waiting forever for revision activity.
  *
- * Returns the parsed issue numbers (deduped). On lookup or parse failure
- * returns null so callers can fall back to existing behavior rather than
- * silently dropping issues from the label transition.
+ * Returns the parsed issue numbers (deduped), or null when there is no open
+ * PR. A failed lookup throws (EM#1244 f5): it is never "no PR" and never a
+ * licence to label the whole batch.
  */
 export function getReferencedIssuesFromOpenPR(
   repo: string,
@@ -48,37 +43,32 @@ export function getReferencedIssuesFromOpenPR(
   cwd: string,
   logger?: Logger,
 ): number[] | null {
-  try {
-    // A new commit moves the head and an edited title/body bumps updatedAt, so
-    // the PR's version from the fleet state is a safe key for what it implements.
-    const json = ghKeyed(`refs:${repo}:${headBranch}:${baseBranch}`, () => openPrVersion(repo, headBranch, baseBranch), [
-      "pr", "list",
-      "--repo", repo,
-      "--head", headBranch,
-      "--base", baseBranch,
-      "--state", "open",
-      "--json", "number,title,body,commits",
-      "--limit", "1",
-    ], cwd);
-    const prs = JSON.parse(json || "[]");
-    if (prs.length === 0) return null;
-    const pr = prs[0];
+  // A new commit moves the head and an edited title/body bumps updatedAt, so
+  // the PR's version from the fleet state is a safe key for what it implements.
+  const json = ghKeyed(`refs:${repo}:${headBranch}:${baseBranch}`, () => openPrVersion(repo, headBranch, baseBranch), [
+    "pr", "list",
+    "--repo", repo,
+    "--head", headBranch,
+    "--base", baseBranch,
+    "--state", "open",
+    "--json", "number,title,body,commits",
+    "--limit", "1",
+  ], cwd);
+  const prs = JSON.parse(json || "[]");
+  if (prs.length === 0) return null;
+  const pr = prs[0];
 
-    // Count an issue as referenced only if the PR IMPLEMENTS it (close/relate
-    // keyword anywhere, or `(#N)` in the title / a commit headline) — never a
-    // bare `(#N)` mention in the free-text body. A schema PR whose body said
-    // "the forthcoming handler (#2) will..." otherwise falsely marked #2
-    // implemented, orphaning it. (slashbin-ai-foreman#28)
-    const commits = (pr.commits || []) as PrCommit[];
-    return extractImplementedIssues({
-      title: pr.title || "",
-      body: pr.body || "",
-      commits,
-    });
-  } catch (err) {
-    logger?.warn("getReferencedIssuesFromOpenPR: gh pr list failed", { ...formatGhError(err), repo, headBranch, baseBranch });
-    return null;
-  }
+  // Count an issue as referenced only if the PR IMPLEMENTS it (close/relate
+  // keyword anywhere, or `(#N)` in the title / a commit headline) — never a
+  // bare `(#N)` mention in the free-text body. A schema PR whose body said
+  // "the forthcoming handler (#2) will..." otherwise falsely marked #2
+  // implemented, orphaning it. (slashbin-ai-foreman#28)
+  const commits = (pr.commits || []) as PrCommit[];
+  return extractImplementedIssues({
+    title: pr.title || "",
+    body: pr.body || "",
+    commits,
+  });
 }
 
 

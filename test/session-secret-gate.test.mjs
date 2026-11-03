@@ -136,7 +136,7 @@ before(() => {
   writeFileSync(join(bin, "claude"),
     `#!/usr/bin/env node\nrequire("fs").appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
     `process.stdout.write("done\\n");\n`);
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho '[]'\n");
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\ncase \"$*\" in *branches/*) printf 0000000000000000000000000000000000000000;; *) echo '[]';; esac\n");
   chmodSync(join(bin, "claude"), 0o755);
   chmodSync(join(bin, "gh"), 0o755);
   saved = { PATH: process.env.PATH, token: process.env.FOREMAN_GITHUB_TOKEN, cwd: process.cwd() };

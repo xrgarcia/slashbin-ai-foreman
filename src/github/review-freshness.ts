@@ -49,53 +49,47 @@ export function hasFreshReview(
     }
   } catch { /* state unavailable — read live */ }
   const fresh = readFreshReview(config, prNumber, reviewerLogin, logger);
-  if (cacheKey && fresh !== null) freshReviewCache.set(id, { key: cacheKey, fresh });
-  return fresh ?? false;
+  if (cacheKey) freshReviewCache.set(id, { key: cacheKey, fresh });
+  return fresh;
 }
 
-/** Null when the lookup failed — not cached, reads as "no fresh review". */
+/** Throws when the read fails (EM#1244 f5): a failed read is never "no fresh review". */
 export function readFreshReview(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): boolean | null {
-  try {
-    const json = gh([
-      "pr", "view", String(prNumber),
-      "--repo", config.githubRepo,
-      "--json", "reviews,commits",
-    ], config.repoPath);
-    const data = JSON.parse(json || "{}") as {
-      commits?: { committedDate?: string }[];
-      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
-    };
-    const commits = data.commits ?? [];
-    const reviews = data.reviews ?? [];
-    if (commits.length === 0) return false;
+): boolean {
+  const json = gh([
+    "pr", "view", String(prNumber),
+    "--repo", config.githubRepo,
+    "--json", "reviews,commits",
+  ], config.repoPath);
+  const data = JSON.parse(json || "{}") as {
+    commits?: { committedDate?: string }[];
+    reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+  };
+  const commits = data.commits ?? [];
+  const reviews = data.reviews ?? [];
+  if (commits.length === 0) return false;
 
-    const lastCommitMs = commits
-      .map((c) => (c.committedDate ? new Date(c.committedDate).getTime() : 0))
-      .reduce((a, b) => Math.max(a, b), 0);
+  const lastCommitMs = commits
+    .map((c) => (c.committedDate ? new Date(c.committedDate).getTime() : 0))
+    .reduce((a, b) => Math.max(a, b), 0);
 
-    return reviews.some(
-      (r) =>
-        byReviewer(r, reviewerLogin) &&
-        (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") &&
-        !!r.submittedAt &&
-        new Date(r.submittedAt).getTime() >= lastCommitMs,
-    );
-  } catch (err) {
-    logger.debug(`hasFreshReview lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
+  return reviews.some(
+    (r) =>
+      byReviewer(r, reviewerLogin) &&
+      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") &&
+      !!r.submittedAt &&
+      new Date(r.submittedAt).getTime() >= lastCommitMs,
+  );
 }
 
 /**
  * True when the reviewer's latest verdict on the PR is CHANGES_REQUESTED. Asked
  * only once the verdict is known to be current and not answered by a return to
- * review, so a true here means the verdict's label move never happened. Lookup
- * failure → false: the pre-existing skip, never a spurious revise.
+ * review, so a true here means the verdict's label move never happened. A failed read throws, never a spurious revise.
  */
 export function currentVerdictRequestsChanges(
   config: RepoConfig,
@@ -103,23 +97,18 @@ export function currentVerdictRequestsChanges(
   reviewerLogin: string | undefined,
   logger: Logger,
 ): boolean {
-  try {
-    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
-      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
-    };
-    const verdicts = (data.reviews ?? [])
-      .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
-      .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
-    return verdicts[verdicts.length - 1]?.state === "CHANGES_REQUESTED";
-  } catch (err) {
-    logger.debug(`currentVerdictRequestsChanges lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
+  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+    reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+  };
+  const verdicts = (data.reviews ?? [])
+    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+    .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
+  return verdicts[verdicts.length - 1]?.state === "CHANGES_REQUESTED";
 }
 
 /**
  * When the reviewer's latest verdict on the PR is APPROVED, the time it was
- * submitted (ms); otherwise null. Lookup failure → null: the pre-existing skip.
+ * submitted (ms); otherwise null. A failed read throws (EM#1244 f5).
  */
 export function currentApprovalMs(
   config: RepoConfig,
@@ -127,19 +116,14 @@ export function currentApprovalMs(
   reviewerLogin: string | undefined,
   logger: Logger,
 ): number | null {
-  try {
-    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
-      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
-    };
-    const verdicts = (data.reviews ?? [])
-      .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
-      .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
-    const last = verdicts[verdicts.length - 1];
-    return last?.state === "APPROVED" ? new Date(last.submittedAt!).getTime() : null;
-  } catch (err) {
-    logger.debug(`currentApprovalMs lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
+  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+    reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+  };
+  const verdicts = (data.reviews ?? [])
+    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+    .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
+  const last = verdicts[verdicts.length - 1];
+  return last?.state === "APPROVED" ? new Date(last.submittedAt!).getTime() : null;
 }
 
 /**
@@ -149,8 +133,8 @@ export function currentApprovalMs(
  * Only a CHANGES_REQUESTED verdict qualifies: an APPROVED PR waiting on merge
  * is genuinely current. In normal flow CHANGES_REQUESTED moves the issues to
  * `prPendingActions`, which `findPRsNeedingReview` excludes, so this lookup
- * runs only in the stuck state it exists for. Lookup failure → false: the
- * pre-existing behaviour, never a spurious review.
+ * runs only in the stuck state it exists for. A failed read throws, so it
+ * is never a spurious review.
  */
 export function returnedToReviewSinceVerdict(
   config: RepoConfig,
@@ -159,53 +143,40 @@ export function returnedToReviewSinceVerdict(
   reviewerLogin: string | undefined,
   logger: Logger,
 ): boolean {
-  try {
-    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
-      reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
-    };
-    const verdicts = (data.reviews ?? [])
-      .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
-      .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
-    const last = verdicts[verdicts.length - 1];
-    if (!last || last.state !== "CHANGES_REQUESTED") return false;
-    const verdictMs = new Date(last.submittedAt!).getTime();
-    const label = config.lifecycleLabels.prUnderReview;
-    for (const n of issueNumbers) {
-      // One timestamp per line: --paginate emits one --jq result per page.
-      const times = gh([
-        "api", `repos/${config.githubRepo}/issues/${n}/events`, "--paginate",
-        "--jq", `.[] | select(.event == "labeled" and .label.name == ${JSON.stringify(label)}) | .created_at`,
-      ], config.repoPath).split("\n").filter(Boolean);
-      if (times.some((t) => new Date(t).getTime() > verdictMs)) return true;
-    }
-    return false;
-  } catch (err) {
-    logger.debug(`returnedToReviewSinceVerdict lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+    reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
+  };
+  const verdicts = (data.reviews ?? [])
+    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+    .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
+  const last = verdicts[verdicts.length - 1];
+  if (!last || last.state !== "CHANGES_REQUESTED") return false;
+  const verdictMs = new Date(last.submittedAt!).getTime();
+  const label = config.lifecycleLabels.prUnderReview;
+  for (const n of issueNumbers) {
+    // One timestamp per line: --paginate emits one --jq result per page.
+    const times = gh([
+      "api", `repos/${config.githubRepo}/issues/${n}/events`, "--paginate",
+      "--jq", `.[] | select(.event == "labeled" and .label.name == ${JSON.stringify(label)}) | .created_at`,
+    ], config.repoPath).split("\n").filter(Boolean);
+    if (times.some((t) => new Date(t).getTime() > verdictMs)) return true;
   }
+  return false;
 }
 
 /**
- * The PR's state read live (never from a snapshot): OPEN, MERGED or CLOSED, or null when GitHub
+ * The PR's state read live (never from a snapshot): OPEN, MERGED or CLOSED, or throws when GitHub
  * cannot say. The review phase asks before it starts a review (foreman#180).
  */
-export function readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED" | null {
-  try {
-    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "state"], config.repoPath) || "{}") as { state?: string };
-    return data.state === "OPEN" || data.state === "MERGED" || data.state === "CLOSED" ? data.state : null;
-  } catch (err) {
-    logger.debug(`readPrState lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
+export function readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED" {
+  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "state"], config.repoPath) || "{}") as { state?: string };
+  if (data.state === "OPEN" || data.state === "MERGED" || data.state === "CLOSED") return data.state;
+  throw new Error(`PR #${prNumber}: GitHub returned no state`);
 }
 
-/** The PR's head commit sha, or null when GitHub cannot say. */
-export function readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string | null {
-  try {
-    const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "headRefOid"], config.repoPath) || "{}") as { headRefOid?: string };
-    return data.headRefOid || null;
-  } catch (err) {
-    logger.debug(`readPrHeadSha lookup failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
+/** The PR's head commit sha, or throws when GitHub cannot say. */
+export function readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string {
+  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "headRefOid"], config.repoPath) || "{}") as { headRefOid?: string };
+  if (!data.headRefOid) throw new Error(`PR #${prNumber}: GitHub returned no head sha`);
+  return data.headRefOid;
 }

@@ -7,6 +7,7 @@ import { InMemoryRecordStore } from "../dist/record-store.js";
 import { loadIssueRecord, loadPrRecord, loadRepoRecord, resetIssueRecordsForTests, updateIssueRecord, updatePrRecord } from "../dist/issue-records.js";
 import { noteReleasePrs, noteLiveRelease, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
 import { resetNoCommitStreaksForTests } from "../dist/no-commit-streak.js";
+import { resetPendingHandoffsForTests } from "../dist/unstick.js";
 
 /** Replace the active work source's record store with a fresh in-memory one (call after the plugins started). */
 export function memoryRecords() {
@@ -18,6 +19,7 @@ export function memoryRecords() {
   resetIssueRecordsForTests();
   resetReleaseTrackerForTests();
   resetNoCommitStreaksForTests();
+  resetPendingHandoffsForTests();
   return store;
 }
 

@@ -70,6 +70,17 @@ export function isBackoffRefusal(err: unknown): err is UpstreamBackoffError {
   return err instanceof UpstreamBackoffError;
 }
 
+/**
+ * The HTTP status GitHub answered a failed `gh api --include` call with, from the status line gh prints
+ * ahead of the body; null when there was no response (a network error) or the call did not use --include.
+ */
+export function ghHttpStatus(err: unknown): number | null {
+  const out = (err as { stdout?: Buffer | string } | null)?.stdout;
+  const first = (typeof out === "string" ? out : out?.toString() ?? "").split("\n", 1)[0] ?? "";
+  const m = /^HTTP\/\S+ (\d{3})\b/.exec(first);
+  return m ? Number(m[1]) : null;
+}
+
 /** The most output one gh call may return before it fails: 64 MiB. */
 export const GH_MAX_BUFFER = 64 * 1024 * 1024;
 

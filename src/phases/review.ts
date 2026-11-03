@@ -144,13 +144,10 @@ async function reviewPass(
   // The candidate came from a snapshot that can be a refresh old; a PR merged or closed since is not
   // reviewed (foreman#180). Unknown (GitHub cannot say) waits a pass rather than spend a review.
   const prState = codeHost().readPrState(repoConfig, candidate.prNumber, reviewLogger);
+  // A read that fails throws and fails the pass (EM#1244 f5); it is never a state.
   if (prState !== "OPEN") {
-    if (prState === null) {
-      reviewLogger.info(`PR #${candidate.prNumber}: its state could not be read — review waits a pass`);
-    } else {
-      codeHost().forgetOpenPrs(repoConfig.githubRepo);
-      reviewLogger.info(`PR #${candidate.prNumber} is already ${prState.toLowerCase()} — no review started; the snapshot is dropped`);
-    }
+    codeHost().forgetOpenPrs(repoConfig.githubRepo);
+    reviewLogger.info(`PR #${candidate.prNumber} is already ${prState.toLowerCase()} — no review started; the snapshot is dropped`);
     return false;
   }
 
@@ -203,9 +200,9 @@ async function reviewPass(
       const wait = formatWait(reviewDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${wait}` };
       reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
-      // A transient GitHub error is a silent tooling defer: the card is not moved to Blocked, so a blip
+      // An unavailable work source is a silent tooling defer: the card is not moved to Blocked, so a blip
       // that clears on the next pass leaves no stale hold behind (foreman#180).
-      if (result.transient) return false;
+      if (result.unavailable) return false;
       // A wait is a Blocked card that says what clears it; the next review session moves it on.
       const why = `waiting on the Tech Lead: it could not take PR #${candidate.prNumber} (${result.reason}) — the review retries automatically in ${wait}`;
       for (const n of candidate.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);

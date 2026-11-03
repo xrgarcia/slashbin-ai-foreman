@@ -1256,6 +1256,8 @@ export async function revisePRFeedback(
   issueNumbers?: number[],
   /** QA's failing lines for the approved head (qaBeforeMerge): the review comments do not carry them. */
   qaFeedback?: string,
+  /** The feature branch's sha the caller already read before admitting the session (a failed read never reaches here). */
+  knownBeforeSha?: string | null,
 ): Promise<RevisionResult> {
   logger.info(`Starting PR revision for ${config.name}`);
 
@@ -1264,7 +1266,7 @@ export async function revisePRFeedback(
   // Without this, a silent no-op would be reported as success and the
   // orchestrator would (incorrectly) transition labels to `pr under review`,
   // hiding the fact that the requested fix was never applied.
-  const beforeSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  const beforeSha = knownBeforeSha !== undefined ? knownBeforeSha : codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
 
   const prContext = prNumber
     ? `\n\nCONTEXT: PR #${prNumber} needs revision. Linked issues: ${(issueNumbers || []).map(n => `#${n}`).join(", ")}. Read the review comments on PR #${prNumber} to understand what changes are requested.`
@@ -1335,8 +1337,8 @@ Work autonomously. Do not ask questions.`;
   // to `pr under review` — that would lie about the PR's state and cause the
   // EM to re-review unchanged code.
   //
-  // Conservative on lookup failures: if either SHA is null (transient gh
-  // error), we trust the exit code rather than fail spuriously.
+  // A branch that does not exist yet reads null; a read that FAILS throws and fails the
+  // pass (EM#1244 f5): neither a trailer nor an exit code is trusted on an unread branch.
   const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
   if (beforeSha && afterSha && beforeSha === afterSha) {
     // Declared no-commit: the revision determined the branch is already correct

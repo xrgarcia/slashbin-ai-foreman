@@ -74,7 +74,7 @@ test("the agent is told how to declare it, in both prompt branches", () => {
 test("two declared no-commits on one head escalate instead of looping", () => {
   const block = orchestrator.slice(orchestrator.indexOf("if (result.noCommit)"), orchestrator.indexOf("if (result.noCommit)") + 2000);
   const fn0 = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  assert.match(fn0, /const admitted = await recordNoCommit\(repoConfig, prNumber, head, prior\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
+  assert.match(fn0, /const seen = await recordNoCommit\(repoConfig, prNumber, head, prior\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
   assert.match(block, /MAX_CONSECUTIVE_NO_COMMIT/, "the cap must be applied, not just declared");
   assert.match(block, /events\.push/, "a stalemate nobody is told about looks exactly like an idle queue");
   assert.match(block, /level: "error"/, "two agents deadlocked is an error-level condition");
@@ -95,12 +95,15 @@ test("an escalated stalemate stops launching revision sessions until the head mo
   assert.ok(skip < fn.indexOf("revisePRFeedback("), "the skip must come before the session launches");
 });
 
-test("a streak that cannot be saved admits no paid session: the round is saved before the session starts", () => {
+test("a marker that cannot be saved admits no paid session; a round counts only after the session and a successful read (EM#1244 f5)", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  const admit = fn.indexOf("const admitted = await recordNoCommit(");
-  assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "saved before the paid session");
-  assert.match(fn.slice(admit, admit + 400), /if \(admitted === null\) \{[\s\S]{0,260}return null;/, "a failed save starts nothing, every pass");
+  const read = fn.indexOf("const beforeSha = codeHost().getRemoteBranchSha(");
+  const admit = fn.indexOf("await admitRevision(");
+  assert.ok(read > 0 && read < admit, "the branch sha is read BEFORE anything is written: a failed read leaves nothing to take back");
+  assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "the marker is saved before the paid session");
+  assert.match(fn.slice(admit, admit + 400), /^await admitRevision\([^\n]*\n[^\n]*\n\s+return null;/, "a failed save starts nothing, every pass");
   assert.ok(admit < fn.indexOf('tryAcquire("claude")'), "and before the slot is taken");
-  assert.match(fn, /restoreNoCommitStreak\(repoConfig, prNumber, prior\)/, "a session that did not answer is not counted as a no-commit round");
-  assert.doesNotMatch(fn.slice(fn.indexOf("if (result.noCommit)"), fn.indexOf("if (result.noCommit)") + 300), /recordNoCommit\(/, "no second, post-session save that could fail after the money is spent");
+  assert.doesNotMatch(fn.slice(read, fn.indexOf("recordNoCommit(") + 600), /restore/i, "nothing is restored: an outage that blocks reads also blocks the write that would undo a save");
+  const counted = fn.indexOf("recordNoCommit(");
+  assert.ok(counted > fn.indexOf("if (result.noCommit)"), "a round is counted only on a completed session whose later read showed the head unchanged");
 });
