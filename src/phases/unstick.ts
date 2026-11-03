@@ -20,7 +20,7 @@ import { fieldTable, loadIssueRecord, loadIssueRecords, loadRepoRecord, updateIs
 import { standingDivergence } from "../divergence.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import {
-  EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
+  EVENT_KINDS, RELEASE_GATE_REASON, drainHandoffs, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
   type UnstickCandidate, type UnstickEntry,
 } from "../unstick.js";
 import { activeRuns, divergenceReason } from "./common.js";
@@ -68,6 +68,8 @@ export async function tryUnstick(
   cycleNumber: number,
   deps: { comment?: CodeHost["commentOnIssue"] } = {},
 ): Promise<number> {
+  // SRE reports saved at receipt but not yet in the repo's record (the record was down): saved now, whether or not the EM is called.
+  await drainHandoffs(repoConfig).catch(() => 0);
   const unsticker = roleFor("unstick", config);
   if (!unsticker) return 0;
   const repoName = repoConfig.name;

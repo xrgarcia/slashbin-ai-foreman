@@ -14,7 +14,8 @@ import { tryReview } from "../dist/phases/review.js";
 import { tryQaBeforeMerge } from "../dist/phases/qa-before-merge.js";
 import { configureIssueCache } from "../dist/github.js";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
-import { memoryRecords, prRecordOf } from "./issue-records.mjs";
+import { memoryRecords, prRecordOf, breakRecords } from "./issue-records.mjs";
+import { activeWorkSource } from "../dist/plugins/registry.js";
 import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plugins/registry.js";
 import { GitHubPlugin } from "../dist/plugins/github.js";
 import { checkoutPathFor } from "../dist/review-checkout.js";
@@ -152,19 +153,97 @@ test("R2: after a restart the saved record still lets the healthy pass revise", 
   assert.equal((await prRecordOf(repo, PR)).noCommit.count, 1);
 });
 
-test("R3: two passes whose post-session sha read fails neither return the issue to review nor consume a round", async () => {
+test("R3: a post-session sha read that fails leaves an unconfirmed marker, not a round; one free pass settles it, then the head revises", async () => {
   const config = load();
   const repo = config.repos[0];
   labelIssue(LABELS.pending);
-  for (const cycle of [1, 2]) {
-    world({ branchOkLeft: 1, branchDown: false }); // the read before the session answers, the one after fails
-    await assert.rejects(pendingPass(config, cycle));
-  }
-  assert.equal(claudeRuns(), 2, "the sessions ran: the failure is the read after them");
-  assert.equal((await prRecordOf(repo, PR)).noCommit, undefined, "the unread result consumed no round");
+  world({ branchOkLeft: 1, branchDown: false }); // the read before the session answers, the one after fails
+  await assert.rejects(pendingPass(config, 1));
+  assert.equal(claudeRuns(), 1, "the session ran: the failure is the read after it");
+  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 0, inflight: true }, "a marker of unknown outcome, no round");
   assert.ok(String(JSON.parse(readFileSync(F.world, "utf8")).labels).includes(LABELS.pending), "the issue was not returned to review");
 
   world({ branchOkLeft: undefined, branchDown: false });
+  assert.equal(await pendingPass(config, 2), null, "the next readable pass settles the unconfirmed attempt and pays for nothing");
+  assert.equal(claudeRuns(), 1, "paid retries are bounded: one unconfirmed attempt per head");
+  assert.equal((await prRecordOf(repo, PR)).noCommit, undefined, "neither counted nor consumed");
   assert.ok(await pendingPass(config, 3), "revision resumes on the unchanged head");
-  assert.equal(claudeRuns(), 3);
+  assert.equal(claudeRuns(), 2);
+  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 }, "now one confirmed round");
+});
+
+// The outage that blocks the read blocks the record's writes too: nothing may need a write to be undone.
+const brokenSaves = async (during) => {
+  const source = activeWorkSource();
+  const [load0, save0] = [source.loadRecord, source.saveRecord];
+  breakRecords([PR], { saves: true, kind: "pr" });
+  try { await during(); } finally { source.loadRecord = load0; source.saveRecord = save0; }
+};
+
+test("R4: the pre-session read fails while saves fail too: nothing launches, nothing is consumed, recovery revises (also after a restart)", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  labelIssue(LABELS.pending);
+  await brokenSaves(async () => {
+    world({ branchDown: true });
+    for (const cycle of [1, 2]) await assert.rejects(pendingPass(config, cycle));
+  });
+  assert.equal(claudeRuns(), 0);
+  assert.equal((await prRecordOf(repo, PR)).noCommit, undefined);
+  resetNoCommitStreaksForTests();
+  world({ branchDown: false });
+  assert.ok(await pendingPass(config, 3));
+  assert.equal(claudeRuns(), 1);
+  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 });
+});
+
+test("R5: the post-session read fails and the record cannot be written: the round is not consumed, the head stays eligible after recovery and a restart", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  labelIssue(LABELS.pending);
+  world({ branchOkLeft: 1, branchDown: false });
+  // The marker was saved before the outage (admission needs a write); the outage then blocks every write.
+  const source = activeWorkSource();
+  const save0 = source.saveRecord;
+  let admitted = false;
+  source.saveRecord = async (k, r, rc) => { const ok = await save0(k, r, rc); admitted = true; return ok; };
+  const pass = pendingPass(config, 1);
+  await assert.rejects(pass);
+  source.saveRecord = save0;
+  assert.ok(admitted, "admission saved the marker before the session");
+  assert.equal(claudeRuns(), 1);
+  assert.equal((await prRecordOf(repo, PR)).noCommit?.count, 0, "no round counted from an unread result");
+  resetNoCommitStreaksForTests();
+  world({ branchOkLeft: undefined, branchDown: false });
+  await brokenSaves(async () => { assert.equal(await pendingPass(config, 2), null, "settling needs a write; it cannot, so the pass launches nothing"); });
+  assert.equal(claudeRuns(), 1, "no paid session on an unsettled marker");
+  assert.equal(await pendingPass(config, 3), null, "the healthy pass settles it");
+  assert.ok(await pendingPass(config, 4), "and the unchanged head is eligible again");
+  assert.equal(claudeRuns(), 2);
+});
+
+test("R6: a marker that cannot be saved admits no session", async () => {
+  const config = load();
+  labelIssue(LABELS.pending);
+  await brokenSaves(async () => { assert.equal(await pendingPass(config, 1), null); });
+  assert.equal(claudeRuns(), 0);
+  assert.ok(await pendingPass(config, 2));
+  assert.equal(claudeRuns(), 1);
+});
+
+test("R8: a confirmed no-commit round whose count cannot be saved does not advance the issue; the next pass settles and revises", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  labelIssue(LABELS.pending);
+  const source = activeWorkSource();
+  const save0 = source.saveRecord;
+  let n = 0;
+  source.saveRecord = async (k, r, rc) => (++n === 1 ? save0(k, r, rc) : false); // the marker saves; the count does not
+  try { assert.equal(await pendingPass(config, 1), null); } finally { source.saveRecord = save0; }
+  assert.equal(claudeRuns(), 1);
+  assert.ok(String(JSON.parse(readFileSync(F.world, "utf8")).labels).includes(LABELS.pending), "not advanced on a round it could not save");
+  assert.equal((await prRecordOf(repo, PR)).noCommit?.count, 0);
+  assert.equal(await pendingPass(config, 2), null);
+  assert.ok(await pendingPass(config, 3));
+  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 });
 });
