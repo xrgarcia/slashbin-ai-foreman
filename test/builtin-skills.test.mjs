@@ -78,7 +78,7 @@ test("builtin: inlines the shipped implement skill with the repo's branches", as
   const { prompt } = await promptOf(() => implementApprovedIssues(trust, repo({ skillPath: "builtin:" }), logger));
   assert.ok(prompt, "claude was not launched");
   assert.ok(prompt.includes(firstLine("skills/implement/SKILL.md")), "the built-in skill text is not in the prompt");
-  assert.match(prompt, /Feature branch: work\. Pull requests target: trunk\./);
+  assert.match(prompt, /Branch prefix for Foreman work: foreman\/\. Pull requests target: trunk\./);
   assert.ok(!prompt.includes("Read and follow the skill at builtin:"), "builtin: was passed through as a literal path");
   assert.match(prompt, /FOREMAN_RESULT: skipped issue=/, "the skip protocol must still follow the skill");
 });

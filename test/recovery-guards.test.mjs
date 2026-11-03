@@ -15,12 +15,12 @@ const src = (p) => readFileSync(join(root, p), "utf-8");
 
 test("a failed open-PR or closed-PR lookup is unknown, and the reconciler skips the branch", () => {
   const r = src("src/reconciler.ts");
-  const open = r.slice(r.indexOf("function hasOpenPR"), r.indexOf("function findLastClosedUnmergedPR"));
+  const open = r.slice(r.indexOf("function hasOpenPR"), r.indexOf("function readClosedPrs"));
   assert.match(open, /catch \{[\s\S]*?return "unknown";/);
-  const closed = r.slice(r.indexOf("function findLastClosedUnmergedPR"), r.indexOf("function createReconciliationPR"));
+  const closed = r.slice(r.indexOf("function readClosedPrs"), r.indexOf("export function pruneMergedBranches"));
   assert.match(closed, /catch \{[\s\S]*?return "unknown";/);
   assert.match(r, /existingPR === "unknown"\) \{[\s\S]*?continue;/);
-  assert.match(r, /lastRejected === "unknown"\) \{[\s\S]*?continue;/);
+  assert.match(r, /closedPrs === "unknown"\) {[\s\S]*?continue;/);
 });
 
 test("a build in flight is counted per repo and cleared only when every build ends", () => {

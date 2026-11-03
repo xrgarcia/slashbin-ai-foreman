@@ -65,6 +65,7 @@ const repoEntrySchema = z.object({
   baseBranch: z.string().optional(),
   productionBranch: z.string().optional(),
   featureBranch: z.string().optional(),
+  branchPrefix: z.string().optional(),
   // A repo-relative SKILL.md, or "builtin:" for the generic skill shipped in
   // this package's skills/ directory (see skillInstruction in phases/workflow-prompt.ts).
   skillPath: z.string().optional(),
@@ -107,8 +108,12 @@ export const configSchema = z.object({
   baseBranch: z.string().default("develop"),
   // The branch promotion PRs target; branch sync merges it back into baseBranch.
   productionBranch: z.string().default("main"),
-  // The branch implement and revise sessions commit to.
+  // LEGACY (#208). Nothing is built on this branch any more; a PR whose head equals it is still
+  // Foreman-owned so PRs open at the cutover drain. Removed once no repo has an open one.
   featureBranch: z.string().default("features"),
+  // Every issue is built on its own branch `<branchPrefix><issue>-<slug>` cut from baseBranch.
+  // A PR is Foreman-owned iff its head starts with this (or equals the legacy featureBranch).
+  branchPrefix: z.string().default("foreman/"),
   // The implement skill: a repo-relative SKILL.md, or "builtin:" for skills/implement/.
   skillPath: z.string().optional(),
   // The revise skill: a repo-relative SKILL.md, or "builtin:" for skills/revise/.
@@ -256,10 +261,6 @@ export const configSchema = z.object({
   // GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
   // Unset = no one is mentioned: the hold stays at its failed cap and the log says so.
   unstickEscalationOwner: z.string().min(1).optional(),
-  // The GitHub login whose divergence ruling the Foreman carries out (foreman#104):
-  // the EM's own account. Unset = no ruling is honoured; a diverged branch stays
-  // blocked until a person repairs it.
-  divergenceRulerLogin: z.string().min(1).optional(),
   // The name issue bodies give the epic tracker in `<label> #N` references (the
   // `## References` convention). When an issue closes in production, each epic it
   // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
@@ -456,7 +457,10 @@ export interface RepoConfig {
   baseBranch: string;
   /** Branch promotion PRs target; sync PRs merge it back into baseBranch. */
   productionBranch: string;
+  /** LEGACY (#208): a head equal to it is still Foreman-owned; nothing new is pushed to it. */
   featureBranch: string;
+  /** Prefix of every Foreman-owned per-issue branch (`<branchPrefix><issue>-<slug>`). */
+  branchPrefix: string;
   /** Repo-relative skill path, or "builtin:" for the skill shipped in skills/. */
   skillPath?: string;
   revisionSkillPath?: string;
@@ -488,8 +492,6 @@ export interface RepoConfig {
   lifecycleLabels: LifecycleLabels;
   /** The fleet-wide GitHub conventions (`github` block) — the global value. */
   github: GithubConventions;
-  /** The login whose divergence ruling is honoured — the global value; undefined = none. */
-  divergenceRulerLogin?: string;
   /** The epic label in `<label> #N` issue references — the global value; undefined = no epic parsing. */
   epicRefLabel?: string;
 }
@@ -537,8 +539,6 @@ export interface AgentConfig {
   emRepoPath?: string;
   /** Login @-mentioned when the unstick stage gives up on a hold; undefined = the give-up is only logged. */
   unstickEscalationOwner?: string;
-  /** The login whose divergence ruling is honoured; undefined = none. */
-  divergenceRulerLogin?: string;
   /** The epic label in `<label> #N` issue references; undefined = no epic parsing. */
   epicRefLabel?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
@@ -704,6 +704,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     baseBranch: process.env.AI_AGENT_BASE_BRANCH ?? fileConfig.baseBranch,
     productionBranch: process.env.AI_AGENT_PRODUCTION_BRANCH ?? fileConfig.productionBranch,
     featureBranch: process.env.AI_AGENT_FEATURE_BRANCH ?? fileConfig.featureBranch,
+    branchPrefix: process.env.AI_AGENT_BRANCH_PREFIX ?? fileConfig.branchPrefix,
     maxTurns: process.env.AI_AGENT_MAX_TURNS ?? fileConfig.maxTurns,
     maxDurationMs: process.env.AI_AGENT_MAX_DURATION_MS ?? fileConfig.maxDurationMs,
     model: process.env.AI_AGENT_MODEL ?? fileConfig.model,
@@ -717,7 +718,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
-    divergenceRulerLogin: fileConfig.divergenceRulerLogin,
     epicRefLabel: fileConfig.epicRefLabel,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
@@ -772,7 +772,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
-    divergenceRulerLogin: parsed.divergenceRulerLogin,
     epicRefLabel: parsed.epicRefLabel,
   };
 
@@ -799,6 +798,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         baseBranch: entry.baseBranch ?? parsed.baseBranch,
         productionBranch: entry.productionBranch ?? parsed.productionBranch,
         featureBranch: entry.featureBranch ?? parsed.featureBranch,
+        branchPrefix: entry.branchPrefix ?? parsed.branchPrefix,
         skillPath: entry.skillPath,
         revisionSkillPath: entry.revisionSkillPath,
         skillOverlayPath: entry.skillOverlayPath,
@@ -834,6 +834,7 @@ export function loadConfig(configPath?: string): AgentConfig {
       baseBranch: parsed.baseBranch,
       productionBranch: parsed.productionBranch,
       featureBranch: parsed.featureBranch,
+      branchPrefix: parsed.branchPrefix,
       skillPath: parsed.skillPath,
       revisionSkillPath: parsed.revisionSkillPath,
       skillOverlayPath: parsed.skillOverlayPath,
@@ -920,7 +921,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     sessionEnv: [...parsed.sessionEnv],
     emRepoPath,
     unstickEscalationOwner: parsed.unstickEscalationOwner,
-    divergenceRulerLogin: parsed.divergenceRulerLogin,
     epicRefLabel: parsed.epicRefLabel,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,

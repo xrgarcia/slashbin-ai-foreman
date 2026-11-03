@@ -86,7 +86,7 @@ itself when its check turns true):
 | Kind | Cause | Releases itself on | EM input |
 |---|---|---|---|
 | `skip` | the implementer declined (3 attempts) | `transientCauseGone`, `waitedOnDone`, `issueChanged` | change the issue so it can be built |
-| `divergence` | feature branch diverged | `divergenceCleared` | none unless it persists |
+| `divergence` | retired (foreman#208): no shared branch to diverge; kept in the list so old records still read | none | none |
 | `verify-no-pr` | `pr merged` with no merged PR closing the issue | `mergedPrFound` | link the PR or fix the label history |
 | `verify-held` | dev verification failed, waiting out back-off | `specEdited` | none — wait |
 | `verify-exhausted` | dev verification spent its attempts | `specEdited`, `baseAdvanced`, `holdNoLongerCharged` | edit the spec or land the fix |

@@ -185,8 +185,6 @@ test("foremanHolds: any recorded hold, an unfinished release, a branch block, or
   const h = await foremanHolds(rt, repo, [1, 2, 3, 4, 5, 7, 8, 10], quiet);
   for (const n of [1, 2, 3, 5, 7]) assert.equal(h(n), true, `#${n}`);
   for (const n of [4, 8, 10]) assert.equal(h(n), false, `#${n}`);
-  rt.divergence.observe(repo, { ahead: 1, behind: 1, mergeBase: "abc" });
-  assert.equal((await foremanHolds(rt, repo, [99], quiet))(99), true);
 });
 
 test("no core file reads an issue-keyed field from the state file but the import", () => {

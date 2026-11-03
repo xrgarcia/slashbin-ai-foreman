@@ -52,7 +52,7 @@ release needs both. The [starter setup](#start-with-one-repo) begins with PRs.
 | Review *(opt-in)* | Hand PRs to a separate Tech Lead program that reviews and merges under its own GitHub account. | [Automated review](docs/review.md) |
 | Revise loop | Address requested changes before starting new builds; pause a PR that keeps bouncing for a scope ruling. | [Revision](docs/pipeline.md#the-stages) |
 | Outcome-label repair and declared holds | Repair a missing outcome label from the reviewer's report after a merge, while respecting deliberate holds. | [Outcome reconciliation](docs/review.md#outcome-label-reconciliation) |
-| Orphan recovery (reconcile) | Find commits on the feature branch that no PR carries and open a PR for them. | [Reconciliation](docs/pipeline.md#the-stages) |
+| Orphan recovery (reconcile) | Find commits on a Foreman branch that no PR carries and open a PR for them. | [Reconciliation](docs/pipeline.md#the-stages) |
 | Dev verification (SRE) | Ask the configured SRE to check merged work in dev, retry failed checks, and optionally hold the next build until verification passes. | [Verification](docs/pipeline.md#the-stages) |
 | Promotion and release to production | Open a promotion PR for authorized work. With the release stage configured, coordinate approval, deployment, production verification, tagging, and issue closure. | [Release contract](docs/lifecycle.md#the-release-stage) |
 | Branch sync | Open a PR to merge the production branch back into the base branch after promotion; merge it automatically when the reviewer token is supplied. | [Branch sync](docs/pipeline.md#the-stages) |
@@ -105,7 +105,7 @@ Apply the trigger label (`approved` by default) to an issue in a configured repo
 
 1. **Build.** Foreman selects eligible work by priority and age, then starts Claude
    Code with the issue, the repo's implementation skill, and your configured limits.
-2. **Open a PR.** The implementation commits to the configured feature branch and
+2. **Open a PR.** The implementation commits to its own branch (`foreman/<issue>-<slug>`) and
    opens a PR into the base branch. The issue moves to `pr under review`.
 3. **Revise.** When a reviewer requests changes and the issue moves to
    `pr pending actions`, Foreman runs the revision skill and returns the PR for review.
@@ -151,8 +151,8 @@ surfaces are GitHub, logs, and the optional board.
 ## Start with one repo
 
 You need Node.js **22.12+**, a logged-in Claude Code CLI, the GitHub CLI, and a local
-checkout of the repo Foreman will edit. That repo needs the configured feature, base,
-and production branches; the defaults are `features`, `develop`, and `main`.
+checkout of the repo Foreman will edit. That repo needs the configured base
+and production branches; the defaults are `develop` and `main`. Each issue gets its own `foreman/…` branch.
 
 Set `FOREMAN_GITHUB_TOKEN` in the daemon's environment to use a dedicated GitHub
 account with write access. Without it, Foreman uses the account logged into `gh`.

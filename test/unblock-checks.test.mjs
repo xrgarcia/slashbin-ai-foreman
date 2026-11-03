@@ -17,7 +17,6 @@ test("a passing check resolves; false and unknown keep the block", () => {
   assert.equal(passingCheck("revision-exhausted", { prHeadMoved: true }), "prHeadMoved");
   assert.equal(passingCheck("revision-exhausted", { prHeadMoved: false }), null);
   assert.equal(passingCheck("verify-exhausted", { baseAdvanced: undefined }), null);
-  assert.equal(passingCheck("divergence", {}), null);
 });
 
 test("a check only releases the kinds it is listed for", () => {
@@ -34,7 +33,7 @@ test("an edited spec releases a failed verify, held or exhausted; unknown keeps 
 });
 
 test("the card note names the check", () => {
-  assert.match(unblockedReason("divergenceCleared"), /^unblocked: .*diverge/);
+  assert.match(unblockedReason("prHeadMoved"), /^unblocked: /);
 });
 
 test("every block kind is wired into the orchestrator", () => {

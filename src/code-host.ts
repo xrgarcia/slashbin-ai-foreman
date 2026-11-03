@@ -386,8 +386,10 @@ export interface CodeHost {
   labelNames(repo: RepoConfig): string[];
   /** Create one label. Throws on failure, an existing label included. */
   createLabel(repo: RepoConfig, name: string, color: string): void;
-  /** The open feature PR's URL, asked directly (outside the back-off; the caller checks it). */
-  featurePrUrlFallback(config: RepoConfig): string | undefined;
+  /** The open Foreman-owned PR's URL (one of `branches` first), asked directly (outside the back-off; the caller checks it). */
+  featurePrUrlFallback(config: RepoConfig, branches?: readonly string[]): string | undefined;
+  /** Delete a merged Foreman PR's head branch. Refuses a head that is not Foreman-owned, and the legacy featureBranch. Throws on failure. */
+  deleteMergedBranch(config: RepoConfig, head: string): boolean;
 
   // Branches: compare, drift, sync PRs.
   checkBranchDrift(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger: Logger): BranchDrift | null;
@@ -434,12 +436,12 @@ export interface CodeHost {
   isDeadBlockerReason(reason: string): boolean;
 
   // Dependency PRs and their batch issue.
-  buildDependencyBatchIssue(featureBranch: string, changes: readonly DependencyChange[], conventions?: GithubConventions, baseBranch?: string): {
+  buildDependencyBatchIssue(landingBranch: string, changes: readonly DependencyChange[], conventions?: GithubConventions, baseBranch?: string): {
     title: string;
     body: string;
 };
   createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): number | null;
-  dependencyBatchBases(featureBranch: string | undefined, baseBranch: string | undefined, productionBranch: string): string[];
+  dependencyBatchBases(baseBranch: string | undefined, productionBranch: string, legacyFeatureBranch?: string): string[];
   describeDependencyPR(number: number, title: string): DependencyChange;
   fetchOpenAlertPackages(repo: string, cwd: string): Set<string>;
   findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): PrSnapshot[];
@@ -470,9 +472,10 @@ export interface CodeHost {
   hasCommentStartingWith(config: RepoConfig, num: number, heading: string): Promise<boolean>;
 
   // Feature PRs.
-  findOpenFeaturePR(config: RepoConfig): {
+  findOpenFeaturePR(config: RepoConfig, prefer?: readonly string[]): {
     number: number;
     headSha: string;
+    headBranch: string;
     issueNumbers: number[];
 } | null;
   getReferencedIssuesFromOpenPR(repo: string, headBranch: string, baseBranch: string, cwd: string, logger?: Logger): number[] | null;

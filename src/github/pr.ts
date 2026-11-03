@@ -3,7 +3,7 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { fleetState } from "../github-state.js";
-import { findOpenPrs, formatGhError, ghKeyed, reads, knownOpenPr, openPrVersion } from "./cache.js";
+import { findOpenForemanPrs, findOpenPrs, formatGhError, ghKeyed, reads, knownOpenForemanPr, openPrVersion } from "./cache.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import type { FailedReviewPlan } from "../code-host.js";
 export type { FailedReviewPlan } from "../code-host.js";
@@ -73,45 +73,43 @@ export function getReferencedIssuesFromOpenPR(
 
 
 /**
- * The work in flight a custom stage runs against: the open feature → base PR,
- * its head, and the issues it implements (same reading as
- * getReferencedIssuesFromOpenPR). `null` when no such PR is open. Throws when
- * the lookup itself fails — a stage that gates must not read "could not look"
- * as "nothing to check".
+ * The work in flight a custom stage and the implement gate run against: the open
+ * Foreman-owned PR into the base branch (a per-issue `<branchPrefix>N-slug` head, or the
+ * legacy shared featureBranch), its head branch and sha, and the issues it implements (same
+ * reading as getReferencedIssuesFromOpenPR). `null` when no such PR is open. With `prefer`,
+ * a PR whose head is among those branches wins over another Foreman PR. Throws when the
+ * lookup itself fails — a stage that gates must not read "could not look" as "nothing to
+ * check". A human-named head is never returned (foreman-branch.ts).
  */
 export function findOpenFeaturePR(
   config: RepoConfig,
-): { number: number; headSha: string; issueNumbers: number[] } | null {
-  // Fleet state on: no open feature PR in it means nothing to check — at most
+  prefer?: readonly string[],
+): { number: number; headSha: string; headBranch: string; issueNumbers: number[] } | null {
+  // Fleet state on: no open Foreman PR in it means nothing to check — at most
   // one refresh late, which only defers a stage, never skips one for good.
   // A thrown refresh propagates: the caller holds the later stages on it.
-  if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo)
-    && !knownOpenPr(config.githubRepo, config.featureBranch, config.baseBranch)) {
-    return null;
-  }
-  const json = ghKeyed(`feature:${config.githubRepo}`, () => openPrVersion(config.githubRepo, config.featureBranch, config.baseBranch), [
-    "pr", "list",
+  if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo) && !knownOpenForemanPr(config)) return null;
+  const owned = findOpenForemanPrs(config);
+  const mine = owned.find((p) => prefer?.includes(p.headRefName)) ?? owned[0];
+  if (!mine) return null;
+  const json = ghKeyed(`feature:${config.githubRepo}:${mine.headRefName}`, () => openPrVersion(config.githubRepo, mine.headRefName, config.baseBranch), [
+    "pr", "view", String(mine.number),
     "--repo", config.githubRepo,
-    "--head", config.featureBranch,
-    "--base", config.baseBranch,
-    "--state", "open",
-    "--json", "number,title,body,commits,headRefOid",
-    "--limit", "1",
+    "--json", "number,title,body,commits,headRefOid,headRefName",
   ], config.repoPath);
-  const prs = JSON.parse(json || "[]") as Array<{
-    number: number; title?: string; body?: string; headRefOid?: string;
+  const pr = JSON.parse(json || "{}") as {
+    number?: number; title?: string; body?: string; headRefOid?: string; headRefName?: string;
     commits?: PrCommit[];
-  }>;
-  if (prs.length === 0) return null;
-  const pr = prs[0];
-  const commits = pr.commits || [];
+  };
+  if (pr.number === undefined) return null;
   return {
     number: pr.number,
     headSha: pr.headRefOid || "",
+    headBranch: pr.headRefName || mine.headRefName,
     issueNumbers: extractImplementedIssues({
       title: pr.title || "",
       body: pr.body || "",
-      commits,
+      commits: pr.commits || [],
     }),
   };
 }

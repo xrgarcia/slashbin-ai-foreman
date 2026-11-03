@@ -45,7 +45,6 @@ test("the slashbin profile resolves to exactly the values the core used to hard-
   assert.equal(c.unstickEscalationOwner, "xrgarcia");
   assert.deepEqual(c.qaRepos, ["xrgarcia/Slashbin-console"]);
   assert.equal(c.qaSecretsRunner, "scripts/secrets/doppler-run.mjs");
-  assert.equal(c.divergenceRulerLogin, "slashbin-engineering-manager");
   assert.equal(c.epicRefLabel, "engineering-manager");
   assert.equal(c.paperclip.commentAuthorHeader, "x-slashbin-comment-author");
   assert.equal(c.paperclip.enabled, false, "the profile's paperclip block does not turn the board on");
@@ -58,24 +57,21 @@ test("the slashbin profile resolves to exactly the values the core used to hard-
     "mcp__railway__*", "mcp__slashbin-ai-knowledge__*",
   ]);
   // Each repo carries the globals the phases read off repoConfig.
-  assert.equal(c.repos[0].divergenceRulerLogin, "slashbin-engineering-manager");
   assert.equal(c.repos[0].epicRefLabel, "engineering-manager");
 });
 
 // (b) Neutral: nothing operator-specific. Each path's clean degradation is tested where it
 // lives: unstick-giveup (no owner), epic-ready-to-close and release-stage (no label),
-// divergence-repair (no ruler), paperclip-config-client (no header).
+// paperclip-config-client (no header). (The divergence ruler key went with divergence repair, foreman#208.)
 test("no profile gives the neutral defaults", () => {
   const c = load({});
   assert.equal(c.profile, undefined);
   assert.equal(c.unstickEscalationOwner, undefined);
   assert.deepEqual(c.qaRepos, []);
   assert.equal(c.qaSecretsRunner, undefined);
-  assert.equal(c.divergenceRulerLogin, undefined);
   assert.equal(c.epicRefLabel, undefined);
   assert.equal(c.paperclip.commentAuthorHeader, undefined);
   assert.deepEqual(c.reviewAllowedTools, BASE_TOOLS);
-  assert.equal(c.repos[0].divergenceRulerLogin, undefined);
   assert.equal(c.repos[0].epicRefLabel, undefined);
 });
 
@@ -94,7 +90,6 @@ test("an explicit file value beats the profile, and a nested block merges key by
   assert.equal(c.repos[0].epicRefLabel, "my-em");
   assert.equal(c.paperclip.url, "http://127.0.0.1:9999");
   assert.equal(c.paperclip.commentAuthorHeader, "x-slashbin-comment-author", "an unset nested key still takes the profile's");
-  assert.equal(c.divergenceRulerLogin, "slashbin-engineering-manager", "an unset key still takes the profile's");
 
   const overridden = load({ profile: "slashbin", paperclip: { commentAuthorHeader: "x-other" } });
   assert.equal(overridden.paperclip.commentAuthorHeader, "x-other");

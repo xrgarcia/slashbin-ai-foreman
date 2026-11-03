@@ -24,6 +24,8 @@ export async function revisePRFeedback(
   qaFeedback?: string,
   /** The feature branch's sha the caller already read before admitting the session (a failed read never reaches here). */
   knownBeforeSha?: string | null,
+  /** The PR's own head branch: the only branch this session may push to. */
+  headBranch: string = config.featureBranch,
 ): Promise<RevisionResult> {
   logger.info(`Starting PR revision for ${config.name}`);
 
@@ -32,10 +34,10 @@ export async function revisePRFeedback(
   // Without this, a silent no-op would be reported as success and the
   // orchestrator would (incorrectly) transition labels to `pr under review`,
   // hiding the fact that the requested fix was never applied.
-  const beforeSha = knownBeforeSha !== undefined ? knownBeforeSha : codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  const beforeSha = knownBeforeSha !== undefined ? knownBeforeSha : codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
 
   const prContext = prNumber
-    ? `\n\nCONTEXT: PR #${prNumber} needs revision. Linked issues: ${(issueNumbers || []).map(n => `#${n}`).join(", ")}. Read the review comments on PR #${prNumber} to understand what changes are requested.`
+    ? `\n\nCONTEXT: PR #${prNumber} needs revision. PR branch: ${headBranch} (push only to this branch). Linked issues: ${(issueNumbers || []).map(n => `#${n}`).join(", ")}. Read the review comments on PR #${prNumber} to understand what changes are requested.`
     : "";
   const qaContext = qaFeedback
     ? `\n\nQA FAILED THIS PR (it booted the approved head locally before the merge). Fix what it found; the full report is the newest "## QA Report" comment on PR #${prNumber}:\n\n${qaFeedback}`
@@ -105,7 +107,7 @@ Work autonomously. Do not ask questions.`;
   //
   // A branch that does not exist yet reads null; a read that FAILS throws and fails the
   // pass (EM#1244 f5): neither a trailer nor an exit code is trusted on an unread branch.
-  const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
   if (beforeSha && afterSha && beforeSha === afterSha) {
     // Declared no-commit: the revision determined the branch is already correct
     // and said so on the trailer. That is a real outcome, not a misfire, and it
@@ -115,7 +117,7 @@ Work autonomously. Do not ask questions.`;
     if (declared) {
       const reason = declared[1].trim().slice(0, 300);
       logger.info(
-        `PR revision made no commit BY DECLARATION on ${config.featureBranch} ` +
+        `PR revision made no commit BY DECLARATION on ${headBranch} ` +
         `(SHA unchanged at ${beforeSha.slice(0, 10)}): ${reason}`,
       );
       return { success: true, noCommit: true, noCommitReason: reason, summary: extractStreamResult(result.stdout) };
@@ -125,7 +127,7 @@ Work autonomously. Do not ask questions.`;
     if (outputTail) {
       logger.warn("Claude output (last 500 chars):\n" + outputTail);
     }
-    logger.error(`PR revision completed (exit 0) but no commits were pushed to ${config.featureBranch} (SHA unchanged at ${beforeSha.slice(0, 10)}) and no FOREMAN_REVISION no-commit trailer was given — marking as failed`);
+    logger.error(`PR revision completed (exit 0) but no commits were pushed to ${headBranch} (SHA unchanged at ${beforeSha.slice(0, 10)}) and no FOREMAN_REVISION no-commit trailer was given — marking as failed`);
     return { success: false, error: "no commits pushed — revision was a no-op" };
   }
 

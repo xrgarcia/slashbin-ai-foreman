@@ -288,7 +288,8 @@ export function describeDrift(drift: readonly SkillDrift[]): string {
 export interface SkillSyncRepo {
   name: string;
   repoPath: string;
-  featureBranch: string;
+  /** The branch the sync commit is made on (the repo's baseBranch); sessions cut their issue branch from it. */
+  baseBranch: string;
   skillSyncSkills?: readonly string[];
 }
 
@@ -342,7 +343,7 @@ export class SkillSync {
       if (!golden) return;
       const names = skillsFor(cfg, golden, repo.skillSyncSkills);
       if (names.length === 0) return;
-      const drift = driftAt(repo.repoPath, `origin/${repo.featureBranch}`, cfg, golden, names);
+      const drift = driftAt(repo.repoPath, `origin/${repo.baseBranch}`, cfg, golden, names);
       const stale = describeDrift(drift);
       if (!stale) {
         this.driftLogged.delete(repo.name);
@@ -352,7 +353,7 @@ export class SkillSync {
       if (this.driftLogged.get(repo.name) === key) return;
       this.driftLogged.set(repo.name, key);
       logger.info(
-        `Skill drift on origin/${repo.featureBranch}: ${stale} behind ${golden.label}@${golden.version} — ` +
+        `Skill drift on origin/${repo.baseBranch}: ${stale} behind ${golden.label}@${golden.version} — ` +
         "synced in the commit before the next approved issue's session",
       );
     } catch (err) {
@@ -383,7 +384,7 @@ export class SkillSync {
     const names = skillsFor(cfg, golden, repo.skillSyncSkills);
     if (names.length === 0) return { status: "current" };
     const cwd = repo.repoPath;
-    const fb = repo.featureBranch;
+    const fb = repo.baseBranch;
     const target = cfg.targetDir.replace(/\/+$/, "");
     try {
       // A tracked change in the clone belongs to someone; checking out over it
@@ -467,19 +468,23 @@ export class SkillSync {
 export function settleSkillSync(repo: SkillSyncRepo, outcome: SyncOutcome, logger: Logger): void {
   if (outcome.status !== "synced") return;
   const cwd = repo.repoPath;
-  const fb = repo.featureBranch;
+  const fb = repo.baseBranch;
   try {
-    git(["fetch", "--quiet", "origin", fb], cwd);
-    try {
-      git(["merge-base", "--is-ancestor", outcome.sha, `origin/${fb}`], cwd);
-      return; // pushed with the work
-    } catch { /* not on origin */ }
-    if (git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) === fb && git(["rev-parse", "HEAD"], cwd) === outcome.sha) {
-      git(["reset", "--quiet", "--keep", `${outcome.sha}~1`], cwd);
-      logger.info(`Skill sync ${outcome.sha.slice(0, 9)} was not pushed (no work landed) — taken back off local ${fb}; the next issue syncs again`);
+    git(["fetch", "--quiet", "origin"], cwd);
+    // Pushed with the work = reachable from some remote branch (the session's own foreman/<N>-<slug>, usually).
+    let pushed = false;
+    try { pushed = git(["branch", "-r", "--contains", outcome.sha], cwd).split("\n").some((l) => l.trim().startsWith("origin/")); } catch { /* unknown: treated as unpushed */ }
+    // The sync commit was made on local <base> and the issue branch cut from it. Either way the local base must go
+    // back to origin/<base>: left ahead, the next sync would skip ("local base has a commit origin does not").
+    if (git(["rev-parse", fb], cwd) === outcome.sha) {
+      if (git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) === fb) git(["reset", "--quiet", "--keep", `${outcome.sha}~1`], cwd);
+      else git(["branch", "-f", fb, `${outcome.sha}~1`], cwd);
+      logger.info(pushed
+        ? `Skill sync ${outcome.sha.slice(0, 9)} was pushed with the work — local ${fb} moved back to origin/${fb}`
+        : `Skill sync ${outcome.sha.slice(0, 9)} was not pushed (no work landed) — taken back off local ${fb}; the next issue syncs again`);
       return;
     }
-    logger.warn(`Skill sync ${outcome.sha.slice(0, 9)} is unpushed under other local work on ${fb} — left in place`);
+    if (!pushed) logger.warn(`Skill sync ${outcome.sha.slice(0, 9)} is unpushed under other local work on ${fb} — left in place`);
   } catch (err) {
     logger.warn(`Skill sync: could not check whether ${outcome.sha.slice(0, 9)} was pushed: ${firstLine(err)}`);
   }

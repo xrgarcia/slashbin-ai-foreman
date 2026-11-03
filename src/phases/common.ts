@@ -9,9 +9,7 @@ import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
-import { type BranchDivergence } from "../reconciler.js";
 import type { ReviewTrailer, UpstreamLimit } from "../session/protocol.js";
-import type { Divergence } from "../divergence.js";
 import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "../unblock.js";
 import { BackoffTracker } from "../backoff.js";
 import { codeHost } from "../plugins/registry.js";
@@ -83,78 +81,6 @@ export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boo
   const since = Date.parse(sinceIso);
   if (r.status !== 0 || Number.isNaN(at) || Number.isNaN(since)) return undefined;
   return at > since;
-}
-
-/** One line: why a diverged feature branch holds an item back. */
-export function divergenceReason(block: Divergence): string {
-  return `${block.featureBranch} diverged from ${block.baseBranch}, merge base ${block.mergeBase} — the EM rules which side wins and the Foreman carries it out`;
-}
-
-/** The comment each held-back issue gets, once per divergence episode. */
-export function divergenceNotice(repoConfig: RepoConfig, block: Divergence): string {
-  const { featureBranch: f, baseBranch: b } = block;
-  return [
-    "<!-- foreman:branch-diverged -->",
-    `**The Foreman has stopped implementing on \`${repoConfig.githubRepo}\`: \`${f}\` has diverged from \`${b}\` (${block.ahead} ahead, ${block.behind} behind).**`,
-    "",
-    "This issue is approved and waiting. Building on a diverged branch would build an unknown tree, so which side wins is not the Foreman's call. The EM is asked for a ruling; the Foreman carries it out (resets or merges `" + f + "`, after saving the old head to a `backup/` ref) and resumes on the first cycle after the branch is reconciled. This is the only notice for this episode.",
-    "",
-    `Merge base: \`${block.mergeBase}\`. To reconcile by hand instead, for example:`,
-    "",
-    "```",
-    `git fetch origin && git checkout ${f} && git merge origin/${b} && git push origin ${f}`,
-    "```",
-  ].join("\n");
-}
-
-/**
- * The waiting issues of `repoConfig` already told about the divergence with merge base `mergeBase`, read from
- * their records. An issue whose record cannot be read is left out of both lists: it is neither told nor assumed
- * told (the caller must not comment on it this pass).
- */
-export async function toldAbout(rt: ForemanRuntime, repoConfig: RepoConfig, issues: readonly number[], mergeBase: string): Promise<{ told: number[]; fresh: number[] }> {
-  const loaded = await rt.records.loadIssueRecords(repoConfig, issues);
-  const told: number[] = [];
-  const fresh: number[] = [];
-  for (const [n, r] of loaded.records) (r.divergenceTold === mergeBase ? told : fresh).push(n);
-  return { told, fresh };
-}
-
-/**
- * Announce a diverged feature branch once per episode (foreman#44). The first sighting in a process warns;
- * later cycles are debug. Each item still waiting gets one comment per episode, an item approved mid-episode
- * its own when it first appears; a new merge base is a new episode. Whom it told lives on each issue's record
- * (`divergenceTold`), saved BEFORE the comment so a crash between the two never posts it twice. Resolves with
- * the issues now told about this episode.
- */
-export async function announceDivergence(
-  rt: ForemanRuntime,
-  repoConfig: RepoConfig,
-  waiting: number[],
-  block: Divergence,
-  logger: Logger,
-  first: boolean,
-): Promise<number[]> {
-  const { told, fresh } = await toldAbout(rt, repoConfig, waiting, block.mergeBase);
-  if (first) {
-    logger.warn(
-      `Implementation on ${repoConfig.name} stopped — ${divergenceReason(block)} (${block.ahead} ahead, ${block.behind} behind). Announcing on ${fresh.map((n) => `#${n}`).join(", ") || "no waiting issue"}; this is the only warning for this episode`,
-    );
-  } else {
-    logger.debug(`Implementation on ${repoConfig.name} still stopped — ${divergenceReason(block)}`);
-  }
-  for (const n of fresh) {
-    if (!(await rt.records.updateIssueRecord(repoConfig, n, (d) => { d.divergenceTold = block.mergeBase; }))) continue;
-    try {
-      codeHost().commentOnIssue(repoConfig, n, divergenceNotice(repoConfig, block));
-      told.push(n);
-    } catch (err) {
-      // Not told after all: forget it, so the next cycle tries again.
-      await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.divergenceTold; });
-      logger.warn(`Could not announce the divergence on #${n}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
-    }
-  }
-  return told;
 }
 
 export function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {

@@ -1,4 +1,5 @@
-// An open feature PR queues the next issue; it does not launch a session.
+// An open Foreman PR queues the next issue; it does not launch a session.
+// (foreman#208: the hold is policy now, ONE issue in flight per repo, not a shared-branch artifact; the gate text moved with it.)
 //
 // jerky_service #66/#70, 2026-10-05. The skill builds straight on `features`
 // and refuses to bundle a second issue into the open PR, so every cycle the
@@ -21,7 +22,7 @@ await startAgentPlugins();
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = orchestratorSource();
 
-const gateAt = src.indexOf("Gate: an open feature PR holds the branch");
+const gateAt = src.indexOf("Gate 1 — an open Foreman PR");
 // The gate itself: from its comment to the end of the `if (holder && queued…)`
 // branch. Ending at "// Invoke the skill" swept in the post-gate "Picked up" push.
 const block = src.slice(gateAt, src.indexOf("\n  }\n", src.indexOf("if (holder && queued.length > 0)", gateAt)) + 4);
@@ -61,5 +62,5 @@ test("a merge awaiting dev verification queues the next build, the same way", ()
   assert.match(block, /lifecycleLabels\.prMerged/, "a merge awaiting verification is the `pr merged` label");
   assert.match(block, /roleFor\("verifier", config\) !== undefined && config\.buildWaitsForDevVerify/,
     "no verifier means no verify stage, so nothing would ever free the queue");
-  assert.match(block, /: holder \? actionableIssues : \[\]/, "behind a verification, every candidate is queued");
+  assert.match(block, /verifyHolder \? actionableIssues : \[\]/, "behind a verification, every candidate is queued");
 });

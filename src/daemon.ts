@@ -133,7 +133,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
       repoPath: repo.repoPath,
       triggerLabel: repo.triggerLabel,
       baseBranch: repo.baseBranch,
-      featureBranch: repo.featureBranch,
+      branchPrefix: repo.branchPrefix,
     });
   }
 

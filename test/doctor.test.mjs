@@ -68,7 +68,7 @@ function arrange(cfg, state) {
     return { status: r.status, out: r.stdout + r.stderr, calls };
   };
 }
-const ready = () => ({ push: true, branches: ["features", "develop", "main"], labels: [...LABELS, "bug"] });
+const ready = () => ({ push: true, branches: ["develop", "main"], labels: [...LABELS, "bug"] });
 
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -98,12 +98,12 @@ test("only reads: every gh call is a GET, --version or auth status", () => {
 test("each missing piece is a FAIL that names its fix; the run exits 1", () => {
   const run = arrange(
     { repos: [{ name: "a", githubRepo: "acme/a", skillPath: ".claude/skills/none/SKILL.md" }, { name: "b", githubRepo: "acme/b", repoPath: join(tmp, "nowhere") }] },
-    { "acme/a": { push: false, branches: ["develop", "main"], labels: ["approved"] } },
+    { "acme/a": { push: false, branches: ["main"], labels: ["approved"] } },
   );
   const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN });
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /^FAIL  a: github — .*cannot push/m);
-  assert.match(r.out, /^FAIL  a: branches — missing on GitHub: feature "features"/m);
+  assert.match(r.out, /^FAIL  a: branches — missing on GitHub: base "develop"/m);
   assert.match(r.out, /^FAIL  a: skillPath — .*Use "builtin:"/m);
   assert.match(r.out, /^WARN  a: revisionSkillPath — unset/m);
   assert.match(r.out, /^FAIL  a: labels — missing "pr under review".*npm run labels:install/m);

@@ -51,6 +51,10 @@ fs.appendFileSync(${JSON.stringify(F.ghLog)}, JSON.stringify(args) + "\\n");
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(F.ghState)}, "utf8"));
 if (args[0] === "pr" && args[1] === "list") {
   process.stdout.write(JSON.stringify(args.includes("--head") ? st.featurePrs : st.openPrs));
+} else if (args[0] === "pr" && args[1] === "view") {
+  // foreman#208: the open Foreman PR is read by number (\`pr view N\`), not by the shared head.
+  const p = st.openPrs.find((x) => String(x.number) === args[2]);
+  process.stdout.write(JSON.stringify(p ?? {}));
 } else {
   process.stdout.write("[]");
 }
@@ -95,13 +99,14 @@ function load(cfg, repos) {
   return loadConfig(p);
 }
 
+// foreman#208: the Foreman finds its PRs by listing the open ones and checking ownership of the head, so the fixture's PR names its head (the legacy shared branch, still owned) and its base.
 const SHA = "a".repeat(40);
 const prAt = (sha) => ({ number: 7, title: "feat: x (#3)", body: "", commits: [], headRefOid: sha });
 
 function arrange({ featurePrs = [prAt(SHA)], claudeOut = "FOREMAN_STAGE pass\n", hold = false } = {}) {
   writeFileSync(F.ghLog, "");
   writeFileSync(F.claudeLog, "");
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs: [] }));
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs: featurePrs.map((p) => ({ ...p, headRefName: "features", baseRefName: "develop" })) }));
   writeFileSync(F.claudeOut, claudeOut);
   if (hold) writeFileSync(F.hold, "");
   else if (existsSync(F.hold)) rmSync(F.hold);
@@ -262,7 +267,7 @@ test("(c) a second pass of the same (repo, lane) waits for the first, then takes
   const first = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await until(() => starts().length === 1, "the first pass's session");
   // New work lands while the first item is in flight.
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs: [prAt("b".repeat(40))], openPrs: [] }));
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs: [prAt("b".repeat(40))], openPrs: [{ ...prAt("b".repeat(40)), headRefName: "features", baseRefName: "develop" }] }));
   const second = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await sleep(300);
   assert.equal(starts().length, 1, "no second item while the first is in flight");

@@ -9,6 +9,7 @@ import {
   detectDeclaredLanded, detectDeclaredSkip, detectSkipSignal, detectUpstreamLimit, extractStreamResult,
   type ImplementationResult,
 } from "../session/protocol.js";
+import { foremanBranchName } from "../foreman-branch.js";
 import { IMAGE_HANDLING_INSTRUCTIONS, readOverlay, skillInstruction } from "./workflow-prompt.js";
 
 /** The priority tiers as one line, e.g. `S1 > security > S2+bug > … > chore`. */
@@ -22,6 +23,12 @@ function priorityOrder(github: GithubConventions): string {
  */
 export function workItemsLine(issueNumbers: number[]): string {
   return `Implement exactly these work items, and no others: ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
+}
+
+/** The per-issue branch contract appended to every implement prompt. */
+export function branchContract(config: RepoConfig, branchMap: Record<number, string>, branchList: string): string {
+  const base = config.baseBranch;
+  return `\n\nIMPORTANT — Branch contract (this OVERRIDES any branch step in the skill or prompt above): each issue is built on its own branch. Your assigned branches, by issue number: ${JSON.stringify(branchMap)} (also in the FOREMAN_BRANCHES environment variable; use the one for the issue you pick: ${branchList}). Cut it from origin/${base} (\`git fetch origin\`, then \`git checkout -B <branch> origin/${base}\`); if origin/<branch> already exists, check it out and rebase it onto origin/${base}. Commit there, push it, and open the PR \`<branch> → ${base}\` with the body starting "Related to #N". NEVER commit or push to \`${config.featureBranch}\` or \`${base}\`, and never push to any branch that is not your assigned one. A PR from any other head is treated as a failed run.`;
 }
 
 /**
@@ -41,13 +48,33 @@ export async function implementApprovedIssues(
   priorFailureReason?: string | null,
   issueNumbers?: number[],
   handOff?: number[],
+  /** Item number -> its own `foreman/<N>-<slug>` branch. The session cuts the one for the item it picks. */
+  branches?: Record<number, string>,
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
+
+  // Every item in the hand-off has its own branch, cut from origin/<base> by the session once it has picked one.
+  const branchMap: Record<number, string> = {};
+  for (const n of new Set([...(handOff ?? []), ...(issueNumbers ?? [])])) branchMap[n] = branches?.[n] ?? foremanBranchName(config, n, "");
+  const candidates = [...new Set(Object.values(branchMap))];
+  const shaOf = (b: string) => codeHost().getRemoteBranchSha(config.githubRepo, b, config.repoPath, logger);
+  const branchList = candidates.join(", ") || `${config.branchPrefix}<N>-<slug>`;
 
   // Captured so a DECLARED skip can be distinguished from a declaration made
   // while the agent was in fact pushing work. Evidence beats narrative in both
   // directions: the trailer is only honoured when the branch really did not move.
-  const beforeSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
+  // A PR open BEFORE the run (a legacy `features` PR draining, or a prior attempt's branch) may legitimately be the head afterwards.
+  const preExistingHead = codeHost().findOpenFeaturePR(config)?.headBranch ?? null;
+  const beforeShas = new Map(candidates.map((b) => [b, shaOf(b)] as const));
+  /** The first candidate branch whose remote sha differs from before the session (a new branch counts as moved). */
+  const movedBranch = (): { branch: string; before: string | null; after: string } | null => {
+    for (const b of candidates) {
+      const after = shaOf(b);
+      const before = beforeShas.get(b) ?? null;
+      if (after && after !== before) return { branch: b, before, after };
+    }
+    return null;
+  };
 
   // Resolve the skill and the overlay before anything is launched: either one
   // configured but unreadable fails this item with Claude never started.
@@ -88,7 +115,7 @@ export async function implementApprovedIssues(
     prompt = `${issueScope}
 
 3. Implement each issue, commit with message: fix|feat|chore: <description> (#<issue-number>)
-4. Push to ${config.featureBranch} and create a PR targeting ${config.baseBranch}.
+4. Cut each item's own branch from origin/${config.baseBranch} (branches: ${branchList}), push it, and create a PR from it targeting ${config.baseBranch}.
 
 IMPORTANT: In PR descriptions, use "Related to #N" — NEVER use "Closes #N" or "Fixes #N". Issues are closed by the EM after production verification, not on dev merge.
 
@@ -98,6 +125,10 @@ Work autonomously. Do not ask questions.`;
   }
 
   if (overlay.ok) prompt += overlay.text;
+
+  // The branch contract rides in the prompt for EVERY skill mode (a repo-local skill, the built-in one, a custom prompt):
+  // the Foreman cannot rely on a repo's skill copy knowing about per-issue branches. It overrides any branch step in the skill.
+  prompt += branchContract(config, branchMap, branchList);
 
   // Skip-signaling protocol: an issue body may explicitly direct the agent NOT
   // to implement (e.g., investigation-first, blocked on external verification).
@@ -111,16 +142,16 @@ Work autonomously. Do not ask questions.`;
   // (the built-in skill carries it as well). Without it "all 16 already on
   // features" ended as prose, no trailer, and the issue stayed open and approved
   // while the issues blocked by it waited (jerky_skuvault_service#478, 2026-10-26).
-  prompt += `\n\nIMPORTANT — Nothing-to-land protocol: if the work an issue asks for is ALREADY on ${config.featureBranch} (for example every dependency PR is already merged there), there is nothing to build and no PR to open. Comment the evidence on the issue (what you checked: PR numbers, SHAs), push nothing, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: landed issue=<the issue number> reason="<one-line evidence>"\n\nThe Foreman then closes the issue as completed, which releases every issue blocked by it. Never end with prose such as "No PR produced" or "No code change to land" alone: it is not heard, and the issue stays open. If the work cannot land and a person must act, use the skip protocol above instead.`;
+  prompt += `\n\nIMPORTANT — Nothing-to-land protocol: if the work an issue asks for is ALREADY on ${config.baseBranch} (for example every dependency PR is already merged there), there is nothing to build and no PR to open. Comment the evidence on the issue (what you checked: PR numbers, SHAs), push nothing, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: landed issue=<the issue number> reason="<one-line evidence>"\n\nThe Foreman then closes the issue as completed, which releases every issue blocked by it. Never end with prose such as "No PR produced" or "No code change to land" alone: it is not heard, and the issue stays open. If the work cannot land and a person must act, use the skip protocol above instead.`;
 
   // Third Way: if a prior attempt failed, include context so Claude can adapt
   if (priorFailureReason) {
-    prompt += `\n\nIMPORTANT — PRIOR ATTEMPT FAILED: "${priorFailureReason}". Ensure you: (1) commit changes to the ${config.featureBranch} branch, (2) push to origin, (3) create a PR targeting ${config.baseBranch} using \`gh pr create\`. If a PR already exists, push new commits to it.`;
+    prompt += `\n\nIMPORTANT — PRIOR ATTEMPT FAILED: "${priorFailureReason}". Ensure you: (1) commit changes to the item's own branch (${branchList}) cut from origin/${config.baseBranch}, (2) push that branch to origin, (3) create a PR from it targeting ${config.baseBranch} using \`gh pr create\`. If a PR already exists for that branch, push new commits to it.`;
   }
 
   const transcriptPath = phaseTranscriptPath("implement", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
-  const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath);
+  const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath, { FOREMAN_BRANCHES: JSON.stringify(branchMap), FOREMAN_BRANCH_PREFIX: config.branchPrefix });
   // The session may have opened a PR the cached list predates.
   codeHost().forgetOpenPrs(config.githubRepo);
 
@@ -156,11 +187,11 @@ Work autonomously. Do not ask questions.`;
   // its issue and the orchestrator closes only an issue in the batch.
   const declaredLanded = detectDeclaredLanded(result.stdout);
   if (declaredLanded.landed) {
-    const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
-    if (beforeSha && afterSha && beforeSha !== afterSha) {
+    const moved = movedBranch();
+    if (moved) {
       logger.warn(
-        `Agent emitted a landed trailer but ${config.featureBranch} advanced ` +
-        `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
+        `Agent emitted a landed trailer but ${moved.branch} advanced ` +
+        `${(moved.before ?? "(new)").slice(0, 9)} → ${moved.after.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
       );
     } else {
       logger.info(`Implementation found #${declaredLanded.issue} already landed — ${declaredLanded.reason}`);
@@ -177,11 +208,11 @@ Work autonomously. Do not ask questions.`;
 
   const declaredSkip = detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
-    const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
-    if (beforeSha && afterSha && beforeSha !== afterSha) {
+    const moved = movedBranch();
+    if (moved) {
       logger.warn(
-        `Agent emitted a skip trailer but ${config.featureBranch} advanced ` +
-        `${beforeSha.slice(0, 9)} → ${afterSha.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
+        `Agent emitted a skip trailer but ${moved.branch} advanced ` +
+        `${(moved.before ?? "(new)").slice(0, 9)} → ${moved.after.slice(0, 9)} — treating the commits as the truth and ignoring the trailer`,
       );
     } else {
       // Scope the skip when the agent named an issue, so one unbuildable spec
@@ -236,11 +267,23 @@ Work autonomously. Do not ask questions.`;
     }
   }
 
+  // The head the session built on: the open Foreman PR's own branch, else the branch that moved, else the first candidate.
+  const openPr = codeHost().findOpenFeaturePR(config);
+  const headBranch = openPr?.headBranch ?? movedBranch()?.branch ?? candidates[0] ?? `${config.branchPrefix}unknown`;
+
+  // The assigned branch is the contract. A PR from any other head is not success for a fresh issue; the legacy shared
+  // head counts only for a PR that was already open before this run.
+  if (candidates.length > 0 && !candidates.includes(headBranch) && headBranch !== preExistingHead && (prUrl || openPr)) {
+    const reason = `branch contract violated: the PR head is "${headBranch}", not the assigned ${branchList} (cut from origin/${config.baseBranch})`;
+    logger.error(`${reason} — marking as failed`);
+    return { success: false, error: reason };
+  }
+
   if (prUrl) {
     // Verify the PR actually exists on GitHub
     const verified = codeHost().verifyPRExists(
       config.githubRepo,
-      config.featureBranch,
+      headBranch,
       config.baseBranch,
       config.repoPath,
       logger,
@@ -250,7 +293,7 @@ Work autonomously. Do not ask questions.`;
       return { success: false, error: "PR creation could not be verified" };
     }
     // Post-implementation self-check: verify the PR has actual file changes
-    const changedFiles = codeHost().checkPRHasChanges(config.githubRepo, config.featureBranch, config.baseBranch, config.repoPath, logger);
+    const changedFiles = codeHost().checkPRHasChanges(config.githubRepo, headBranch, config.baseBranch, config.repoPath, logger);
     if (changedFiles === 0) {
       return { success: false, error: "PR exists but has no file changes" };
     }
@@ -263,7 +306,7 @@ Work autonomously. Do not ask questions.`;
   // feature PR already has the work (Claude may have added commits to it).
   const existingPR = codeHost().verifyPRExists(
     config.githubRepo,
-    config.featureBranch,
+    headBranch,
     config.baseBranch,
     config.repoPath,
     logger,
