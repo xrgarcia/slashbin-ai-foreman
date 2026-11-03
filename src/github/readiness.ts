@@ -13,7 +13,6 @@ import type { RepoConfig } from "../config.js";
 import { formatGhError } from "./cache.js";
 import { commentOnIssue } from "./ci-gate.js";
 import { gh } from "./gh.js";
-import { foremanLogin } from "./skip-hold.js";
 
 /** One declared prerequisite. */
 export type Predicate =
@@ -248,11 +247,12 @@ type LabeledNode = { label?: { name?: string }; actor?: { login?: string } | nul
  * follow it, so a restart does not repeat it and a readiness hold never hides an
  * acceptance hold (or the reverse). Returns true when the reason is on the issue
  * (already, or just posted); false when it could not be established, so the
- * caller tries again next cycle. Throws never.
+ * caller tries again next cycle. Throws never. `login` is the Foreman's own
+ * login (undefined when unknown: the dedupe is then skipped).
  */
-export function announceHold(config: RepoConfig, num: number, kind: HoldKind, reasons: string[]): boolean {
+export function announceHold(config: RepoConfig, num: number, kind: HoldKind, reasons: string[], login: string | undefined): boolean {
   try {
-    const self = foremanLogin(config.repoPath)?.toLowerCase();
+    const self = login?.toLowerCase();
     const lastHold = self
       ? findLatest<CommentNode, string>(config, num, COMMENTS_QUERY, "comments", (c) =>
           c.author?.login?.toLowerCase() === self && c.body?.includes(MARKER_PREFIX) && kindOf(c.body) === kind ? c.body : undefined)
@@ -265,11 +265,6 @@ export function announceHold(config: RepoConfig, num: number, kind: HoldKind, re
   } catch {
     return false;
   }
-}
-
-/** Announce a readiness hold (see `announceHold`). */
-export function announceReadinessHold(config: RepoConfig, num: number, unmet: string[]): boolean {
-  return announceHold(config, num, "readiness", unmet);
 }
 
 /** The issue body, live. Throws on a gh failure. */

@@ -74,10 +74,7 @@ export {
 export {
   type SignoffGate,
   unsignedIssues,
-  unsignedInHead,
-  foremanAppliedOrHold,
-  syncSignoff,
-  resetSignoff,
+  ReleaseSignoff,
   SIGNOFF_MARK,
 } from "./github/release-signoff.js";
 export {
@@ -89,7 +86,6 @@ export {
   listCarriedMerges,
   planCarry,
   mergedPrNumber,
-  resetReleaseCarry,
 } from "./github/release-carry.js";
 export { issueTitles, readPrDigest, prChangedFiles, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
 export {

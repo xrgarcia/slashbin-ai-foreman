@@ -2,8 +2,8 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { isGitHubStateEnabled } from "../github-state.js";
-import { findOpenPrs, formatGhError, ghKeyed, issueCacheTtlMs, knownOpenPr, openPrVersion } from "./cache.js";
+import { fleetState } from "../github-state.js";
+import { findOpenPrs, formatGhError, ghKeyed, reads, knownOpenPr, openPrVersion } from "./cache.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import type { FailedReviewPlan } from "../code-host.js";
 export type { FailedReviewPlan } from "../code-host.js";
@@ -85,7 +85,7 @@ export function findOpenFeaturePR(
   // Fleet state on: no open feature PR in it means nothing to check — at most
   // one refresh late, which only defers a stage, never skips one for good.
   // A thrown refresh propagates: the caller holds the later stages on it.
-  if (issueCacheTtlMs > 0 && isGitHubStateEnabled(config.githubRepo)
+  if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo)
     && !knownOpenPr(config.githubRepo, config.featureBranch, config.baseBranch)) {
     return null;
   }
