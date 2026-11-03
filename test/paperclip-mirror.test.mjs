@@ -1642,6 +1642,24 @@ test("identity: with the registry down the scan completes, a resolvable repo get
   assert.ok(log.lines.some(([lvl, m]) => lvl === "warn" && m.includes("example/down") && m.includes("unavailable")));
 });
 
+test("identity: a mixed-owner repo whose lookup failed creates no second card, and the recovered registry finds the first", async () => {
+  const fake = fakePaperclip([oldCard()]);
+  const id = fakeIdentity();
+  id.downRepos.add("xrgarcia/slashbin-console");
+  const { mirror, log } = mirrorOn(fake, { repos: ["slashbin-io/slashbin-console", "xrgarcia/slashbin-console"] }, id);
+  await mirror.ensureIndex(true);
+  // R1: the existing card is indexed on its raw spelling; claiming under the other owner must not create a second card.
+  await mirror.onClaim(MOVED, repoConfig, logger());
+  assert.equal(fake.rows.length, 1, "no second card while the old spelling is unresolved");
+  assert.ok(log.lines.some(([lvl, m]) => lvl === "warn" && m.includes("no card created")));
+  // R2: the registry recovers before the next scheduled scan; the index is rebuilt on the answer and finds the card.
+  id.downRepos.clear();
+  await mirror.warm("xrgarcia/slashbin-console");
+  await mirror.onClaim(MOVED, repoConfig, logger());
+  assert.equal(fake.rows.length, 1, "the recovered registry finds the existing card");
+  assert.equal(fake.rows[0].status, "in_progress");
+});
+
 test("identity: a failed repo costs one lookup per scan, however many rows and items name it", async () => {
   const rows = Array.from({ length: 5 }, (_, i) => ({ id: `d${i}`, title: "t", status: "todo", description: `source: example/down#${i + 1}\n\nx` }));
   const fake = fakePaperclip(rows);

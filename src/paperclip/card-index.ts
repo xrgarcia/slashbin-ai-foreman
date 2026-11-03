@@ -89,6 +89,8 @@ export class CardIndex {
   /** Repos whose registry lookup failed during the scan in progress: asked once, then compared on their last known key. */
   private readonly unresolved = new Set<string>();
   private scanning = false;
+  /** Repos the last committed scan indexed on a fallback key (their lookup failed): their cards may sit under a spelling the registry would merge. */
+  private staleRepos = new Set<string>();
   /** The Unplaced project's id, or the lookup in flight; cleared when it finds none or an ambiguous set. */
   private unplacedLookup: Promise<string | null> | null = null;
 
@@ -123,6 +125,8 @@ export class CardIndex {
     if (!this.env.identity) return repo;
     const key = await this.env.identity.keyOf(repo);
     this.repoKeys.set(repo, key);
+    // The registry is back for a repo the index was built without: rescan so its cards are keyed on the answer.
+    if (this.staleRepos.delete(repo)) this.indexedAt = 0;
     return key;
   }
 
@@ -279,6 +283,12 @@ export class CardIndex {
     // An explicit project wins; the Unplaced lookup files nothing until it finds one.
     const key = await this.indexKey(item);
     if (!key) return null;
+    // A repo of this name whose registry lookup failed may hold this issue's card under another owner's spelling: create nothing until it resolves.
+    const name = (r: string) => r.split("/").pop()!.toLowerCase();
+    if ([...this.staleRepos].some((r) => name(r) === name(item.repo))) {
+      this.env.log("warn", `Paperclip mirror: no card created for ${item.repo}#${item.issueNumber}: the registry has not answered for ${[...this.staleRepos].filter((r) => name(r) === name(item.repo)).join(", ")}, whose card for it may exist under that spelling`);
+      return null;
+    }
     const unplaced = !this.env.cfg.projectId && this.env.cfg.projects;
     const projectId = this.env.cfg.projectId ?? (unplaced ? await this.unplacedProjectId() : null);
     if (unplaced && !projectId) return null;
@@ -368,6 +378,7 @@ export class CardIndex {
     this.scanning = false;
     if (!scanned.ok) return !!this.index;
     this.rows = scanned.value.rows;
+    this.staleRepos = new Set(this.unresolved);
     this.lastReadStartedAt = started;
     if (!delta) this.fullReadAt = started;
     const gets = this.env.client.reads.calls - reads0.calls;
