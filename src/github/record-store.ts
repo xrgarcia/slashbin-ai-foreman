@@ -13,7 +13,6 @@ import type { RepoConfig } from "../config.js";
 import { canonicalJson, isItemRecord, recordId } from "../record-store.js";
 import { formatGhError } from "./cache.js";
 import { gh } from "./gh.js";
-import { foremanLogin } from "./skip-hold.js";
 
 /**
  * The issue a repo's own record lives on (EM#1244 f4): a repo has no item to hold a comment, so the store keeps
@@ -32,8 +31,6 @@ export interface RecordStoreIo {
   run(args: string[], cwd: string): string;
   login(cwd: string): string | undefined;
 }
-
-const realIo: RecordStoreIo = { run: gh, login: foremanLogin };
 
 /** The comment body for a record. `<` and `>` are escaped so the JSON can never close its own HTML comment. */
 export function recordBody(record: ItemRecord): string {
@@ -69,7 +66,7 @@ export class GitHubRecordStore {
   /** The anchor issue of each repo's record, once found: null = looked for, none exists yet. */
   private readonly anchors = new Map<string, number | null>();
 
-  constructor(private readonly io: RecordStoreIo = realIo) {}
+  constructor(private readonly io: RecordStoreIo) {}
 
   async loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad> {
     try {

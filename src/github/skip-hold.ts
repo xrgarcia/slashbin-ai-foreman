@@ -122,16 +122,23 @@ export function issueActivitySince(repo: string, issue: number, since: string, c
   ];
 }
 
-let selfLogin: string | undefined;
-/** The login the Foreman's token acts as, read once. Undefined when the read fails. */
-export function foremanLogin(cwd: string): string | undefined {
-  if (selfLogin) return selfLogin;
-  try {
-    selfLogin = gh(["api", "user", "--jq", ".login"], cwd) || undefined;
-  } catch {
-    return undefined;
+/**
+ * The login the Foreman's token acts as, read once and then remembered.
+ * The GitHub plugin owns one and hands it to its connector and code host.
+ */
+export class ForemanIdentity {
+  private known: string | undefined;
+
+  /** The login, or undefined when the read fails (it is tried again next call). */
+  login(cwd: string): string | undefined {
+    if (this.known) return this.known;
+    try {
+      this.known = gh(["api", "user", "--jq", ".login"], cwd) || undefined;
+    } catch {
+      return undefined;
+    }
+    return this.known;
   }
-  return selfLogin;
 }
 
 /** Whether a held issue stays held, and if not, what released it. */

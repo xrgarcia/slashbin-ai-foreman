@@ -31,8 +31,11 @@ export const GITHUB_WORK_SOURCE = "github";
  * GitHub's code host (EM#1150 f5): every operation delegates to src/github/*,
  * which stays the implementation and which only this plugin imports. Same
  * calls, tokens and caches as when the core called those modules directly.
+ * Its memory (the sign-off gate's, the Foreman login) lives in this call's
+ * objects, so each code host built has its own.
  */
-export function githubCodeHost(): CodeHost {
+export function githubCodeHost(identity: skipHold.ForemanIdentity = new skipHold.ForemanIdentity()): CodeHost {
+  const signoff = new releaseSignoff.ReleaseSignoff();
   return {
     configureIssueCache: cache.configureIssueCache,
     // The fleet state reads with the Foreman token from the daemon's cwd, as before.
@@ -111,9 +114,9 @@ export function githubCodeHost(): CodeHost {
     readIssueBody: readiness.readIssueBody,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
-    foremanAppliedOrHold: releaseSignoff.foremanAppliedOrHold,
-    syncSignoff: releaseSignoff.syncSignoff,
-    unsignedInHead: releaseSignoff.unsignedInHead,
+    foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),
+    syncSignoff: (config, pr, headSha, unsigned, logger, unresolved) => signoff.syncSignoff(config, pr, headSha, unsigned, logger, unresolved),
+    unsignedInHead: (config, logger) => signoff.unsignedInHead(config, logger),
     unsignedIssues: releaseSignoff.unsignedIssues,
     RELEASE_STOP_MARK: release.RELEASE_STOP_MARK,
     addBlockedLabel: release.addBlockedLabel,
@@ -141,7 +144,7 @@ export function githubCodeHost(): CodeHost {
     readPrState: reviewFreshness.readPrState,
     hasPendingRevisions: reviewQueue.hasPendingRevisions,
     escalatedReason: skipHold.escalatedReason,
-    foremanLogin: skipHold.foremanLogin,
+    foremanLogin: (cwd) => identity.login(cwd),
     heldReason: skipHold.heldReason,
     issueActivitySince: skipHold.issueActivitySince,
     parseWaitingOn: skipHold.parseWaitingOn,
@@ -162,9 +165,11 @@ export function githubCodeHost(): CodeHost {
 export class GitHubPlugin implements ForemanPlugin {
   readonly id = "github";
   readonly roles = ["workSource", "codeHost"] as const;
-  /** Stateless: its holds and announcements live in github-work-source.ts's module state, as before. */
-  readonly workSource = new GitHubIssueConnector();
-  readonly codeHost = githubCodeHost();
+  /** The Foreman login, read once, shared by both roles. */
+  private readonly identity = new skipHold.ForemanIdentity();
+  /** The connector the daemon uses; it holds its own announce-once and hold memory. */
+  readonly workSource = new GitHubIssueConnector(this.identity);
+  readonly codeHost = githubCodeHost(this.identity);
 
   enabled(config: AgentConfig): boolean {
     return this.fills("workSource", config) || this.fills("codeHost", config);
