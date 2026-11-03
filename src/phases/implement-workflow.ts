@@ -26,9 +26,9 @@ export function workItemsLine(issueNumbers: number[]): string {
 }
 
 /** The per-issue branch contract appended to every implement prompt. */
-export function branchContract(config: RepoConfig, branchMap: Record<number, string>, branchList: string): string {
+export function branchContract(config: RepoConfig, branchMap: Record<number, string>, branchList: string, startRef: string): string {
   const base = config.baseBranch;
-  return `\n\nIMPORTANT — Branch contract (this OVERRIDES any branch step in the skill or prompt above): each issue is built on its own branch. Your assigned branches, by issue number: ${JSON.stringify(branchMap)} (also in the FOREMAN_BRANCHES environment variable; use the one for the issue you pick: ${branchList}). Local \`${base}\` was prepared by the Foreman as \`origin/${base}\` plus at most one skill-sync commit (subject \`chore(skills): sync …\`). Cut a fresh branch from LOCAL \`${base}\`: \`git checkout -B <branch> ${base}\` (if \`git rev-list --count origin/${base}..${base}\` is more than that one sync commit, cut from \`origin/${base}\` instead). If \`origin/<branch>\` already exists (an earlier attempt), do NOT rebase: \`git checkout -B <branch> origin/<branch> && git merge --no-edit ${base}\`, which keeps the published commits so a normal push works; on a conflict run \`git merge --abort\` and stop with a \`FOREMAN_RESULT: skipped issue=<N> reason="merge conflict: <files>"\` trailer. Never rebase, never force-push, never push \`${base}\`. Commit there, push the branch, and open the PR \`<branch> → ${base}\` with the body starting "Related to #N". NEVER commit or push to \`${config.featureBranch}\` or \`${base}\`, and never push to any branch that is not your assigned one. A PR from any other head is treated as a failed run.`;
+  return `\n\nIMPORTANT — Branch contract (this OVERRIDES any branch step in the skill or prompt above): each issue is built on its own branch. Your assigned branches, by issue number: ${JSON.stringify(branchMap)} (also in the FOREMAN_BRANCHES environment variable; use the one for the issue you pick: ${branchList}). The Foreman supplies the exact START REF for every branch: \`${startRef}\` (also FOREMAN_START_REF). It is \`origin/${base}\`, plus this session's own skill-sync commit when one was made. Fresh branch: \`git checkout -B <branch> ${startRef}\`. If \`origin/<branch>\` already exists (an earlier attempt), do NOT rebase: \`git checkout -B <branch> origin/<branch> && git merge --no-edit ${startRef}\`, which keeps the published commits so a normal push works; on a conflict run \`git merge --abort\` and stop with a \`FOREMAN_RESULT: skipped issue=<N> reason="merge conflict: <files>"\` trailer. Never start from, merge or push your local \`${base}\` (it may hold unpublished commits that are not yours); never rebase; never force-push. Commit there, push the branch, and open the PR \`<branch> → ${base}\` with the body starting "Related to #N". NEVER commit or push to \`${config.featureBranch}\` or \`${base}\`, and never push to any branch that is not your assigned one. A PR from any other head is treated as a failed run.`;
 }
 
 /**
@@ -50,6 +50,8 @@ export async function implementApprovedIssues(
   handOff?: number[],
   /** Item number -> its own `foreman/<N>-<slug>` branch. The session cuts the one for the item it picks. */
   branches?: Record<number, string>,
+  /** The exact ref every branch starts from (the session's own sync commit, else origin/<base> as a SHA). */
+  startRef?: string,
 ): Promise<ImplementationResult> {
   logger.info(`Starting batch implementation for ${config.name}`);
 
@@ -128,7 +130,8 @@ Work autonomously. Do not ask questions.`;
 
   // The branch contract rides in the prompt for EVERY skill mode (a repo-local skill, the built-in one, a custom prompt):
   // the Foreman cannot rely on a repo's skill copy knowing about per-issue branches. It overrides any branch step in the skill.
-  prompt += branchContract(config, branchMap, branchList);
+  const start = startRef ?? `origin/${config.baseBranch}`;
+  prompt += branchContract(config, branchMap, branchList, start);
 
   // Skip-signaling protocol: an issue body may explicitly direct the agent NOT
   // to implement (e.g., investigation-first, blocked on external verification).
@@ -151,7 +154,7 @@ Work autonomously. Do not ask questions.`;
 
   const transcriptPath = phaseTranscriptPath("implement", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
-  const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath, { FOREMAN_BRANCHES: JSON.stringify(branchMap), FOREMAN_BRANCH_PREFIX: config.branchPrefix });
+  const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath, { FOREMAN_BRANCHES: JSON.stringify(branchMap), FOREMAN_BRANCH_PREFIX: config.branchPrefix, FOREMAN_START_REF: start });
   // The session may have opened a PR the cached list predates.
   codeHost().forgetOpenPrs(config.githubRepo);
 

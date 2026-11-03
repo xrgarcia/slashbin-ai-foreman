@@ -60,16 +60,15 @@ object of issue number to branch name (`foreman/<N>-<slug>`); read the chosen is
 node -e 'console.log(JSON.parse(process.env.FOREMAN_BRANCHES)[<N>])'
 ```
 
-Local `<base>` was prepared by the Foreman as `origin/<base>` plus at most one skill-sync
-commit (subject `chore(skills): sync ...`). Never push `<base>`.
+The Foreman supplies the exact start ref in `FOREMAN_START_REF` (and in the prompt's branch
+contract): `origin/<base>` as a SHA, plus this session's own skill-sync commit when it made one.
+Never start from, merge or push your local `<base>`.
 
-1. Fresh branch: `git checkout -B <branch> <base>` (cut from LOCAL `<base>`, so the sync commit
-   rides in). If `git rev-list --count origin/<base>..<base>` is more than that one sync commit,
-   cut from `origin/<base>` instead.
+1. Fresh branch: `git checkout -B <branch> "$FOREMAN_START_REF"`.
 2. If `origin/<branch>` already exists (a prior attempt), do NOT rebase:
-   `git checkout -B <branch> origin/<branch> && git merge --no-edit <base>`. A merge keeps the
-   published commits, so a normal push works. On a conflict, `git merge --abort`, comment, and end
-   with `FOREMAN_RESULT: skipped issue=<N> reason="merge conflict: <files>"`. Never force-push.
+   `git checkout -B <branch> origin/<branch> && git merge --no-edit "$FOREMAN_START_REF"`. A merge
+   keeps the published commits, so a normal push works. On a conflict, `git merge --abort`, comment,
+   and end with `FOREMAN_RESULT: skipped issue=<N> reason="merge conflict: <files>"`. Never force-push.
 
 Never build on, commit to or push to another issue's branch, `<base>`, or a branch you
 did not cut here.
