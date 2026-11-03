@@ -63,17 +63,17 @@ Type: string · Default: `"main"` · Env: `AI_AGENT_PRODUCTION_BRANCH` · Per re
 
 The branch promotion PRs target; branch sync merges it back into baseBranch.
 
+### `featureBranch`
+
+Type: string · Default: `"features"` · Env: `AI_AGENT_FEATURE_BRANCH` · Per repo: yes, falls back to this value
+
+LEGACY (#208). Nothing is built on this branch any more; a PR whose head equals it is still Foreman-owned so PRs open at the cutover drain. Removed once no repo has an open one.
+
 ### `branchPrefix`
 
 Type: string · Default: `"foreman/"` · Env: `AI_AGENT_BRANCH_PREFIX` · Per repo: yes, falls back to this value
 
-Every issue is built on its own branch `<branchPrefix><issue>-<slug>`, cut from `origin/<baseBranch>`, and its PR targets `baseBranch`. A PR is Foreman-owned iff its head starts with this prefix (or equals the legacy `featureBranch`). A head with any other name, such as `ray/fix-x`, is a person's: the Foreman never revises, reconciles, pushes to or deletes it. A Foreman branch is deleted once its PR has merged.
-
-### `featureBranch` (legacy)
-
-Type: string · Default: `"features"` · Env: `AI_AGENT_FEATURE_BRANCH` · Per repo: yes, falls back to this value
-
-The retired shared branch. Nothing new is pushed to it. A PR whose head equals it is still Foreman-owned, so work open at the cutover is reviewed, revised and merged normally; once none remain, the setting and the branch can go.
+Every issue is built on its own branch `<branchPrefix><issue>-<slug>` cut from baseBranch. A PR is Foreman-owned iff its head starts with this (or equals the legacy featureBranch).
 
 ### `skillPath`
 
@@ -246,12 +246,6 @@ The EM checkout. The unstick stage runs `bin/em.mjs unstick` here (cwd) for stuc
 Type: string · Default: none · Env: `AI_AGENT_UNSTICK_ESCALATION_OWNER`
 
 GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105). Unset = no one is mentioned: the hold stays at its failed cap and the log says so.
-
-### `divergenceRulerLogin`
-
-Type: string · Default: none
-
-The GitHub login whose divergence ruling the Foreman carries out (foreman#104): the EM's own account. Unset = no ruling is honoured; a diverged branch stays blocked until a person repairs it.
 
 ### `epicRefLabel`
 
@@ -462,6 +456,8 @@ which only means it retries sooner.
 | `prodVerifyRetry` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 5.3 h, 6 h | none |
 | `upstream` | 2 min, 4 min, 8 min, 16 min, 32 min, 1 h | none |
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
+| `paperclip` | 1 s, 1 s | `maxAttempts` 3 |
+| `registry` | 1 s, 1 s | `maxAttempts` 3 |
 | `stuckMergeGraceMs` | 15 min | — |
 | `maxCiBounces` | — | `2` |
 
@@ -583,6 +579,28 @@ One `gh` call that failed for a passing reason (network, 5xx, timeout) is retrie
 | `factor` | `3` | `AI_AGENT_BACKOFF_GH_FACTOR` |
 | `maxAttempts` | `3` | `AI_AGENT_BACKOFF_GH_MAX_ATTEMPTS` |
 
+### `backoff.paperclip`
+
+One Paperclip READ (a GET) that failed for a passing reason (no answer, a timeout, HTTP 408/429/500/502/503/504) is retried in place, up to `maxAttempts` tries in all. A write is never retried: a timeout does not prove it failed. Default 0.5 s, then 1 s.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `500` (1 s) | `AI_AGENT_BACKOFF_PAPERCLIP_BASE_MS` |
+| `capMs` | `5000` (5 s) | `AI_AGENT_BACKOFF_PAPERCLIP_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_PAPERCLIP_FACTOR` |
+| `maxAttempts` | `3` | `AI_AGENT_BACKOFF_PAPERCLIP_MAX_ATTEMPTS` |
+
+### `backoff.registry`
+
+One registry `repo_identity` request (the mirror's owner-free repo key) that failed for the same passing reasons is retried in place the same way. Default 0.5 s, then 1 s.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `500` (1 s) | `AI_AGENT_BACKOFF_REGISTRY_BASE_MS` |
+| `capMs` | `5000` (5 s) | `AI_AGENT_BACKOFF_REGISTRY_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_REGISTRY_FACTOR` |
+| `maxAttempts` | `3` | `AI_AGENT_BACKOFF_REGISTRY_MAX_ATTEMPTS` |
+
 ### `backoff.stuckMergeGraceMs`
 
 How long after a PR merged before its issue, still unadvanced, is reported as stuck (the dead zone). Shorter flags a merge the review is still settling.
@@ -643,7 +661,7 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 | `promotionBatchTitle` | `"release: promote {n} changes to production"` | Title of a promotion PR carrying several issues. {n} is how many. |
 | `syncTitle` | `"chore: sync {base} with {production} (merge commits backfill)"` | Title of the PR that merges production back into base after a promotion. {base} and {production} are the two branch names. |
 | `reconcileTitle` | `"feat: implement #{N}"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number. |
-| `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the branch. |
+| `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the feature branch. |
 | `releaseTagFormat` | `"release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"` | Name of the annotated git tag the release stage puts on a release PR's merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date, {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must appear so two releases never share a name. A plain annotated tag only, never a GitHub Release: jerky_shipping's desktop pipeline (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases and tags at HEAD to decide whether a commit is already released, so a Release on main's merge commit would suppress its desktop build. Never starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a `release-` name stays out of its version history. |
 | `signoffStatusContext` | `"foreman/em-sign-off"` | The commit status the Foreman puts on a release PR's head while it lists an open issue the EM has not signed off (no `ready for prod release` or later release-stage label). Failing while any is unsigned, passing once none is: add it to the production branch's required checks to hold a human merge too. |
 | `signature` | `"Automated by slashbin-ai-agent"` | The last line of every PR body the Foreman writes. Empty writes none. No "#<number>": every #N in a promotion PR's body is read as an issue it carries. |

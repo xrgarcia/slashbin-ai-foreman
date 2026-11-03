@@ -3,22 +3,40 @@
 // one GitHub owner to another, `<old-owner>/<name>` and `<new-owner>/<name>` answer the same
 // `key`, so a card written under one spelling is found by an item carrying the other.
 //
-// An outage THROWS: the registry never answers "unknown" for one (the tool errors), and the
-// mirror fails the scan on it, keeping the previous index. A repo the registry does not know
+// An outage THROWS: the registry never answers "unknown" for one (the tool errors). A request
+// that failed for a passing reason (no answer, a timeout, HTTP 408/429/500/502/503/504) is first
+// retried in place with `backoff.registry`; the mirror's scan tolerates what still fails (it uses
+// the repo's last known key). A successful answer is kept REPO_KEY_TTL_MS; a failure never is. A repo the registry does not know
 // (kind "unknown") or knows only exactly (kind "other") keeps its input as its key, so
 // `jerky_*`, `cmneb_*` and `slashbin-io/jerky_rank` merge with nothing.
 //
 // Transport: MCP streamable HTTP (JSON-RPC over POST, bearer auth), the same route the EM's
 // `registry_client.py` takes to the router. Uses the global fetch; no dependency.
 
+import { backoffSettings, retryAsync } from "../backoff.js";
+
+/** How long a successful answer stands before the registry is asked again. */
+export const REPO_KEY_TTL_MS = 60 * 60_000;
+
 export interface RepoIdentity {
   /** The key `repo` is compared on. Memoised since the last `beginScan`. Throws when the registry cannot answer. */
   keyOf(repo: string): Promise<string>;
-  /** Forget what was answered: the next scan asks again. */
+  /** A new scan: drop answers older than REPO_KEY_TTL_MS and reopen the MCP session. */
   beginScan(): void;
+  /** HTTP requests sent to the registry so far (retries included), for the scan's log line. */
+  requests?(): number;
 }
 
-export class RepoIdentityError extends Error {}
+/** `status` is the HTTP status, 0 when no response arrived, unset for an answer that is itself the failure. */
+export class RepoIdentityError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+    this.name = "RepoIdentityError";
+  }
+}
+
+const TRANSIENT_STATUS = new Set([0, 408, 429, 500, 502, 503, 504]);
+const isTransient = (err: unknown): boolean => err instanceof RepoIdentityError && err.status !== undefined && TRANSIENT_STATUS.has(err.status);
 
 export type RepoIdentityOptions = {
   /** The registry's MCP endpoint (`paperclip.registryUrl`). */
@@ -27,6 +45,8 @@ export type RepoIdentityOptions = {
   apiKey?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** The clock, injected for tests. */
+  now?: () => number;
 };
 
 type Answer = { kind?: unknown; key?: unknown };
@@ -59,11 +79,14 @@ function answerOf(result: unknown): Answer {
 export function createRepoIdentity(opts: RepoIdentityOptions): RepoIdentity {
   const doFetch = opts.fetch ?? fetch;
   const timeout = opts.timeoutMs ?? 10_000;
-  let memo = new Map<string, Promise<string>>();
+  const now = opts.now ?? Date.now;
+  let memo = new Map<string, { p: Promise<string>; at: number }>();
+  let requests = 0;
   let session: Promise<string | null> | null = null;
   let id = 0;
 
-  const post = async (payload: object, sessionId: string | null) => {
+  const postOnce = async (payload: object, sessionId: string | null) => {
+    requests++;
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -74,10 +97,20 @@ export function createRepoIdentity(opts: RepoIdentityOptions): RepoIdentity {
     try {
       res = await doFetch(opts.url, { method: "POST", headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeout) });
     } catch (e) {
-      throw new RepoIdentityError(`registry unreachable: ${e instanceof Error ? e.message : String(e)}`);
+      throw new RepoIdentityError(`registry unreachable: ${e instanceof Error ? e.message : String(e)}`, 0);
     }
-    if (!res.ok) throw new RepoIdentityError(`registry answered ${res.status}`);
-    return { res, body: await res.text() };
+    if (!res.ok) throw new RepoIdentityError(`registry answered ${res.status}`, res.status);
+    try {
+      return { res, body: await res.text() };
+    } catch (e) {
+      throw new RepoIdentityError(`registry unreachable: ${e instanceof Error ? e.message : String(e)}`, 0);
+    }
+  };
+
+  // Every request here is a read (initialize, the initialized notice, repo_identity), so each is safe to resend.
+  const post = (payload: object, sessionId: string | null) => {
+    const retry = backoffSettings().registry;
+    return retryAsync(() => postOnce(payload, sessionId), { window: retry, maxAttempts: retry.maxAttempts, isTransient });
   };
 
   // One MCP session per scan, opened on the first question.
@@ -110,18 +143,19 @@ export function createRepoIdentity(opts: RepoIdentityOptions): RepoIdentity {
 
   return {
     keyOf(repo) {
-      let p = memo.get(repo);
-      if (!p) {
-        p = ask(repo);
-        memo.set(repo, p);
-        // A failed answer is not remembered: the next scan, or the next call, asks again.
-        p.catch(() => { if (memo.get(repo) === p) memo.delete(repo); });
-      }
+      const have = memo.get(repo);
+      if (have && now() - have.at < REPO_KEY_TTL_MS) return have.p;
+      const p = ask(repo);
+      const entry = { p, at: now() };
+      memo.set(repo, entry);
+      // A failed answer is not remembered: the next call asks again.
+      p.catch(() => { if (memo.get(repo) === entry) memo.delete(repo); });
       return p;
     },
     beginScan() {
-      memo = new Map();
+      for (const [repo, e] of memo) if (now() - e.at >= REPO_KEY_TTL_MS) memo.delete(repo);
       session = null;
     },
+    requests: () => requests,
   };
 }
