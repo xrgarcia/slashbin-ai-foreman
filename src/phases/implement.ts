@@ -12,7 +12,7 @@ import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-b
 import { backoffDelay, formatWait } from "../backoff.js";
 import { fieldTable } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
-import { settleSkillSync, type SyncOutcome } from "../skill-sync.js";
+import { alignLocalBase, resolveStartRef, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import { CycleEvent, activeRuns, itemOf, notifyOnce, prReport, releaseIfResolved, startReport, stoppedReason } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
@@ -464,13 +464,18 @@ export async function tryBatchImplementation(
     // A stale skill copy is brought to the golden in a commit the session
     // builds on and pushes with its work (docs/skill-sync.md). The code makes
     // it, never the session; it cannot fail the issue.
+    // Hygiene: local <base> is brought level with origin/<base>. Correctness does not depend on it: the session starts
+    // from an exact ref (below), never from wherever local <base> points.
+    alignLocalBase(repoConfig, repoLogger);
     if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
 
     const priorFailure = rt.memory.lastFailureReason.get(repoName) || null;
     // One branch per issue, named from the issue's title; the session cuts the one for the issue it picks.
     const branches: Record<number, string> = {};
     for (const n of actionableIssues) branches[n] = foremanBranchName(repoConfig, n, titles.get(n) ?? "");
-    const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues, branches)
+    // The session's start ref: this session's own skill-sync commit if it made one, else origin/<base> as a SHA.
+    const startRef = resolveStartRef(repoConfig, skillSync);
+    const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues, branches, startRef)
       .catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
