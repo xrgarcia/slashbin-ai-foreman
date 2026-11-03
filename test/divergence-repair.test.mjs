@@ -17,6 +17,8 @@ import {
 /** The configured `divergenceRulerLogin`: the only author whose ruling counts. */
 const RULER = "the-em";
 import { divergenceNotice, divergenceReason } from "../dist/phases/common.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 Object.assign(process.env, {
   GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
@@ -59,6 +61,7 @@ function fixture({ rejectFeaturePush = false } = {}) {
   }
   setStatePath(mkTmp("div-state-"));
   const repo = { name: "dr", githubRepo: "o/dr", repoPath: clone, baseBranch: "develop", featureBranch: "features", divergenceRulerLogin: RULER };
+  rt = new ForemanRuntime();
   memoryRecords();
   // The divergence is what git shows (src/divergence.ts); the episode is told on issue 7.
   const block = { featureBranch: "features", baseBranch: "develop", mergeBase, ahead: 1, behind: 1 };
@@ -70,7 +73,7 @@ const ruling = (winner, mergeBase, over = {}) => ({
 });
 const run = (f, cands, extra = {}) => {
   const comments = [];
-  const p = repairDivergence(f.repo, logger, f.block, f.announced, {
+  const p = repairDivergence(rt.records, f.repo, logger, f.block, f.announced, {
     readCandidates: () => cands, comment: (_r, n, body) => comments.push({ n, body }),
     now: () => new Date("2026-10-24T13:05:09Z"), ...extra,
   });
@@ -130,7 +133,7 @@ test("repair failure: one comment, the divergence stands, the same ruling is not
   assert.equal(first.comments[0].n, 7);
   assert.match(first.comments[0].body, /^\*\*Foreman: divergence repair failed\*\*/);
   assert.match(first.comments[0].body, /rejected by fixture hook/);
-  assert.deepEqual((await repoRecordOf(f.repo)).divergenceRuled, ["comment:1"], "the ruling id is recorded before git is touched");
+  assert.deepEqual((await repoRecordOf(rt, f.repo)).divergenceRuled, ["comment:1"], "the ruling id is recorded before git is touched");
   const again = await run(f, cands);
   assert.equal(again.outcome, "none");
   assert.equal(again.comments.length, 0);
@@ -206,5 +209,5 @@ test("no divergenceRulerLogin: no ruling is read or honoured, the branch is left
   assert.equal(read, 0, "nothing is read without a ruler");
   assert.equal(comments.length, 0);
   assert.equal(remoteRef(f, "refs/heads/features"), f.featureHead);
-  assert.equal((await repoRecordOf(f.repo)).divergenceRuled, undefined);
+  assert.equal((await repoRecordOf(rt, f.repo)).divergenceRuled, undefined);
 });

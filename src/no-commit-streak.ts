@@ -15,7 +15,7 @@
 // PR closes or merges.
 
 import type { RepoConfig } from "./config.js";
-import { loadPrRecord, updatePrRecord } from "./issue-records.js";
+import type { IssueRecordStore } from "./issue-records.js";
 import type { NoCommitStreak } from "./issue-records.js";
 
 // The streak lives on the PR's record in the work source (EM#1244 f3). A read
@@ -23,24 +23,6 @@ import type { NoCommitStreak } from "./issue-records.js";
 
 /** One no-commit is an answer; one more on the same head is a stalemate. */
 export const MAX_CONSECUTIVE_NO_COMMIT = 1;
-
-/** PRs this process has seen a streak on, so a closed PR's streak can be forgotten without listing the store. */
-const seen = new Map<string, Set<number>>();
-const seenOf = (repoConfig: RepoConfig) => seen.get(repoConfig.githubRepo) ?? seen.set(repoConfig.githubRepo, new Set()).get(repoConfig.githubRepo)!;
-
-/** The import knows these PRs hold a streak. */
-export function noteStreakPrs(githubRepo: string, prs: Iterable<number>): void {
-  const into = seen.get(githubRepo) ?? seen.set(githubRepo, new Set()).get(githubRepo)!;
-  for (const n of prs) into.add(n);
-}
-
-/** PR `pr`'s streak: `{ok:true}` with it (or none), or `{ok:false}` when its record cannot be read. */
-export async function readNoCommitStreak(repoConfig: RepoConfig, pr: number): Promise<{ ok: true; streak?: NoCommitStreak } | { ok: false }> {
-  const record = await loadPrRecord(repoConfig, pr);
-  if (!record) return { ok: false };
-  if (record.noCommit) seenOf(repoConfig).add(pr);
-  return { ok: true, ...(record.noCommit ? { streak: record.noCommit } : {}) };
-}
 
 /** No-commit revisions in a row at `head` for a streak; 0 once the head has moved. */
 export function noCommitCount(streak: NoCommitStreak | undefined, head: string): number {
@@ -52,63 +34,84 @@ export function stalemateHead(streak: NoCommitStreak | undefined): string | unde
   return streak && streak.count > MAX_CONSECUTIVE_NO_COMMIT ? streak.head : undefined;
 }
 
-/**
- * Admit a paid revision session on PR `pr` at `head`: save an in-flight marker (the count it already has at
- * `head`, unchanged, flagged `inflight`) BEFORE the session starts. A marker that cannot be saved admits no
- * session (a record store that rejects writes would otherwise let every pass pay for a round nothing can
- * track). The marker is not a round: nothing is added to the count, so nothing ever has to be taken back, and a
- * pass that fails after this (an unreadable branch sha, a crash) leaves a marker whose outcome is unknown, which
- * is neither counted nor consumed. One marker at most is outstanding per PR: the next admission replaces it.
- * False when it could not be saved.
- */
-export async function admitRevision(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
-  const count = noCommitCount(streak, head);
-  const ok = await updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true }; });
-  if (ok) seenOf(repoConfig).add(pr);
-  return ok;
-}
-
-/**
- * Resolve an unconfirmed marker at `head`: an earlier admission left it (its session finished or died with no
- * successful read after it), and this pass has just READ the branch successfully. The earlier attempt is neither
- * counted nor consumed, so the marker is dropped keeping the count it had, and THIS pass launches nothing: that is
- * what bounds paid retries to one unconfirmed attempt per head, resolved on the next readable pass. False when the
- * resolution could not be saved (the marker stays; the next pass tries again).
- */
-export async function resolveUnconfirmed(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
-  const count = noCommitCount(streak, head);
-  return updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count }; else delete d.noCommit; });
-}
-
 /** True when `streak` is an unconfirmed marker for `head`. */
 export const isUnconfirmed = (streak: NoCommitStreak | undefined, head: string): boolean => !!streak && streak.head === head && streak.inflight === true;
 
-/**
- * Count the round the in-flight marker stood for: the session completed AND a successful read after it showed
- * the head still `head`, by declaration, so the caller only asks once it has both. Resolves the new count, or
- * null when it could not be saved (the marker stays, the round stays unconfirmed).
- */
-export async function recordNoCommit(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<number | null> {
-  const count = noCommitCount(streak, head) + 1;
-  const ok = await updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count }; });
-  if (!ok) return null;
-  seenOf(repoConfig).add(pr);
-  return count;
-}
+/** The no-commit streaks of one runtime: reads and writes on the PRs' records, and the PRs this process has seen one on. */
+export class NoCommitStreaks {
+  /** PRs this process has seen a streak on, so a closed PR's streak can be forgotten without listing the store. */
+  private readonly seen = new Map<string, Set<number>>();
 
-/** Forget PR `pr`'s streak: it pushed a commit, or someone pushed to it. False when that could not be saved. */
-export async function clearNoCommitStreak(repoConfig: RepoConfig, pr: number): Promise<boolean> {
-  const ok = await updatePrRecord(repoConfig, pr, (d) => { delete d.noCommit; });
-  if (ok) seenOf(repoConfig).delete(pr);
-  return ok;
-}
+  constructor(private readonly records: IssueRecordStore) {}
 
-/** The PRs this process knows a streak on. */
-export function prsWithNoCommitStreak(repoConfig: RepoConfig): number[] {
-  return [...seenOf(repoConfig)];
-}
+  private seenOf(repoConfig: RepoConfig): Set<number> {
+    return this.seen.get(repoConfig.githubRepo) ?? this.seen.set(repoConfig.githubRepo, new Set()).get(repoConfig.githubRepo)!;
+  }
 
-/** Tests only. */
-export function resetNoCommitStreaksForTests(): void {
-  seen.clear();
+  /** The import knows these PRs hold a streak. */
+  noteStreakPrs(githubRepo: string, prs: Iterable<number>): void {
+    const into = this.seen.get(githubRepo) ?? this.seen.set(githubRepo, new Set()).get(githubRepo)!;
+    for (const n of prs) into.add(n);
+  }
+
+  /** PR `pr`'s streak: `{ok:true}` with it (or none), or `{ok:false}` when its record cannot be read. */
+  async read(repoConfig: RepoConfig, pr: number): Promise<{ ok: true; streak?: NoCommitStreak } | { ok: false }> {
+    const record = await this.records.loadPrRecord(repoConfig, pr);
+    if (!record) return { ok: false };
+    if (record.noCommit) this.seenOf(repoConfig).add(pr);
+    return { ok: true, ...(record.noCommit ? { streak: record.noCommit } : {}) };
+  }
+
+  /**
+   * Admit a paid revision session on PR `pr` at `head`: save an in-flight marker (the count it already has at
+   * `head`, unchanged, flagged `inflight`) BEFORE the session starts. A marker that cannot be saved admits no
+   * session (a record store that rejects writes would otherwise let every pass pay for a round nothing can
+   * track). The marker is not a round: nothing is added to the count, so nothing ever has to be taken back, and a
+   * pass that fails after this (an unreadable branch sha, a crash) leaves a marker whose outcome is unknown, which
+   * is neither counted nor consumed. One marker at most is outstanding per PR: the next admission replaces it.
+   * False when it could not be saved.
+   */
+  async admitRevision(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
+    const count = noCommitCount(streak, head);
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true }; });
+    if (ok) this.seenOf(repoConfig).add(pr);
+    return ok;
+  }
+
+  /**
+   * Resolve an unconfirmed marker at `head`: an earlier admission left it (its session finished or died with no
+   * successful read after it), and this pass has just READ the branch successfully. The earlier attempt is neither
+   * counted nor consumed, so the marker is dropped keeping the count it had, and THIS pass launches nothing: that is
+   * what bounds paid retries to one unconfirmed attempt per head, resolved on the next readable pass. False when the
+   * resolution could not be saved (the marker stays; the next pass tries again).
+   */
+  async resolveUnconfirmed(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
+    const count = noCommitCount(streak, head);
+    return this.records.updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count }; else delete d.noCommit; });
+  }
+
+  /**
+   * Count the round the in-flight marker stood for: the session completed AND a successful read after it showed
+   * the head still `head`, by declaration, so the caller only asks once it has both. Resolves the new count, or
+   * null when it could not be saved (the marker stays, the round stays unconfirmed).
+   */
+  async record(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<number | null> {
+    const count = noCommitCount(streak, head) + 1;
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count }; });
+    if (!ok) return null;
+    this.seenOf(repoConfig).add(pr);
+    return count;
+  }
+
+  /** Forget PR `pr`'s streak: it pushed a commit, or someone pushed to it. False when that could not be saved. */
+  async clear(repoConfig: RepoConfig, pr: number): Promise<boolean> {
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { delete d.noCommit; });
+    if (ok) this.seenOf(repoConfig).delete(pr);
+    return ok;
+  }
+
+  /** The PRs this process knows a streak on. */
+  prsWithStreak(repoConfig: RepoConfig): number[] {
+    return [...this.seenOf(repoConfig)];
+  }
 }

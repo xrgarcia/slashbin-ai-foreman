@@ -14,6 +14,8 @@ import { loadConfig } from "../dist/config.js";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 await startAgentPlugins();
 
@@ -91,7 +93,7 @@ function world(failOnce = []) {
   }));
 }
 const gh = () => JSON.parse(readFileSync(ST, "utf8"));
-const pass = () => runReconcileStage(repo, config, logger, []);
+const pass = () => runReconcileStage(rt, repo, config, logger, []);
 
 test("same-branch layout, no reviewer: an issue at `pr under review` whose PR a person merged is closed within two passes, merged and approved recorded, one comment", async () => {
   assert.equal(config.techLeadPath, undefined);

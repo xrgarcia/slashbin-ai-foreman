@@ -21,7 +21,7 @@
 
 import { createHash } from "node:crypto";
 import type { RepoConfig } from "./config.js";
-import { updateIssueRecord, updateRepoRecord, type SkippedIssue, type VerifyHold } from "./issue-records.js";
+import type { IssueRecordStore, SkippedIssue, VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
 
 /**
@@ -99,6 +99,7 @@ export interface UnstickCandidate {
 export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): string => `${issue}:${kind}${tag ? `:${tag}` : ""}`;
 
 /** The kinds only an event can report: there is no persisted condition to read them from. */
+/** Immutable constant (not state): the kinds only an event can report. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
   "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close",
 ]);
@@ -190,28 +191,6 @@ export function openEntry(prior: UnstickEntry | undefined, c: UnstickCandidate, 
   return { issue: c.issue, kind: c.kind, reason: c.reason, status: "pending", attempts: 0, since: now, ...(c.tag ? { tag: c.tag } : {}) };
 }
 
-/** An event reported work stuck: remember it for the stage's next pass. Resolves false when it could not be recorded. */
-export async function noteStuck(repoConfig: RepoConfig, issue: number, kind: UnstickKind, reason: string): Promise<boolean> {
-  const key = unstickKey(issue, kind);
-  const now = new Date().toISOString();
-  if (issue <= 0) {
-    return updateRepoRecord(repoConfig, (d) => {
-      const table = { ...(d.unstick ?? {}) };
-      const next = openEntry(table[key], { issue, kind, reason }, now);
-      if (next === table[key]) return;
-      table[key] = next;
-      d.unstick = table;
-    });
-  }
-  return updateIssueRecord(repoConfig, issue, (d) => {
-    const table = { ...(d.unstick ?? {}) };
-    const next = openEntry(table[key], { issue, kind, reason }, now);
-    if (next === table[key]) return;
-    table[key] = next;
-    d.unstick = table;
-  });
-}
-
 /**
  * An error the SRE saw during a verification and excluded as not caused by the
  * release (its `Not caused by this release, needs triage:` lines). Nothing read
@@ -233,44 +212,6 @@ export class HandoffNotSaved extends Error {
   }
 }
 
-/**
- * The one way a repo-level hand-off to the EM is raised (unrelated-error, epic-ready-to-close): written to the
- * repo record, and only then may the event that raised it be acknowledged. `entries` are the hand-offs the event
- * produced; one already in the record is kept as it is. Resolves how many were new, and throws HandoffNotSaved
- * when the record is unavailable or the save fails, so the caller's pass fails closed with its trigger (the
- * verdict still to be acted on, the issue still open) intact and the next healthy pass raises it again.
- */
-async function persistHandoffs(
-  repoConfig: RepoConfig,
-  kind: "unrelated-error" | "epic-ready-to-close",
-  entries: readonly { tag: string; reason: string }[],
-): Promise<number> {
-  if (entries.length === 0) return 0;
-  const now = new Date().toISOString();
-  let added = 0;
-  const ok = await updateRepoRecord(repoConfig, (d) => {
-    const table = { ...(d.unstick ?? {}) };
-    added = 0;
-    for (const { tag, reason } of entries) {
-      const key = unstickKey(0, kind, tag);
-      if (table[key]) continue;
-      table[key] = openEntry(undefined, { issue: 0, kind, reason, tag }, now);
-      added++;
-    }
-    if (added > 0) d.unstick = table;
-  });
-  if (!ok) throw new HandoffNotSaved(kind, repoConfig.githubRepo);
-  return added;
-}
-
-/**
- * Unrelated-error hand-offs the record has not taken yet, by subject (`owner/repo#PR`) and signature tag. IN MEMORY
- * ONLY, like the in-memory notes elsewhere: a durable fact persists through the work-source plugin, never a core state file
- * (EM#1244 decision 4). The SRE's report has no re-readable source, and a re-verification that comes back clean
- * would not repeat it, so the payload is held here until the record holds it.
- */
-const pendingHandoffs = new Map<string, Map<string, { tag: string; reason: string }>>();
-
 /** The subject a hand-off and the transitions that wait on it share: the PR the SRE verified. */
 export const handoffSubject = (githubRepo: string, pr: number): string => `${githubRepo}#${pr}`;
 
@@ -278,50 +219,6 @@ export const handoffSubject = (githubRepo: string, pr: number): string => `${git
 export interface FreshUnrelated {
   seen: { errors: readonly string[]; evidence: readonly string[] };
   seenOn: string;
-}
-
-/**
- * THE gate every lifecycle transition for `subject` (verify advance, merged/held settle, prodReverified, the
- * deploy-recovery verify, the soak drop) passes through first, and the one entry for "this result's reports". Order,
- * always: (1) buffer the fresh result's unrelated errors into the subject's pending set (deduped by signature), THEN
- * (2) drain the set to the repo's EM triage record. So a report B that arrives while an earlier report A is still
- * unsaved is kept even though the drain throws. Throws HandoffNotSaved when the record cannot take them, so the
- * transition does not happen this pass whatever the new verification says. A pending report and a recurring one
- * save once. Resolves how many were new.
- */
-export async function settleHandoffs(repoConfig: RepoConfig, subject: string, fresh?: FreshUnrelated): Promise<number> {
-  if (fresh) {
-    const evidence = fresh.seen.evidence.length ? ` Evidence: ${fresh.seen.evidence.slice(0, 4).join(" ")}` : "";
-    const held = pendingHandoffs.get(subject) ?? pendingHandoffs.set(subject, new Map()).get(subject)!;
-    for (const error of fresh.seen.errors) {
-      const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
-      if (!held.has(tag)) held.set(tag, { tag, reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${fresh.seenOn}): ${error.trim().slice(0, 600)}.${evidence}` });
-    }
-  }
-  const held = pendingHandoffs.get(subject);
-  if (!held || held.size === 0) return 0;
-  const added = await persistHandoffs(repoConfig, "unrelated-error", [...held.values()]);
-  pendingHandoffs.delete(subject);
-  return added;
-}
-
-/** Tests only. */
-export function resetPendingHandoffsForTests(): void {
-  pendingHandoffs.clear();
-}
-
-/** `settleHandoffs` with this result's reports: buffered first, then drained (see there). Returns how many were new. */
-export const noteUnrelated = (
-  repoConfig: RepoConfig,
-  seen: FreshUnrelated["seen"],
-  seenOn: string,
-  subject: string,
-): Promise<number> => settleHandoffs(repoConfig, subject, { seen, seenOn });
-
-/** The block on `issue` was released (`unblocked`): its questions are over. */
-export async function clearUnstick(repoConfig: RepoConfig, issue: number): Promise<boolean> {
-  if (issue <= 0) return true;
-  return updateIssueRecord(repoConfig, issue, (d) => { delete d.unstick; });
 }
 
 /** `label` with every regex metacharacter escaped. */
@@ -338,14 +235,118 @@ export function epicRefs(body: string, label: string | undefined): number[] {
 }
 
 /**
- * foreman#151: a child closed in production may have been its epic's last, and
- * closing a delivered epic is the EM's hand-off to the PO that nothing else makes.
- * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
- * CLOSE check decides whether it was the last. Returns the entries added.
+ * What the Foreman asks the EM, written to the work source's records: the questions events raise (`noteStuck`)
+ * and the repo-level hand-offs (unrelated errors, epics ready to close).
  */
-export async function noteEpicChildClosed(repoConfig: RepoConfig, issue: number, epics: readonly number[], label: string): Promise<number> {
-  return persistHandoffs(repoConfig, "epic-ready-to-close", epics.map((epic) => ({
-    tag: `${epic}-${issue}`,
-    reason: `${repoConfig.githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`,
-  })));
+export class EmHandoffs {
+  /**
+   * Unrelated-error hand-offs the record has not taken yet, by subject (`owner/repo#PR`) and signature tag. IN MEMORY
+   * ONLY, like the in-memory notes elsewhere: a durable fact persists through the work-source plugin, never a core state file
+   * (EM#1244 decision 4). The SRE's report has no re-readable source, and a re-verification that comes back clean
+   * would not repeat it, so the payload is held here until the record holds it.
+   */
+  private readonly pending = new Map<string, Map<string, { tag: string; reason: string }>>();
+
+  constructor(private readonly records: IssueRecordStore) {}
+
+  /** An event reported work stuck: remember it for the stage's next pass. Resolves false when it could not be recorded. */
+  async noteStuck(repoConfig: RepoConfig, issue: number, kind: UnstickKind, reason: string): Promise<boolean> {
+    const key = unstickKey(issue, kind);
+    const now = new Date().toISOString();
+    if (issue <= 0) {
+      return this.records.updateRepoRecord(repoConfig, (d) => {
+        const table = { ...(d.unstick ?? {}) };
+        const next = openEntry(table[key], { issue, kind, reason }, now);
+        if (next === table[key]) return;
+        table[key] = next;
+        d.unstick = table;
+      });
+    }
+    return this.records.updateIssueRecord(repoConfig, issue, (d) => {
+      const table = { ...(d.unstick ?? {}) };
+      const next = openEntry(table[key], { issue, kind, reason }, now);
+      if (next === table[key]) return;
+      table[key] = next;
+      d.unstick = table;
+    });
+  }
+
+  /** The block on `issue` was released (`unblocked`): its questions are over. */
+  async clearUnstick(repoConfig: RepoConfig, issue: number): Promise<boolean> {
+    if (issue <= 0) return true;
+    return this.records.updateIssueRecord(repoConfig, issue, (d) => { delete d.unstick; });
+  }
+
+  /**
+   * The one way a repo-level hand-off to the EM is raised (unrelated-error, epic-ready-to-close): written to the
+   * repo record, and only then may the event that raised it be acknowledged. `entries` are the hand-offs the event
+   * produced; one already in the record is kept as it is. Resolves how many were new, and throws HandoffNotSaved
+   * when the record is unavailable or the save fails, so the caller's pass fails closed with its trigger (the
+   * verdict still to be acted on, the issue still open) intact and the next healthy pass raises it again.
+   */
+  private async persist(
+    repoConfig: RepoConfig,
+    kind: "unrelated-error" | "epic-ready-to-close",
+    entries: readonly { tag: string; reason: string }[],
+  ): Promise<number> {
+    if (entries.length === 0) return 0;
+    const now = new Date().toISOString();
+    let added = 0;
+    const ok = await this.records.updateRepoRecord(repoConfig, (d) => {
+      const table = { ...(d.unstick ?? {}) };
+      added = 0;
+      for (const { tag, reason } of entries) {
+        const key = unstickKey(0, kind, tag);
+        if (table[key]) continue;
+        table[key] = openEntry(undefined, { issue: 0, kind, reason, tag }, now);
+        added++;
+      }
+      if (added > 0) d.unstick = table;
+    });
+    if (!ok) throw new HandoffNotSaved(kind, repoConfig.githubRepo);
+    return added;
+  }
+
+  /**
+   * THE gate every lifecycle transition for `subject` (verify advance, merged/held settle, prodReverified, the
+   * deploy-recovery verify, the soak drop) passes through first, and the one entry for "this result's reports". Order,
+   * always: (1) buffer the fresh result's unrelated errors into the subject's pending set (deduped by signature), THEN
+   * (2) drain the set to the repo's EM triage record. So a report B that arrives while an earlier report A is still
+   * unsaved is kept even though the drain throws. Throws HandoffNotSaved when the record cannot take them, so the
+   * transition does not happen this pass whatever the new verification says. A pending report and a recurring one
+   * save once. Resolves how many were new.
+   */
+  async settleHandoffs(repoConfig: RepoConfig, subject: string, fresh?: FreshUnrelated): Promise<number> {
+    if (fresh) {
+      const evidence = fresh.seen.evidence.length ? ` Evidence: ${fresh.seen.evidence.slice(0, 4).join(" ")}` : "";
+      const held = this.pending.get(subject) ?? this.pending.set(subject, new Map()).get(subject)!;
+      for (const error of fresh.seen.errors) {
+        const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
+        if (!held.has(tag)) held.set(tag, { tag, reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${fresh.seenOn}): ${error.trim().slice(0, 600)}.${evidence}` });
+      }
+    }
+    const held = this.pending.get(subject);
+    if (!held || held.size === 0) return 0;
+    const added = await this.persist(repoConfig, "unrelated-error", [...held.values()]);
+    this.pending.delete(subject);
+    return added;
+  }
+
+  /** `settleHandoffs` with this result's reports: buffered first, then drained (see there). Returns how many were new. */
+  noteUnrelated(repoConfig: RepoConfig, seen: FreshUnrelated["seen"], seenOn: string, subject: string): Promise<number> {
+    return this.settleHandoffs(repoConfig, subject, { seen, seenOn });
+  }
+
+  /**
+   * foreman#151: a child closed in production may have been its epic's last, and
+   * closing a delivered epic is the EM's hand-off to the PO that nothing else makes.
+   * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
+   * CLOSE check decides whether it was the last. Returns the entries added.
+   */
+  async noteEpicChildClosed(repoConfig: RepoConfig, issue: number, epics: readonly number[], label: string): Promise<number> {
+    return this.persist(repoConfig, "epic-ready-to-close", epics.map((epic) => ({
+      tag: `${epic}-${issue}`,
+      reason: `${repoConfig.githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`,
+    })));
+  }
 }

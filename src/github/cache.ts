@@ -170,7 +170,7 @@ export function getOpenIssues(repo: string, cwd: string, logger: Logger): IssueS
   // is supposed to see, which would look exactly like "no work to do".
   if (issues.length >= reads.snapshotLimit) {
     logger.warn(
-      "Open-issue snapshot hit its limit — discovery may be missing issues; raise reads.snapshotLimit",
+      "Open-issue snapshot hit its limit — discovery may be missing issues; raise issueSnapshotLimit",
       { repo, limit: reads.snapshotLimit, returned: issues.length },
     );
   }

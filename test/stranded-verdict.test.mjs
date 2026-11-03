@@ -43,7 +43,7 @@ test("a lookup failure throws and fails the pass instead of sending work to revi
 test("the review phase reports stranded issues inReview → changesRequested and does not review", () => {
   const phase = orchestrator.slice(orchestrator.indexOf("if (candidate.stranded)"));
   const block = phase.slice(0, phase.indexOf("\n  }\n"));
-  assert.match(block, /advance\(itemOf\(repoConfig, n\), "changesRequested"/);
+  assert.match(block, /advance\(rt, itemOf\(repoConfig, n\), "changesRequested"/);
   assert.match(block, /return false;/);
   assert.ok(orchestrator.indexOf("if (candidate.stranded)") < orchestrator.indexOf("getPRCheckVerdict(repoConfig, candidate.prNumber"),
     "before the CI gate and the review run");

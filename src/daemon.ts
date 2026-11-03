@@ -1,5 +1,4 @@
 import type { AgentConfig } from "./config.js";
-import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { concurrencyWarning, loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
@@ -12,6 +11,7 @@ import { stateDir } from "./state-dir.js";
 import { configureBackoff } from "./backoff.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
+import type { ForemanRuntime } from "./runtime.js";
 
 export interface DaemonOptions {
   configPath?: string;
@@ -24,7 +24,7 @@ export interface DaemonHandle {
   stop(): Promise<void>;
 }
 
-export function startDaemon(config: AgentConfig, logger: Logger, options?: DaemonOptions): DaemonHandle {
+export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Logger, options?: DaemonOptions): DaemonHandle {
   let cycleNumber = 0;
   let stopping = false;
   let sleepResolve: (() => void) | null = null;
@@ -42,8 +42,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
   // Every managed checkout trusted before the first session (src/claude-trust.ts);
   // again on each reload, and once more before every spawn.
-  configureClaudeTrust({ enabled: config.trustManagedRepos });
-  trustManagedRepos(config.repos, logger);
+  rt.trust.configure({ enabled: config.trustManagedRepos });
+  rt.trust.trustManagedRepos(config.repos, logger);
 
   const host = codeHost();
   host.configureIssueCache({
@@ -171,8 +171,8 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
       host.setStateRepos(fresh.repos.map((r) => r.githubRepo));
       configureBackoff(fresh.backoff);
-      configureClaudeTrust({ enabled: fresh.trustManagedRepos });
-      trustManagedRepos(fresh.repos, logger);
+      rt.trust.configure({ enabled: fresh.trustManagedRepos });
+      rt.trust.trustManagedRepos(fresh.repos, logger);
       options?.onReload?.(fresh);
       return fresh;
     } catch (err) {
@@ -236,7 +236,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
           // The first lane mirrors the board every pass, as the whole-repo pass
           // did; the others only after they changed something, so splitting a
           // repo into lanes does not multiply the idle snapshot rate.
-          const result = await runLanePass(repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work");
+          const result = await runLanePass(rt, repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work");
           didWork = result.processed > 0;
           for (const event of result.events) logger[event.level](event.message);
         } catch (err) {

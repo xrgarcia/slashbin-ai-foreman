@@ -16,17 +16,14 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
 import type { UnstickOutcome } from "../plugins/contract.js";
-import { fieldTable, loadIssueRecord, loadIssueRecords, loadRepoRecord, updateIssueRecord, updateRepoRecord } from "../issue-records.js";
-import { standingDivergence } from "../divergence.js";
+import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import {
-  EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey,
-  type UnstickCandidate, type UnstickEntry,
-} from "../unstick.js";
+import { EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns, divergenceReason } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): string {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -37,15 +34,15 @@ function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): 
  * Apply `fn` to the persisted questions about `issue` (its record's table; issue 0: the repo's own) and save them.
  * Resolves false when the record could not be read or saved, in which case nothing changed.
  */
-async function mutate(repoConfig: RepoConfig, issue: number, fn: (table: Record<string, UnstickEntry>) => void): Promise<boolean> {
+async function mutate(rt: ForemanRuntime, repoConfig: RepoConfig, issue: number, fn: (table: Record<string, UnstickEntry>) => void): Promise<boolean> {
   if (issue <= 0) {
-    return updateRepoRecord(repoConfig, (d) => {
+    return rt.records.updateRepoRecord(repoConfig, (d) => {
       const table = { ...(d.unstick ?? {}) };
       fn(table);
       d.unstick = table;
     });
   }
-  return updateIssueRecord(repoConfig, issue, (d) => {
+  return rt.records.updateIssueRecord(repoConfig, issue, (d) => {
     const table = { ...(d.unstick ?? {}) };
     fn(table);
     d.unstick = table;
@@ -53,15 +50,16 @@ async function mutate(repoConfig: RepoConfig, issue: number, fn: (table: Record<
 }
 
 /** The standing question `key` about `issue`; undefined when there is none or the record cannot be read. */
-async function entryOf(repoConfig: RepoConfig, issue: number, key: string): Promise<UnstickEntry | undefined> {
-  if (issue <= 0) return (await loadRepoRecord(repoConfig))?.unstick?.[key];
-  return (await loadIssueRecord(repoConfig, issue))?.unstick?.[key];
+async function entryOf(rt: ForemanRuntime, repoConfig: RepoConfig, issue: number, key: string): Promise<UnstickEntry | undefined> {
+  if (issue <= 0) return (await rt.records.loadRepoRecord(repoConfig))?.unstick?.[key];
+  return (await rt.records.loadIssueRecord(repoConfig, issue))?.unstick?.[key];
 }
 
 const toStatus = (o: UnstickOutcome): UnstickEntry["status"] => (o.kind === "failed" ? "failed" : o.kind);
 
 /** Returns how many EM calls this pass made. Never throws. */
 export async function tryUnstick(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   base: Logger,
@@ -85,10 +83,10 @@ export async function tryUnstick(
     }
     const open = issues ? new Set(issues.map((i) => i.number)) : null;
     // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
-    const loaded = await loadIssueRecords(repoConfig, open ?? []);
+    const loaded = await rt.records.loadIssueRecords(repoConfig, open ?? []);
     // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
-    const repoRecord = await loadRepoRecord(repoConfig);
-    const standing = standingDivergence(repoConfig);
+    const repoRecord = await rt.records.loadRepoRecord(repoConfig);
+    const standing = rt.divergence.standing(repoConfig);
     const candidates: UnstickCandidate[] = derivedCandidates({
       verifyHeld: fieldTable(loaded, "verifyHeld"),
       skipped: fieldTable(loaded, "skipped"),
@@ -132,7 +130,7 @@ export async function tryUnstick(
     for (const n of issuesInPlay) {
       if (n === 0 ? repoRecord === null : loaded.unavailable.has(n)) continue;
       const mine = byIssue.get(n) ?? [];
-      await mutate(repoConfig, n, (table) => {
+      await mutate(rt, repoConfig, n, (table) => {
         for (const [key, e] of Object.entries(table)) if (!EVENT_KINDS.has(e.kind) && !live.has(key)) delete table[key];
         for (const c of mine) {
           const key = unstickKey(c.issue, c.kind, c.tag);
@@ -144,7 +142,7 @@ export async function tryUnstick(
     let calls = 0;
     for (const c of candidates) {
       const key = unstickKey(c.issue, c.kind, c.tag);
-      const entry = await entryOf(repoConfig, c.issue, key);
+      const entry = await entryOf(rt, repoConfig, c.issue, key);
       if (!entry || !needsCall(entry, c)) continue;
       const ac = new AbortController();
       activeRuns.set(ac, repoName);
@@ -158,7 +156,7 @@ export async function tryUnstick(
       calls++;
       log.info(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): ${outcome.kind}${outcome.detail ? ` — ${outcome.detail.slice(0, 200)}` : ""}`);
       let spent: UnstickEntry | undefined;
-      await mutate(repoConfig, c.issue, (table) => {
+      await mutate(rt, repoConfig, c.issue, (table) => {
         const cur = table[key];
         // The reason changed while the call ran: it is a new question, answered next pass.
         if (!cur || cur.reason !== c.reason) return;
@@ -184,7 +182,7 @@ export async function tryUnstick(
         } else {
           try {
             (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
-            await mutate(repoConfig, c.issue, (table) => {
+            await mutate(rt, repoConfig, c.issue, (table) => {
               const cur = table[key];
               if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
             });

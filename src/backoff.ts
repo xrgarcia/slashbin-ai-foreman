@@ -177,6 +177,7 @@ export function mergeBackoff(fromFile: unknown, legacyFile: LegacyBackoffKeys = 
 // scans and the upstream back-off are module-level and take no config, so the
 // daemon hands them the same block here at start and on every config reload.
 
+/** Process-wide: the live back-off windows, handed over by the daemon at start and reload. */
 let active: BackoffConfig = DEFAULT_BACKOFF;
 
 /** Apply the loaded `backoff` block daemon-wide. Until called, the defaults stand. */

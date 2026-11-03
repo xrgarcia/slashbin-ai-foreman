@@ -14,10 +14,11 @@ import { qaBeforeMergeApplies, qaFailStandsBody, realQaLocalDeps, runQaBeforeMer
 import { isToolingHold } from "./verify.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { BackoffTracker, backoffSettings, formatWait } from "../backoff.js";
-import { CycleEvent, activeRuns, itemOf, pausedByBlockedLabel, reviewFailureCount, reviewFailurePause, stoppedReason } from "./common.js";
+import { CycleEvent, activeRuns, itemOf, pausedByBlockedLabel, stoppedReason } from "./common.js";
 import { settleReviewOutcome } from "./review.js";
 import { resolve } from "node:path";
 import { codeHost } from "../plugins/registry.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 /**
  * What the pass did. `none`: no approved PR is waiting for QA, so the review phase carries on.
@@ -26,16 +27,12 @@ import { codeHost } from "../plugins/registry.js";
  */
 export type QaPhaseResult = "none" | "handled" | "waiting";
 
-/** Per repo: the QA phase waiting after a tooling hold (backoff.agentUnavailable). */
-export const qaDefer = new BackoffTracker();
-/** Per PR head: the merge retry waiting after a PASS the Tech Lead could not merge yet (backoff.approvedUnmerged). */
-export const qaMergeWait = new BackoffTracker();
-
 /** The hold's text on the card: who is waited on, why, and when it retries. */
 const holdWhy = (pr: number, reason: string, summary: string, wait: string): string =>
   `waiting on QA: it gave no verdict on PR #${pr} (${reason}${summary ? `: ${summary.slice(0, 200)}` : ""}) — nothing merges; ${wait}`;
 
 export async function tryQaBeforeMerge(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
@@ -52,15 +49,15 @@ export async function tryQaBeforeMerge(
   if (!target) return "none";
   const { prNumber, issueNumbers, headSha } = target;
   // The EM's `blocked` label on the PR's issue pauses QA, and the Tech Lead is not offered the PR either.
-  if (pausedByBlockedLabel(repoConfig, "QA before the merge", prNumber, issueNumbers, qlog)) return "waiting";
+  if (pausedByBlockedLabel(rt, repoConfig, "QA before the merge", prNumber, issueNumbers, qlog)) return "waiting";
   const { repoFailure, agentUnavailable, maxCiBounces } = config.backoff;
 
-  if (qaDefer.waiting(repoName)) return "waiting";
-  if (qaMergeWait.waiting(`${repoConfig.githubRepo}#${prNumber}@${headSha}`)) return "waiting";
-  const failures = reviewFailureCount.get(repoName) ?? 0;
+  if (rt.memory.qaDefer.waiting(repoName)) return "waiting";
+  if (rt.memory.qaMergeWait.waiting(`${repoConfig.githubRepo}#${prNumber}@${headSha}`)) return "waiting";
+  const failures = rt.memory.reviewFailureCount.get(repoName) ?? 0;
   if (failures >= repoFailure.maxFailures) {
-    if (reviewFailurePause.waiting(repoName)) return "waiting";
-    reviewFailureCount.set(repoName, 0);
+    if (rt.memory.reviewFailurePause.waiting(repoName)) return "waiting";
+    rt.memory.reviewFailureCount.set(repoName, 0);
   }
 
   // Never boot a PR its own CI already rejects: CI red goes back to the builder like a review would.
@@ -76,7 +73,7 @@ export async function tryQaBeforeMerge(
       return "waiting";
     }
     codeHost().bounceForRedCI(repoConfig, prNumber, checks);
-    for (const n of issueNumbers) await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
+    for (const n of issueNumbers) await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
     events?.push({ message: `${repoConfig.githubRepo} PR #${prNumber}: CI red after approval — sent back to the builder before QA`, level: "info" });
     return "handled";
   }
@@ -90,14 +87,14 @@ export async function tryQaBeforeMerge(
   qlog.info(`QA before merge: ${repoName} PR #${prNumber} at ${headSha.slice(0, 7)}`);
   events?.push({ message: `QA checking ${repoConfig.githubRepo} PR #${prNumber} locally before the merge`, level: "info" });
   try {
-    await emit({ kind: "session", session: { ...session, status: "started" } }, null, qlog);
-    await emit({ kind: "session", session: { ...qaSession, status: "started" } }, null, qlog);
+    await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, qlog);
+    await emit(rt, { kind: "session", session: { ...qaSession, status: "started" } }, null, qlog);
     const qaDeps = deps ?? realQaLocalDeps(repoConfig, config, qlog);
     const decision: QaPreMergeDecision = await runQaBeforeMerge(repoConfig.githubRepo, prNumber, headSha, qaDeps, qlog);
-    await emit({ kind: "session", session: { ...qaSession, status: decision.kind === "pass" ? "finished" : "failed", detail: decision.kind } }, null, qlog);
+    await emit(rt, { kind: "session", session: { ...qaSession, status: decision.kind === "pass" ? "finished" : "failed", detail: decision.kind } }, null, qlog);
 
     if (decision.kind === "fail") {
-      for (const n of issueNumbers) await advance(itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
+      for (const n of issueNumbers) await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
       // A QA FAIL is a review round (reports.ts counts its report), so REVIEW_ROUNDS_ALERT bounds the loop.
       // A reused FAIL posted no report, so it says it stands, or the round would go uncounted (foreman#167).
       if (decision.reused) await qaDeps.post(prNumber, qaFailStandsBody(headSha)).catch((e: unknown) => qlog.warn(`QA: PR #${prNumber} standing FAIL not posted: ${String(e).slice(0, 200)}`));
@@ -110,16 +107,16 @@ export async function tryQaBeforeMerge(
       // A checker that could not run charges nothing and retries after a wait; a real hold counts as a failed review.
       let wait: string;
       if (isToolingHold(decision.reason)) {
-        wait = `retries automatically in ${formatWait(qaDefer.start(repoName, agentUnavailable))}`;
+        wait = `retries automatically in ${formatWait(rt.memory.qaDefer.start(repoName, agentUnavailable))}`;
       } else {
         const n = failures + 1;
-        reviewFailureCount.set(repoName, n);
+        rt.memory.reviewFailureCount.set(repoName, n);
         wait = n >= repoFailure.maxFailures
-          ? `paused ${formatWait(reviewFailurePause.start(repoName, repoFailure))}, then retries`
+          ? `paused ${formatWait(rt.memory.reviewFailurePause.start(repoName, repoFailure))}, then retries`
           : `retries next cycle (${n}/${repoFailure.maxFailures})`;
       }
       const why = holdWhy(prNumber, decision.reason, decision.summary, wait);
-      for (const n of issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
+      for (const n of issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
       ended = { status: "failed", detail: why };
       qlog.warn(`${repoName}: ${why}`);
       events?.push({ message: `⏸️ ${repoConfig.githubRepo} PR #${prNumber}: ${why}`, level: "warn" });
@@ -139,56 +136,56 @@ export async function tryQaBeforeMerge(
       : Promise.resolve({ fallback: true as const, reason: "no reviewer is enabled" }))
       .catch((e: unknown): { fallback: true; reason: string } => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
-      const wait = formatWait(qaDefer.start(repoName, agentUnavailable));
+      const wait = formatWait(rt.memory.qaDefer.start(repoName, agentUnavailable));
       ended = { status: "failed", detail: `QA passed PR #${prNumber}; the Tech Lead could not take the merge (${result.reason}) — retried in ${wait}` };
       const why = `waiting on the Tech Lead: QA passed PR #${prNumber} but it could not take the merge (${result.reason}) — retries automatically in ${wait}`;
-      for (const n of issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
+      for (const n of issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
       return "handled";
     }
     const own = (result.trailers ?? []).find((t) => t.pr === prNumber);
     if (result.success && own?.hold === HEAD_MOVED_HOLD) {
       // The head moved after QA passed it: nothing merged, nothing charged. The card stays in review, and the
       // new head goes back through the Tech Lead and QA (findQaPendingPr sees no approval of it).
-      reviewFailureCount.set(repoName, 0);
+      rt.memory.reviewFailureCount.set(repoName, 0);
       ended = { status: "finished", detail: `QA passed ${headSha.slice(0, 7)} but PR #${prNumber} has a new head; it goes back to review` };
       events?.push({ message: `↩️ ${repoConfig.githubRepo} PR #${prNumber}: a new head was pushed after QA passed ${headSha.slice(0, 7)} — back to review, nothing merged`, level: "info" });
       return "handled";
     }
     if (result.success && own?.hold === NOT_APPROVED_HOLD) {
       const n = failures + 1;
-      reviewFailureCount.set(repoName, n);
+      rt.memory.reviewFailureCount.set(repoName, n);
       const wait = n >= repoFailure.maxFailures
-        ? `paused ${formatWait(reviewFailurePause.start(repoName, repoFailure))}, then retries`
+        ? `paused ${formatWait(rt.memory.reviewFailurePause.start(repoName, repoFailure))}, then retries`
         : `retries next cycle (${n}/${repoFailure.maxFailures})`;
       const why = `held: QA passed ${headSha.slice(0, 7)} on PR #${prNumber}, but the Tech Lead has no approval of that head — nothing merges; ${wait}`;
-      for (const i of issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, i), reason: why }, repoConfig, qlog);
+      for (const i of issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, i), reason: why }, repoConfig, qlog);
       ended = { status: "failed", detail: why };
       events?.push({ message: `⏸️ ${repoConfig.githubRepo} PR #${prNumber}: ${why}`, level: "warn" });
       return "handled";
     }
     if (!result.success) {
-      reviewFailureCount.set(repoName, failures + 1);
+      rt.memory.reviewFailureCount.set(repoName, failures + 1);
       ended = { status: "failed", detail: result.error || "the merge run failed" };
       const why = stoppedReason(`Merge of PR #${prNumber} after QA`, result, false, `${failures + 1}/${repoFailure.maxFailures}`);
-      for (const n of issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
+      for (const n of issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, qlog);
       events?.push({ message: `Merge after QA failed on ${repoConfig.githubRepo} PR #${prNumber}: ${result.error}`, level: "error" });
       return "handled";
     }
-    reviewFailureCount.set(repoName, 0);
-    reviewFailurePause.clear(repoName);
+    rt.memory.reviewFailureCount.set(repoName, 0);
+    rt.memory.reviewFailurePause.clear(repoName);
     const trailers = result.trailers ?? [];
-    await settleReviewOutcome(repoConfig, config, issueNumbers, prNumber, trailers, qlog, events);
+    await settleReviewOutcome(rt, repoConfig, config, issueNumbers, prNumber, trailers, qlog, events);
     if (trailers.some((t) => t.pr === prNumber && t.merged)) {
       ended = { status: "finished", detail: `QA passed PR #${prNumber}; merged` };
     } else {
       // Approved, QA passed, not merged (CI still running, GitHub refused): the next try waits one window.
-      qaMergeWait.start(`${repoConfig.githubRepo}#${prNumber}@${headSha}`, backoffSettings().approvedUnmerged);
+      rt.memory.qaMergeWait.start(`${repoConfig.githubRepo}#${prNumber}@${headSha}`, backoffSettings().approvedUnmerged);
       ended = { status: "finished", detail: `QA passed PR #${prNumber}; the Tech Lead did not merge it yet (${result.statusLine || "no trailer detail"}) — retried after a wait` };
       events?.push({ message: `⏳ ${repoConfig.githubRepo} PR #${prNumber}: QA passed, merge not done yet — ${result.statusLine || "retrying"}`, level: "warn" });
     }
     return "handled";
   } finally {
     activeRuns.delete(runAbort);
-    await emit({ kind: "session", session: { ...session, ...ended } }, null, qlog);
+    await emit(rt, { kind: "session", session: { ...session, ...ended } }, null, qlog);
   }
 }

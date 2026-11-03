@@ -22,6 +22,8 @@ import { rulingState } from "../dist/github/reports.js";
 import { qaFailStandsBody } from "../dist/qa-report.js";
 import { REVIEW_ROUNDS_ALERT } from "../dist/phases/common.js";
 import { createLogger } from "../dist/logger.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 const REPO = "example/fake";
@@ -98,6 +100,7 @@ after(() => {
 
 beforeEach(() => {
   reviewed = 0;
+  rt = new ForemanRuntime();
   memoryRecords();
   for (const f of [F.world, F.ghLog, F.claudeLog]) rmSync(f, { force: true });
   world({ labels: ["approved"], head: SHA, reviews: [] });
@@ -120,20 +123,20 @@ test("#1597: QA FAIL → no-commit → a pass with no pending revision → QA FA
 
   labelIssue(LABELS.pending); // QA FAIL sends it back
   const events1 = [];
-  assert.ok(await tryRevision(repo, config, logger, 1, events1), "the first no-commit returns it to review");
+  assert.ok(await tryRevision(rt, repo, config, logger, 1, events1), "the first no-commit returns it to review");
   assert.equal(claudeRuns(), 1);
 
   labelIssue(LABELS.review); // QA runs on the head: no pending revision this pass
-  assert.equal(await tryRevision(repo, config, logger, 2, []), null);
+  assert.equal(await tryRevision(rt, repo, config, logger, 2, []), null);
 
   labelIssue(LABELS.pending); // QA FAILs the same head again
   const events2 = [];
-  assert.equal(await tryRevision(repo, config, logger, 3, events2), null, "the second no-commit does not relabel");
+  assert.equal(await tryRevision(rt, repo, config, logger, 3, events2), null, "the second no-commit does not relabel");
   assert.equal(claudeRuns(), 2);
   assert.ok(events2.some((e) => e.level === "error" && /answered 2 review rounds with no code change/.test(e.message)), JSON.stringify(events2));
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 2 }, "persisted on the PR's record, so a restart keeps it");
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 2 }, "persisted on the PR's record, so a restart keeps it");
 
-  assert.equal(await tryRevision(repo, config, logger, 4, []), null);
+  assert.equal(await tryRevision(rt, repo, config, logger, 4, []), null);
   assert.equal(claudeRuns(), 2, "no further session on the stalled head");
 });
 
@@ -141,17 +144,17 @@ test("a push that moves the head clears the stalemate and revise runs again", as
   const config = load();
   const repo = config.repos[0];
   labelIssue(LABELS.pending);
-  await tryRevision(repo, config, logger, 1, []);
+  await tryRevision(rt, repo, config, logger, 1, []);
   labelIssue(LABELS.review);
-  await tryRevision(repo, config, logger, 2, []);
+  await tryRevision(rt, repo, config, logger, 2, []);
   labelIssue(LABELS.pending);
-  await tryRevision(repo, config, logger, 3, []);
-  assert.equal((await prRecordOf(repo, PR)).noCommit.count, 2, "stalled");
+  await tryRevision(rt, repo, config, logger, 3, []);
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit.count, 2, "stalled");
 
   world({ head: NEW_SHA });
-  assert.ok(await tryRevision(repo, config, logger, 4, []), "the new head is revised and goes back to review");
+  assert.ok(await tryRevision(rt, repo, config, logger, 4, []), "the new head is revised and goes back to review");
   assert.equal(claudeRuns(), 3);
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: NEW_SHA, count: 1 }, "the old head's streak is gone");
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: NEW_SHA, count: 1 }, "the old head's streak is gone");
 });
 
 test("a QA FAIL that stands on the same head is a review round: the third goes to needsRuling", () => {
@@ -171,7 +174,7 @@ test("a reused QA FAIL posts that it stands, once per send-back, without running
   world({ reviews: [{ author: { login: "tl" }, state: "APPROVED", submittedAt: "2026-11-01T19:47:43Z" }] });
   const deps = { runs: 0, posted: [], run: async () => { deps.runs++; return { kind: "errored", detail: "unused" }; },
     hasMarker: async (_pr, m) => m.includes("verdict=FAIL"), hasReport: async () => false, post: async (_pr, b) => { deps.posted.push(b); } };
-  assert.equal(await tryQaBeforeMerge(config.repos[0], config, logger, 1, [], deps), "handled");
+  assert.equal(await tryQaBeforeMerge(rt, config.repos[0], config, logger, 1, [], deps), "handled");
   assert.equal(deps.runs, 0);
   assert.deepEqual(deps.posted, [qaFailStandsBody(SHA)]);
 });
@@ -181,10 +184,10 @@ test("a reused QA FAIL posts that it stands, once per send-back, without running
 test("blocked: revise does not run on a PR whose issue carries the label", async () => {
   const config = load();
   labelIssue(LABELS.pending, "blocked");
-  assert.equal(await tryRevision(config.repos[0], config, logger, 1, []), null);
+  assert.equal(await tryRevision(rt, config.repos[0], config, logger, 1, []), null);
   assert.equal(claudeRuns(), 0);
   labelIssue(LABELS.pending);
-  assert.ok(await tryRevision(config.repos[0], config, logger, 2, []), "lifted: it runs");
+  assert.ok(await tryRevision(rt, config.repos[0], config, logger, 2, []), "lifted: it runs");
   assert.equal(claudeRuns(), 1);
 });
 
@@ -194,10 +197,10 @@ test("blocked: review does not offer the PR to the Tech Lead", async () => {
   mkdirSync(co, { recursive: true });
   assert.equal(spawnSync("git", ["init", "-q"], { cwd: co }).status, 0);
   labelIssue(LABELS.review, "blocked");
-  await tryReview(config.repos[0], config, logger, 1);
+  await tryReview(rt, config.repos[0], config, logger, 1);
   assert.equal(reviewed, 0);
   labelIssue(LABELS.review);
-  await tryReview(config.repos[0], config, logger, 2);
+  await tryReview(rt, config.repos[0], config, logger, 2);
   assert.equal(reviewed, 1, "lifted: it is reviewed");
 });
 
@@ -207,9 +210,9 @@ test("blocked: QA before the merge does not run, and the PR waits", async () => 
   const deps = { runs: 0, run: async () => { deps.runs++; return { kind: "errored", detail: "x" }; },
     hasMarker: async () => false, hasReport: async () => false, post: async () => {} };
   labelIssue(LABELS.review, "blocked");
-  assert.equal(await tryQaBeforeMerge(config.repos[0], config, logger, 1, [], deps), "waiting");
+  assert.equal(await tryQaBeforeMerge(rt, config.repos[0], config, logger, 1, [], deps), "waiting");
   assert.equal(deps.runs, 0);
   labelIssue(LABELS.review);
-  await tryQaBeforeMerge(config.repos[0], config, logger, 2, [], deps);
+  await tryQaBeforeMerge(rt, config.repos[0], config, logger, 2, [], deps);
   assert.equal(deps.runs, 1, "lifted: QA runs");
 });

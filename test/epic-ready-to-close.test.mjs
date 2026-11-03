@@ -8,10 +8,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
-import { epicRefs, noteEpicChildClosed, UNSTICK_KINDS } from "../dist/unstick.js";
+import { epicRefs, UNSTICK_KINDS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords } from "./issue-records.mjs";
 import { slashbinProfile } from "../dist/profiles/slashbin.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 /** The epic label Slashbin's issues use (`epicRefLabel`, from its profile). */
 const LABEL = slashbinProfile.epicRefLabel;
@@ -35,6 +37,7 @@ test("no epicRefLabel: no epic is parsed from any body", () => {
 
 test("two children of one epic: two EM calls, one per close; a repeat close adds none", async () => {
   setStatePath(mkTmp("erc-state-"));
+  rt = new ForemanRuntime();
   memoryRecords();
   const em = mkTmp("erc-em-");
   const log = join(em, "calls.jsonl");
@@ -44,10 +47,10 @@ test("two children of one epic: two EM calls, one per close; a repeat close adds
   const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } } };
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
-  assert.equal(await noteEpicChildClosed(repo, 5, [880], LABEL), 1);
-  assert.equal(await noteEpicChildClosed(repo, 6, [880], LABEL), 1);
-  assert.equal(await noteEpicChildClosed(repo, 5, [880], LABEL), 0);
-  assert.equal(await tryUnstick(repo, config, logger, 1, {}), 2);
+  assert.equal(await rt.handoffs.noteEpicChildClosed(repo, 5, [880], LABEL), 1);
+  assert.equal(await rt.handoffs.noteEpicChildClosed(repo, 6, [880], LABEL), 1);
+  assert.equal(await rt.handoffs.noteEpicChildClosed(repo, 5, [880], LABEL), 0);
+  assert.equal(await tryUnstick(rt, repo, config, logger, 1, {}), 2);
   const made = calls();
   assert.equal(made.length, 2);
   for (const argv of made) {
@@ -55,5 +58,5 @@ test("two children of one epic: two EM calls, one per close; a repeat close adds
     assert.equal(argv[argv.indexOf("--issue") + 1], "0");
   }
   assert.match(made.map((a) => a[a.indexOf("--reason") + 1]).join("\n"), /o\/erc#5 was closed.*engineering-manager #880[\s\S]*o\/erc#6 was closed/);
-  assert.equal(await tryUnstick(repo, config, logger, 2, {}), 0);
+  assert.equal(await tryUnstick(rt, repo, config, logger, 2, {}), 0);
 });

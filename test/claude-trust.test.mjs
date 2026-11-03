@@ -11,12 +11,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import {
-  claudeConfigPath, configureClaudeTrust, ensureClaudeTrust, isUntrustedWarning, trustManagedRepos,
-  resetClaudeTrustForTests,
-} from "../dist/claude-trust.js";
+import { claudeConfigPath, isUntrustedWarning } from "../dist/claude-trust.js";
 import { runCustomStage } from "../dist/agent.js";
 import { loadConfig } from "../dist/config.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const capture = () => {
   const lines = [];
@@ -29,7 +28,7 @@ const capture = () => {
 let tmp;
 before(() => { tmp = mkdtempSync(join(tmpdir(), "foreman-trust-")); });
 after(() => rmSync(tmp, { recursive: true, force: true }));
-beforeEach(() => { resetClaudeTrustForTests(); configureClaudeTrust({ enabled: true }); });
+beforeEach(() => { (rt = new ForemanRuntime()); rt.trust.configure({ enabled: true }); });
 
 /** A fresh HOME with a checkout in it; returns its env, config file and repo. */
 const fixture = (cfg) => {
@@ -50,16 +49,16 @@ test("config path: CLAUDE_CONFIG_DIR wins over HOME", () => {
 test("trusts a checkout with no entry, and logs it once", () => {
   const { env, file, repo } = fixture({ projects: {} });
   const { logger, lines } = capture();
-  assert.equal(ensureClaudeTrust(repo, logger, env), "trusted");
+  assert.equal(rt.trust.ensure(repo, logger, env), "trusted");
   assert.equal(read(file).projects[repo].hasTrustDialogAccepted, true);
   assert.deepEqual(lines, [`info trusted ${repo} for Claude Code (managed repo)`]);
-  assert.equal(ensureClaudeTrust(repo, logger, env), "already");
+  assert.equal(rt.trust.ensure(repo, logger, env), "already");
   assert.equal(lines.length, 1);
 });
 
 test("creates the config when there is none", () => {
   const { env, file, repo } = fixture();
-  assert.equal(ensureClaudeTrust(repo, capture().logger, env), "trusted");
+  assert.equal(rt.trust.ensure(repo, capture().logger, env), "trusted");
   assert.equal(read(file).projects[repo].hasTrustDialogAccepted, true);
   assert.equal(statSync(file).mode & 0o777, 0o600);
 });
@@ -69,7 +68,7 @@ test("writes under CLAUDE_CONFIG_DIR when the session env sets it", () => {
   const dir = join(home, "cfgdir");
   mkdirSync(dir);
   writeFileSync(join(dir, ".claude.json"), "{}");
-  ensureClaudeTrust(repo, capture().logger, { ...env, CLAUDE_CONFIG_DIR: dir });
+  rt.trust.ensure(repo, capture().logger, { ...env, CLAUDE_CONFIG_DIR: dir });
   assert.equal(read(join(dir, ".claude.json")).projects[repo].hasTrustDialogAccepted, true);
   assert.deepEqual(read(join(home, ".claude.json")), {});
 });
@@ -79,7 +78,7 @@ test("an already-trusted checkout is not written at all", () => {
   writeFileSync(file, JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } }));
   const before = statSync(file);
   const bytes = readFileSync(file, "utf8");
-  assert.equal(ensureClaudeTrust(repo, capture().logger, env), "already");
+  assert.equal(rt.trust.ensure(repo, capture().logger, env), "already");
   const after = statSync(file);
   assert.equal(after.ino, before.ino, "file was replaced");
   assert.equal(after.mtimeMs, before.mtimeMs, "file was rewritten");
@@ -98,7 +97,7 @@ test("keeps every other key, the project's own keys, and the file mode", () => {
   };
   writeFileSync(file, JSON.stringify(original));
   chmodSync(file, 0o640);
-  assert.equal(ensureClaudeTrust(repo, capture().logger, env), "trusted");
+  assert.equal(rt.trust.ensure(repo, capture().logger, env), "trusted");
   const got = read(file);
   assert.deepEqual(got.oauthAccount, original.oauthAccount);
   assert.equal(got.numStartups, 41);
@@ -112,7 +111,7 @@ test("refuses to touch a config that does not parse, and never logs its contents
   const broken = '{"oauthAccount": {"secret": "dummy-not-a-real-value"';
   const { env, file, repo } = fixture(broken);
   const { logger, lines } = capture();
-  assert.equal(ensureClaudeTrust(repo, logger, env), "skipped");
+  assert.equal(rt.trust.ensure(repo, logger, env), "skipped");
   assert.equal(readFileSync(file, "utf8"), broken);
   assert.equal(lines.length, 1);
   assert.match(lines[0], /^warn .*does not parse.*stays untrusted/);
@@ -121,15 +120,15 @@ test("refuses to touch a config that does not parse, and never logs its contents
 
 test("refuses a config whose top level is not an object", () => {
   const { env, file, repo } = fixture("[]");
-  assert.equal(ensureClaudeTrust(repo, capture().logger, env), "skipped");
+  assert.equal(rt.trust.ensure(repo, capture().logger, env), "skipped");
   assert.equal(readFileSync(file, "utf8"), "[]");
 });
 
 test("trustManagedRepos: false — nothing is written", () => {
   const { env, file, repo } = fixture({});
-  configureClaudeTrust({ enabled: false });
-  assert.equal(ensureClaudeTrust(repo, capture().logger, env), "disabled");
-  trustManagedRepos([{ repoPath: repo }], capture().logger, env);
+  rt.trust.configure({ enabled: false });
+  assert.equal(rt.trust.ensure(repo, capture().logger, env), "disabled");
+  rt.trust.trustManagedRepos([{ repoPath: repo }], capture().logger, env);
   assert.deepEqual(read(file), {});
 });
 
@@ -137,7 +136,7 @@ test("a symlinked checkout is trusted under its real path too", () => {
   const { env, file, repo, home } = fixture({});
   const link = join(home, "link");
   symlinkSync(repo, link);
-  ensureClaudeTrust(link, capture().logger, env);
+  rt.trust.ensure(link, capture().logger, env);
   const p = read(file).projects;
   assert.equal(p[link].hasTrustDialogAccepted, true);
   assert.equal(p[repo].hasTrustDialogAccepted, true);
@@ -147,7 +146,7 @@ test("trustManagedRepos trusts every configured checkout on disk and skips one n
   const { env, file, repo, home } = fixture({});
   const other = join(home, "other");
   mkdirSync(other);
-  trustManagedRepos([{ repoPath: repo }, { repoPath: other }, { repoPath: join(home, "missing") }], capture().logger, env);
+  rt.trust.trustManagedRepos([{ repoPath: repo }, { repoPath: other }, { repoPath: join(home, "missing") }], capture().logger, env);
   assert.deepEqual(Object.keys(read(file).projects).sort(), [other, repo].sort());
 });
 
@@ -203,7 +202,7 @@ const runStage = async (f, logger, extraEnv = {}) => {
     const p = join(f.home, "cfg.json");
     writeFileSync(p, JSON.stringify({ repos: [{ name: "t", repoPath: f.repo, githubRepo: "example/t" }] }));
     const repo = { ...loadConfig(p).repos[0], sessionEnv: [...loadConfig(p).repos[0].sessionEnv, "FAKE_DROP_TRUST"] };
-    await runCustomStage(repo, { id: "lint", skillPath: "/opt/lint/SKILL.md" },
+    await runCustomStage(rt.trust, repo, { id: "lint", skillPath: "/opt/lint/SKILL.md" },
       { prNumber: 7, headSha: "a".repeat(40), issueNumbers: [3] }, logger).catch(() => {});
   } finally {
     process.chdir(cwd);
@@ -232,7 +231,7 @@ test("spawn: an untrusted warning on stderr is named and the checkout re-trusted
 
 test("spawn: with trust off, the warning tells the operator and nothing is written", async () => {
   const f = spawnFixture();
-  configureClaudeTrust({ enabled: false });
+  rt.trust.configure({ enabled: false });
   const { logger, lines } = capture();
   await runStage(f, logger);
   assert.equal(JSON.parse(readFileSync(f.seen, "utf8")), null);

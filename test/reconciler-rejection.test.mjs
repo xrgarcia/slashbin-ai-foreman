@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
@@ -67,7 +69,7 @@ test("a rejected branch is announced once per head SHA, recorded on the rejected
   const block = phase.slice(phase.indexOf("for (const r of result.rejected"));
   assert.match(block.slice(0, 900), /record\.rejectedHead === r\.headSha/,
     "dedup must key on the head SHA so new commits re-alert");
-  const save = block.indexOf("updatePrRecord(");
+  const save = block.indexOf("rt.records.updatePrRecord(");
   const alert = block.indexOf("events.push");
   assert.ok(save > 0 && save < alert, "the head is recorded before the alert goes out; a failed save sends nothing");
   assert.match(block.slice(0, save), /loadPrRecord\(/, "an unreadable record is not 'never told'");

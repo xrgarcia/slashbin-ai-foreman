@@ -94,7 +94,7 @@ test("wiring: the re-run move goes pr approved -> pr merged, verify takes reques
   assert.deepEqual([MOVES.qaRerun.from, MOVES.qaRerun.to], ["approved", "merged"]);
   const v = src("phases/verify.ts");
   assert.ok(v.indexOf("takeQaRerunRequests(repoConfig") < v.indexOf("findIssuesAwaitingVerify(repoConfig"), "a request is taken before this cycle reads its pr merged issues");
-  assert.match(v, /advance\(itemOf\(repoConfig, n\), "qaRerun"/);
+  assert.match(v, /advance\(rt, itemOf\(repoConfig, n\), "qaRerun"/);
   assert.match(v, /qaBeforeMerge && await postMergeQaNeeded\(/);
   assert.match(v, /\|\| qaAgain\)\) \{/);
   assert.match(v, /!codeHost\(\)\.hasLabel\(i, readyForProd\)/, "an authorized issue is never sent back");

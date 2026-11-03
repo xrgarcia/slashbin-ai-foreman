@@ -8,12 +8,14 @@ import { join } from "node:path";
 import { QA_PENDING_HOLD, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../dist/agent.js";
 import { reviewViaTechLead } from "../dist/plugins/tech-lead.js";
 import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
-import { runQaBeforeMerge, qaBeforeMergeApplies, qaVerdictMarker, qaFailLines, qaGateBody, runQaReport, applyQaGate, executeQa } from "../dist/qa-report.js";
+import { runQaBeforeMerge, qaBeforeMergeApplies, qaVerdictMarker, qaFailLines, qaGateBody, applyQaGate, executeQa } from "../dist/qa-report.js";
 import { rulingState } from "../dist/github/reports.js";
 import { sessionFallbackStage, MOVES, STAGE_MEANING, SESSION_FALLBACK_STAGE } from "../dist/lifecycle.js";
 import { TOOLING_HOLDS, verifyHoldPlan } from "../dist/phases/verify.js";
 import { configSchema } from "../dist/config.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 await startAgentPlugins();
 
@@ -269,7 +271,7 @@ test("F3: runQaReport, applyQaGate and runQaBeforeMerge share one run helper; a 
   const pre = await runQaBeforeMerge(REPO, 5, SHA, boom(), logger);
   assert.deepEqual([pre.kind, pre.reason], ["hold", "qa-errored"]);
   const d = boom();
-  await runQaReport(REPO, 9, d, logger);
+  await rt.qaReports.run(REPO, 9, d, logger);
   assert.match(d.posted[0], /errored|did not|could not|no verdict/i, "report-only still posts an errored note");
   const code = src("qa-report.ts");
   assert.equal(code.split("mkdirSync(out, { recursive: true })").length - 1, 1, "cache setup exists once (the helper)");

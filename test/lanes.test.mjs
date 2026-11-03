@@ -23,6 +23,8 @@ import { configureIssueCache } from "../dist/github.js";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -211,7 +213,7 @@ test("maxConcurrentSessions: 0 is unbounded; N caps concurrent sessions at N", a
 test("(a) a build session in flight on repo A does not hold repo A's release lane", async () => {
   arrange({ hold: true });
   const config = load({ stages: [{ id: "slow", skillPath: "/opt/slow/SKILL.md" }, { type: "implement" }, { type: "promote" }] }, [{ name: "lanes-a" }]);
-  const pass = runRepoPass(config.repos[0], config, logger);
+  const pass = runRepoPass(rt, config.repos[0], config, logger);
   await until(() => starts().length === 1, "the build session to start");
   await until(promoteRan, "promote to run beside the build");
   assert.ok(!claudeEvents().some((e) => e.event === "end"), "the build session was still running when promote ran");
@@ -229,7 +231,7 @@ test("(b) two lanes that change the clone never overlap on one repo", async () =
     { id: "lockA", skillPath: "/opt/a/SKILL.md" }, { type: "implement" }, { type: "promote" }, { id: "lockB", skillPath: "/opt/b/SKILL.md" },
   ] }, [{ name: "lanes-b" }]);
   assert.deepEqual(lanesFor(config.stages).map((l) => l.name), ["build", "release", "lockB"]);
-  const pass = runRepoPass(config.repos[0], config, logger);
+  const pass = runRepoPass(rt, config.repos[0], config, logger);
   await until(() => starts().length === 1, "the first clone session");
   await until(promoteRan, "promote to run while the clone is locked");
   await sleep(300);
@@ -246,7 +248,7 @@ test("(b) two lanes that change the clone never overlap on one repo", async () =
 test("(c) one lane runs on every repo at once", async () => {
   arrange({ hold: true });
   const config = load({ stages: [{ id: "wide", skillPath: "/opt/w/SKILL.md" }] }, [{ name: "lanes-c1" }, { name: "lanes-c2" }]);
-  const passes = config.repos.map((r) => runRepoPass(r, config, logger));
+  const passes = config.repos.map((r) => runRepoPass(rt, r, config, logger));
   await until(() => starts().length === 2, "both repos' sessions in the same lane at once");
   assert.deepEqual(new Set(starts().map((s) => s.repo)), new Set(["example/lanes-c1", "example/lanes-c2"]));
   release();
@@ -257,11 +259,11 @@ test("(c) a second pass of the same (repo, lane) waits for the first, then takes
   arrange({ hold: true });
   const config = load({ stages: [{ id: "one", skillPath: "/opt/o/SKILL.md" }] }, [{ name: "lanes-c3" }]);
   const [lane] = lanesFor(config.stages);
-  const first = runLanePass(config.repos[0], config, lane, logger, "never");
+  const first = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await until(() => starts().length === 1, "the first pass's session");
   // New work lands while the first item is in flight.
   writeFileSync(F.ghState, JSON.stringify({ featurePrs: [prAt("b".repeat(40))], openPrs: [] }));
-  const second = runLanePass(config.repos[0], config, lane, logger, "never");
+  const second = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await sleep(300);
   assert.equal(starts().length, 1, "no second item while the first is in flight");
   release();
@@ -282,7 +284,7 @@ test("(d) drain waits for a lane pass that holds no session (the release lane af
   // pass is in flight with no run registered.
   let free;
   const held = withCheckoutLock("lanes-d1", () => new Promise((r) => { free = r; }));
-  const pass = runLanePass(config.repos[0], config, lane, logger, "never");
+  const pass = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await until(() => getActiveLanePasses().includes("lanes-d1/drainA"), "the lane pass to be in flight");
   assert.equal(getActiveRunCount(), 0, "no session registered");
   requestShutdown();

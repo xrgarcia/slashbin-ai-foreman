@@ -20,7 +20,7 @@
 import type { ReleaseEvent, WorkItem } from "./adapters.js";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { loadPrRecord, updatePrRecord } from "./issue-records.js";
+import type { IssueRecordStore } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
 import type { ProdRelease } from "./issue-records.js";
 
@@ -102,143 +102,141 @@ interface Sweep {
   unsure: Set<number>;
 }
 
-const sweeps = new Map<string, Sweep>();
-const sweeping = new Map<string, Promise<Sweep | null>>();
-/** PR numbers the import found before the first sweep. */
-const hints = new Map<string, Set<number>>();
-
-/** The one-time import knows these PRs hold release entries: the sweep reads them whether or not GitHub lists them. */
-export function noteReleasePrs(githubRepo: string, prs: Iterable<number>): void {
-  const sweep = sweeps.get(githubRepo);
-  const into = sweep ? sweep.unsure : (hints.get(githubRepo) ?? hints.set(githubRepo, new Set()).get(githubRepo)!);
-  for (const n of prs) into.add(n);
-}
-
-const hasStage = (c: RepoConfig) => c.baseBranch !== c.productionBranch;
-
-/** Read the repo's release PRs once per process. Null when GitHub could not list them: nothing acts on a release until it can. */
-async function swept(repoConfig: RepoConfig, logger: Logger): Promise<Sweep | null> {
-  const id = repoConfig.githubRepo;
-  const done = sweeps.get(id);
-  if (done) return done;
-  const running = sweeping.get(id);
-  if (running) return running;
-  const run = (async (): Promise<Sweep | null> => {
-    const numbers = new Set<number>(hints.get(id) ?? []);
-    if (hasStage(repoConfig)) {
-      try {
-        // Every release PR there has ever been (open, merged, closed), in one complete listing that throws when it
-        // fails or may be cut short: a stored release or pointer can sit on any of them, however old, and a swallowed
-        // failure would read as "none". Each PR's record is then read once.
-        for (const p of codeHost().allPrsForBranch(id, repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.repoPath)) numbers.add(p.number);
-      } catch (err) {
-        logger.debug(`Could not list ${id}'s release PRs: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
-    }
-    const sweep: Sweep = { live: new Set(), tracked: new Set(), unsure: new Set() };
-    for (const n of numbers) {
-      const record = await loadPrRecord(repoConfig, n);
-      if (!record) sweep.unsure.add(n);
-      else {
-        if (record.release) sweep.live.add(n);
-        if (record.tracked) sweep.tracked.add(n);
-      }
-    }
-    sweeps.set(id, sweep);
-    hints.delete(id);
-    return sweep;
-  })().finally(() => sweeping.delete(id));
-  sweeping.set(id, run);
-  return run;
-}
-
 /** What the stage may act on: the releases it carries, and the PRs whose record could not be read. Null when the repo's release PRs are unknown. */
 export interface Releases {
   releases: ProdRelease[];
   unreadable: ReadonlySet<number>;
 }
 
-/** Read the record of every release the repo carries, once. */
-export async function loadReleases(repoConfig: RepoConfig, logger: Logger): Promise<Releases | null> {
-  const sweep = await swept(repoConfig, logger);
-  if (!sweep) return null;
-  const releases: ProdRelease[] = [];
-  const unreadable = new Set<number>();
-  for (const n of new Set([...sweep.live, ...sweep.unsure])) {
-    const record = await loadPrRecord(repoConfig, n);
-    if (!record) { unreadable.add(n); continue; }
-    sweep.unsure.delete(n);
-    if (record.release) { sweep.live.add(n); releases.push(record.release); } else sweep.live.delete(n);
-    if (record.tracked) sweep.tracked.add(n); else sweep.tracked.delete(n);
+const hasStage = (c: RepoConfig) => c.baseBranch !== c.productionBranch;
+
+/** A runtime's view of every repo's release PRs, and the stage's reads and writes of their records. */
+export class ReleaseTracker {
+  private readonly sweeps = new Map<string, Sweep>();
+  private readonly sweeping = new Map<string, Promise<Sweep | null>>();
+  /** PR numbers the import found before the first sweep. */
+  private readonly hints = new Map<string, Set<number>>();
+
+  constructor(private readonly records: IssueRecordStore) {}
+
+  /** The one-time import knows these PRs hold release entries: the sweep reads them whether or not GitHub lists them. */
+  noteReleasePrs(githubRepo: string, prs: Iterable<number>): void {
+    const sweep = this.sweeps.get(githubRepo);
+    const into = sweep ? sweep.unsure : (this.hints.get(githubRepo) ?? this.hints.set(githubRepo, new Set()).get(githubRepo)!);
+    for (const n of prs) into.add(n);
   }
-  releases.sort((a, b) => a.pr - b.pr);
-  return { releases, unreadable };
-}
 
-/** Save `rel` on its PR's record. False when it could not be saved: the caller does not act on the strength of it. */
-export async function putRelease(repoConfig: RepoConfig, rel: ProdRelease): Promise<boolean> {
-  const ok = await updatePrRecord(repoConfig, rel.pr, (d) => { d.release = rel; });
-  if (ok) sweeps.get(repoConfig.githubRepo)?.live.add(rel.pr);
-  return ok;
-}
+  /** Read the repo's release PRs once per runtime. Null when GitHub could not list them: nothing acts on a release until it can. */
+  private async swept(repoConfig: RepoConfig, logger: Logger): Promise<Sweep | null> {
+    const id = repoConfig.githubRepo;
+    const done = this.sweeps.get(id);
+    if (done) return done;
+    const running = this.sweeping.get(id);
+    if (running) return running;
+    const run = (async (): Promise<Sweep | null> => {
+      const numbers = new Set<number>(this.hints.get(id) ?? []);
+      if (hasStage(repoConfig)) {
+        try {
+          // Every release PR there has ever been (open, merged, closed), in one complete listing that throws when it
+          // fails or may be cut short: a stored release or pointer can sit on any of them, however old, and a swallowed
+          // failure would read as "none". Each PR's record is then read once.
+          for (const p of codeHost().allPrsForBranch(id, repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.repoPath)) numbers.add(p.number);
+        } catch (err) {
+          logger.debug(`Could not list ${id}'s release PRs: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        }
+      }
+      const sweep: Sweep = { live: new Set(), tracked: new Set(), unsure: new Set() };
+      for (const n of numbers) {
+        const record = await this.records.loadPrRecord(repoConfig, n);
+        if (!record) sweep.unsure.add(n);
+        else {
+          if (record.release) sweep.live.add(n);
+          if (record.tracked) sweep.tracked.add(n);
+        }
+      }
+      this.sweeps.set(id, sweep);
+      this.hints.delete(id);
+      return sweep;
+    })().finally(() => this.sweeping.delete(id));
+    this.sweeping.set(id, run);
+    return run;
+  }
 
-/** Remove PR `pr`'s release from its record. */
-export async function dropRelease(repoConfig: RepoConfig, pr: number): Promise<boolean> {
-  const ok = await updatePrRecord(repoConfig, pr, (d) => { delete d.release; });
-  if (ok) sweeps.get(repoConfig.githubRepo)?.live.delete(pr);
-  return ok;
-}
+  /** Read the record of every release the repo carries, once. */
+  async loadReleases(repoConfig: RepoConfig, logger: Logger): Promise<Releases | null> {
+    const sweep = await this.swept(repoConfig, logger);
+    if (!sweep) return null;
+    const releases: ProdRelease[] = [];
+    const unreadable = new Set<number>();
+    for (const n of new Set([...sweep.live, ...sweep.unsure])) {
+      const record = await this.records.loadPrRecord(repoConfig, n);
+      if (!record) { unreadable.add(n); continue; }
+      sweep.unsure.delete(n);
+      if (record.release) { sweep.live.add(n); releases.push(record.release); } else sweep.live.delete(n);
+      if (record.tracked) sweep.tracked.add(n); else sweep.tracked.delete(n);
+    }
+    releases.sort((a, b) => a.pr - b.pr);
+    return { releases, unreadable };
+  }
 
-/** Mark PR `pr` as a release the stage carries without having read its record yet (found by a listing). */
-export function noteLiveRelease(githubRepo: string, pr: number): void {
-  sweeps.get(githubRepo)?.live.add(pr);
-}
-
-/**
- * Follow the release PR from open to merged: announce an open one once, and a tracked PR's end once.
- * Every tracked PR that is not the open one is settled first. A record that cannot be read leaves its PR alone.
- */
-export async function followReleasePrs(
-  repoConfig: RepoConfig,
-  logger: Logger,
-  emit: (event: ReleaseEvent) => Promise<void>,
-  owned: boolean,
-): Promise<void> {
-  const sweep = await swept(repoConfig, logger);
-  if (!sweep) return;
-  const id = repoConfig.githubRepo;
-  const open = codeHost().findOpenPromotionPR(id, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
-  const save = async (pr: number, v: SavedRelease | null): Promise<boolean> => {
-    const ok = await updatePrRecord(repoConfig, pr, (d) => { if (v) d.tracked = v; else delete d.tracked; });
-    if (ok) { if (v) sweep.tracked.add(pr); else sweep.tracked.delete(pr); }
+  /** Save `rel` on its PR's record. False when it could not be saved: the caller does not act on the strength of it. */
+  async putRelease(repoConfig: RepoConfig, rel: ProdRelease): Promise<boolean> {
+    const ok = await this.records.updatePrRecord(repoConfig, rel.pr, (d) => { d.release = rel; });
+    if (ok) this.sweeps.get(repoConfig.githubRepo)?.live.add(rel.pr);
     return ok;
-  };
-  const common = {
-    repo: id,
-    productionBranch: repoConfig.productionBranch,
-    releaseState: (pr: number) => codeHost().getPrState(id, pr, repoConfig.repoPath, logger),
-    save,
-    emit,
-    owned,
-  };
-  for (const n of [...sweep.tracked]) {
-    if (n === open?.number) continue;
-    const record = await loadPrRecord(repoConfig, n);
-    if (!record) continue;
-    if (!record.tracked) { sweep.tracked.delete(n); continue; }
-    await trackRelease({ ...common, saved: record.tracked, findOpenRelease: () => null });
   }
-  if (open) {
-    const record = await loadPrRecord(repoConfig, open.number);
-    if (!record) return;
-    await trackRelease({ ...common, saved: record.tracked ?? null, findOpenRelease: () => open });
-  }
-}
 
-/** Tests only: forget the sweep. */
-export function resetReleaseTrackerForTests(): void {
-  sweeps.clear();
-  sweeping.clear();
-  hints.clear();
+  /** Remove PR `pr`'s release from its record. */
+  async dropRelease(repoConfig: RepoConfig, pr: number): Promise<boolean> {
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { delete d.release; });
+    if (ok) this.sweeps.get(repoConfig.githubRepo)?.live.delete(pr);
+    return ok;
+  }
+
+  /** Mark PR `pr` as a release the stage carries without having read its record yet (found by a listing). */
+  noteLiveRelease(githubRepo: string, pr: number): void {
+    this.sweeps.get(githubRepo)?.live.add(pr);
+  }
+
+  /**
+   * Follow the release PR from open to merged: announce an open one once, and a tracked PR's end once.
+   * Every tracked PR that is not the open one is settled first. A record that cannot be read leaves its PR alone.
+   */
+  async followReleasePrs(
+    repoConfig: RepoConfig,
+    logger: Logger,
+    emit: (event: ReleaseEvent) => Promise<void>,
+    owned: boolean,
+  ): Promise<void> {
+    const sweep = await this.swept(repoConfig, logger);
+    if (!sweep) return;
+    const id = repoConfig.githubRepo;
+    const open = codeHost().findOpenPromotionPR(id, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
+    const save = async (pr: number, v: SavedRelease | null): Promise<boolean> => {
+      const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { if (v) d.tracked = v; else delete d.tracked; });
+      if (ok) { if (v) sweep.tracked.add(pr); else sweep.tracked.delete(pr); }
+      return ok;
+    };
+    const common = {
+      repo: id,
+      productionBranch: repoConfig.productionBranch,
+      releaseState: (pr: number) => codeHost().getPrState(id, pr, repoConfig.repoPath, logger),
+      save,
+      emit,
+      owned,
+    };
+    for (const n of [...sweep.tracked]) {
+      if (n === open?.number) continue;
+      const record = await this.records.loadPrRecord(repoConfig, n);
+      if (!record) continue;
+      if (!record.tracked) { sweep.tracked.delete(n); continue; }
+      await trackRelease({ ...common, saved: record.tracked, findOpenRelease: () => null });
+    }
+    if (open) {
+      const record = await this.records.loadPrRecord(repoConfig, open.number);
+      if (!record) return;
+      await trackRelease({ ...common, saved: record.tracked ?? null, findOpenRelease: () => open });
+    }
+  }
 }

@@ -10,15 +10,7 @@ import { CycleEvent, activeRuns, itemOf } from "./common.js";
 import { reportLaunchThrew } from "./implement.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
-
-/**
- * A custom stage's last verdict per repo, keyed `<repo>\0<stage id>`, with the
- * feature-branch head it was reached on. A verdict stands until that head moves:
- * the pass loop polls every minute, and re-running the same skill on the same
- * code each time would spend a session per poll to learn nothing new. In memory
- * only — a restart re-runs each stage once.
- */
-export const customStageVerdicts = new Map<string, { headSha: string; outcome: "ok" | "blocked" | "failed"; reason?: string }>();
+import type { ForemanRuntime } from "../runtime.js";
 
 /**
  * Run one custom stage for one repo: a single Claude session on the stage's
@@ -31,6 +23,7 @@ export const customStageVerdicts = new Map<string, { headSha: string; outcome: "
  * refused is `blocked` without a verdict (not remembered, retried next pass).
  */
 export async function tryCustomStage(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   stage: CustomStage,
   logger: Logger,
@@ -51,7 +44,7 @@ export async function tryCustomStage(
   if (!pr) return { outcome: "ok", ran: false };
 
   const key = `${repoConfig.name}\0${stage.id}`;
-  const prior = customStageVerdicts.get(key);
+  const prior = rt.memory.customStageVerdicts.get(key);
   if (prior && prior.headSha === pr.headSha) {
     return { outcome: prior.outcome, reason: prior.reason, ran: false };
   }
@@ -61,7 +54,7 @@ export async function tryCustomStage(
   activeRuns.set(runAbort, repoConfig.name);
   try {
     const result = await runCustomStage(
-      repoConfig, stage,
+      rt.trust, repoConfig, stage,
       { prNumber: pr.number, issueNumbers: pr.issueNumbers, headSha: pr.headSha },
       stageLogger, runAbort.signal,
     ).catch(reportLaunchThrew);
@@ -69,7 +62,7 @@ export async function tryCustomStage(
     if (result.upstreamLimit) return { outcome: "blocked", reason: result.upstreamLimit.reason, ran: false };
 
     const outcome = result.verdict === "pass" ? "ok" : result.verdict;
-    customStageVerdicts.set(key, { headSha: pr.headSha, outcome, reason: result.reason });
+    rt.memory.customStageVerdicts.set(key, { headSha: pr.headSha, outcome, reason: result.reason });
     const where = `${repoConfig.githubRepo} PR #${pr.number}`;
     if (outcome === "ok") {
       stageLogger.info(`Stage "${stage.id}" passed on ${where}`);
@@ -81,7 +74,7 @@ export async function tryCustomStage(
         level: outcome === "blocked" ? "warn" : "error",
       });
       const why = `stage "${stage.id}" ${outcome} on PR #${pr.number}: ${result.reason ?? "no reason given"}`;
-      for (const n of pr.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, stageLogger);
+      for (const n of pr.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, stageLogger);
     }
     return { outcome, reason: result.reason, ran: true };
   } finally {

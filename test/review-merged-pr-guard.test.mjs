@@ -11,6 +11,8 @@ import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plu
 import { TechLeadPlugin } from "../dist/plugins/tech-lead.js";
 import { tryReview } from "../dist/phases/review.js";
 import { readPrState } from "../dist/github/review-freshness.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
 const tmp = mkdtempSync(join(tmpdir(), "review-merged-guard-"));
@@ -63,7 +65,7 @@ after(() => { process.env.PATH = saved.PATH; resetRegistryForTests(); rmSync(tmp
 
 test("a candidate whose PR is already merged starts no review and drops the snapshot", async () => {
   state = "MERGED"; calls.length = 0;
-  assert.equal(await tryReview(repo, config, quiet, 1), false);
+  assert.equal(await tryReview(rt, repo, config, quiet, 1), false);
   assert.ok(calls.includes("readPrState"));
   assert.ok(calls.includes("forgetOpenPrs"));
   assert.equal(existsSync(ranMarker), false, "the Tech Lead was offered a merged PR");
@@ -71,13 +73,13 @@ test("a candidate whose PR is already merged starts no review and drops the snap
 
 test("a closed PR starts no review either", async () => {
   state = "CLOSED"; calls.length = 0;
-  assert.equal(await tryReview(repo, config, quiet, 1), false);
+  assert.equal(await tryReview(rt, repo, config, quiet, 1), false);
   assert.equal(existsSync(ranMarker), false);
 });
 
 test("a PR whose state cannot be read fails the pass: no review is spent", async () => {
   state = "THROW"; calls.length = 0;
-  await assert.rejects(() => tryReview(repo, config, quiet, 1));
+  await assert.rejects(() => tryReview(rt, repo, config, quiet, 1));
   assert.equal(existsSync(ranMarker), false);
 });
 

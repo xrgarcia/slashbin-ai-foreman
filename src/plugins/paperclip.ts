@@ -5,6 +5,8 @@ import { PaperclipMirror } from "../paperclip/mirror.js";
 import { runDoctor } from "../paperclip/doctor.js";
 import { createCardBlockStore } from "../card-blocks.js";
 import { createRepoIdentity } from "../paperclip/repo-identity.js";
+import type { IssueRecordStore } from "../issue-records.js";
+import type { LegacyImport } from "../legacy-records.js";
 import type { ForemanPlugin, PluginContext } from "./contract.js";
 
 /**
@@ -37,6 +39,8 @@ export class PaperclipPlugin implements ForemanPlugin {
   readonly commands = {
     "paperclip:doctor": (config: AgentConfig) => runDoctor(config),
   };
+  /** @param stores the runtime's record store and legacy import, which the card-block store reads and writes. */
+  constructor(private readonly stores: { records: IssueRecordStore; legacy: LegacyImport }) {}
   private mirror: PaperclipMirror | null = null;
   private stopMirror: (() => void) | null = null;
   private mirroredText: string | null = null;
@@ -86,7 +90,7 @@ export class PaperclipPlugin implements ForemanPlugin {
       logger,
       config.lifecycleLabels,
       // A card's block (reason, holder, stage, ruling) outlives a restart, in its repo's own record.
-      createCardBlockStore(() => this.repos),
+      createCardBlockStore(() => this.repos, this.stores.records, this.stores.legacy),
       config.paperclip.registryUrl
         ? createRepoIdentity({ url: config.paperclip.registryUrl, apiKey: config.paperclip.registryApiKey })
         : undefined,
