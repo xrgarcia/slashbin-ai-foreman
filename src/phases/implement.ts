@@ -7,7 +7,8 @@ import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { selectWork, heldWork, emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
-import { implementApprovedIssues, type ImplementationResult } from "../agent.js";
+import { implementApprovedIssues } from "./implement-workflow.js";
+import type { ImplementationResult } from "../session/protocol.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import {
   checkLocalBranchDivergence,

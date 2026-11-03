@@ -93,7 +93,11 @@ test("postMergeQaNeeded: no edge to read comments keeps the old behaviour; an un
 test("wiring: the re-run move goes pr approved -> pr merged, verify takes requests first and runs the gate under qaBeforeMerge", () => {
   assert.deepEqual([MOVES.qaRerun.from, MOVES.qaRerun.to], ["approved", "merged"]);
   const v = src("phases/verify.ts");
-  assert.ok(v.indexOf("takeQaRerunRequests(repoConfig") < v.indexOf("findIssuesAwaitingVerify(repoConfig"), "a request is taken before this cycle reads its pr merged issues");
+  const takeAt = v.indexOf("takeQaRerunRequests(rt, repoConfig,");
+  const readAt = v.indexOf("findIssuesAwaitingVerify(repoConfig");
+  assert.ok(takeAt >= 0, "the QA re-run request take is gone from verify.ts (or its call shape moved)");
+  assert.ok(readAt >= 0, "the awaiting-verify read is gone from verify.ts (or its call shape moved)");
+  assert.ok(takeAt < readAt, "a request is taken before this cycle reads its pr merged issues");
   assert.match(v, /advance\(rt, itemOf\(repoConfig, n\), "qaRerun"/);
   assert.match(v, /qaBeforeMerge && await postMergeQaNeeded\(/);
   assert.match(v, /\|\| qaAgain\)\) \{/);

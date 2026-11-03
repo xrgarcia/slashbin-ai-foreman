@@ -23,7 +23,7 @@
 // Run with `npm test` (node:test, no dependencies) after `npm run build`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reviewBudget } from "../dist/agent.js";
+import { reviewBudget } from "../dist/session/runner.js";
 import { planFailedReviewOutcome } from "../dist/github.js";
 
 // --- 1. The budget the run is told about ----------------------------------

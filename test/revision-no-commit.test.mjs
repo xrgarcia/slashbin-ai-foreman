@@ -17,12 +17,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { orchestratorSource } from "./source-text.mjs";
+import { orchestratorSource, agentSource, between } from "./source-text.mjs";
 import { ForemanRuntime } from "../dist/runtime.js";
 let rt = new ForemanRuntime();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
+const agent = agentSource();
 const orchestrator = orchestratorSource();
 
 /** The live regex, lifted from source so the test cannot drift from it. */
@@ -53,7 +53,7 @@ test("a bare no-commit claim without a reason does NOT parse", () => {
 });
 
 test("the SHA guard returns success ONLY on a declared no-commit", () => {
-  const guard = agent.slice(agent.indexOf("if (beforeSha && afterSha && beforeSha === afterSha)"));
+  const guard = between(agent, "if (beforeSha && afterSha && beforeSha === afterSha)");
   const block = guard.slice(0, 2000);
   assert.match(block, /REVISION_NO_COMMIT\.exec/,
     "the guard must consult the trailer before failing the run");

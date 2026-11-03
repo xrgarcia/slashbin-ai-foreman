@@ -19,8 +19,10 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(root, "hooks", "session-secret-gate.mjs");
 const { violation, fileViolation } = await import(HOOK);
-const { implementApprovedIssues, revisePRFeedback, runCustomStage, sessionSettings, SESSION_SECRET_GATE } =
-  await import(join(root, "dist/agent.js"));
+const { implementApprovedIssues } = await import(join(root, "dist/phases/implement-workflow.js"));
+const { revisePRFeedback } = await import(join(root, "dist/phases/revise-workflow.js"));
+const { runCustomStage } = await import(join(root, "dist/phases/custom-workflow.js"));
+const { sessionSettings, SESSION_SECRET_GATE } = await import(join(root, "dist/session/secret-gate.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
 const { ClaudeTrust } = await import(join(root, "dist/claude-trust.js"));
 const trust = new ClaudeTrust();

@@ -1,6 +1,6 @@
 import type { WorkObserver, WorkSourceAdapter } from "../adapters.js";
 import type { CodeHost } from "../code-host.js";
-import type { ReviewResult, ReviewTrailer } from "../agent.js";
+import type { ReviewResult, ReviewTrailer } from "../session/protocol.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { QaOutcome } from "../qa-report.js";
