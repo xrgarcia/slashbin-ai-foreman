@@ -8,7 +8,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent } from "../adapters.js";
 import { emit, advance } from "../work-source.js";
-import { HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../agent.js";
+import { HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../session/protocol.js";
 import { roleFor } from "../plugins/registry.js";
 import { qaBeforeMergeApplies, qaFailStandsBody, realQaLocalDeps, runQaBeforeMerge, type QaDeps, type QaPreMergeDecision } from "../qa-report.js";
 import { isToolingHold } from "./verify.js";

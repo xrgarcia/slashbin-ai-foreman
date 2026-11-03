@@ -10,7 +10,7 @@ import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { reviewMove } from "../lifecycle.js";
 import { parseReviewBody } from "../review-report.js";
 import { type BranchDivergence } from "../reconciler.js";
-import type { ReviewTrailer, UpstreamLimit } from "../agent.js";
+import type { ReviewTrailer, UpstreamLimit } from "../session/protocol.js";
 import type { Divergence } from "../divergence.js";
 import { passingCheck, unblockedReason, type BlockFacts, type BlockKind } from "../unblock.js";
 import { BackoffTracker } from "../backoff.js";

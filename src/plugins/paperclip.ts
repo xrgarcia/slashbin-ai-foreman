@@ -1,5 +1,5 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
-import { secretValues } from "../agent.js";
+import { secretValues } from "../session/env.js";
 import { PaperclipClient } from "../paperclip/client.js";
 import { PaperclipMirror } from "../paperclip/mirror.js";
 import { runDoctor } from "../paperclip/doctor.js";

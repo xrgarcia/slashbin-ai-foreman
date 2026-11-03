@@ -19,7 +19,7 @@ import { loadConfig, defaultLifecycleLabels } from "../dist/config.js";
 import { configureIssueCache } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { transition } from "../dist/lifecycle.js";
-import { revisePRFeedback } from "../dist/agent.js";
+import { revisePRFeedback } from "../dist/phases/revise-workflow.js";
 import { ClaudeTrust } from "../dist/claude-trust.js";
 const trust = new ClaudeTrust();
 import { createLogger } from "../dist/logger.js";

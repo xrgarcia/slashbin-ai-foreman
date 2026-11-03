@@ -1,6 +1,7 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS, SUMMARY_DISPLAY_LIMIT, type ReviewTrailer } from "../agent.js";
+import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
+import { SUMMARY_DISPLAY_LIMIT, type ReviewTrailer } from "../session/protocol.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { cliTail, parseReviewTrailerRecords, parseUnrelatedErrors, runAgentCli, type CliRun } from "./agent-cli.js";
 import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, Verifier, VerifyResult } from "./contract.js";

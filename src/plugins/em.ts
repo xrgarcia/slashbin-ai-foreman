@@ -1,6 +1,6 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { pickEnv, SESSION_ENV_ESSENTIALS } from "../agent.js";
+import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { cliTail, lastLine, runAgentCli } from "./agent-cli.js";
 import type { ForemanPlugin, Unsticker, UnstickOutcome } from "./contract.js";
 

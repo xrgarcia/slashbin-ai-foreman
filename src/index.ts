@@ -11,7 +11,9 @@ export { DEFAULT_BACKOFF, backoffDelay, type BackoffConfig, type BackoffWindow }
 export { STAGES, MOVES, transition, type Stage, type Move, type Transition } from "./lifecycle.js";
 export { ClaudeTrust, claudeConfigPath } from "./claude-trust.js";
 export { ForemanRuntime } from "./runtime.js";
-export { implementApprovedIssues, revisePRFeedback, type ImplementationResult, type RevisionResult } from "./agent.js";
+export { implementApprovedIssues } from "./phases/implement-workflow.js";
+export { revisePRFeedback } from "./phases/revise-workflow.js";
+export type { ImplementationResult, RevisionResult } from "./session/protocol.js";
 export { reconcileRepo, type ReconciliationResult } from "./reconciler.js";
 export { runCycle, runRepoPass, runLanePass, getState, type OrchestratorState, type CycleResult } from "./orchestrator.js";
 export { lanesFor, type Lane } from "./lanes.js";

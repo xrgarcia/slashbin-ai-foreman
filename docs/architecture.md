@@ -109,7 +109,8 @@ src/
 ├── config-schema/     # The github and paperclip config blocks (core: config.ts reads them)
 ├── github.ts          # GitHub plugin code: API surface (PRs, labels, dual-token ops); code in github/
 ├── github-work-source.ts # GitHub plugin code: issues as the work source, a move → its labels
-├── agent.ts           # Claude Code CLI spawner (session env, secret gate, redaction)
+├── session/           # The Claude session: runner.ts (spawn), env.ts (allowlist, redaction), secret-gate.ts,
+│                      #   protocol.ts (parses what a session printed: trailers, skip/landed, limits; no I/O)
 ├── stages.ts          # Stage schema, default order, dispatch loop
 ├── lanes.ts           # Stages grouped into lanes; checkout, lane and session locks
 ├── backoff.ts         # Every retry wait: the `backoff` config block and the one formula

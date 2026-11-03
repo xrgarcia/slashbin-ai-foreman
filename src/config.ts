@@ -66,7 +66,7 @@ const repoEntrySchema = z.object({
   productionBranch: z.string().optional(),
   featureBranch: z.string().optional(),
   // A repo-relative SKILL.md, or "builtin:" for the generic skill shipped in
-  // this package's skills/ directory (see resolveSkill in agent.ts).
+  // this package's skills/ directory (see skillInstruction in phases/workflow-prompt.ts).
   skillPath: z.string().optional(),
   revisionSkillPath: z.string().optional(),
   // Optional repo-relative file appended to the implement / revise prompt after
@@ -227,7 +227,7 @@ export const configSchema = z.object({
   // inert when unset or when the file does not exist. Additive + OSS-safe.
   builderMcpConfig: z.string().optional(),
   // Env var names a Claude session inherits from the daemon, on top of the
-  // essentials every session gets (SESSION_ENV_ESSENTIALS in agent.ts). Nothing
+  // essentials every session gets (SESSION_ENV_ESSENTIALS in session/env.ts). Nothing
   // else from the daemon's env reaches a session: the production daemon runs
   // under `doppler run`, and on 2026-10-01 a session that listed its env printed
   // FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix

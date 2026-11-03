@@ -209,7 +209,7 @@ MCP client config handed to implement/revise sessions (`--mcp-config`), so a bui
 
 Type: string[] · Default: `[]`
 
-Env var names a Claude session inherits from the daemon, on top of the essentials every session gets (SESSION_ENV_ESSENTIALS in agent.ts). Nothing else from the daemon's env reaches a session: the production daemon runs under `doppler run`, and on 2026-10-01 a session that listed its env printed FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix denylist misses names like SYSTEM_SUDO_PW and WORKER_POSTGRES_URL. One list for the fleet, never per repo. May not name a GitHub token (see loadConfig).
+Env var names a Claude session inherits from the daemon, on top of the essentials every session gets (SESSION_ENV_ESSENTIALS in session/env.ts). Nothing else from the daemon's env reaches a session: the production daemon runs under `doppler run`, and on 2026-10-01 a session that listed its env printed FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix denylist misses names like SYSTEM_SUDO_PW and WORKER_POSTGRES_URL. One list for the fleet, never per repo. May not name a GitHub token (see loadConfig).
 
 ### `logFormat`
 
