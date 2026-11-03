@@ -133,7 +133,7 @@ is config: the trigger label, `lifecycleLabels`, or the `github` block
 (`src/config-schema/github.ts`), each defaulting to the name it always had. Phases pass
 `repoConfig.github`; `src/github/*` functions take it as a trailing parameter defaulting
 to `DEFAULT_GITHUB_CONVENTIONS`. Sessions get every label name as `FOREMAN_*_LABEL(S)`
-env vars (`setLabelEnv` in `agent.ts`), so no skill types one. **A new GitHub name is a
+env vars (`setLabelEnv` in `src/session/env.ts`), so no skill types one. **A new GitHub name is a
 key there, never a literal.** The markers the Foreman and its skills talk through
 (`FOREMAN_RESULT`, `FOREMAN_REVIEW`, `<!-- foreman-ci-gate -->`, "Related to #N") stay
 fixed on purpose.
@@ -152,7 +152,7 @@ src/
 │                    #   (gh runner, caches, discovery, review queue, lifecycle scans, CI gate, promotion, …)
 ├── github-work-source.ts # GitHubIssueConnector: a move → its `gh issue edit`; labels → stages for snapshot
 ├── redact.ts / review-report.ts # Core helpers shared by the agent runner and plugins
-├── agent.ts         # Spawns claude CLI (implement / revise / review)
+├── session/         # The Claude session: runner (spawn), env (allowlist, redaction), secret-gate, protocol (output parsing)
 ├── claude-trust.ts  # Claude Code workspace trust for every checkout a session runs in (`trustManagedRepos`)
 ├── backoff.ts       # Every retry wait: the `backoff` config block, the one formula, BackoffTracker
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)

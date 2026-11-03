@@ -6,7 +6,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
-import type { ReviewTrailer } from "../agent.js";
+import type { ReviewTrailer } from "../session/protocol.js";
 import { roleFor } from "../plugins/registry.js";
 import { REVIEW_MILESTONES, ReviewProgressRelay } from "../review-progress.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";

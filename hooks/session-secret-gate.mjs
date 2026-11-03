@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * PreToolUse hook the Foreman passes to EVERY Claude session it spawns
- * (`--settings`, see src/agent.ts sessionSettings). It blocks Bash commands
+ * (`--settings`, see src/session/secret-gate.ts sessionSettings). It blocks Bash commands
  * that would print an environment or credential VALUE, and file-tool calls
  * (Read, Grep, Edit, notebooks) on a file whose content is a credential.
  *

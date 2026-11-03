@@ -13,7 +13,7 @@
 // (orchestrator.ts), the runs the shutdown drain aborts (phases/common.ts
 // activeRuns), the plugin registry, the gh usage counters, the state
 // directory, the work-source event queue, the backoff config, the
-// upstream-backoff wiring and the secret-gate log flag (agent.ts).
+// upstream-backoff wiring and the secret-gate log flag (session/runner.ts).
 //
 // Import rule: only the composition roots (daemon, cli, tests) import this
 // module as a value. Everything else uses `import type`, so it never becomes

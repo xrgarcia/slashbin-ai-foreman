@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mcpServerNames } from "../dist/agent.js";
+import { mcpServerNames } from "../dist/session/runner.js";
 
 const quiet = { warn() {}, info() {}, debug() {}, error() {}, child() { return quiet; } };
 const dir = mkTmp("builder-mcp-");

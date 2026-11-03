@@ -3,7 +3,7 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { emit } from "../work-source.js";
-import { runCustomStage } from "../agent.js";
+import { runCustomStage } from "./custom-workflow.js";
 import { type CustomStage, type StageResult } from "../stages.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { CycleEvent, activeRuns, itemOf } from "./common.js";

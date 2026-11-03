@@ -2,7 +2,7 @@ import { releaseStageReady, type AgentConfig, type RepoConfig } from "./config.j
 import { configureBackoff } from "./backoff.js";
 import type { Logger } from "./logger.js";
 import { publishSnapshot, wantsSnapshot, workSourceFor } from "./work-source.js";
-import { type ImplementationResult } from "./agent.js";
+import { type ImplementationResult } from "./session/protocol.js";
 import { dispatchStages, hasStage, isCustomStage, type StageEntry, type StageResult } from "./stages.js";
 import { getQueuedSessionCount, lanesFor, setSessionLimit, stageNeedsCheckout, stageSpawnsSession, withCheckoutLock, withLaneLock, withSessionSlot, type Lane } from "./lanes.js";
 import { CycleEvent, activeRuns } from "./phases/common.js";

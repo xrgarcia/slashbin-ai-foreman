@@ -1,6 +1,7 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS, SUMMARY_DISPLAY_LIMIT, type ReviewResult, type ReviewTrailer } from "../agent.js";
+import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
+import { SUMMARY_DISPLAY_LIMIT, type ReviewResult, type ReviewTrailer } from "../session/protocol.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "../review-progress.js";
 import { isTransientGhError } from "../github/gh.js";

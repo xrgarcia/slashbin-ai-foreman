@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectDeclaredSkip } from "../dist/agent.js";
+import { detectDeclaredSkip } from "../dist/session/protocol.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { loadConfig } from "../dist/config.js";
 import { UNBLOCK_CHECKS, passingCheck } from "../dist/unblock.js";

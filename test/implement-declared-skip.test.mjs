@@ -19,14 +19,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentSource, between } from "./source-text.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
+const agent = agentSource();
 
-const fn = agent.slice(
-  agent.indexOf("export async function implementApprovedIssues"),
-  agent.indexOf("export async function revisePRFeedback"),
-);
+const fn = between(agent, "export async function implementApprovedIssues", "export async function revisePRFeedback");
 
 test("the declared skip is checked BEFORE any PR attribution", () => {
   const skipAt = fn.indexOf("detectDeclaredSkip(result.stdout)");
@@ -41,7 +39,7 @@ test("the declared skip is checked BEFORE any PR attribution", () => {
 });
 
 test("a declared skip is only honoured when the branch did not move", () => {
-  const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
+  const block = between(fn, "const declaredSkip =", "const prMatch");
   assert.match(block, /getRemoteBranchSha/,
     "without a SHA check the trailer is taken on trust, which is the assumption that should never be load-bearing");
   assert.match(block, /beforeSha !== afterSha/, "the guard must compare, not merely fetch");
@@ -51,10 +49,7 @@ test("a declared skip is only honoured when the branch did not move", () => {
 });
 
 test("the structured detector never falls back to prose", () => {
-  const detector = agent.slice(
-    agent.indexOf("function detectDeclaredSkip"),
-    agent.indexOf("function detectSkipSignal"),
-  );
+  const detector = between(agent, "function detectDeclaredSkip", "function detectSkipSignal");
   assert.match(detector, /FOREMAN_RESULT/, "it must read the trailer");
   for (const phrase of ["skipped because", "no immediate code change", "slice(-2000)"]) {
     assert.ok(!detector.includes(phrase),
@@ -82,10 +77,7 @@ test("the fuzzy heuristic still exists, downstream", () => {
 // every issue behind it off the board for a defect in a spec it never read.
 
 test("the trailer carries an optional issue scope", () => {
-  const detector = agent.slice(
-    agent.indexOf("function detectDeclaredSkip"),
-    agent.indexOf("function detectSkipSignal"),
-  );
+  const detector = between(agent, "function detectDeclaredSkip", "function detectSkipSignal");
   assert.match(detector, /issue=/,
     "detectDeclaredSkip must parse the issue scope, or a scoped trailer is silently unscoped");
   assert.match(detector, /issue\?: number/,
@@ -93,7 +85,7 @@ test("the trailer carries an optional issue scope", () => {
 });
 
 test("a scoped skip narrows skippedIssues to the named issue", () => {
-  const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
+  const block = between(fn, "const declaredSkip =", "const prMatch");
   assert.match(block, /skippedIssues: named !== undefined \? \[named\] : \(issueNumbers \?\? \[\]\)/,
     "a scoped trailer must narrow the skip; unscoped must still cover the batch");
 });
@@ -105,7 +97,7 @@ test("a scoped skip narrows skippedIssues to the named issue", () => {
 // routine. Widening the skip to the batch over it would reintroduce the exact
 // starvation the scope exists to prevent.
 test("an out-of-batch issue scope is honoured, not widened to the batch", () => {
-  const block = fn.slice(fn.indexOf("const declaredSkip ="), fn.indexOf("const prMatch"));
+  const block = between(fn, "const declaredSkip =", "const prMatch");
   assert.ok(!/skippedIssues: scoped/.test(block),
     "the scope must not depend on batch membership");
   assert.match(block, /includes\(named\)/,
@@ -136,7 +128,7 @@ test("the agent is told to include the issue scope", () => {
 // defect was in what the regex MATCHED, which source text cannot show.
 
 test("reason and issue parse regardless of field order", async () => {
-  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
 
   const scopedFirst = detectDeclaredSkip(
     'FOREMAN_RESULT: skipped issue=427 reason="cited path does not exist"',
@@ -154,7 +146,7 @@ test("reason and issue parse regardless of field order", async () => {
 });
 
 test("the legacy unscoped trailer still parses and stays batch-wide", async () => {
-  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
   const legacy = detectDeclaredSkip('FOREMAN_RESULT: skipped reason="investigation only"');
   assert.equal(legacy.skipped, true);
   assert.equal(legacy.reason, "investigation only");
@@ -163,7 +155,7 @@ test("the legacy unscoped trailer still parses and stays batch-wide", async () =
 });
 
 test("a reason on a later line is NOT swept into the trailer", async () => {
-  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
   const spread = detectDeclaredSkip('FOREMAN_RESULT: skipped issue=5\nreason="on the next line"');
   assert.equal(spread.issue, 5);
   assert.equal(spread.reason, "no reason given",
@@ -171,7 +163,7 @@ test("a reason on a later line is NOT swept into the trailer", async () => {
 });
 
 test("no trailer at all is not a skip", async () => {
-  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
   assert.equal(detectDeclaredSkip("I decided to skip this issue entirely.").skipped, false,
     "prose must not reach the pre-PR check — that is detectSkipSignal's job, downstream");
 });
@@ -181,7 +173,7 @@ test("no trailer at all is not a skip", async () => {
 // three approved issues backed off for 1h, then 2h. The text is from the
 // 2026-10-01T19:34:55Z Slashbin-console implement log.
 test("prose that names the trailer is not a declaration", async () => {
-  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
   const prose =
     "To unblock, PR #1175 needs a review and a merge into `develop`.\n\n" +
     "I left off the `FOREMAN_RESULT: skipped` line on purpose. No single issue is at fault, " +
@@ -191,7 +183,7 @@ test("prose that names the trailer is not a declaration", async () => {
 });
 
 test("a real trailer after prose still parses, and the last one wins", async () => {
-  const { detectDeclaredSkip } = await import("../dist/agent.js");
+  const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
   const out = detectDeclaredSkip(
     "Commented on #9 with what would unblock it.\n\n" +
     "FOREMAN_RESULT: skipped issue=8 reason=\"superseded\"\n" +
