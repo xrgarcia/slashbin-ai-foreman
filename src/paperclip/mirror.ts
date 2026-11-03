@@ -772,6 +772,12 @@ export class PaperclipMirror implements WorkObserver {
     if (to !== "queued") this.claimed.delete(this.keyOf(item));
     const id = await this.resolve(item, false);
     if (!id) return;
+    // Block readiness comes before any hold decision: holdOutranks must only ever see restored blocks.
+    // Unread, the whole event waits (the next snapshot places the card), never a guess about its hold.
+    if (!(await this.ensureBlocks())) {
+      this.logger.warn("Paperclip card blocks could not be read; the stage update waits for the next snapshot");
+      return;
+    }
     // A closed issue's card is terminal: a stage update landing after the close
     // reopened SLA-2633 as pending verification on the EM (Foreman #112). A done
     // or cancelled card counts as closed until the snapshot reads its issue open.
@@ -861,6 +867,8 @@ export class PaperclipMirror implements WorkObserver {
   async onUnblocked(item: WorkItem, reason: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const id = await this.resolve(item, false);
     if (!id || this.holds.has(id)) return;
+    // Restore first: a clear before the load would let the old block come back from the record.
+    if (!(await this.ensureBlocks())) return;
     if (this.rowState.get(id) !== `status:${this.statusName("blocked")}`) return;
     this.blockedAt.delete(id);
     this.clearBlock(id);
