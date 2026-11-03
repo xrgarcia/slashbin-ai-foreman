@@ -21,7 +21,7 @@ import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { ForemanRuntime } from "../dist/runtime.js";
 let rt = new ForemanRuntime();
 
-const DEFAULT = ["reconcile", "review", "verify", "promote", "release", "revise", "implement", "branch-sync", "dependabot", "unstick"];
+const DEFAULT = ["reconcile", "review", "verify", "promote", "release", "revise", "implement", "branch-sync", "dependabot", "unstick", "skill-deliver"];
 const logger = createLogger({ format: "text", level: "error" });
 const names = (stages) => stages.map((s) => s.type ?? s.id);
 
@@ -115,7 +115,7 @@ const OPEN_PR = { number: 7, title: "feat: scan target (#3)", body: "Related to 
 
 // --- Config resolution -------------------------------------------------------
 
-test("default stages: a config with no `stages` resolves to the ten built-ins, in order", () => {
+test("default stages: a config with no `stages` resolves to the eleven built-ins, in order", () => {
   assert.deepEqual([...BUILTIN_STAGES], DEFAULT);
   assert.deepEqual(names(load({}).stages), DEFAULT);
   assert.deepEqual(names(configSchema.parse({}).stages), DEFAULT);

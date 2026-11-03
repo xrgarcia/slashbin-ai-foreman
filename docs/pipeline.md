@@ -163,10 +163,11 @@ built-ins in the order above (verify only with `srePath`; release only with both
 { "stages": [
   { "type": "reconcile" }, { "type": "review" }, { "type": "verify" }, { "type": "promote" },
   { "type": "release" }, { "type": "revise" }, { "type": "implement" }, { "type": "branch-sync" },
-  { "type": "dependabot" }, { "type": "unstick" }
+  { "type": "dependabot" }, { "type": "unstick" }, { "type": "skill-deliver" }
 ] }
 ```
 
+`skill-deliver` runs only on `syncOnly` (human-lane) repos, which run nothing else ([skill-sync.md](skill-sync.md#human-lane-sync-only-repos)).
 Leave a built-in out and it never runs. Order matters only inside a lane: revise
 runs before implement in the build lane, promote before release in the release lane
 (so release acts on the PR promote just opened or updated), and a custom stage runs

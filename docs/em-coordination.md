@@ -58,6 +58,12 @@ put on the card after the last pass is read live before any stage move, so it is
 ruling block a Paperclip outage lost is re-delivered on the next pass. Never fix a card by hand
 that the next pass would place: fix the issue.
 
+**Human-lane repos (`syncOnly`, stage `skill-deliver`).** Not a lifecycle stage: no card, label or PR. For each open
+`approved-for-human` issue in a `syncOnly` repo the Foreman pushes the current golden skills as one commit on
+`feature/<N>-<slug>` cut from `origin/<base>` (never when the base is current or `feature/<N>-*` exists), so the
+person's direct-mode session resumes it. EM input: none. Adding a human-lane repo to the Foreman means a `syncOnly`
+entry in `.ai-agent.json`, never an implement/review lane (`docs/skill-sync.md`).
+
 ## 2. Holds by code
 
 A dev-verification hold is planned by `verifyHoldPlan` (`src/phases/verify.ts`) into one of
