@@ -75,7 +75,7 @@ test.after(() => {
 const cfgPath = join(tmp, "cfg.json");
 writeFileSync(cfgPath, JSON.stringify({
   stages: [{ type: "reconcile" }, { type: "implement" }],
-  repos: [{ name: "hm", repoPath: tmp, githubRepo: REPO, featureBranch: "develop", baseBranch: "develop", productionBranch: "main" }],
+  repos: [{ name: "hm", repoPath: tmp, githubRepo: REPO, baseBranch: "develop", productionBranch: "main" }],
 }));
 const config = loadConfig(cfgPath);
 const repo = config.repos[0];

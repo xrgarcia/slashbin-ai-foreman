@@ -19,7 +19,7 @@ import type { ForemanRuntime } from "./runtime.js";
 
 // The phases live in src/phases/; these are the parts of them the daemon, the
 // CLI and the tests reach through the orchestrator.
-export { stoppedReason, divergenceNotice, labelFromTrailer, workStateOf, type CycleEvent } from "./phases/common.js";
+export { stoppedReason, labelFromTrailer, workStateOf, type CycleEvent } from "./phases/common.js";
 export { prBlockingSkip } from "./phases/implement.js";
 export { verifyHoldPlan, pickVerifyTarget, devVerifyHolding, visualDecisionHolder, followUpsOf, followUpsToBuild, evidenceLinks } from "./phases/verify.js";
 
@@ -349,7 +349,7 @@ async function runStage(
     //    post-promotion merge commits. Runs independently of promotion work so
     //    drift is cleared even when no ready-for-prod issues exist. ---
     case "branch-sync":
-      if (!(repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch)) {
+      if (!(repoConfig.baseBranch === repoConfig.productionBranch)) {
         if (trySyncDrift(repoConfig, base, cycleNumber)) {
           events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged`, level: "info" });
           processed++;

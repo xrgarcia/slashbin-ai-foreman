@@ -22,7 +22,7 @@ built-ins in this order (`src/stages.ts`):
 Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot → Unstick
 ```
 
-1. **Reconcile** — finds commits on the feature branch that no PR carries (orphaned
+1. **Reconcile** — finds commits on a Foreman branch that no PR carries (orphaned
    work) and opens a PR for them. The PR titles are `github.reconcileTitle` /
    `github.reconcileBatchTitle` ([configuration.md](configuration.md#github-conventions-github)).
 2. **Review** *(opt-in)* — when `reviewEnabled` is set, hands each open feature PR
@@ -183,7 +183,7 @@ A custom stage is `{ "id": "<name>", "skillPath": "<SKILL.md>" }`. It is kept
 deliberately small:
 
 - **When it runs.** When the pass reaches it and the repo has an open
-  `featureBranch → baseBranch` PR. No open PR: no session, and the pass continues.
+  Foreman-owned PR (a `foreman/…` head, or the legacy shared head) into `baseBranch`. No open PR: no session, and the pass continues.
 - **What it gets.** One Claude session per repo, in the managed repo, under
   `FOREMAN_GITHUB_TOKEN`, with the implement session's model, tools, MCP config
   and budget. The prompt names the skill, the PR, its head and the issues it

@@ -148,7 +148,7 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
   // documented format grew an `issue=` field in front of it the reason silently
   // became "no reason given". That is not cosmetic: the reason is persisted as
   // state.skipped[n].reason and is the ONLY input to isResolvedTransientSkip,
-  // which recognises a transient divergence solely by matching the agent's own
+  // which recognises a transient wait (an open PR on the branch) solely by matching the agent's own
   // wording. A dropped reason turns a self-clearing skip into a 24h back-off.
   //
   // The trailer must START a line. Unanchored, prose that merely names it is a

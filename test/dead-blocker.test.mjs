@@ -22,7 +22,7 @@ import { prBlockingSkip } from "../dist/phases/implement.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 let tmp, calls, dependents, savedPath, savedToken;
-const cfg = { githubRepo: "o/gw", repoPath: tmp, featureBranch: "features", github: { blockedLabel: "blocked" } };
+const cfg = { githubRepo: "o/gw", repoPath: tmp, baseBranch: "develop", github: { blockedLabel: "blocked" } };
 
 before(() => {
   tmp = mkdtempSync(join(tmpdir(), "foreman-deadblocker-"));
@@ -95,17 +95,18 @@ else if (a[2] === "1") { process.stderr.write("boom"); process.exit(1); }
 
 test("closing an already-landed issue comments the evidence, then closes as completed", () => {
   writeFileSync(calls, "");
-  closeAlreadyLanded(cfg, 478, "all 16 PRs already on features");
+  closeAlreadyLanded(cfg, 478, "all 16 PRs already on develop");
   const c = made();
   assert.equal(c[0][1], "comment");
-  assert.match(c[0][c[0].indexOf("--body") + 1], /already on features/);
+  assert.match(c[0][c[0].indexOf("--body") + 1], /present on `develop`/);
   assert.deepEqual(c[1].slice(0, 2), ["issue", "close"]);
   assert.equal(c[1][c[1].indexOf("--reason") + 1], "completed");
 });
 
 test("only a cause that will not clear by itself counts as a dead blocker", () => {
   assert.equal(isDeadBlockerReason("all 11 dependency PRs fail npm ci"), true);
-  assert.equal(isDeadBlockerReason("diverged from origin/features — not a fast-forward"), false);
+  // foreman#208: the divergence wait is gone (no shared branch to diverge), so every cause is a dead one.
+  assert.equal(isDeadBlockerReason("any other cause"), true);
   // The other transient wait (an open PR on the branch) is the caller's, through prBlockingSkip:
   for (const r of ["PR #88 is still open on features", "features occupied by open PR #843"]) {
     assert.notEqual(prBlockingSkip(r), null, r);
@@ -131,7 +132,7 @@ test("wiring: landed is checked before PR attribution and behind the SHA guard; 
   const prMatchAt = fn.indexOf("const prMatch = result.stdout.match");
   assert.ok(prMatchAt > 0, "PR extraction is gone - test needs updating");
   assert.ok(landedAt < prMatchAt);
-  assert.match(between(fn, "detectDeclaredLanded(result.stdout)", "const declaredSkip"), /beforeSha !== afterSha/);
+  assert.match(between(fn, "detectDeclaredLanded(result.stdout)", "const declaredSkip"), /movedBranch\(\)/);
   const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
   assert.match(impl, /actionableIssues\.includes\(result\.landedIssue\)/, "only an issue in the batch may be closed");
   assert.match(impl, /await tellDependents\(/);

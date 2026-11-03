@@ -47,6 +47,10 @@ fs.appendFileSync(${JSON.stringify(F.ghLog)}, JSON.stringify(args) + "\\n");
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(F.ghState)}, "utf8"));
 if (args[0] === "pr" && args[1] === "list") {
   process.stdout.write(JSON.stringify(args.includes("--head") ? st.featurePrs : st.openPrs));
+} else if (args[0] === "pr" && args[1] === "view") {
+  // foreman#208: the open Foreman PR is read by number, not by the shared head.
+  const p = st.openPrs.find((x) => String(x.number) === args[2]);
+  process.stdout.write(JSON.stringify(p ?? {}));
 } else if (args[0] === "api" && args.join(" ").includes("dependabot/alerts")) {
   if (st.alertsFail) { process.stderr.write("gh: Dependabot alerts are disabled for this repository. (HTTP 404)"); process.exit(1); }
   process.stdout.write((st.alerts || []).join("\\n") + ((st.alerts || []).length ? "\\n" : ""));
@@ -96,7 +100,7 @@ function load(cfg, repo = {}) {
 function arrange({ featurePrs = [], openPrs = [], claudeOut = "", alerts = [], alertsFail = false } = {}) {
   writeFileSync(F.ghLog, "");
   writeFileSync(F.claudeLog, "");
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs, alerts, alertsFail }));
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs: [...featurePrs.map((p) => ({ ...p, headRefName: "features", baseRefName: "develop" })), ...openPrs], alerts, alertsFail }));
   writeFileSync(F.claudeOut, claudeOut);
 }
 const lines = (f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -105,6 +109,7 @@ const ghCalls = () => lines(F.ghLog);
 /** The promote stage's first act is listing the ready-for-prod issues. */
 const promoteRan = () => ghCalls().some((a) => a[0] === "issue" && a[1] === "list");
 
+// foreman#208: a fixture PR in `featurePrs` is the legacy shared-branch Foreman PR (head `features`, still owned) into the base `develop`.
 const SHA = "a".repeat(40);
 const OPEN_PR = { number: 7, title: "feat: scan target (#3)", body: "Related to #4", commits: [], headRefOid: SHA };
 
@@ -189,6 +194,7 @@ test("custom stage: one Claude session on its skillPath, told the work in flight
     FOREMAN_STAGE_REPO: "example/repo",
     FOREMAN_STAGE_BASE_BRANCH: "develop",
     FOREMAN_STAGE_FEATURE_BRANCH: "features",
+    FOREMAN_STAGE_HEAD_BRANCH: "features", // foreman#208: the PR's own head, for a per-issue branch; FEATURE_BRANCH keeps the same value for stages written against it
     FOREMAN_STAGE_PR: "7",
     FOREMAN_STAGE_ISSUES: JSON.stringify([3, 4]),
     FOREMAN_STAGE_HEAD_SHA: SHA,
@@ -246,7 +252,7 @@ test("a stage left out of `stages` never runs", async () => {
 
 for (const pre of [true, false]) {
   test(`dependabot stage: dependencyPreApproved=${pre} ${pre ? "files the batch with" : "files the batch without"} the trigger label`, async () => {
-    arrange({ alerts: ["lodash"], openPrs: [{ number: 11, url: "u", title: "Bump lodash from 4.17.20 to 4.17.21", body: "", headRefName: "dependabot/npm/lodash", baseRefName: "features" }] });
+    arrange({ alerts: ["lodash"], openPrs: [{ number: 11, url: "u", title: "Bump lodash from 4.17.20 to 4.17.21", body: "", headRefName: "dependabot/npm/lodash", baseRefName: "develop" }] });
     const config = load({ stages: [{ type: "dependabot" }] }, { name: `dep-${pre}`, dependencyPreApproved: pre });
     await runRepoPass(rt, config.repos[0], config, logger);
     const create = ghCalls().find((a) => a[0] === "issue" && a[1] === "create");
@@ -259,7 +265,7 @@ for (const pre of [true, false]) {
 
 // --- Dependabot: security updates only -----------------------------------------
 
-const depPr = (number, title, body = "") => ({ number, url: "u", title, body, headRefName: `dependabot/npm/p${number}`, baseRefName: "features" });
+const depPr = (number, title, body = "") => ({ number, url: "u", title, body, headRefName: `dependabot/npm/p${number}`, baseRefName: "develop" });
 const issueCreates = () => ghCalls().filter((a) => a[0] === "issue" && a[1] === "create");
 
 test("dependabot.securityOnly defaults to true and can be turned off", () => {

@@ -55,7 +55,7 @@ export async function tryCustomStage(
   try {
     const result = await runCustomStage(
       rt.trust, repoConfig, stage,
-      { prNumber: pr.number, issueNumbers: pr.issueNumbers, headSha: pr.headSha },
+      { prNumber: pr.number, issueNumbers: pr.issueNumbers, headSha: pr.headSha, headBranch: pr.headBranch },
       stageLogger, runAbort.signal,
     ).catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
@@ -68,9 +68,9 @@ export async function tryCustomStage(
       stageLogger.info(`Stage "${stage.id}" passed on ${where}`);
       events.push({ message: `Stage "${stage.id}" passed on ${where}`, level: "info" });
     } else {
-      stageLogger.warn(`Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"} — later stages held until ${repoConfig.featureBranch} moves`);
+      stageLogger.warn(`Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"} — later stages held until ${pr.headBranch} moves`);
       events.push({
-        message: `${outcome === "blocked" ? "⛔" : "⚠️"} Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"}. Later stages are held for this repo until \`${repoConfig.featureBranch}\` moves.`,
+        message: `${outcome === "blocked" ? "⛔" : "⚠️"} Stage "${stage.id}" ${outcome} on ${where}: ${result.reason ?? "no reason given"}. Later stages are held for this repo until \`${pr.headBranch}\` moves.`,
         level: outcome === "blocked" ? "warn" : "error",
       });
       const why = `stage "${stage.id}" ${outcome} on PR #${pr.number}: ${result.reason ?? "no reason given"}`;

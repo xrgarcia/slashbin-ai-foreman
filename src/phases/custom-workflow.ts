@@ -13,6 +13,8 @@ export interface CustomStageInput {
   issueNumbers: number[];
   /** Head of the feature branch the verdict applies to. */
   headSha: string;
+  /** The PR's head branch (a Foreman-owned `foreman/<N>-<slug>`, or the legacy features branch). */
+  headBranch: string;
 }
 
 /**
@@ -36,12 +38,12 @@ export async function runCustomStage(
   const prompt =
     `Read and follow the skill at ${stage.skillPath}.\n\n` +
     `This is the "${stage.id}" stage of the Foreman pipeline for ${config.githubRepo}. ` +
-    `Work in flight: PR #${input.prNumber} (${config.featureBranch} → ${config.baseBranch}) at ${input.headSha}, ` +
+    `Work in flight: PR #${input.prNumber} (${input.headBranch} → ${config.baseBranch}) at ${input.headSha}, ` +
     `implementing issues: ${issues}.\n\n` +
     `End your output with exactly one verdict line and nothing after it:\n\n` +
     `  FOREMAN_STAGE pass\n` +
     `  FOREMAN_STAGE blocked reason="<one line: what must change before this work goes further>"\n\n` +
-    `\`blocked\` stops every later stage for this repo until ${config.featureBranch} moves. ` +
+    `\`blocked\` stops every later stage for this repo until ${input.headBranch} moves. ` +
     `A run with no verdict line is recorded as failed, which stops them too.\n\n` +
     `Work autonomously. Do not ask questions.`;
 
@@ -68,7 +70,8 @@ export async function runCustomStage(
         FOREMAN_STAGE_ID: stage.id,
         FOREMAN_STAGE_REPO: config.githubRepo,
         FOREMAN_STAGE_BASE_BRANCH: config.baseBranch,
-        FOREMAN_STAGE_FEATURE_BRANCH: config.featureBranch,
+        FOREMAN_STAGE_FEATURE_BRANCH: input.headBranch,
+        FOREMAN_STAGE_HEAD_BRANCH: input.headBranch,
         FOREMAN_STAGE_PR: String(input.prNumber),
         FOREMAN_STAGE_ISSUES: JSON.stringify(input.issueNumbers),
         FOREMAN_STAGE_HEAD_SHA: input.headSha,

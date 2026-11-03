@@ -192,7 +192,7 @@ for (const repo of config.repos) {
     line("PASS", `${at}: github`, `${repo.githubRepo}, write access`);
   }
 
-  const branches = [["base", repo.baseBranch], ["feature", repo.featureBranch], ["production", repo.productionBranch]];
+  const branches = [["base", repo.baseBranch], ["production", repo.productionBranch]];
   const missing = [];
   for (const [role, b] of branches) {
     try {
@@ -201,7 +201,7 @@ for (const repo of config.repos) {
       missing.push(`${role} "${b}"`);
     }
   }
-  if (missing.length) line("FAIL", `${at}: branches`, `missing on GitHub: ${missing.join(", ")}. Create them, or set baseBranch / featureBranch / productionBranch.`);
+  if (missing.length) line("FAIL", `${at}: branches`, `missing on GitHub: ${missing.join(", ")}. Create them, or set baseBranch / productionBranch.`);
   else line("PASS", `${at}: branches`, branches.map(([role, b]) => `${role} ${b}`).join(", "));
 
   for (const [key, path] of [["skillPath", repo.skillPath], ["revisionSkillPath", repo.revisionSkillPath]]) {
@@ -218,7 +218,7 @@ for (const repo of config.repos) {
   // approved issue here syncs it (docs/skill-sync.md).
   if (golden) {
     const names = skillsFor(config.skillSync, golden, repo.skillSyncSkills);
-    const ref = `origin/${repo.featureBranch}`;
+    const ref = `origin/${repo.baseBranch}`;
     if (names.length === 0) {
       line("PASS", `${at}: skill sync`, "opted out (skillSyncSkills is empty)");
     } else {

@@ -57,7 +57,7 @@ const w = JSON.parse(fs.readFileSync(${JSON.stringify(F.world)}, "utf8"));
 const has = (s) => args.join(" ").includes(s);
 const out = (v) => process.stdout.write(typeof v === "string" ? v : JSON.stringify(v));
 if (args[0] === "issue" && args[1] === "list") out([{ number: ${ISSUE}, title: "the issue", labels: w.labels.map((name) => ({ name })) }]);
-else if (args[0] === "pr" && args[1] === "list") out([{ number: ${PR}, url: "https://github.com/${REPO}/pull/${PR}", title: "Build #${ISSUE}", body: "Closes #${ISSUE}", headRefName: "features", baseRefName: "develop" }]);
+else if (args[0] === "pr" && args[1] === "list") out([{ number: ${PR}, url: "https://github.com/${REPO}/pull/${PR}", title: "Build #${ISSUE}", body: "Closes #${ISSUE}", headRefName: "foreman/${ISSUE}-build", baseRefName: "develop" }]);
 else if (args[0] === "pr" && args[1] === "view" && has("headRefOid")) out({ headRefOid: w.head });
 else if (args[0] === "pr" && args[1] === "view" && has("--json state")) out({ state: "OPEN" });
 else if (args[0] === "pr" && args[1] === "view" && has("reviews")) out({ reviews: w.reviews ?? [], commits: [{ committedDate: "2026-11-01T19:40:00Z" }] });
