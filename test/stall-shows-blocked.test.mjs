@@ -4,7 +4,7 @@
 // 2026-10-03, slashbin-io-worker#693: the PR stalled and the Paperclip card sat
 // in "in review" — the owner could not see that anything needed him. Each stall
 // below already logged an error and a Discord event; none told the work source.
-// The blocked report is `emit({ kind: "blocked", ... })` (work-source.ts).
+// The blocked report is `emit(rt, { kind: "blocked", ... })` (work-source.ts).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,11 +23,11 @@ test("reviewer/reviser stalemate reports blocked before stopping", () => {
 });
 
 test("review retries exhausted reports blocked", () => {
-  assert.match(after("const pause = reviewFailurePause.start(repoName, repoFailure);", 400), /kind: "blocked"/);
+  assert.match(after("const pause = rt.memory.reviewFailurePause.start(repoName, repoFailure);", 400), /kind: "blocked"/);
 });
 
 test("implementation retries exhausted reports blocked", () => {
-  assert.match(after("const pause = failurePause.start(repoName, repoFailure);\n        const why", 400), /emit\(\{ kind: "blocked", item: itemOf\(repoConfig, n\)/);
+  assert.match(after("const pause = rt.memory.failurePause.start(repoName, repoFailure);\n        const why", 400), /emit\(rt, \{ kind: "blocked", item: itemOf\(repoConfig, n\)/);
 });
 
 test("a configured stage that blocks or fails reports blocked", () => {

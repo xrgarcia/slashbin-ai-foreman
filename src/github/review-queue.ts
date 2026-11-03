@@ -1,7 +1,6 @@
 // What is waiting for revise and for review, including orphaned PR adoption.
 
 import type { RepoConfig } from "../config.js";
-import { isBuildInFlight } from "../build-in-flight.js";
 import type { Logger } from "../logger.js";
 import { fleetState } from "../github-state.js";
 import { findOpenPrs, getOpenIssues, hasLabel, reads } from "./cache.js";
@@ -10,6 +9,9 @@ import { extractImplementedIssues } from "./discovery.js";
 import { BackoffTracker, backoffSettings } from "../backoff.js";
 import { currentApprovalMs, currentVerdictRequestsChanges, hasFreshReview, readPrHeadSha, returnedToReviewSinceVerdict } from "./review-freshness.js";
 import type { PendingRevisionPR, PendingRevisionInfo, ReviewCandidate, QaPendingPr } from "../code-host.js";
+
+/** Whether a build session is running in a repo's checkout, injected by the composition root (the runtime owns that state). */
+export type BuildProbe = (repo: string) => boolean;
 export type { PendingRevisionPR, PendingRevisionInfo, ReviewCandidate, QaPendingPr } from "../code-host.js";
 
 /**
@@ -155,6 +157,7 @@ export function findPRsNeedingReview(
   reviewerLogin: string | undefined,
   logger: Logger,
   waits: BackoffTracker,
+  isBuildInFlight: BuildProbe,
 ): ReviewCandidate | null {
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
@@ -163,7 +166,7 @@ export function findPRsNeedingReview(
     // Exclude issues also labeled `pr pending actions` — the revise phase owns those.
     const reviewable = issues.filter((i) => !hasLabel(i, prPendingActions));
     if (reviewable.length === 0) {
-      return adoptOrphanedReviewCandidate(config, reviewerLogin, logger, waits);
+      return adoptOrphanedReviewCandidate(config, reviewerLogin, logger, waits, isBuildInFlight);
     }
 
     // Confirm an open feature PR exists (features → develop).
@@ -227,6 +230,7 @@ export function findQaPendingPr(
   config: RepoConfig,
   reviewerLogin: string | undefined,
   logger: Logger,
+  isBuildInFlight: BuildProbe,
 ): QaPendingPr | null {
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
@@ -281,6 +285,7 @@ export function adoptOrphanedReviewCandidate(
   reviewerLogin: string | undefined,
   logger: Logger,
   waits: BackoffTracker,
+  isBuildInFlight: BuildProbe,
 ): ReviewCandidate | null {
   const prs: { number: number; url: string; title: string; body: string }[] = findOpenPrs(
     config.githubRepo,

@@ -2,7 +2,6 @@
 // the implement session, and report what it opened or why it stopped.
 
 import { repairDivergence } from "../divergence-repair.js";
-import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
@@ -17,29 +16,14 @@ import {
   type BranchDivergence,
 } from "../reconciler.js";
 import { backoffDelay, formatWait } from "../backoff.js";
-import { observeDivergence, standingDivergence, type Divergence } from "../divergence.js";
-import { fieldTable, loadIssueRecord, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
+import { type Divergence } from "../divergence.js";
+import { fieldTable } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
-import { noticeSkillDrift, syncSkillsForIssue, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
-import {
-  CycleEvent,
-  activeRuns,
-  announceDivergence,
-  toldAbout,
-  divergenceReason,
-  failureCount,
-  failurePause,
-  itemOf,
-  lastFailureReason,
-  notifyOnce,
-  prReport,
-  queuedBehind,
-  releaseIfResolved,
-  startReport,
-  stoppedReason,
-} from "./common.js";
+import { settleSkillSync, type SyncOutcome } from "../skill-sync.js";
+import { CycleEvent, activeRuns, announceDivergence, toldAbout, divergenceReason, itemOf, notifyOnce, prReport, releaseIfResolved, startReport, stoppedReason } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 /**
  * Classify a recorded skip reason as transient + currently-resolved. Returns
@@ -116,14 +100,14 @@ export function reportLaunchThrew(err: unknown): never {
  * so the filter stops every release but a person's change to the issue, and
  * escalated for the EM's ruling, the card held Blocked at the approved stage.
  */
-async function escalateSkips(items: { n: number; reason: string }[], repoName: string, repoConfig: RepoConfig, repoLogger: Logger): Promise<void> {
+async function escalateSkips(rt: ForemanRuntime, items: { n: number; reason: string }[], repoName: string, repoConfig: RepoConfig, repoLogger: Logger): Promise<void> {
   const at = new Date().toISOString();
   for (const { n } of items) {
-    await updateIssueRecord(repoConfig, n, (d) => { if (d.skipped) d.skipped = { ...d.skipped, escalatedAt: at }; });
+    await rt.records.updateIssueRecord(repoConfig, n, (d) => { if (d.skipped) d.skipped = { ...d.skipped, escalatedAt: at }; });
   }
   for (const { n, reason } of items) {
     repoLogger.warn(`Escalated #${n} for the EM's ruling: ${reason}`);
-    await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved" }, repoConfig, repoLogger);
+    await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved" }, repoConfig, repoLogger);
   }
 }
 
@@ -135,11 +119,11 @@ async function escalateSkips(items: { n: number; reason: string }[], repoName: s
  * issue itself is held with the blocked label, dependents or none, so it is not re-picked.
  * Best effort: a failed read or write is logged, never thrown, and the next skip retries.
  */
-async function tellDependents(issues: number[], reason: string, repoName: string, repoConfig: RepoConfig, managed: readonly RepoConfig[], repoLogger: Logger): Promise<void> {
+async function tellDependents(rt: ForemanRuntime, issues: number[], reason: string, repoName: string, repoConfig: RepoConfig, managed: readonly RepoConfig[], repoLogger: Logger): Promise<void> {
   for (const n of issues) {
     try {
       // An unreadable record is not an empty one: told again, the dependents would be commented twice.
-      const record = await loadIssueRecord(repoConfig, n);
+      const record = await rt.records.loadIssueRecord(repoConfig, n);
       if (!record) {
         repoLogger.warn(`Could not read #${n}'s record — its dependents are checked next pass`);
         continue;
@@ -169,7 +153,7 @@ async function tellDependents(issues: number[], reason: string, repoName: string
           repoLogger.warn(`${t.ref} is in a repo the Foreman does not manage — told by comment and label only; no EM handoff can be recorded yet`);
           continue;
         }
-        await emit({
+        await emit(rt, {
           kind: "escalated",
           item: itemOf(home, t.number),
           reason: `blocked by ${repoConfig.githubRepo}#${n}, which the Foreman could not land: ${reason}`,
@@ -179,7 +163,7 @@ async function tellDependents(issues: number[], reason: string, repoName: string
         escalated.push(t.ref);
         repoLogger.warn(`Told ${t.ref} its blocker #${n} is dead and escalated it: ${reason}`);
       }
-      await updateIssueRecord(repoConfig, n, (d) => { if (d.skipped) d.skipped = { ...d.skipped, deadBlockerTold: toldRefs, deadBlockerEscalated: escalated }; });
+      await rt.records.updateIssueRecord(repoConfig, n, (d) => { if (d.skipped) d.skipped = { ...d.skipped, deadBlockerTold: toldRefs, deadBlockerEscalated: escalated }; });
     } catch (err) {
       repoLogger.warn(`Could not check what #${n} blocks: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -193,19 +177,19 @@ async function tellDependents(issues: number[], reason: string, repoName: string
  * a held blocker is never offered again, so the skip path that told its
  * dependents never runs a second time. Best effort.
  */
-export async function deliverPendingHandoffs(repoConfig: RepoConfig, config: AgentConfig, repoLogger: Logger): Promise<void> {
+export async function deliverPendingHandoffs(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, repoLogger: Logger): Promise<void> {
   const managed = config.allRepos ?? config.repos;
   try {
     // The issues the repo has open: a held blocker keeps its blocked label and is among them.
     const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger).map((i) => i.number);
-    const skipped = fieldTable(await loadIssueRecords(repoConfig, open), "skipped");
+    const skipped = fieldTable(await rt.records.loadIssueRecords(repoConfig, open), "skipped");
     for (const [key, entry] of Object.entries(skipped)) {
       const pending = (entry.deadBlockerTold ?? []).filter((ref) => {
         if ((entry.deadBlockerEscalated ?? []).includes(ref)) return false;
         const repo = ref.includes("#") && !ref.startsWith("#") ? ref.slice(0, ref.indexOf("#")) : repoConfig.githubRepo;
         return managed.some((r) => r.githubRepo === repo);
       });
-      if (pending.length > 0) await tellDependents([Number(key)], entry.reason, repoConfig.name, repoConfig, managed, repoLogger);
+      if (pending.length > 0) await tellDependents(rt, [Number(key)], entry.reason, repoConfig.name, repoConfig, managed, repoLogger);
     }
   } catch (err) {
     repoLogger.warn(`Could not deliver pending EM handoffs: ${err instanceof Error ? err.message : String(err)}`);
@@ -213,6 +197,7 @@ export async function deliverPendingHandoffs(repoConfig: RepoConfig, config: Age
 }
 
 export async function tryBatchImplementation(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
@@ -223,7 +208,7 @@ export async function tryBatchImplementation(
   const { skip, repoFailure } = config.backoff;
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
 
-  await deliverPendingHandoffs(repoConfig, config, repoLogger);
+  await deliverPendingHandoffs(rt, repoConfig, config, repoLogger);
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
@@ -232,19 +217,19 @@ export async function tryBatchImplementation(
   // A repo whose sessions keep failing pauses (backoff.repoFailure). When the
   // pause ends the count restarts, but the pause count is kept: tripping again
   // pauses for longer, until a success clears it.
-  const failures = failureCount.get(repoName) ?? 0;
+  const failures = rt.memory.failureCount.get(repoName) ?? 0;
   if (failures >= repoFailure.maxFailures) {
-    if (failurePause.waiting(repoName)) {
-      repoLogger.debug(`Skipping ${repoName} — ${failures} consecutive failures, paused (pause ${failurePause.count(repoName)})`);
+    if (rt.memory.failurePause.waiting(repoName)) {
+      repoLogger.debug(`Skipping ${repoName} — ${failures} consecutive failures, paused (pause ${rt.memory.failurePause.count(repoName)})`);
       return null;
     }
     repoLogger.info(`Failure pause over for ${repoName} — retrying`);
-    failureCount.set(repoName, 0);
+    rt.memory.failureCount.set(repoName, 0);
   }
 
   // Read-only: say once per golden version that this repo's skill copy is
   // behind. The copy changes only below, when an approved issue is built.
-  if (config.skillSync?.enabled) noticeSkillDrift(config.skillSync, repoConfig, repoLogger);
+  if (config.skillSync?.enabled) rt.skillSync.noticeSkillDrift(config.skillSync, repoConfig, repoLogger);
 
   // Gate: are there approved issues to implement? The work source offers
   // every eligible item, uncapped. Two lists are cut from that offer:
@@ -264,9 +249,9 @@ export async function tryBatchImplementation(
   const acceptanceHolds = [...heldWork(repoConfig)];
   if (offered.length === 0) {
     // Nothing offered, so nothing waits: observers clear this repo's waits.
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
+    await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
     // Reset failure count when there's no work (issues were resolved externally)
-    if (failures > 0) failureCount.set(repoName, 0);
+    if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
   }
 
@@ -276,15 +261,15 @@ export async function tryBatchImplementation(
   // used to filter here, and the self-heal that pruned every entry still in the offer, are gone with it.
   // What the Foreman holds each of these for. An issue whose record cannot be read is left out this cycle,
   // not built: a hold or a skip on it may be exactly what the unreadable record says.
-  const recordsOfHandOff = await loadIssueRecords(repoConfig, handOff);
+  const recordsOfHandOff = await rt.records.loadIssueRecords(repoConfig, handOff);
   if (recordsOfHandOff.unavailable.size > 0) {
     repoLogger.warn(`Records unreadable, leaving these alone this cycle: ${[...recordsOfHandOff.unavailable].map((n) => `#${n}`).join(", ")}`);
     handOff = handOff.filter((n) => !recordsOfHandOff.unavailable.has(n));
   }
   if (handOff.length === 0) {
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
+    await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: acceptanceHolds }, null, repoLogger);
     repoLogger.info(`All actionable issues already implemented (state filter) — skipping`);
-    if (failures > 0) failureCount.set(repoName, 0);
+    if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
   }
 
@@ -356,23 +341,23 @@ export async function tryBatchImplementation(
   if (released.length > 0) {
     const at = new Date().toISOString();
     for (const { n, reset } of released) {
-      await updateIssueRecord(repoConfig, n, (d) => {
+      await rt.records.updateIssueRecord(repoConfig, n, (d) => {
         if (reset) delete d.skipped;
         else if (d.skipped) d.skipped = { ...d.skipped, releasedAt: at };
       });
     }
     repoLogger.info(`Released ${released.length} held issue(s) for one session: ${released.map(({ n, by, reset }) => `#${n} (${by}${reset ? ", attempts reset" : ""})`).join("; ")}`);
     for (const { n, by } of released) {
-      await releaseIfResolved("skip", { [by]: true }, [n], repoConfig, repoLogger);
+      await releaseIfResolved(rt, "skip", { [by]: true }, [n], repoConfig, repoLogger);
     }
   }
-  if (escalating.length > 0) await escalateSkips(escalating, repoName, repoConfig, repoLogger);
+  if (escalating.length > 0) await escalateSkips(rt, escalating, repoName, repoConfig, repoLogger);
   if (resolvedTransient.length > 0) {
     repoLogger.info(
       `Cleared ${resolvedTransient.length} resolved-transient skip entr${resolvedTransient.length === 1 ? "y" : "ies"}: ${resolvedTransient.map(({ n }) => `#${n}`).join(", ")}`,
     );
-    for (const { n } of resolvedTransient) await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
-    await releaseIfResolved("skip", { transientCauseGone: true }, resolvedTransient.map(({ n }) => n), repoConfig, repoLogger);
+    for (const { n } of resolvedTransient) await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
+    await releaseIfResolved(rt, "skip", { transientCauseGone: true }, resolvedTransient.map(({ n }) => n), repoConfig, repoLogger);
   }
   if (stillBackedOff.length > 0) {
     // Promoted DEBUG → INFO so silent skip-cache filtering is visible in the
@@ -395,16 +380,16 @@ export async function tryBatchImplementation(
   // pending-revision gate and may not run for hours. The divergence is what git shows (divergence.ts),
   // not a stored block. The EM's ruling on it is carried out first (foreman#104); the release check
   // below then sees the repaired branch.
-  let block = standingDivergence(repoConfig);
+  let block = rt.divergence.standing(repoConfig);
   if (block) {
-    const { told } = await toldAbout(repoConfig, handOff, block.mergeBase);
-    await repairDivergence(repoConfig, repoLogger, block, told);
-    if (await releaseIfResolved("divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, told, repoConfig, repoLogger)) {
-      observeDivergence(repoConfig, null);
+    const { told } = await toldAbout(rt, repoConfig, handOff, block.mergeBase);
+    await repairDivergence(rt.records, repoConfig, repoLogger, block, told);
+    if (await releaseIfResolved(rt, "divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, told, repoConfig, repoLogger)) {
+      rt.divergence.observe(repoConfig, null);
       block = null;
     }
   }
-  await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(block) }, null, repoLogger);
+  await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(block) }, null, repoLogger);
   // Labels rank the batch by priority. Unreadable, every issue ranks the
   // same and the oldest goes first.
   let labels = new Map<number, string[]>();
@@ -418,7 +403,7 @@ export async function tryBatchImplementation(
   }
   const actionableIssues = codeHost().discoveryBatch(repoConfig, handOff, repoLogger, config.buildBatchSize, (n) => labels.get(n) ?? []);
   if (actionableIssues.length === 0) {
-    if (failures > 0) failureCount.set(repoName, 0);
+    if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
   }
 
@@ -441,20 +426,20 @@ export async function tryBatchImplementation(
   const divergence: BranchDivergence = {};
   const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger, divergence);
   if (ffOutcome === "diverged") {
-    const seen = observeDivergence(repoConfig, { ahead: divergence.ahead ?? 0, behind: divergence.behind ?? 0, mergeBase: divergence.mergeBase ?? "" });
+    const seen = rt.divergence.observe(repoConfig, { ahead: divergence.ahead ?? 0, behind: divergence.behind ?? 0, mergeBase: divergence.mergeBase ?? "" });
     const now = seen.now!;
-    await announceDivergence(repoConfig, handOff, now, repoLogger, seen.before?.mergeBase !== now.mergeBase);
-    await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(now) }, null, repoLogger);
+    await announceDivergence(rt, repoConfig, handOff, now, repoLogger, seen.before?.mergeBase !== now.mergeBase);
+    await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(now) }, null, repoLogger);
     return null;
   }
   // "unknown" proves nothing either way, so a standing divergence stands.
   if (ffOutcome !== "unknown") {
-    const { before } = observeDivergence(repoConfig, null);
+    const { before } = rt.divergence.observe(repoConfig, null);
     if (before) {
       repoLogger.info(
         `${repoConfig.featureBranch} is reconciled with ${repoConfig.baseBranch} — implementation on ${repoName} resumes`,
       );
-      await emit({ kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(null) }, null, repoLogger);
+      await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(null) }, null, repoLogger);
     }
   }
 
@@ -470,13 +455,13 @@ export async function tryBatchImplementation(
   // branch, but the issue is not done until it is verified on dev, and what the
   // verification finds may change the next one (Ray, 2026-10-14: one issue in
   // flight per repo). Queued the same way; see devVerifyHolding for what frees it.
-  const repoQueue = queuedBehind.get(repoName) ?? new Map<number, string>();
-  queuedBehind.set(repoName, repoQueue);
+  const repoQueue = rt.memory.queuedBehind.get(repoName) ?? new Map<number, string>();
+  rt.memory.queuedBehind.set(repoName, repoQueue);
   const merged = !featurePr && roleFor("verifier", config) !== undefined && config.buildWaitsForDevVerify
     ? [...labels].filter(([, names]) => names.includes(repoConfig.lifecycleLabels.prMerged)).map(([n]) => n)
     : [];
   // An unreadable record of a merged issue could be the very hold that queues the build: build nothing this cycle.
-  const mergedRecords = await loadIssueRecords(repoConfig, merged);
+  const mergedRecords = await rt.records.loadIssueRecords(repoConfig, merged);
   if (mergedRecords.unavailable.size > 0) {
     repoLogger.warn(`Dev verification holds unreadable for ${[...mergedRecords.unavailable].map((n) => `#${n}`).join(", ")} — not building this cycle`);
     return null;
@@ -503,7 +488,7 @@ export async function tryBatchImplementation(
     const fresh = queued.filter((n) => repoQueue.get(n) !== holder);
     for (const n of fresh) {
       repoQueue.set(n, holder);
-      await advance(itemOf(repoConfig, n), "queue", repoConfig, repoLogger);
+      await advance(rt, itemOf(repoConfig, n), "queue", repoConfig, repoLogger);
     }
     repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind ${holder} — ${featurePr ? "builds once it merges or closes" : "builds once it passes, or waits on a person"}`);
     // A PR that names no issue is outside the lifecycle: nothing here moves it,
@@ -512,7 +497,7 @@ export async function tryBatchImplementation(
     if (featurePr && fresh.length > 0 && featurePr.issueNumbers.length === 0) {
       repoLogger.warn(`PR #${featurePr.number} names no issue and holds ${fresh.map((n) => `#${n}`).join(", ")} — the Tech Lead reviews it; they build once it merges or closes`);
     }
-    if (failures > 0) failureCount.set(repoName, 0);
+    if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
   }
 
@@ -522,7 +507,7 @@ export async function tryBatchImplementation(
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
-  buildStarted(repoName);
+  rt.builds.started(repoName);
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
   const session: Omit<SessionEvent, "status"> = {
     phase: "implement", repo: repoConfig.githubRepo, items: actionableIssues.map((n) => itemOf(repoConfig, n)),
@@ -538,17 +523,17 @@ export async function tryBatchImplementation(
 
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
-    for (const n of actionableIssues) await emit({ kind: "claim", item: itemOf(repoConfig, n) }, repoConfig, repoLogger);
+    for (const n of actionableIssues) await emit(rt, { kind: "claim", item: itemOf(repoConfig, n) }, repoConfig, repoLogger);
     const goals = startReport(repoConfig, actionableIssues, repoLogger);
-    await emit({ kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
+    await emit(rt, { kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
 
     // A stale skill copy is brought to the golden in a commit the session
     // builds on and pushes with its work (docs/skill-sync.md). The code makes
     // it, never the session; it cannot fail the issue.
-    if (config.skillSync?.enabled) skillSync = syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
+    if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
 
-    const priorFailure = lastFailureReason.get(repoName) || null;
-    const result = await implementApprovedIssues(repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues)
+    const priorFailure = rt.memory.lastFailureReason.get(repoName) || null;
+    const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues)
       .catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
@@ -565,9 +550,9 @@ export async function tryBatchImplementation(
     }
 
     if (result.success) {
-      failureCount.set(repoName, 0);
-      lastFailureReason.delete(repoName);
-      failurePause.clear(repoName);
+      rt.memory.failureCount.set(repoName, 0);
+      rt.memory.lastFailureReason.delete(repoName);
+      rt.memory.failurePause.clear(repoName);
 
       // Filter to only issues the implementation skill actually addressed in
       // the resulting PR. The canonical implement-approved-issues skill picks
@@ -642,14 +627,14 @@ export async function tryBatchImplementation(
 
       // Clear any prior skip record — if it's now implemented, the prior
       // "blocked on investigation" state is resolved.
-      for (const issueNum of issuesActuallyImplemented) await updateIssueRecord(repoConfig, issueNum, (d) => { delete d.skipped; });
+      for (const issueNum of issuesActuallyImplemented) await rt.records.updateIssueRecord(repoConfig, issueNum, (d) => { delete d.skipped; });
 
       // Report each implemented item in review (on GitHub: the `prUnderReview`
       // label) so the EM knows the PR is ready. One item at a time, in order.
       for (const n of issuesActuallyImplemented) {
         const item = itemOf(repoConfig, n);
-        if (result.prUrl) await emit({ kind: "prLink", item, prUrl: result.prUrl }, repoConfig, repoLogger);
-        await advance(item, "implemented", repoConfig, repoLogger);
+        if (result.prUrl) await emit(rt, { kind: "prLink", item, prUrl: result.prUrl }, repoConfig, repoLogger);
+        await advance(rt, item, "implemented", repoConfig, repoLogger);
       }
 
       repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")}`, { prUrl: result.prUrl });
@@ -665,22 +650,22 @@ export async function tryBatchImplementation(
       const reason = result.landedReason ?? "no evidence given";
       try {
         codeHost().closeAlreadyLanded(repoConfig, n, reason);
-        await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
-        failureCount.set(repoName, 0);
-        lastFailureReason.delete(repoName);
-        failurePause.clear(repoName);
+        await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
+        rt.memory.failureCount.set(repoName, 0);
+        rt.memory.lastFailureReason.delete(repoName);
+        rt.memory.failurePause.clear(repoName);
         repoLogger.info(`Closed #${n} as completed: already landed on ${repoConfig.featureBranch} — ${reason}`);
         events?.push({ message: `Closed #${n} on ${repoConfig.githubRepo}: already landed (${reason})`, level: "info" });
       } catch (err) {
         const why = `#${n} is already landed (${reason}) but the Foreman could not close it: ${err instanceof Error ? err.message : String(err)}`;
         repoLogger.warn(why);
-        await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
+        await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       }
     } else if (result.skipped) {
       // Deliberate no-op by the agent (e.g., issue body says "investigate first").
       // Record per-issue skip timestamps so the back-off filter at the top of
       // this function suppresses retries for backoffDelay(skipCount, backoff.skip).
-      // Do NOT increment failureCount — this isn't an error.
+      // Do NOT increment rt.memory.failureCount — this isn't an error.
       let skippedSet = result.skippedIssues && result.skippedIssues.length > 0
         ? result.skippedIssues
         : actionableIssues;
@@ -707,10 +692,10 @@ export async function tryBatchImplementation(
       const hasVerifier = roleFor("verifier", config) !== undefined;
       if (alreadyMerged.length > 0) {
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
-        await notifyOnce("merged", repoConfig, mergedNums, repoLogger);
+        await notifyOnce(rt, "merged", repoConfig, mergedNums, repoLogger);
         for (const n of mergedNums) {
           // With a verify stage, merged work still owes its acceptance evidence (EM#441).
-          await advance(itemOf(repoConfig, n), hasVerifier ? "alreadyMerged" : "alreadyApproved", repoConfig, repoLogger);
+          await advance(rt, itemOf(repoConfig, n), hasVerifier ? "alreadyMerged" : "alreadyApproved", repoConfig, repoLogger);
         }
         repoLogger.info(
           `Advanced ${mergedNums.length} already-merged issue(s) to '${repoConfig.lifecycleLabels[hasVerifier ? "prMerged" : "prApproved"]}': ${alreadyMerged.map((m) => `#${m.issueNumber} (merged in PR #${m.prNumber})`).join(", ")}`,
@@ -721,7 +706,7 @@ export async function tryBatchImplementation(
         });
         // They're out of the actionable set now — no skip record needed, and a
         // stale one would linger in state forever.
-        for (const n of mergedNums) await updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
+        for (const n of mergedNums) await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
         skippedSet = skippedSet.filter((n) => !mergedNums.includes(n));
       }
       // ------------------------------------------------------------------------
@@ -745,7 +730,7 @@ export async function tryBatchImplementation(
         // permanently-unactionable issue costs an agent session every window,
         // indefinitely. Count the consecutive skips; the filter at the top of
         // this function widens the window geometrically off this count.
-        const saved = await updateIssueRecord(repoConfig, issueNum, (d) => {
+        const saved = await rt.records.updateIssueRecord(repoConfig, issueNum, (d) => {
           const prior = d.skipped;
           const skipCount = (prior?.skipCount ?? 0) + 1;
           skipCounts.set(issueNum, skipCount);
@@ -770,18 +755,18 @@ export async function tryBatchImplementation(
       const blockedReason = skip.hold ? codeHost().heldReason(reason, repoConfig.githubRepo, waitingOn, waitingOnIsPr) : reason;
       const outOfAttempts = skip.hold ? skippedSet.filter((n) => (skipCounts.get(n) ?? 0) >= skip.maxAttempts) : [];
       for (const n of skippedSet) {
-        if (!outOfAttempts.includes(n)) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blockedReason }, repoConfig, repoLogger);
+        if (!outOfAttempts.includes(n)) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: blockedReason }, repoConfig, repoLogger);
       }
       if (outOfAttempts.length > 0) {
-        await escalateSkips(outOfAttempts.map((n) => ({ n, reason: codeHost().escalatedReason(reason, skipCounts.get(n) ?? 0) })), repoName, repoConfig, repoLogger);
+        await escalateSkips(rt, outOfAttempts.map((n) => ({ n, reason: codeHost().escalatedReason(reason, skipCounts.get(n) ?? 0) })), repoName, repoConfig, repoLogger);
       }
       // A stop that holds other issues up says so to them (dead-blocker.ts).
       // A skip naming an open PR on the branch clears when that PR leaves (isResolvedTransientSkip): never a dead blocker.
-      if (codeHost().isDeadBlockerReason(reason) && prBlockingSkip(reason) === null) await tellDependents(skippedSet, reason, repoName, repoConfig, config.allRepos ?? config.repos, repoLogger);
+      if (codeHost().isDeadBlockerReason(reason) && prBlockingSkip(reason) === null) await tellDependents(rt, skippedSet, reason, repoName, repoConfig, config.allRepos ?? config.repos, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
-      failureCount.set(repoName, 0);
-      lastFailureReason.delete(repoName);
-      failurePause.clear(repoName);
+      rt.memory.failureCount.set(repoName, 0);
+      rt.memory.lastFailureReason.delete(repoName);
+      rt.memory.failurePause.clear(repoName);
       repoLogger.info(`Batch implementation skipped by agent: ${blockedReason} (issues: ${skippedSet.map(n => `#${n}`).join(", ")})`);
       events?.push({ message: `Implementation skipped on ${repoConfig.githubRepo}: ${reason}`, level: "info" });
     } else {
@@ -790,11 +775,11 @@ export async function tryBatchImplementation(
       // goes to Blocked: the work has stopped, and the board says why.
       if (result.upstreamLimit || isUpstreamBlocked("github")) {
         const why = stoppedReason("Implementation", result, isUpstreamBlocked("github"));
-        for (const n of actionableIssues) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
+        for (const n of actionableIssues) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
         return null;
       }
-      const newCount = (failureCount.get(repoName) ?? 0) + 1;
-      failureCount.set(repoName, newCount);
+      const newCount = (rt.memory.failureCount.get(repoName) ?? 0) + 1;
+      rt.memory.failureCount.set(repoName, newCount);
       // The run failed after its work landed in a PR: the PR names the issue
       // it was on, and only that issue is told it failed.
       const onPr = codeHost().getReferencedIssuesFromOpenPR(
@@ -804,13 +789,13 @@ export async function tryBatchImplementation(
       const failedOn = worked ?? actionableIssues;
       if (newCount < repoFailure.maxFailures) {
         const why = stoppedReason("Implementation", result, false, `${newCount}/${repoFailure.maxFailures}`);
-        for (const n of failedOn) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
+        for (const n of failedOn) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       } else {
-        const pause = failurePause.start(repoName, repoFailure);
+        const pause = rt.memory.failurePause.start(repoName, repoFailure);
         const why = `implementation failed ${newCount}× — paused ${formatWait(pause)}: ${result.error || "unknown"}`;
-        for (const n of failedOn) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
+        for (const n of failedOn) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       }
-      lastFailureReason.set(repoName, result.error || "unknown");
+      rt.memory.lastFailureReason.set(repoName, result.error || "unknown");
       repoLogger.warn(`Batch implementation failed (${newCount}/${repoFailure.maxFailures}): ${result.error}`);
       events?.push({ message: `Implementation failed on ${repoConfig.githubRepo}: ${result.error}`, level: "error" });
     }
@@ -818,9 +803,9 @@ export async function tryBatchImplementation(
     return result;
   } finally {
     activeRuns.delete(runAbort);
-    buildEnded(repoName);
+    rt.builds.ended(repoName);
     if (skillSync) settleSkillSync(repoConfig, skillSync, repoLogger);
-    await emit({ kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }
 }
 

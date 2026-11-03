@@ -145,7 +145,7 @@ test("a dependent is escalated under ITS repo's config, with a stuck kind the un
   assert.match(body, /managed\.find\(\(r\) => r\.githubRepo === t\.repo\)/, "cross-repo dependents need their own repo config");
   assert.match(body, /stuck: "needs-ruling"/, "without a stuck kind no EM handoff is recorded (Paperclip off = nobody hears it)");
   assert.match(body, /itemOf\(home, t\.number\)/);
-  assert.match(impl, /tellDependents\(skippedSet, reason, repoName, repoConfig, config\.allRepos \?\? config\.repos, repoLogger\)/);
+  assert.match(impl, /tellDependents\(rt, skippedSet, reason, repoName, repoConfig, config\.allRepos \?\? config\.repos, repoLogger\)/);
 });
 
 test("the landed protocol is in the COMMON prompt, so a repo-local skill hears it", () => {

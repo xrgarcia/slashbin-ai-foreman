@@ -24,7 +24,8 @@ import { qaFailStandsBody } from "../dist/qa-report.js";
 import { REVIEW_ROUNDS_ALERT } from "../dist/phases/common.js";
 import { createLogger } from "../dist/logger.js";
 import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
-import { resetNoCommitStreaksForTests } from "../dist/no-commit-streak.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 const REPO = "example/fake";
@@ -108,6 +109,7 @@ after(() => {
 
 beforeEach(() => {
   reviewed = 0;
+  rt = new ForemanRuntime();
   memoryRecords();
   for (const f of [F.world, F.ghLog, F.claudeLog]) rmSync(f, { force: true });
   world({ labels: ["approved"], head: SHA, reviews: [] });
@@ -122,7 +124,7 @@ function load(top = {}) {
   return loadConfig(p);
 }
 
-const pendingPass = async (config, cycle) => tryRevision(config.repos[0], config, logger, cycle, []);
+const pendingPass = async (config, cycle) => tryRevision(rt, config.repos[0], config, logger, cycle, []);
 
 test("R1/R2: two passes whose pre-session sha read fails launch nothing and consume no round; the healthy pass revises", async () => {
   const config = load();
@@ -131,13 +133,13 @@ test("R1/R2: two passes whose pre-session sha read fails launch nothing and cons
   world({ branchDown: true });
   for (const cycle of [1, 2]) await assert.rejects(pendingPass(config, cycle), undefined, `pass ${cycle} fails closed`);
   assert.equal(claudeRuns(), 0, "no session was launched");
-  assert.equal((await prRecordOf(repo, PR)).noCommit, undefined, "no no-commit round was saved for a session that never ran");
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit, undefined, "no no-commit round was saved for a session that never ran");
   assert.ok(String(JSON.parse(readFileSync(F.world, "utf8")).labels).includes(LABELS.pending), "the issue was not advanced");
 
   world({ branchDown: false });
   assert.ok(await pendingPass(config, 3), "GitHub is back: the unchanged head is still eligible");
   assert.equal(claudeRuns(), 1);
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 }, "one declared round, counted once");
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 }, "one declared round, counted once");
 });
 
 test("R2: after a restart the saved record still lets the healthy pass revise", async () => {
@@ -146,11 +148,11 @@ test("R2: after a restart the saved record still lets the healthy pass revise", 
   labelIssue(LABELS.pending);
   world({ branchDown: true });
   for (const cycle of [1, 2]) await assert.rejects(pendingPass(config, cycle));
-  resetNoCommitStreaksForTests(); // a new process: only the saved record is left
+  rt = new ForemanRuntime(); // a new process: only the saved record is left
   world({ branchDown: false });
   assert.ok(await pendingPass(config, 3));
   assert.equal(claudeRuns(), 1);
-  assert.equal((await prRecordOf(repo, PR)).noCommit.count, 1);
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit.count, 1);
 });
 
 test("R3: a post-session sha read that fails leaves an unconfirmed marker, not a round; one free pass settles it, then the head revises", async () => {
@@ -160,16 +162,16 @@ test("R3: a post-session sha read that fails leaves an unconfirmed marker, not a
   world({ branchOkLeft: 1, branchDown: false }); // the read before the session answers, the one after fails
   await assert.rejects(pendingPass(config, 1));
   assert.equal(claudeRuns(), 1, "the session ran: the failure is the read after it");
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 0, inflight: true }, "a marker of unknown outcome, no round");
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 0, inflight: true }, "a marker of unknown outcome, no round");
   assert.ok(String(JSON.parse(readFileSync(F.world, "utf8")).labels).includes(LABELS.pending), "the issue was not returned to review");
 
   world({ branchOkLeft: undefined, branchDown: false });
   assert.equal(await pendingPass(config, 2), null, "the next readable pass settles the unconfirmed attempt and pays for nothing");
   assert.equal(claudeRuns(), 1, "paid retries are bounded: one unconfirmed attempt per head");
-  assert.equal((await prRecordOf(repo, PR)).noCommit, undefined, "neither counted nor consumed");
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit, undefined, "neither counted nor consumed");
   assert.ok(await pendingPass(config, 3), "revision resumes on the unchanged head");
   assert.equal(claudeRuns(), 2);
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 }, "now one confirmed round");
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 }, "now one confirmed round");
 });
 
 // The outage that blocks the read blocks the record's writes too: nothing may need a write to be undone.
@@ -189,12 +191,12 @@ test("R4: the pre-session read fails while saves fail too: nothing launches, not
     for (const cycle of [1, 2]) await assert.rejects(pendingPass(config, cycle));
   });
   assert.equal(claudeRuns(), 0);
-  assert.equal((await prRecordOf(repo, PR)).noCommit, undefined);
-  resetNoCommitStreaksForTests();
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit, undefined);
+  rt = new ForemanRuntime();
   world({ branchDown: false });
   assert.ok(await pendingPass(config, 3));
   assert.equal(claudeRuns(), 1);
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 });
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 });
 });
 
 test("R5: the post-session read fails and the record cannot be written: the round is not consumed, the head stays eligible after recovery and a restart", async () => {
@@ -212,8 +214,8 @@ test("R5: the post-session read fails and the record cannot be written: the roun
   source.saveRecord = save0;
   assert.ok(admitted, "admission saved the marker before the session");
   assert.equal(claudeRuns(), 1);
-  assert.equal((await prRecordOf(repo, PR)).noCommit?.count, 0, "no round counted from an unread result");
-  resetNoCommitStreaksForTests();
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit?.count, 0, "no round counted from an unread result");
+  rt = new ForemanRuntime();
   world({ branchOkLeft: undefined, branchDown: false });
   await brokenSaves(async () => { assert.equal(await pendingPass(config, 2), null, "settling needs a write; it cannot, so the pass launches nothing"); });
   assert.equal(claudeRuns(), 1, "no paid session on an unsettled marker");
@@ -242,8 +244,8 @@ test("R8: a confirmed no-commit round whose count cannot be saved does not advan
   try { assert.equal(await pendingPass(config, 1), null); } finally { source.saveRecord = save0; }
   assert.equal(claudeRuns(), 1);
   assert.ok(String(JSON.parse(readFileSync(F.world, "utf8")).labels).includes(LABELS.pending), "not advanced on a round it could not save");
-  assert.equal((await prRecordOf(repo, PR)).noCommit?.count, 0);
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit?.count, 0);
   assert.equal(await pendingPass(config, 2), null);
   assert.ok(await pendingPass(config, 3));
-  assert.deepEqual((await prRecordOf(repo, PR)).noCommit, { head: SHA, count: 1 });
+  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 });
 });

@@ -259,7 +259,7 @@ test("the review phase hands the relay to the Tech Lead and closes it before the
   const src = orchestratorSource();
   assert.match(src, /\.reviewPr\([^)]*transcriptPath, onProgress(, noMerge)?\)/);
   const close = src.indexOf("progress.close();");
-  const end = src.indexOf('await emit({ kind: "session", session: { ...session, ...ended, reviewer');
+  const end = src.indexOf('await emit(rt, { kind: "session", session: { ...session, ...ended, reviewer');
   assert.ok(close > 0 && end > close, "closed first, so no stage post lands after the end comment");
   assert.match(src, /kind: "reviewProgress"/);
 });

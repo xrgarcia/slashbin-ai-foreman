@@ -5,6 +5,7 @@ import { TechLeadPlugin } from "./tech-lead.js";
 import { SrePlugin } from "./sre.js";
 import { QaPlugin } from "./qa.js";
 import { EmPlugin } from "./em.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 // The package's GitHub exports (src/index.ts) come through the composition root,
 // the one core file that may name plugin code.
@@ -16,10 +17,10 @@ export { GitHubIssueConnector } from "../github-work-source.js";
  * calls `registerBuiltinPlugins` once; everything else reaches plugins through
  * the registry. Idempotent.
  */
-export function registerBuiltinPlugins(): void {
+export function registerBuiltinPlugins(runtime: ForemanRuntime): void {
   if (registeredPlugins().length > 0) return;
-  registerPlugin(new GitHubPlugin());
-  registerPlugin(new PaperclipPlugin());
+  registerPlugin(new GitHubPlugin((repo) => runtime.builds.isInFlight(repo)));
+  registerPlugin(new PaperclipPlugin(runtime));
   registerPlugin(new TechLeadPlugin());
   registerPlugin(new SrePlugin());
   registerPlugin(new QaPlugin());

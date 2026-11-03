@@ -2,9 +2,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { trackRelease, releaseIssues } from "../dist/release-tracker.js";
-import { updatePrRecord, resetIssueRecordsForTests } from "../dist/issue-records.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, prRecordOf } from "./issue-records.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 function harness({ open = null, state = "MERGED", saved = null } = {}) {
   const h = { open, state, saved, events: [], reads: 0, failSave: false };
@@ -82,22 +83,23 @@ test("a save that fails announces nothing, and the next pass announces once", as
 // release PR's own record in the work source's store (EM#1244 f3).
 test("the saved release is on the PR's record, so an open release is announced once across passes", async () => {
   await startAgentPlugins();
+  rt = new ForemanRuntime();
   memoryRecords();
   const rc = { githubRepo: "o/r" };
   const events = [];
   const pass = async () => trackRelease({
     repo: "o/r", productionBranch: "main",
-    saved: (await prRecordOf(rc, 371)).tracked ?? null,
+    saved: (await prRecordOf(rt, rc, 371)).tracked ?? null,
     findOpenRelease: () => ({ number: 371, url: "u", body: "Release: #368, #367" }),
     releaseState: () => "OPEN",
-    save: (pr, v) => updatePrRecord(rc, pr, (d) => { if (v) d.tracked = v; else delete d.tracked; }),
+    save: (pr, v) => rt.records.updatePrRecord(rc, pr, (d) => { if (v) d.tracked = v; else delete d.tracked; }),
     emit: async (e) => { events.push(e.state); },
   });
   for (let i = 0; i < 4; i++) await pass();
-  assert.deepEqual((await prRecordOf(rc, 371)).tracked, { pr: 371, url: "u", issues: [368, 367] });
+  assert.deepEqual((await prRecordOf(rt, rc, 371)).tracked, { pr: 371, url: "u", issues: [368, 367] });
   assert.deepEqual(events, ["open"]);
   // A restart forgets everything in memory; the store still has it.
-  resetIssueRecordsForTests();
+  rt = new ForemanRuntime();
   await pass();
   assert.deepEqual(events, ["open"]);
 });

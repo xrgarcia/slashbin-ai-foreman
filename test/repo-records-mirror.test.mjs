@@ -9,13 +9,13 @@ import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
 import { activeWorkSource } from "../dist/plugins/registry.js";
 import { InMemoryRecordStore } from "../dist/record-store.js";
-import { resetIssueRecordsForTests } from "../dist/issue-records.js";
 import { createCardBlockStore } from "../dist/card-blocks.js";
-import { importLegacyRecords, resetLegacyImportForTests } from "../dist/legacy-records.js";
 import { setStateDir } from "../dist/state-dir.js";
 import { writeLegacy, removeLegacy } from "./_legacy-state.mjs";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { mkTmp } from "./tmp-dir.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
 const repoA = { name: "a", githubRepo: "example/a", repoPath: mkTmp("mirror-blocks-a-") };
@@ -37,8 +37,7 @@ beforeEach(() => {
   const source = activeWorkSource();
   source.loadRecord = (k, rc) => store.loadRecord(k, rc);
   source.saveRecord = (k, r, rc) => store.saveRecord(k, r, rc);
-  resetIssueRecordsForTests();
-  resetLegacyImportForTests();
+  rt = new ForemanRuntime();
   removeLegacy();
 });
 
@@ -51,10 +50,10 @@ function mirrorWith(blockStore) {
 
 test("mirror: started before the import, it holds no blocks until a load taken after the import, then restores them", async () => {
   writeLegacy({ cardBlocks: { c1: { reason: "blocked: x", owner: "sre", at: "merged" } } });
-  const { mirror } = mirrorWith(createCardBlockStore(() => cfgs));
+  const { mirror } = mirrorWith(createCardBlockStore(() => cfgs, rt.records, rt.legacy));
   assert.equal(await mirror.ensureBlocks(), false, "the legacy block is not in any record yet: nothing is loaded, nothing is guessed");
   assert.equal(mirror.blockedReason.has("c1"), false);
-  await importLegacyRecords(repoA, quiet, cfgs);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
   assert.equal(await mirror.ensureBlocks(), true, "the next load is taken after the import");
   assert.equal(mirror.blockedReason.get("c1"), "blocked: x");
   assert.equal(mirror.blockedOwner.get("c1"), "sre");
@@ -88,13 +87,13 @@ const item = { repo: "example/a", issueNumber: 1, number: 1 };
 test("mirror R8/R6: plugin-before-import, an approved-stage EM ruling hold survives the first same-stage queued event", async () => {
   const hold = { reason: "needs a ruling", owner: "em", at: "approved", ruling: true };
   writeLegacy({ cardBlocks: { c1: hold } });
-  const store = createCardBlockStore(() => cfgs);
+  const store = createCardBlockStore(() => cfgs, rt.records, rt.legacy);
   const { mirror } = mirrorWith(store);
   const moves = stubbed(mirror);
   mirror.ghStage.set("c1", "approved");
   await mirror.onState(item, "x", "queued"); // before the import: the hold is unknown, so nothing moves
   assert.deepEqual(moves, []);
-  await importLegacyRecords(repoA, quiet, cfgs);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
   await mirror.onState(item, "x", "queued");
   assert.deepEqual(moves, [], "the restored ruling outranks the same-stage update: the card is not moved");
   assert.equal(mirror.rulingHeld.has("c1"), true);
@@ -118,10 +117,10 @@ test("mirror R5/R3: unreadable blocks defer the event; the first readable event 
 
 test("mirror R4: an SRE hold anchored at merged is restored before the first event after a failed-save retry", async () => {
   writeLegacy({ cardBlocks: { c1: { reason: "deploy failed", owner: "sre", at: "merged" } } });
-  const store = createCardBlockStore(() => cfgs);
+  const store = createCardBlockStore(() => cfgs, rt.records, rt.legacy);
   const { mirror } = mirrorWith(store);
   assert.equal(await mirror.ensureBlocks(), false);
-  await importLegacyRecords(repoA, quiet, cfgs);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
   const moves = stubbed(mirror);
   await mirror.onUnblocked(item, "why"); // restores first, so a clear can never be undone by a later load
   assert.equal(mirror.blockedOwner.get("c1"), "sre");
@@ -133,10 +132,10 @@ test("card blocks: a clear that succeeded stays cleared whichever repo the impor
   const repoB = { name: "b", githubRepo: "example/b", repoPath: mkTmp("mirror-blocks-b-") };
   const both = [repoA, repoB];
   writeLegacy({ cardBlocks: { c1: { reason: "x", at: "approved", repo: "example/b" } } });
-  await importLegacyRecords(repoA, quiet, both);
-  await importLegacyRecords(repoB, quiet, both);
-  const store = createCardBlockStore(() => both);
+  await rt.legacy.importLegacyRecords(repoA, quiet, both);
+  await rt.legacy.importLegacyRecords(repoB, quiet, both);
+  const store = createCardBlockStore(() => both, rt.records, rt.legacy);
   assert.ok((await store.load()).c1);
   assert.equal(await store.save("c1", null, "example/b"), true);
-  assert.equal((await createCardBlockStore(() => both).load()).c1, undefined, "a fresh store sees it cleared");
+  assert.equal((await createCardBlockStore(() => both, rt.records, rt.legacy).load()).c1, undefined, "a fresh store sees it cleared");
 });

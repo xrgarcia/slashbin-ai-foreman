@@ -2,11 +2,9 @@ import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter 
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
-import { standingDivergence } from "./divergence.js";
-import { fieldTable, loadIssueRecords } from "./issue-records.js";
-import { loadReleases } from "./release-tracker.js";
-import { clearUnstick, noteStuck } from "./unstick.js";
+import { fieldTable } from "./issue-records.js";
 import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
+import type { ForemanRuntime } from "./runtime.js";
 
 /**
  * The work source each repo selects from and reports to: the one the registry
@@ -81,6 +79,7 @@ export function loopTimeout(limitMs: number, onExpire: () => void, tickMs = OBSE
 }
 
 /** Events are delivered in order, one at a time, behind the build. */
+/** Process-wide: one delivery order for every observer, whatever runtime raised the event. */
 let queue: Promise<void> = Promise.resolve();
 
 function enqueue(event: WorkEvent, logger: Logger): void {
@@ -166,18 +165,27 @@ export function heldWork(repoConfig: RepoConfig): ReadonlyArray<WaitingItem> {
 }
 
 /**
+ * Tell the observers about an event that belongs to no repo (an upstream
+ * back-off): no record is written and no handoff is touched, so no runtime is needed.
+ */
+export async function emitProcessEvent(event: WorkEvent, logger: Logger): Promise<boolean> {
+  enqueue(event, logger);
+  return false;
+}
+
+/**
  * The one way an event leaves the core. With a repo, the work source records
  * it first (an `observed` transition excepted: the source already shows it);
  * then every observer is told, in order, off the build path. Resolves what
  * the source returned: `true` when it recorded a change.
  */
-export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logger: Logger): Promise<boolean> {
+export async function emit(rt: ForemanRuntime, event: WorkEvent, repoConfig: RepoConfig | null, logger: Logger): Promise<boolean> {
   // Stuck work the unstick stage should take to the EM (src/unstick.ts), and the
   // end of it. State only; the stage reads it on its next pass.
   if (repoConfig) {
     try {
-      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) await noteStuck(repoConfig, event.item.issueNumber, event.stuck, event.reason);
-      else if (event.kind === "unblocked") await clearUnstick(repoConfig, event.item.issueNumber);
+      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) await rt.handoffs.noteStuck(repoConfig, event.item.issueNumber, event.stuck, event.reason);
+      else if (event.kind === "unblocked") await rt.handoffs.clearUnstick(repoConfig, event.item.issueNumber);
     } catch (err) {
       logger.debug(`unstick record skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -195,13 +203,14 @@ export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logg
  * the outcome label itself), so only observers hear of it.
  */
 export function advance(
+  rt: ForemanRuntime,
   item: WorkItem,
   move: Move,
   repoConfig: RepoConfig,
   logger: Logger,
   opts: { observed?: boolean } = {},
 ): Promise<boolean> {
-  return emit({ kind: "transition", item, observed: opts.observed === true, ...transition(move) }, repoConfig, logger);
+  return emit(rt, { kind: "transition", item, observed: opts.observed === true, ...transition(move) }, repoConfig, logger);
 }
 
 /**
@@ -210,13 +219,13 @@ export function advance(
  * in its record. An issue whose record cannot be read is held: the answer is unknown, and a card must not
  * be moved on an unknown (fail closed).
  */
-export async function foremanHolds(repoConfig: RepoConfig, numbers: readonly number[], logger: Logger): Promise<(n: number) => boolean> {
-  if (standingDivergence(repoConfig)) return () => true;
+export async function foremanHolds(rt: ForemanRuntime, repoConfig: RepoConfig, numbers: readonly number[], logger: Logger): Promise<(n: number) => boolean> {
+  if (rt.divergence.standing(repoConfig)) return () => true;
   // A release whose record cannot be read may be holding any issue: unknown, so every card is held.
-  const releases = await loadReleases(repoConfig, logger);
+  const releases = await rt.releases.loadReleases(repoConfig, logger);
   if (!releases || releases.unreadable.size > 0) return () => true;
   const out = new Set<number>();
-  const loaded = await loadIssueRecords(repoConfig, numbers);
+  const loaded = await rt.records.loadIssueRecords(repoConfig, numbers);
   for (const n of loaded.unavailable) out.add(n);
   for (const [n, r] of loaded.records) if (r.skipped || r.held || r.verifyHeld || r.failed || Object.keys(r.unstick ?? {}).length > 0) out.add(n);
   for (const r of releases.releases) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
@@ -228,7 +237,7 @@ export async function foremanHolds(repoConfig: RepoConfig, numbers: readonly num
  * Foreman stopped acting on is put back where it belongs. Reads the source
  * only when an enabled observer wants a snapshot.
  */
-export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): Promise<void> {
+export async function publishSnapshot(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
   if (!wantsSnapshot()) return;
   const source = workSourceFor(repoConfig);
   const items = await source.snapshot(repoConfig, logger);
@@ -237,10 +246,10 @@ export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): P
   // Otherwise the closed items alone: a card the Foreman moved follows its issue to done.
   const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
   const numbers = items.map((i) => i.item.issueNumber);
-  const holds = await foremanHolds(repoConfig, numbers, logger);
-  const held = fieldTable(await loadIssueRecords(repoConfig, numbers), "verifyHeld");
+  const holds = await foremanHolds(rt, repoConfig, numbers, logger);
+  const held = fieldTable(await rt.records.loadIssueRecords(repoConfig, numbers), "verifyHeld");
   const read = source.states?.bind(source);
-  await emit({
+  await emit(rt, {
     kind: "snapshot",
     repo: repoConfig.githubRepo,
     items: items.map((i) => ({ ...(held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i), foremanHeld: holds(i.item.issueNumber) })),

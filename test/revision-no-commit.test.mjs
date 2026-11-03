@@ -18,6 +18,8 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { orchestratorSource } from "./source-text.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
@@ -74,7 +76,7 @@ test("the agent is told how to declare it, in both prompt branches", () => {
 test("two declared no-commits on one head escalate instead of looping", () => {
   const block = orchestrator.slice(orchestrator.indexOf("if (result.noCommit)"), orchestrator.indexOf("if (result.noCommit)") + 2000);
   const fn0 = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  assert.match(fn0, /const seen = await recordNoCommit\(repoConfig, prNumber, head, prior\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
+  assert.match(fn0, /const seen = await rt\.streaks\.record\(repoConfig, prNumber, head, prior\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
   assert.match(block, /MAX_CONSECUTIVE_NO_COMMIT/, "the cap must be applied, not just declared");
   assert.match(block, /events\.push/, "a stalemate nobody is told about looks exactly like an idle queue");
   assert.match(block, /level: "error"/, "two agents deadlocked is an error-level condition");
@@ -83,9 +85,9 @@ test("two declared no-commits on one head escalate instead of looping", () => {
 
 test("the no-commit streak clears on a real push, never on an idle pass (foreman#167)", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  assert.match(fn, /\} else \{\n(?:\s*\/\/[^\n]*\n)?\s+await clearNoCommitStreak\(repoConfig, prNumber\);/, "a pushed revision ends the streak");
+  assert.match(fn, /\} else \{\n(?:\s*\/\/[^\n]*\n)?\s+await rt\.streaks\.clear\(repoConfig, prNumber\);/, "a pushed revision ends the streak");
   const idle = fn.slice(fn.indexOf("if (!pending) {"), fn.indexOf("return null;", fn.indexOf("if (!pending) {")));
-  assert.doesNotMatch(idle, /clearNoCommitStreak\(/, "a pass with no pending revision must not reset it");
+  assert.doesNotMatch(idle, /rt\.streaks\.clear\(/, "a pass with no pending revision must not reset it");
 });
 
 test("an escalated stalemate stops launching revision sessions until the head moves", () => {
@@ -98,12 +100,12 @@ test("an escalated stalemate stops launching revision sessions until the head mo
 test("a marker that cannot be saved admits no paid session; a round counts only after the session and a successful read (EM#1244 f5)", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
   const read = fn.indexOf("const beforeSha = codeHost().getRemoteBranchSha(");
-  const admit = fn.indexOf("await admitRevision(");
+  const admit = fn.indexOf("await rt.streaks.admitRevision(");
   assert.ok(read > 0 && read < admit, "the branch sha is read BEFORE anything is written: a failed read leaves nothing to take back");
   assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "the marker is saved before the paid session");
-  assert.match(fn.slice(admit, admit + 400), /^await admitRevision\([^\n]*\n[^\n]*\n\s+return null;/, "a failed save starts nothing, every pass");
+  assert.match(fn.slice(admit, admit + 400), /^await rt\.streaks\.admitRevision\([^\n]*\n[^\n]*\n\s+return null;/, "a failed save starts nothing, every pass");
   assert.ok(admit < fn.indexOf('tryAcquire("claude")'), "and before the slot is taken");
-  assert.doesNotMatch(fn.slice(read, fn.indexOf("recordNoCommit(") + 600), /restore/i, "nothing is restored: an outage that blocks reads also blocks the write that would undo a save");
-  const counted = fn.indexOf("recordNoCommit(");
+  assert.doesNotMatch(fn.slice(read, fn.indexOf("rt.streaks.record(") + 600), /restore/i, "nothing is restored: an outage that blocks reads also blocks the write that would undo a save");
+  const counted = fn.indexOf("rt.streaks.record(");
   assert.ok(counted > fn.indexOf("if (result.noCommit)"), "a round is counted only on a completed session whose later read showed the head unchanged");
 });

@@ -12,6 +12,8 @@ import { UNSTICK_MAX_ATTEMPTS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, seed, recordOf } from "./issue-records.mjs";
 import { slashbinProfile } from "../dist/profiles/slashbin.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 await startAgentPlugins();
 
@@ -26,6 +28,7 @@ process.env.PATH = `${ghBin}:${process.env.PATH}`;
 
 function setup(exitCode = 1) {
   setStatePath(mkTmp("giveup-state-"));
+  rt = new ForemanRuntime();
   memoryRecords();
   const em = mkTmp("giveup-em-");
   mkdirSync(join(em, "bin"));
@@ -33,10 +36,10 @@ function setup(exitCode = 1) {
   const repo = { name: "gr", githubRepo: "o/gr", repoPath: em, lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };
   // Slashbin's owner, from its profile: the comment mentions exactly today's login.
   const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } }, unstickEscalationOwner: slashbinProfile.unstickEscalationOwner };
-  const hold = (reason) => seed(repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason, attempts: 3 } });
+  const hold = (reason) => seed(rt, repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason, attempts: 3 } });
   return { repo, config, hold };
 }
-const entry = async () => (await recordOf({ name: "gr", githubRepo: "o/gr" }, 7)).unstick["7:verify-exhausted"];
+const entry = async () => (await recordOf(rt, { name: "gr", githubRepo: "o/gr" }, 7)).unstick["7:verify-exhausted"];
 
 test("three failed calls -> exactly one comment mentioning the owner, status escalated", async () => {
   const { repo, config, hold } = setup();
@@ -44,7 +47,7 @@ test("three failed calls -> exactly one comment mentioning the owner, status esc
   const comment = (_r, n, body) => { comments.push({ n, body }); };
   await hold("acceptance-not-verified");
   for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) {
-    assert.equal(await tryUnstick(repo, config, logger, i, { comment }), 1, `call ${i}`);
+    assert.equal(await tryUnstick(rt, repo, config, logger, i, { comment }), 1, `call ${i}`);
     assert.equal(comments.length, i < UNSTICK_MAX_ATTEMPTS ? 0 : 1);
   }
   assert.equal(comments[0].n, 7);
@@ -56,7 +59,7 @@ test("three failed calls -> exactly one comment mentioning the owner, status esc
   assert.ok(comments[0].body.length < 2000);
   assert.equal((await entry()).status, "escalated");
   // Further cycles, same reason: no call, no comment.
-  assert.equal(await tryUnstick(repo, config, logger, 9, { comment }), 0);
+  assert.equal(await tryUnstick(rt, repo, config, logger, 9, { comment }), 0);
   assert.equal(comments.length, 1);
 });
 
@@ -64,16 +67,16 @@ test("a changed reason calls the EM again", async () => {
   const { repo, config, hold } = setup();
   const comment = () => {};
   await hold("acceptance-not-verified");
-  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(repo, config, logger, i, { comment });
+  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(rt, repo, config, logger, i, { comment });
   await hold("dev-verify-other");
-  assert.equal(await tryUnstick(repo, config, logger, 9, { comment }), 1);
+  assert.equal(await tryUnstick(rt, repo, config, logger, 9, { comment }), 1);
 });
 
 test("the owner is configurable", async () => {
   const { repo, config, hold } = setup();
   const bodies = [];
   await hold("r");
-  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(repo, { ...config, unstickEscalationOwner: "someone" }, logger, i, { comment: (_r, _n, b) => bodies.push(b) });
+  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(rt, repo, { ...config, unstickEscalationOwner: "someone" }, logger, i, { comment: (_r, _n, b) => bodies.push(b) });
   assert.match(bodies[0], /@someone/);
 });
 
@@ -85,11 +88,11 @@ test("no unstickEscalationOwner: nobody is mentioned, no comment is posted, the 
   const comment = () => { posts++; };
   await hold("r");
   const neutral = { ...config, unstickEscalationOwner: undefined };
-  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(repo, neutral, log, i, { comment });
+  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(rt, repo, neutral, log, i, { comment });
   assert.equal(posts, 0);
   assert.equal((await entry()).status, "failed");
   assert.equal(warned.filter((m) => /no unstickEscalationOwner configured/.test(m)).length, 1);
-  assert.equal(await tryUnstick(repo, neutral, log, 9, { comment }), 0);
+  assert.equal(await tryUnstick(rt, repo, neutral, log, 9, { comment }), 0);
   assert.equal(posts, 0);
 });
 
@@ -98,10 +101,10 @@ test("a failing comment post does not throw, stays failed at the cap and is not 
   let posts = 0;
   const comment = () => { posts++; throw new Error("gh down"); };
   await hold("r");
-  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(repo, config, logger, i, { comment });
+  for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) await tryUnstick(rt, repo, config, logger, i, { comment });
   assert.equal(posts, 1);
   assert.equal((await entry()).status, "failed");
-  assert.equal(await tryUnstick(repo, config, logger, 9, { comment }), 0);
+  assert.equal(await tryUnstick(rt, repo, config, logger, 9, { comment }), 0);
   assert.equal(posts, 1);
 });
 
@@ -109,7 +112,7 @@ test("an answered call (exit 0) never comments", async () => {
   const { repo, config, hold } = setup(0);
   let posts = 0;
   await hold("r");
-  await tryUnstick(repo, config, logger, 1, { comment: () => { posts++; } });
+  await tryUnstick(rt, repo, config, logger, 1, { comment: () => { posts++; } });
   assert.equal(posts, 0);
   assert.equal((await entry()).status, "invoked");
 });

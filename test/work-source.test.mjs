@@ -20,6 +20,8 @@ import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { addObserver, drainObservers } from "../dist/work-source.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 let tmp, F, saved;
@@ -91,7 +93,7 @@ function load(repo, top = {}) {
 async function pass(config) {
   rmSync(F.claudeLog, { force: true });
   events.length = 0;
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   await drainObservers();
   const prompt = existsSync(F.claudeLog) ? JSON.parse(readFileSync(F.claudeLog, "utf8").trim().split("\n")[0]).prompt : null;
   return { prompt, events: [...events] };

@@ -88,8 +88,9 @@ function cfgFor(goldenPath, over = {}) {
 }
 
 let tmp;
+let skillSync;
 beforeEach(() => {
-  ss.resetSkillSyncCache();
+  skillSync = new ss.SkillSync();
   tmp = mkTmp("skill-sync-");
 });
 
@@ -133,8 +134,8 @@ test("drift is read from the feature branch on origin, and logged once per golde
 
   const log = logger();
   const r = { name: "svc", repoPath: repo, featureBranch: "features" };
-  ss.noticeSkillDrift(cfg, r, log);
-  ss.noticeSkillDrift(cfg, r, log);
+  skillSync.noticeSkillDrift(cfg, r, log);
+  skillSync.noticeSkillDrift(cfg, r, log);
   assert.equal(log.lines.filter((l) => l.includes("Skill drift")).length, 1, "a poll that sees the same drift says nothing new");
 });
 
@@ -149,7 +150,7 @@ test("a stale copy is synced in one local commit naming the issue, byte for byte
     ".claude/skills/local-only/SKILL.md": "not in the golden — left alone\n",
   });
   const before = git(repo, "rev-parse", "HEAD");
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [42], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [42], logger());
 
   assert.equal(out.status, "synced");
   assert.deepEqual(out.skills, ["clean-code", "implement-approved-issues"]);
@@ -168,7 +169,7 @@ test("no commit when the copy is already current", () => {
   const cfg = cfgFor(makeGolden(tmp));
   const repo = makeRepo(tmp, CURRENT);
   const before = git(repo, "rev-parse", "HEAD");
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [7], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [7], logger());
   assert.equal(out.status, "current");
   assert.equal(git(repo, "rev-parse", "HEAD"), before);
 });
@@ -176,7 +177,7 @@ test("no commit when the copy is already current", () => {
 test("a batch of several issues names none: a guessed number would mislink the PR", () => {
   const cfg = cfgFor(makeGolden(tmp));
   const repo = makeRepo(tmp, {});
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [1, 2], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [1, 2], logger());
   assert.equal(out.status, "synced");
   assert.doesNotMatch(out.subject, /#\d/);
 });
@@ -185,8 +186,8 @@ test("a repo's own list narrows the sync; [] opts it out", () => {
   const cfg = cfgFor(makeGolden(tmp));
   const repo = makeRepo(tmp, {});
   const r = { name: "svc", repoPath: repo, featureBranch: "features" };
-  assert.equal(ss.syncSkillsForIssue(cfg, { ...r, skillSyncSkills: [] }, [3], logger()).status, "current");
-  const out = ss.syncSkillsForIssue(cfg, { ...r, skillSyncSkills: ["clean-code"] }, [3], logger());
+  assert.equal(skillSync.syncSkillsForIssue(cfg, { ...r, skillSyncSkills: [] }, [3], logger()).status, "current");
+  const out = skillSync.syncSkillsForIssue(cfg, { ...r, skillSyncSkills: ["clean-code"] }, [3], logger());
   assert.deepEqual(out.skills, ["clean-code"]);
 });
 
@@ -199,7 +200,7 @@ test("the sync builds on origin's tip: a clone behind origin is fast-forwarded f
   git(seed, "commit", "--quiet", "-am", "x");
   git(seed, "add", "-A"); git(seed, "commit", "--quiet", "-m", "y", "--allow-empty");
   git(seed, "push", "--quiet", "origin", "features");
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [9], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [9], logger());
   assert.equal(out.status, "synced");
   assert.equal(git(repo, "rev-parse", "HEAD~1"), git(repo, "rev-parse", "origin/features"));
   assert.ok(existsSync(join(repo, "src.txt")));
@@ -212,7 +213,7 @@ test("an unreadable golden skips the sync and never throws", () => {
   const before = git(repo, "rev-parse", "HEAD");
   const log = logger();
   const cfg = cfgFor(join(tmp, "nowhere"));
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [5], log);
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [5], log);
   assert.equal(out.status, "skipped");
   assert.equal(git(repo, "rev-parse", "HEAD"), before);
   assert.ok(log.lines.some((l) => l.startsWith("warn: Skill sync: golden source unreadable")));
@@ -223,7 +224,7 @@ test("a checkout with someone's uncommitted change is left alone", () => {
   const repo = makeRepo(tmp, {});
   put(repo, "README.md", "uncommitted\n");
   const before = git(repo, "rev-parse", "HEAD");
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [5], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [5], logger());
   assert.equal(out.status, "skipped");
   assert.equal(git(repo, "rev-parse", "HEAD"), before);
   assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "uncommitted\n");
@@ -234,7 +235,7 @@ test("a git failure mid-sync is a failed outcome, not a thrown one, and the inde
   const repo = makeRepo(tmp, {});
   rmSync(join(tmp, "svc.git"), { recursive: true, force: true }); // origin gone: the fetch fails
   const log = logger();
-  const out = ss.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [5], log);
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, featureBranch: "features" }, [5], log);
   assert.equal(out.status, "failed");
   assert.ok(log.lines.some((l) => l.startsWith("warn: Skill sync failed — implementing on the existing skill")));
   assert.equal(git(repo, "diff", "--cached", "--name-only"), "");
@@ -247,7 +248,7 @@ test("a sync the session did not push is taken back off the local branch", () =>
   const repo = makeRepo(tmp, {});
   const before = git(repo, "rev-parse", "HEAD");
   const r = { name: "svc", repoPath: repo, featureBranch: "features" };
-  const out = ss.syncSkillsForIssue(cfg, r, [5], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, r, [5], logger());
   ss.settleSkillSync(r, out, logger());
   assert.equal(git(repo, "rev-parse", "HEAD"), before, "no stray (#5) headline is left for another issue's push");
   assert.ok(!existsSync(join(repo, ".claude/skills/clean-code/SKILL.md")));
@@ -257,7 +258,7 @@ test("a sync pushed with the work stays", () => {
   const cfg = cfgFor(makeGolden(tmp));
   const repo = makeRepo(tmp, {});
   const r = { name: "svc", repoPath: repo, featureBranch: "features" };
-  const out = ss.syncSkillsForIssue(cfg, r, [5], logger());
+  const out = skillSync.syncSkillsForIssue(cfg, r, [5], logger());
   put(repo, "work.txt", "the issue's work\n");
   git(repo, "add", "work.txt"); git(repo, "commit", "--quiet", "-m", "feat: work (#5)");
   git(repo, "push", "--quiet", "origin", "features");
@@ -280,7 +281,7 @@ test("default config: skill sync is off, and an off config touches nothing", () 
     assert.equal(config.skillSync.source, "builtin");
     const log = logger();
     const before = git(repo, "rev-parse", "HEAD");
-    ss.noticeSkillDrift(config.skillSync, config.repos[0], log);
+    skillSync.noticeSkillDrift(config.skillSync, config.repos[0], log);
     assert.deepEqual(log.lines, []);
     assert.equal(git(repo, "rev-parse", "HEAD"), before);
   } finally {
@@ -291,7 +292,7 @@ test("default config: skill sync is off, and an off config touches nothing", () 
 
 test("the implement phase calls the sync only when enabled, before the session, and settles it after", () => {
   const src = readFileSync(join(root, "src/phases/implement.ts"), "utf8");
-  const sync = src.indexOf("if (config.skillSync?.enabled) skillSync = syncSkillsForIssue(");
+  const sync = src.indexOf("if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(");
   const session = src.indexOf("await implementApprovedIssues(");
   const settle = src.indexOf("if (skillSync) settleSkillSync(");
   assert.ok(sync > 0 && sync < session, "the copy must be fresh before the session reads it");

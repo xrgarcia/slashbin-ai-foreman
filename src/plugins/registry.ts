@@ -7,18 +7,25 @@ import type { AgentRole, CodeHost, ForemanPlugin, PluginCommand, PluginContext, 
  * Plugins are registered once (`plugins/index.ts`), the enabled ones started
  * once at startup, and every role is resolved here. Holds no plugin's code.
  */
+/** Process-wide: the plugin registry is the process's wiring, set once at startup. */
 const registered: ForemanPlugin[] = [];
+/** Process-wide: the plugins started in this process. */
 const started: ForemanPlugin[] = [];
 /** The observer each started plugin contributed, so stopping it can take it back out. */
+/** Process-wide: the observers the started plugins contributed. */
 const startedObservers = new Map<ForemanPlugin, WorkObserver>();
 
 /** Observers in delivery order: started plugins' and directly added ones, as they arrived. */
+/** Process-wide: every observer in the process hears every event. */
 const observerList: WorkObserver[] = [];
 /** A work source set directly (tests, an embedding host); wins over a plugin's. */
+/** Process-wide: a host-set work source replaces the plugin's for the process. */
 let workSourceOverride: WorkSourceAdapter | null = null;
 /** A code host set directly (tests, an embedding host); wins over a plugin's. */
+/** Process-wide: a host-set code host replaces the plugin's for the process. */
 let codeHostOverride: CodeHost | null = null;
 /** The config plugins were last started or reconfigured with, for `fills`. */
+/** Process-wide: the config the plugins were started with. */
 let currentConfig: AgentConfig | undefined;
 
 /** Whether `p` fills `role` under `config` (or the current one): listed, and selected when it says which. */
