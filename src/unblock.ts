@@ -18,7 +18,6 @@
 /** Why the Foreman stopped on an item. */
 export type BlockKind =
   | "skip"                 // the implementer declined: held until something it names moves
-  | "divergence"           // the feature branch diverged from its base
   | "verify-no-pr"         // labelled merged, but no merged PR closes the issue
   | "verify-held"          // dev verification failed and is waiting out its backoff
   | "verify-exhausted"     // dev verification failed its last attempt
@@ -33,8 +32,6 @@ export interface BlockFacts {
   waitedOnDone?: boolean;
   /** Someone other than the Foreman edited, commented on or labelled the issue after the skip. */
   issueChanged?: boolean;
-  /** The feature branch no longer diverges from its base. */
-  divergenceCleared?: boolean;
   /** A merged PR into the base branch now closes the issue. */
   mergedPrFound?: boolean;
   /** The base branch gained commits after the block: a fix may have landed. */
@@ -52,7 +49,6 @@ export type UnblockCheck = keyof BlockFacts;
 /** The checks each kind of block is released by, in order. */
 export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>> = {
   "skip": ["transientCauseGone", "waitedOnDone", "issueChanged"],
-  "divergence": ["divergenceCleared"],
   "verify-no-pr": ["mergedPrFound"],
   "verify-held": ["specEdited"],
   "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged"],
@@ -65,7 +61,6 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   transientCauseGone: "the condition the skip named has cleared",
   waitedOnDone: "the issue or PR the skip was waiting on has closed or merged — building again",
   issueChanged: "the issue changed since the skip — building again",
-  divergenceCleared: "the feature branch no longer diverges from its base",
   mergedPrFound: "a merged PR now closes the issue",
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",
   specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",

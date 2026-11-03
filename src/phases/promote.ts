@@ -78,9 +78,8 @@ export function tryFileDependencyBatchIssue(
   cycleNumber: number,
 ): number | null {
   const depLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "dependencies" });
-  const bases = codeHost().dependencyBatchBases(repoConfig.featureBranch, repoConfig.baseBranch, repoConfig.productionBranch);
+  const bases = codeHost().dependencyBatchBases(repoConfig.baseBranch, repoConfig.productionBranch);
   if (bases.length === 0) return null;
-  const featureBranch = repoConfig.featureBranch || bases[0];
 
   let prs = codeHost().findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger, repoConfig.github);
   if (prs.length === 0) return null;
@@ -116,7 +115,7 @@ export function tryFileDependencyBatchIssue(
   }
 
   const changes = prs.map((p) => codeHost().describeDependencyPR(p.number, p.title));
-  const { title, body } = codeHost().buildDependencyBatchIssue(featureBranch, changes, repoConfig.github, repoConfig.baseBranch);
+  const { title, body } = codeHost().buildDependencyBatchIssue(repoConfig.baseBranch, changes, repoConfig.github, repoConfig.baseBranch);
   const number = codeHost().createDependencyBatchIssue(
     repoConfig.githubRepo, repoConfig.repoPath, title, body,
     repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, depLogger,
@@ -294,7 +293,7 @@ export async function tryPromotion(
   const promoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "promote" });
 
   // Main-only repos (like docs) don't have develop → main promotion
-  if (repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch) {
+  if (repoConfig.baseBranch === repoConfig.productionBranch) {
     return null;
   }
 

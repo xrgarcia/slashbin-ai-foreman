@@ -19,14 +19,14 @@ with its next approved issue, in that issue's own PR.
 ## What it does
 
 - **Notices.** On each implement pass, the Foreman compares every carried skill by
-  content: each file's path and bytes, on `origin/<featureBranch>`.
+  content: each file's path and bytes, on `origin/<baseBranch>`.
   - A changed byte makes the copy stale.
   - So does a missing file, or a file the golden doesn't have.
   - Drift is logged once per repo for each golden version, not on every poll.
 - **Syncs at implement time.** When an approved issue is picked up for a stale repo,
   the Foreman's code (never the session) copies the golden files byte for byte into
   the checkout, under the checkout lock.
-  - It commits them on the feature branch:
+  - It commits them on the local base branch; the issue's own branch is cut from it, and the base is moved back once the session ends:
     `chore(skills): sync <names> from <source>@<version> (#<issue>)`.
   - The session then runs on the fresh skill, and the commit is pushed with the
     session's work. So it rides the issue's PR.

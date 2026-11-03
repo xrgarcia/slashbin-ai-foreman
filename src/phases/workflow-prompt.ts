@@ -50,7 +50,7 @@ export function skillInstruction(config: RepoConfig, skillPath: string, builtin:
     return {
       ok: true,
       text: `Follow the skill below — the Foreman's built-in skills/${builtin}/SKILL.md.\n\n` +
-        `Repository: ${config.githubRepo}. Feature branch: ${config.featureBranch}. ` +
+        `Repository: ${config.githubRepo}. Branch prefix for Foreman work: ${config.branchPrefix}. ` +
         `Pull requests target: ${config.baseBranch}.\n\n` +
         `===== SKILL =====\n${body}\n===== END SKILL =====`,
     };

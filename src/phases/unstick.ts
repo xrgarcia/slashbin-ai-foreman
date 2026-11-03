@@ -19,7 +19,7 @@ import type { UnstickOutcome } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, unstickGiveUpComment, derivedCandidates, needsCall, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
-import { activeRuns, divergenceReason } from "./common.js";
+import { activeRuns } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
@@ -72,7 +72,7 @@ export async function tryUnstick(
   const log = base.child({ cycle: cycleNumber, repo: repoName, phase: "unstick" });
   try {
     // The issues this pass looks at: the repo's open ones. When GitHub cannot be read there are none, and the
-    // pass keeps to what is held in state (a branch divergence, the questions about no issue) and prunes nothing it cannot see.
+    // pass keeps to what is held in state (the questions about no issue) and prunes nothing it cannot see.
     let issues: ReturnType<CodeHost["getOpenIssues"]> | null = null;
     if (!isUpstreamBlocked("github")) {
       try {
@@ -86,16 +86,9 @@ export async function tryUnstick(
     const loaded = await rt.records.loadIssueRecords(repoConfig, open ?? []);
     // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
     const repoRecord = await rt.records.loadRepoRecord(repoConfig);
-    const standing = rt.divergence.standing(repoConfig);
     const candidates: UnstickCandidate[] = derivedCandidates({
       verifyHeld: fieldTable(loaded, "verifyHeld"),
       skipped: fieldTable(loaded, "skipped"),
-      ...(standing ? {
-        divergence: {
-          reason: divergenceReason(standing),
-          announced: [...loaded.records].filter(([, r]) => r.divergenceTold === standing.mergeBase).map(([n]) => n),
-        },
-      } : {}),
     }, {
       verifyMaxAttempts: config.backoff.verifyRetry.maxAttempts,
       isDeployFailureHold,

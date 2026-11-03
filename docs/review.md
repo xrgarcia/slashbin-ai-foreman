@@ -38,7 +38,7 @@ checks the work in dev ([pipeline.md](pipeline.md#the-stages)).
 ## When a PR is reviewed
 
 A PR is gated into review only when its linked issue is labeled `pr under review`,
-it has an open `featureBranch → baseBranch` PR, and there is no review by
+it has an open Foreman-owned PR into `baseBranch`, and there is no review by
 `reviewerLogin` newer than the PR's latest commit (a freshness guard against
 re-review loops).
 

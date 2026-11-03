@@ -60,6 +60,7 @@ export function githubCodeHost(
     labelNames: coreReads.labelNames,
     createLabel: coreReads.createLabel,
     featurePrUrlFallback: coreReads.featurePrUrlFallback,
+    deleteMergedBranch: coreReads.deleteMergedBranch,
 
     checkBranchDrift: branch.checkBranchDrift,
     checkPRHasChanges: branch.checkPRHasChanges,

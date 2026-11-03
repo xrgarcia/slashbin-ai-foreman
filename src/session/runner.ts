@@ -313,13 +313,15 @@ export function spawnClaude(
   config: RepoConfig,
   logger: Logger,
   abortSignal?: AbortSignal,
-  transcriptPath?: string
+  transcriptPath?: string,
+  extraEnv?: Record<string, string>,
 ): Promise<SpawnResult> {
   return spawnClaudeWithOptions(
     prompt,
     {
       trust,
       cwd: config.repoPath,
+      ...(extraEnv ? { extraEnv } : {}),
       sessionEnv: config.sessionEnv,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
       triggerLabel: config.triggerLabel,

@@ -1,7 +1,6 @@
 // The implement phase: select approved work, gate on an open feature PR, run
 // the implement session, and report what it opened or why it stopped.
 
-import { repairDivergence } from "../divergence-repair.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
@@ -10,21 +9,15 @@ import { selectWork, heldWork, emit, advance, wantsSessionReports, workSourceFor
 import { implementApprovedIssues } from "./implement-workflow.js";
 import type { ImplementationResult } from "../session/protocol.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
-import {
-  checkLocalBranchDivergence,
-  fastForwardFeatureBranch,
-  divergenceStillHolds,
-  type BranchDivergence,
-} from "../reconciler.js";
 import { backoffDelay, formatWait } from "../backoff.js";
-import { type Divergence } from "../divergence.js";
 import { fieldTable } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
 import { settleSkillSync, type SyncOutcome } from "../skill-sync.js";
-import { CycleEvent, activeRuns, announceDivergence, toldAbout, divergenceReason, itemOf, notifyOnce, prReport, releaseIfResolved, startReport, stoppedReason } from "./common.js";
+import { CycleEvent, activeRuns, itemOf, notifyOnce, prReport, releaseIfResolved, startReport, stoppedReason } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
+import { foremanBranchName } from "../foreman-branch.js";
 
 /**
  * Classify a recorded skip reason as transient + currently-resolved. Returns
@@ -34,19 +27,8 @@ import type { ForemanRuntime } from "../runtime.js";
  * back-off continues normally.
  *
  * Known transient patterns:
- * - "diverged from origin/<branch>" — local working clone ahead/behind origin;
- *   resolved when both are 0. The skill emits this when `git pull origin
- *   features` fails on a divergent branch state, typically caused by an EM
- *   session leaving polluted refs in the shared clone (see
- *   feedback_em_clone_stay_on_main). An EM manual reconcile
- *   (`git branch -f features origin/features`) clears the cause but cannot
- *   reach into the daemon's skip cache; this recheck lets the orchestrator
- *   notice the cause is gone and admit on the next cycle instead of waiting
- *   out the full 30-min back-off.
- *
- * - "an open PR #N holds the feature branch" (foreman#50) — the session will not
- *   push a second issue onto a branch another PR owns. Cleared once #N is no
- *   longer open. The most common skip in the state file: Slashbin-console #1205
+ * - "an open PR #N" blocks the build (foreman#50) — a skip recorded against an open
+ *   Foreman PR. Cleared once #N is no longer open. The most common skip in the state file: Slashbin-console #1205
  *   sat out its window 16+ minutes after #1204 merged, Slashbin-io-docs #412 33.
  *
  * Add new transient patterns here as they are identified. Durable reasons
@@ -59,12 +41,6 @@ export function isResolvedTransientSkip(
   repoConfig: RepoConfig,
   logger: Logger,
 ): boolean {
-  const divergenceMatch = reason.match(/diverged from origin\/(\S+?)\b/i);
-  if (divergenceMatch) {
-    const branch = divergenceMatch[1];
-    const div = checkLocalBranchDivergence(repoConfig.repoPath, branch, logger);
-    return div !== null && div.ahead === 0 && div.behind === 0;
-  }
   const prNumber = prBlockingSkip(reason);
   if (prNumber !== null) {
     return codeHost().isPrOpen(repoConfig.githubRepo, prNumber, repoConfig.repoPath) === false;
@@ -287,12 +263,10 @@ export async function tryBatchImplementation(
   // or released here.
   //
   // Reason-aware recheck: some skip reasons describe a TRANSIENT precondition
-  // (e.g., "local features branch diverged from origin/features") that an EM
-  // session can manually resolve mid-back-off. Before honoring the back-off,
-  // re-run the precondition check; if it now passes, admit the issue and clear
-  // the stale skip entry. This prevents the cache from pinning a dead-zone
-  // a whole window past an already-applied manual reconcile.
-  // The open feature PR, if any. Unknown (lookup threw) reads as none: the
+  // (e.g., an open PR the skip named) that clears by itself mid-back-off. Before
+  // honoring the back-off, re-run the precondition check; if it now passes, admit
+  // the issue and clear the stale skip entry, rather than pinning it a whole window.
+  // The open Foreman-owned PR, if any (findOpenFeaturePR: per-issue branch or legacy head). Unknown (lookup threw) reads as none: the
   // session still refuses to bundle, so the old path is the fallback.
   let featurePr: ReturnType<CodeHost["findOpenFeaturePR"]> = null;
   try {
@@ -371,26 +345,11 @@ export async function tryBatchImplementation(
   }
   // The repo's whole waiting set, every cycle that reaches here: an issue that
   // drops out of it has stopped waiting, which is how an observer clears it.
-  // A recorded branch divergence holds everything else back too (foreman#44).
-  const waitingSet = (block: Divergence | null) => [
+  const waiting = [
     ...acceptanceHolds,
     ...stillBackedOff.map(({ n, reason }) => ({ item: itemOf(repoConfig, n), reason: reason.split("\n")[0], skipped: true })),
-    ...(block ? handOff.map((n) => ({ item: itemOf(repoConfig, n), reason: divergenceReason(block) })) : []),
   ];
-  // A standing divergence is re-checked read-only every pass: the fast-forward below sits behind the
-  // pending-revision gate and may not run for hours. The divergence is what git shows (divergence.ts),
-  // not a stored block. The EM's ruling on it is carried out first (foreman#104); the release check
-  // below then sees the repaired branch.
-  let block = rt.divergence.standing(repoConfig);
-  if (block) {
-    const { told } = await toldAbout(rt, repoConfig, handOff, block.mergeBase);
-    await repairDivergence(rt.records, repoConfig, repoLogger, block, told);
-    if (await releaseIfResolved(rt, "divergence", { divergenceCleared: divergenceStillHolds(repoConfig) === false }, told, repoConfig, repoLogger)) {
-      rt.divergence.observe(repoConfig, null);
-      block = null;
-    }
-  }
-  await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(block) }, null, repoLogger);
+  await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waiting }, null, repoLogger);
   // Labels rank the batch by priority. Unreadable, every issue ranks the
   // same and the oldest goes first.
   let labels = new Map<number, string[]>();
@@ -416,46 +375,18 @@ export async function tryBatchImplementation(
     return null;
   }
 
-  // Bring `features` up to `develop` before the session builds on it.
+  // Gate 1 — an open Foreman PR: ONE issue in flight per repo is policy (Ray, 2026-10-14),
+  // not a branch artifact: every issue builds on its own branch now, so nothing here is
+  // "held" by a shared branch. Launching anyway would run a second issue beside the first
+  // one's review, and spent a session per cycle to learn it, posted "picked up" then
+  // "skipped" to Discord and bounced the Paperclip card implementing → blocked (jerky_service
+  // #66/#70, 2026-10-05). Hold here: the issues show as queued, say nothing to Discord, and
+  // build once the PR merges or closes.
   //
-  // The implement skill's Phase 0 only pulls `features` — nothing has ever
-  // merged the base branch in. Dependabot lands on the base, so without this
-  // the session builds and boots a tree missing every bump since the last
-  // feature merge. Fast-forward only: an in-flight feature PR (features ahead)
-  // is the normal state and is left alone, and a true divergence is reported
-  // rather than resolved. See fastForwardFeatureBranch for the full rationale.
-  const divergence: BranchDivergence = {};
-  const ffOutcome = fastForwardFeatureBranch(repoConfig, repoLogger, divergence);
-  if (ffOutcome === "diverged") {
-    const seen = rt.divergence.observe(repoConfig, { ahead: divergence.ahead ?? 0, behind: divergence.behind ?? 0, mergeBase: divergence.mergeBase ?? "" });
-    const now = seen.now!;
-    await announceDivergence(rt, repoConfig, handOff, now, repoLogger, seen.before?.mergeBase !== now.mergeBase);
-    await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(now) }, null, repoLogger);
-    return null;
-  }
-  // "unknown" proves nothing either way, so a standing divergence stands.
-  if (ffOutcome !== "unknown") {
-    const { before } = rt.divergence.observe(repoConfig, null);
-    if (before) {
-      repoLogger.info(
-        `${repoConfig.featureBranch} is reconciled with ${repoConfig.baseBranch} — implementation on ${repoName} resumes`,
-      );
-      await emit(rt, { kind: "waiting", repo: repoConfig.githubRepo, items: waitingSet(null) }, null, repoLogger);
-    }
-  }
-
-  // Gate: an open feature PR holds the branch. The skill builds straight on
-  // `features`, so another issue's commit would land in that PR, and the skill
-  // refuses to bundle (Phase 4 rule 3). Launching anyway spent a session per
-  // cycle to learn that, posted "picked up" then "skipped" to Discord, and
-  // bounced the Paperclip card implementing → blocked, for what is just the
-  // queue (jerky_service #66/#70, 2026-10-05). Hold here: the issues show as
-  // queued, say nothing to Discord, and build once the PR merges or closes.
-  //
-  // Gate: the last merge has not passed dev verification. Merging frees the
-  // branch, but the issue is not done until it is verified on dev, and what the
-  // verification finds may change the next one (Ray, 2026-10-14: one issue in
-  // flight per repo). Queued the same way; see devVerifyHolding for what frees it.
+  // Gate 2 — the last merge has not passed dev verification. Merging frees the repo, but the
+  // issue is not done until it is verified on dev, and what the verification finds may change
+  // the next one (Ray, 2026-10-14). Independent of gate 1: it holds when no PR is open. Queued
+  // the same way; see devVerifyHolding for what frees it.
   const repoQueue = rt.memory.queuedBehind.get(repoName) ?? new Map<number, string>();
   rt.memory.queuedBehind.set(repoName, repoQueue);
   const merged = !featurePr && roleFor("verifier", config) !== undefined && config.buildWaitsForDevVerify
@@ -482,8 +413,10 @@ export async function tryBatchImplementation(
     actionableIssues.splice(0, actionableIssues.length, ...fixes);
     repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the follow-up to #${followUpOf}, whose dev verification is waiting on it`);
   }
-  const holder = featurePr ? `open feature PR #${featurePr.number}` : verifying !== null && fixes.length === 0 ? `#${verifying}'s dev verification` : null;
-  const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : holder ? actionableIssues : [];
+  const prHolder = featurePr ? `open Foreman PR #${featurePr.number}` : null;
+  const verifyHolder = verifying !== null && fixes.length === 0 ? `#${verifying}'s dev verification` : null;
+  const holder = prHolder ?? verifyHolder;
+  const queued = featurePr ? actionableIssues.filter((n) => !featurePr!.issueNumbers.includes(n)) : verifyHolder ? actionableIssues : [];
   for (const n of [...repoQueue.keys()]) if (!queued.includes(n)) repoQueue.delete(n);
   if (holder && queued.length > 0) {
     const fresh = queued.filter((n) => repoQueue.get(n) !== holder);
@@ -534,7 +467,10 @@ export async function tryBatchImplementation(
     if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
 
     const priorFailure = rt.memory.lastFailureReason.get(repoName) || null;
-    const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues)
+    // One branch per issue, named from the issue's title; the session cuts the one for the issue it picks.
+    const branches: Record<number, string> = {};
+    for (const n of actionableIssues) branches[n] = foremanBranchName(repoConfig, n, titles.get(n) ?? "");
+    const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues, branches)
       .catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
@@ -545,8 +481,8 @@ export async function tryBatchImplementation(
         ? { status: "finished", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
         : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (wantsSessionReports()) {
-      // Commits on the open PR leave no URL: the feature branch names the PR.
-      const pr = result.success ? prReport(repoConfig, result.prUrl ?? repoConfig.featureBranch, repoLogger) : undefined;
+      // Commits on the open PR leave no URL: its head branch names the PR.
+      const pr = result.success ? prReport(repoConfig, result.prUrl ?? codeHost().findOpenFeaturePR(repoConfig)?.headBranch ?? repoConfig.baseBranch, repoLogger) : undefined;
       report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
     }
 
@@ -580,13 +516,7 @@ export async function tryBatchImplementation(
       // Widening to allActionable (vs just actionableIssues) is the
       // slashbin-ai-foreman#18 fix: if the skill picked an out-of-batch
       // approved issue, the resulting PR still gets correctly labeled.
-      const referencedAll = codeHost().getReferencedIssuesFromOpenPR(
-        repoConfig.githubRepo,
-        repoConfig.featureBranch,
-        repoConfig.baseBranch,
-        repoConfig.repoPath,
-        repoLogger,
-      );
+      const referencedAll = codeHost().findOpenFeaturePR(repoConfig)?.issueNumbers ?? null;
       const allActionable = (await workSourceFor(repoConfig).selectEligible?.(repoConfig, repoLogger) ?? []).map((w) => w.issueNumber);
       const labelingCandidates = Array.from(new Set([...actionableIssues, ...allActionable]));
       const matched = referencedAll
@@ -641,7 +571,7 @@ export async function tryBatchImplementation(
       repoLogger.info(`Batch implementation succeeded — tracked ${issuesActuallyImplemented.map(n => `#${n}`).join(", ")}`, { prUrl: result.prUrl });
       events?.push({ message: `Feature PR on ${repoConfig.githubRepo}: ${result.prUrl || "(commits added to existing PR)"}`, level: "info" });
     } else if (result.landed && result.landedIssue !== undefined && actionableIssues.includes(result.landedIssue)) {
-      // Nothing to land: the issue's work is already on the feature branch. That
+      // Nothing to land: the issue's work is already on the base branch. That
       // is DONE, not stalled — close it as completed with the evidence, which also
       // releases every issue GitHub records as blocked by it (blockers.ts treats a
       // closed blocker as met). Left open and `approved` it held its dependents
@@ -655,7 +585,7 @@ export async function tryBatchImplementation(
         rt.memory.failureCount.set(repoName, 0);
         rt.memory.lastFailureReason.delete(repoName);
         rt.memory.failurePause.clear(repoName);
-        repoLogger.info(`Closed #${n} as completed: already landed on ${repoConfig.featureBranch} — ${reason}`);
+        repoLogger.info(`Closed #${n} as completed: already landed on ${repoConfig.baseBranch} — ${reason}`);
         events?.push({ message: `Closed #${n} on ${repoConfig.githubRepo}: already landed (${reason})`, level: "info" });
       } catch (err) {
         const why = `#${n} is already landed (${reason}) but the Foreman could not close it: ${err instanceof Error ? err.message : String(err)}`;
@@ -783,9 +713,7 @@ export async function tryBatchImplementation(
       rt.memory.failureCount.set(repoName, newCount);
       // The run failed after its work landed in a PR: the PR names the issue
       // it was on, and only that issue is told it failed.
-      const onPr = codeHost().getReferencedIssuesFromOpenPR(
-        repoConfig.githubRepo, repoConfig.featureBranch, repoConfig.baseBranch, repoConfig.repoPath, repoLogger,
-      )?.filter((n) => actionableIssues.includes(n));
+      const onPr = (codeHost().findOpenFeaturePR(repoConfig)?.issueNumbers ?? null)?.filter((n) => actionableIssues.includes(n));
       if (onPr && onPr.length > 0) worked = onPr;
       const failedOn = worked ?? actionableIssues;
       if (newCount < repoFailure.maxFailures) {

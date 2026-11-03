@@ -63,11 +63,17 @@ Type: string · Default: `"main"` · Env: `AI_AGENT_PRODUCTION_BRANCH` · Per re
 
 The branch promotion PRs target; branch sync merges it back into baseBranch.
 
-### `featureBranch`
+### `branchPrefix`
+
+Type: string · Default: `"foreman/"` · Env: `AI_AGENT_BRANCH_PREFIX` · Per repo: yes, falls back to this value
+
+Every issue is built on its own branch `<branchPrefix><issue>-<slug>`, cut from `origin/<baseBranch>`, and its PR targets `baseBranch`. A PR is Foreman-owned iff its head starts with this prefix (or equals the legacy `featureBranch`). A head with any other name, such as `ray/fix-x`, is a person's: the Foreman never revises, reconciles, pushes to or deletes it. A Foreman branch is deleted once its PR has merged.
+
+### `featureBranch` (legacy)
 
 Type: string · Default: `"features"` · Env: `AI_AGENT_FEATURE_BRANCH` · Per repo: yes, falls back to this value
 
-The branch implement and revise sessions commit to.
+The retired shared branch. Nothing new is pushed to it. A PR whose head equals it is still Foreman-owned, so work open at the cutover is reviewed, revised and merged normally; once none remain, the setting and the branch can go.
 
 ### `skillPath`
 
@@ -636,7 +642,7 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 | `promotionBatchTitle` | `"release: promote {n} changes to production"` | Title of a promotion PR carrying several issues. {n} is how many. |
 | `syncTitle` | `"chore: sync {base} with {production} (merge commits backfill)"` | Title of the PR that merges production back into base after a promotion. {base} and {production} are the two branch names. |
 | `reconcileTitle` | `"feat: implement #{N}"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number. |
-| `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the feature branch. |
+| `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the branch. |
 | `releaseTagFormat` | `"release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"` | Name of the annotated git tag the release stage puts on a release PR's merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date, {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must appear so two releases never share a name. A plain annotated tag only, never a GitHub Release: jerky_shipping's desktop pipeline (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases and tags at HEAD to decide whether a commit is already released, so a Release on main's merge commit would suppress its desktop build. Never starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a `release-` name stays out of its version history. |
 | `signoffStatusContext` | `"foreman/em-sign-off"` | The commit status the Foreman puts on a release PR's head while it lists an open issue the EM has not signed off (no `ready for prod release` or later release-stage label). Failing while any is unsigned, passing once none is: add it to the production branch's required checks to hold a human merge too. |
 | `signature` | `"Automated by slashbin-ai-agent"` | The last line of every PR body the Foreman writes. Empty writes none. No "#<number>": every #N in a promotion PR's body is read as an issue it carries. |

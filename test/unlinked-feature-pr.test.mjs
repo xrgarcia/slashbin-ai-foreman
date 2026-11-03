@@ -1,6 +1,6 @@
 // An open feature PR that names no approved issue is reviewed, not skipped.
 //
-// jerky_service #99, 2026-10-10: a person's PR on `features`, linked to nothing
+// jerky_service #99, 2026-10-10: a person's PR on the Foreman branch, linked to nothing
 // ("Follow-up to #98", a merged PR). The review stage only took PRs with an
 // issue in review or one it could adopt, so it never touched #99; the implement
 // stage queues every approved issue behind any open feature PR, so #102 sat
@@ -56,7 +56,7 @@ let n = 0;
 // A fresh repo name per case: the open-issue and open-PR lists are cached per repo.
 function arrange({ body = "Follow-up to #98", issues = [], reviews = [] } = {}) {
   const repo = `example/r${++n}`;
-  const pr = { number: 99, url: `https://github.com/${repo}/pull/99`, title: "fix(mcp): keep the bearer out of argv", body, headRefName: "features", baseRefName: "develop", headRefOid: "e4927f5", updatedAt: "2026-10-08T20:08:13Z" };
+  const pr = { number: 99, url: `https://github.com/${repo}/pull/99`, title: "fix(mcp): keep the bearer out of argv", body, headRefName: "foreman/99-bearer-argv", baseRefName: "develop", headRefOid: "e4927f5", updatedAt: "2026-10-08T20:08:13Z" };
   writeFileSync(ghState, JSON.stringify({ pr, issues, reviews }));
   const p = join(tmp, `cfg${n}.json`);
   writeFileSync(p, JSON.stringify({ repos: [{ name: "a", repoPath: tmp, githubRepo: repo }] }));

@@ -40,7 +40,7 @@
   "triggerLabel": "approved",
   "baseBranch": "develop",
   "productionBranch": "main",
-  "featureBranch": "features",
+  "branchPrefix": "foreman/",
   "pollIntervalMs": 300000,
   "maxTurns": 30,
   "maxDurationMs": 3600000,

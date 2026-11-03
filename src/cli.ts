@@ -48,7 +48,7 @@ Commands:
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
-repoPath, githubRepo, baseBranch, featureBranch, triggerLabel, skillPath, prompt.
+repoPath, githubRepo, baseBranch, branchPrefix, triggerLabel, skillPath, prompt.
 Top-level values are defaults. Use --repo to run one repo per daemon instance.
 
 Single-repo (backward compat): omit repos[] and set repoPath/githubRepo directly.
@@ -62,7 +62,8 @@ Environment variables:
   AI_AGENT_ISSUE_SNAPSHOT_LIMIT Max open issues fetched per snapshot (default: 500)
   AI_AGENT_SKILL_PATH       Path to skill file
   AI_AGENT_BASE_BRANCH      PR target branch (default: develop)
-  AI_AGENT_FEATURE_BRANCH   Commit branch (default: features)
+  AI_AGENT_BRANCH_PREFIX    Prefix of each issue's own branch (default: foreman/)
+  AI_AGENT_FEATURE_BRANCH   Legacy shared branch, still Foreman-owned if a PR uses it (default: features)
   AI_AGENT_PRODUCTION_BRANCH  Production branch for sync/promotion (default: main)
   AI_AGENT_MAX_TURNS        Max agent turns (default: 30)
   AI_AGENT_LOG_FORMAT       json or text (default: text)

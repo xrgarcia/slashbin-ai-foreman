@@ -6,7 +6,7 @@ description: Revise a PR with pending review feedback — read the review, fix e
 
 The Foreman runs this skill non-interactively inside a checkout of the repository it
 manages, after a review asked for changes. Work autonomously and do not ask questions.
-The prompt that carried this skill names the repository, its **feature branch**, the
+The prompt that carried this skill names the repository, its **branch prefix**, the
 **base branch**, and normally the PR number and linked issues — use those.
 
 ## Labels come from the environment
@@ -30,7 +30,7 @@ whether you pushed.
    ```
    PENDING=$(node -e 'console.log(JSON.parse(process.env.FOREMAN_LIFECYCLE_LABELS).prPendingActions)')
    gh issue list --label "$PENDING" --state open --json number,title
-   gh pr list --head <feature> --base <base> --state open --json number,title,url,headRefName,body
+   gh pr list --base <base> --state open --json number,title,url,headRefName,body
    ```
 
 3. If either list is empty, report that nothing is pending revision and stop.

@@ -21,7 +21,6 @@
 
 import { BuildsInFlight } from "./build-in-flight.js";
 import { ClaudeTrust } from "./claude-trust.js";
-import { DivergenceMemory } from "./divergence.js";
 import { IssueRecordStore } from "./issue-records.js";
 import { LegacyImport } from "./legacy-records.js";
 import { NoCommitStreaks } from "./no-commit-streak.js";
@@ -36,9 +35,8 @@ export class ForemanRuntime {
   readonly records = new IssueRecordStore();
   readonly releases = new ReleaseTracker(this.records);
   readonly streaks = new NoCommitStreaks(this.records);
-  readonly divergence = new DivergenceMemory();
   readonly handoffs = new EmHandoffs(this.records);
-  readonly legacy = new LegacyImport(this.records, this.releases, this.streaks, this.divergence);
+  readonly legacy = new LegacyImport(this.records, this.releases, this.streaks);
   readonly onboarding = new Onboarding();
   readonly trust = new ClaudeTrust();
   readonly skillSync = new SkillSync();

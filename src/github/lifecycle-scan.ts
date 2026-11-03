@@ -3,10 +3,26 @@
 
 import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { closedPrVersion, dropIssueSnapshot, findOpenPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel, type IssueSnapshot } from "./cache.js";
+import { closedPrVersion, dropIssueSnapshot, findOpenForemanPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel, type IssueSnapshot } from "./cache.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { gh } from "./gh.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
+
+/**
+ * The issues covered by every open Foreman-owned PR into the base branch (a `foreman/...` head, or the legacy
+ * features head). `null` when a PR is open but its references cannot be read: callers fail closed on that.
+ * A human-named PR is not Foreman's work and conceals nothing.
+ */
+function issuesOnOpenForemanPrs(config: RepoConfig, logger: Logger): number[] | null {
+  const open = findOpenForemanPrs(config, 20);
+  const covered: number[] = [];
+  for (const pr of open) {
+    const referenced = getReferencedIssuesFromOpenPR(config.githubRepo, pr.headRefName, config.baseBranch, config.repoPath, logger);
+    if (referenced === null) return null;
+    covered.push(...referenced);
+  }
+  return covered;
+}
 import { backoffSettings } from "../backoff.js";
 import type { MergedIssueRef, StuckMergedIssue, ReviewOutcome } from "../code-host.js";
 export type { MergedIssueRef, StuckMergedIssue, ReviewOutcome } from "../code-host.js";
@@ -145,7 +161,6 @@ export function findStuckMergedIssues(
   config: RepoConfig,
   logger: Logger,
 ): StuckMergedIssue[] {
-  if (config.baseBranch === config.featureBranch) return [];
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
     const lifecycle = Object.values(config.lifecycleLabels);
@@ -177,28 +192,12 @@ export function findStuckMergedIssues(
     // Fail CLOSED on an unreadable reference list: if we cannot tell which
     // issues the open PR covers, suppress the whole repo as before rather than
     // risk "recovering" an issue whose PR is still open and under review.
-    const openFeaturePrs = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
-    let reviewPending: number[] = [];
-    if (openFeaturePrs.length > 0) {
-      const referenced = getReferencedIssuesFromOpenPR(
-        config.githubRepo,
-        config.featureBranch,
-        config.baseBranch,
-        config.repoPath,
-        logger,
-      );
-      if (referenced === null) {
-        logger.debug(
-          `${config.name}: open feature PR present but its referenced issues are unreadable — suppressing dead-zone detection this pass`,
-        );
-        return [];
-      }
-      reviewPending = referenced;
+    const referenced = issuesOnOpenForemanPrs(config, logger);
+    if (referenced === null) {
+      logger.debug(`${config.name}: open Foreman PR present but its referenced issues are unreadable — suppressing dead-zone detection this pass`);
+      return [];
     }
+    const reviewPending: number[] = referenced;
     const unowned = candidates.filter((i) => !reviewPending.includes(i.number));
     if (unowned.length === 0) return [];
 
@@ -259,7 +258,6 @@ export function findOrphanedLifecycleIssues(
   config: RepoConfig,
   logger: Logger,
 ): number[] {
-  if (config.baseBranch === config.featureBranch) return [];
   try {
     const { prUnderReview, prPendingActions, prMerged, prApproved, readyForProd } = config.lifecycleLabels;
     const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
@@ -272,26 +270,11 @@ export function findOrphanedLifecycleIssues(
     );
     if (candidates.length === 0) return [];
 
-    const openFeaturePrs = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
-    let reviewPending: number[] = [];
-    if (openFeaturePrs.length > 0) {
-      const referenced = getReferencedIssuesFromOpenPR(
-        config.githubRepo,
-        config.featureBranch,
-        config.baseBranch,
-        config.repoPath,
-        logger,
-      );
-      // Unreadable reference list — cannot tell what the open PR covers, so
-      // releasing anything risks re-implementing work that is in flight.
-      if (referenced === null) return [];
-      reviewPending = referenced;
-    }
-
+    // Unreadable reference list — cannot tell what the open PR covers, so
+    // releasing anything risks re-implementing work that is in flight.
+    const referenced = issuesOnOpenForemanPrs(config, logger);
+    if (referenced === null) return [];
+    const reviewPending: number[] = referenced;
     const unowned = candidates.filter((i) => !reviewPending.includes(i.number));
     if (unowned.length === 0) return [];
 

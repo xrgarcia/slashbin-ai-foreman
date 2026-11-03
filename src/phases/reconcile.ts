@@ -130,7 +130,7 @@ export interface HumanMergeDeps {
 
 /** No deployer and no promote path (a main-only repo has none): nothing will ever release a merged issue. */
 function nothingReleases(repoConfig: RepoConfig, config: AgentConfig): boolean {
-  const mainOnly = repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch;
+  const mainOnly = repoConfig.baseBranch === repoConfig.productionBranch;
   return !roleFor("deployer", config) && !(hasStage(config.stages, "promote") && !mainOnly);
 }
 

@@ -52,7 +52,6 @@ import type { Logger } from "./logger.js";
 import type { CardBlockRecord, IssueRecordStore, NoCommitStreak, ProdRelease } from "./issue-records.js";
 import { activeWorkSource, codeHost } from "./plugins/registry.js";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import type { DivergenceMemory } from "./divergence.js";
 import { legacyStatePath } from "./state-dir.js";
 import type { UnstickEntry } from "./unstick.js";
 import type { ReleaseTracker, SavedRelease } from "./release-tracker.js";
@@ -153,7 +152,6 @@ export class LegacyImport {
     private readonly records: IssueRecordStore,
     private readonly releases: ReleaseTracker,
     private readonly streaks: NoCommitStreaks,
-    private readonly divergence: DivergenceMemory,
   ) {}
 
   /** Import `repoConfig`'s legacy issue entries once per process (retrying an incomplete run after a while). Never throws. */
@@ -422,24 +420,13 @@ export class LegacyImport {
       } else pending++;
     }
     if (bb) {
-      // Only an episode git still shows is carried over; a reconciled one holds nothing. Git unreadable is neither:
-      // the entry stays for the next run, with its announced issues and ruled ids.
-      const now = bb.mergeBase === undefined ? null : this.divergence.known(repoConfig);
-      let ok = now !== undefined;
-      if (ok && now?.mergeBase === bb.mergeBase) {
-        const ruled = (bb.ruled ?? []).filter((x) => typeof x === "string");
-        if (ruled.length > 0) ok = await this.records.importRepoRecord(repoConfig, (d) => { d.divergenceRuled = [...new Set([...(d.divergenceRuled ?? []), ...ruled])]; });
-        for (const n of bb.announced ?? []) {
-          if (ok && !(await this.records.importIssueRecord(repoConfig, n, (d) => { d.divergenceTold = d.divergenceTold ?? bb.mergeBase; }))) ok = false;
-        }
-      }
-      if (ok) this.editLegacyFile((file) => { delete file.repos[name]?.branchBlock; });
-      else pending++;
+      // The branch-divergence block is retired (each issue builds on its own branch): nothing carries over, the entry goes.
+      this.editLegacyFile((file) => { delete file.repos[name]?.branchBlock; });
     }
     this.records.setRepoUnimported(repoConfig.githubRepo, pending > 0);
     logger.info(
       `Legacy repo records of ${repoConfig.githubRepo}: ${movedQuestions} EM question(s) moved to the repo's record` +
-      (bb ? `, the branch divergence block ${pending > 0 ? "kept" : "settled"}` : "") +
+      (bb ? ", the retired branch divergence block dropped" : "") +
       (pending > 0 ? `; ${pending} not saved yet, withheld until they are` : ""),
     );
     return pending;

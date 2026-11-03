@@ -103,7 +103,7 @@ const WHEN = {
   releaseClosed: "That release pull request is closed without merging; the task stays in review until the next one.",
   backoffPause: "A GitHub or Claude limit pauses the build in progress.",
   backoffResume: "The build in progress resumes after that limit clears.",
-  waiting: "The Foreman holds the issue back this cycle (an occupied branch, a branch divergence). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner.",
+  waiting: "The Foreman holds the issue back this cycle (an open PR holding the repo, a dev verification in progress). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner.",
   resumed: "An issue the Foreman had moved to blocked is no longer held back.",
   implementFinished: "The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason).",
   implementFailed: "The build session for the issue fails.",

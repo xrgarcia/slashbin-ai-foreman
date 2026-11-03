@@ -205,7 +205,6 @@ give the reason. A skip's comment names what it waits on.
 | Block | Why the Foreman stopped | Released by (any one, checked in this order) |
 |---|---|---|
 | `skip` | The implement session declined the issue: a precondition outside the repo, investigation only, or already done. Its comment on the issue says what it waits on. | Clear the condition the skip named (reconcile the branch, close the blocking PR).<br>Close or merge the issue or PR the skip named in `waiting_on`.<br>Edit, comment on or label the issue (anyone but the Foreman). Escalated: see below. |
-| `divergence` | The feature branch diverged from its base. | Reconcile the feature branch with its base. |
 | `verify-no-pr` | The issue is labelled merged, but no merged PR closes it. | Merge a PR into the base branch that closes the issue. |
 | `verify-held` | Dev verification failed and is waiting out its back-off; it retries by itself. | Edit the issue's body (the spec the SRE verifies against). |
 | `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch.<br>Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own. |
@@ -216,11 +215,11 @@ give the reason. A skip's comment names what it waits on.
 | `needsRuling`: skip escalated | A skip used up `backoff.skip.maxAttempts` sessions in a row. | See below. |
 
 **A stop that holds other issues up** tells them. When a skip's cause will not clear by itself (not a
-diverged or occupied feature branch) and GitHub records open issues as blocked by the skipped issue
+wait on an open PR) and GitHub records open issues as blocked by the skipped issue
 (`/dependencies/blocking`), the Foreman comments on each dependent naming the dead blocker, labels it
 `blocked`, and escalates it for the EM; the skipped issue is labelled `blocked` too. Each dependent is told
 once (`deadBlockerTold` in the skip's state). Remove the `blocked` label on a dependent to release it.
-The opposite outcome, the work **already on the feature branch**, ends `FOREMAN_RESULT: landed issue=N`:
+The opposite outcome, the work **already on the base branch**, ends `FOREMAN_RESULT: landed issue=N`:
 the Foreman closes the issue as completed with the evidence, which releases its dependents
 (`src/github/dead-blocker.ts`; gateway#222 / skuvault#478, 2026-10-26).
 

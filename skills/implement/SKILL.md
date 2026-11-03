@@ -6,9 +6,9 @@ description: Implement ONE of the work items the Foreman selected (highest prior
 
 The Foreman runs this skill non-interactively inside a checkout of the repository
 it manages. Work autonomously and do not ask questions. The prompt that carried
-this skill names the repository, its **feature branch** and the **base branch**
-pull requests target — use those names wherever this file says `<feature>` and
-`<base>`.
+this skill names the repository and the **base branch** pull requests target — use
+that name wherever this file says `<base>`. Every issue is built on **its own branch**,
+`<branch>`, cut from `origin/<base>` (see Phase 1.5).
 
 ## Labels come from the environment
 
@@ -28,35 +28,16 @@ you finish. You only read them.
 
 ## Phase 0: Sync
 
-1. `git checkout <feature>`
-2. `git pull origin <feature>`
-3. If the pull fails, STOP. Do not resolve merge conflicts automatically. Nothing is
-   selected yet, so this is the one stop whose trailer carries no `issue=`. Read the
-   first line of the git error and count both directions:
+1. `git fetch origin`
+2. If the fetch fails, STOP. Nothing is selected yet, so this is the one stop whose
+   trailer carries no `issue=`. Keep the whole trailer on one line, closing quote included:
 
    ```
-   git rev-list --count origin/<feature>..<feature>   # ahead
-   git rev-list --count <feature>..origin/<feature>   # behind
+   FOREMAN_RESULT: skipped reason="Phase 0 sync failed — <first line of the git error, no quotes>"
    ```
 
-   - The error says the **histories disagree** (`non-fast-forward`, `divergent branches`,
-     `unrelated histories`, `CONFLICT`, `Automatic merge failed`) **and** a count is non-zero:
-
-     ```
-     FOREMAN_RESULT: skipped reason="diverged from origin/<feature> — <first line of the git error, no quotes>"
-     ```
-
-   - Anything else (merge or rebase in progress, stale `index.lock`, dirty tree, network
-     failure), whatever the counts say:
-
-     ```
-     FOREMAN_RESULT: skipped reason="Phase 0 sync failed on <feature> — <first line of the git error, no quotes>"
-     ```
-
-   The `diverged from origin/<branch>` wording is machine-read: the Foreman re-checks it
-   and clears the hold as soon as local and origin level out. Use it only for a real
-   divergence, or a cause the counts cannot see will clear its own back-off and repeat
-   every cycle. Keep the whole trailer on one line, closing quote included.
+   There is no shared branch to pull and no divergence to repair: each issue starts from
+   the tip of `origin/<base>`.
 
 ## Phase 1: Inventory
 
@@ -69,6 +50,25 @@ you finish. You only read them.
 3. Read each named item in full: `gh issue view <number>`.
 4. Select exactly ONE of them by the Phase 2 priority rules. Do not loop — the Foreman
    invokes you again next cycle for the next issue.
+
+## Phase 1.5: Cut the issue's branch
+
+Once Phase 2 has chosen the issue, give it its own branch. `FOREMAN_BRANCHES` is a JSON
+object of issue number to branch name (`foreman/<N>-<slug>`); read the chosen issue's:
+
+```
+node -e 'console.log(JSON.parse(process.env.FOREMAN_BRANCHES)[<N>])'
+```
+
+1. `git checkout <base> && git merge --ff-only origin/<base>` (a no-op when already level;
+   a local sync commit the Foreman made on `<base>` is carried into the branch below).
+2. If `origin/<branch>` already exists (a prior attempt), `git checkout -B <branch> origin/<branch>`
+   then `git rebase <base>`. A conflict you cannot resolve mechanically is a stop:
+   `git rebase --abort`, comment, and end with a `skipped issue=<N>` trailer.
+3. Otherwise `git checkout -B <branch> <base>`.
+
+Never build on, commit to or push to another issue's branch, `<base>`, or a branch you
+did not cut here.
 
 ## Phase 2: Analysis & Ordering
 
@@ -127,13 +127,13 @@ right answer is the same stop and the same trailer.
 A build that opens no PR is never "nothing happened" — others may be waiting on the issue
 (GitHub "blocked by"). End on exactly one of:
 
-- **Everything the issue asks for is already on the feature branch** (a dependency-landing chore
+- **Everything the issue asks for is already on `<base>`** (a dependency-landing chore
   whose PRs are all present, say). The issue is done. Comment the evidence (what you checked, the
   SHAs/PRs), then end with this line. The Foreman closes the issue as completed, which releases
   everything blocked by it. `issue=` is required; the branch must not have moved:
 
   ```
-  FOREMAN_RESULT: landed issue=<N> reason="<one line of evidence: e.g. all 16 PRs already on features>"
+  FOREMAN_RESULT: landed issue=<N> reason="<one line of evidence: e.g. all 16 PRs already on <base>>"
   ```
 
 - **It cannot land and a person must act** (every PR fails `npm ci`, a prerequisite is missing).
@@ -203,22 +203,21 @@ Implement the single chosen issue, then:
 5. **Commit and push:**
    - Stage the specific files (never `git add .` or `git add -A`).
    - Commit: `fix|feat|chore: <description> (#<issue-number>)` — one commit per issue.
-   - `git push origin <feature>`
+   - `git push -u origin <branch>`
 6. **If the smoke test fails:** fix the code (never the tests) and re-run, at most twice.
    Still red → revert this issue's changes. Both outcomes — reverted, or a build broken
    beyond this issue — are stops: comment and end with the `FOREMAN_RESULT` trailer.
 
 ## Phase 4: Pull Request
 
-1. Check for an open PR from `<feature>` to `<base>`:
+1. Check for an open PR from `<branch>` to `<base>`:
 
    ```
-   gh pr list --head <feature> --base <base> --state open --json number
+   gh pr list --head <branch> --base <base> --state open --json number
    ```
 
-   If one exists and it is for a different issue, STOP and report it — never add another
-   issue's changes to an existing PR.
-2. Create the PR from `<feature>` to `<base>` — one PR per issue:
+   If one exists, your push already updated it: skip step 2.
+2. Create the PR from `<branch>` to `<base>` — one PR per issue:
    - Title: `<type>: <description> (#<issue-number>)`
    - Body: `Related to #<N>`, a summary of the change, the smoke-test results, and one
      line per acceptance row naming the change that serves it (`no change — baseline /

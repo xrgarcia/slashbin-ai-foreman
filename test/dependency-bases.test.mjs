@@ -1,65 +1,47 @@
-// Regression tests for which branches a Dependabot PR may be merged into.
+// Regression tests for which branch a Dependabot PR may be merged into.
 //
-// Origin: owner decision, 2026-09-07. Dependabot targeted `develop`, so every
-// dependency bump landed on `develop` and left `features` — the branch the
-// Foreman and a human both start work from — one commit further behind. The
-// flow is `features → develop → main`; dependency updates were the one class of
-// change skipping the first hop. Dependabot is being retargeted to `features`.
+// History: owner decision 2026-09-07 retargeted Dependabot to the shared `features` branch, and the
+// batch phase covered BOTH `features` and `develop` while repos flipped one at a time. foreman#208
+// retires the shared branch: every change, a dependency bump included, now lands on `baseBranch`
+// (`develop`) from its own branch, so the only acceptable base is `baseBranch`.
 //
-// The repos flip one at a time, so the merge phase has to accept BOTH branches
-// for the duration. That widening is the risk this file exists to bound: the
-// one outcome the dependency phase must never produce is a merge to `main`,
-// which is the defect `jerky_shipping#237` closed on the producing side.
-//
-// Before this change `tryMergeDependencyPR`'s comment claimed to "re-assert
-// both invariants" and asserted only the head-branch one — the caller's filter
-// was the only thing keeping a bump off `main`. Widening that filter without
-// asserting the base would have widened it to anything.
+// The risk this file bounds is unchanged: the one outcome the dependency phase must never produce
+// is a merge to the production branch, which is the defect `jerky_shipping#237` closed on the
+// producing side.
 //
 // Run with `npm test` (node:test, no dependencies) after `npm run build`.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { dependencyBatchBases } from "../dist/github.js";
 
-test("the normal repo covers BOTH working branches", () => {
-  // Both, because nothing merges a dependency PR mechanically any more. Covering
-  // only `features` would have left the 24 PRs already sitting on `develop`
-  // (measured 2026-09-07) with no route to a session at all.
-  assert.deepEqual(dependencyBatchBases("features", "develop", "main"), ["features", "develop"]);
+test("the normal repo covers its base branch only (intentional change, #208: was [features, develop])", () => {
+  assert.deepEqual(dependencyBatchBases("develop", "main"), ["develop"]);
 });
 
-test("main is never an acceptable base, from either field", () => {
-  assert.deepEqual(dependencyBatchBases("features", "main", "main"), ["features"]);
-  assert.deepEqual(dependencyBatchBases("main", "develop", "main"), ["develop"]);
+test("the production branch is never an acceptable base", () => {
+  assert.deepEqual(dependencyBatchBases("main", "main"), []);
 });
 
 test("a main-only repo yields no acceptable base at all", () => {
-  // featureBranch === baseBranch === "main". The caller already skips these;
+  // baseBranch === productionBranch. The caller already skips these;
   // this asserts the phase is safe even if that guard is ever removed.
-  assert.deepEqual(dependencyBatchBases("main", "main", "main"), []);
+  assert.deepEqual(dependencyBatchBases("main", "main"), []);
 });
 
-test("identical feature and base branches dedupe to one entry", () => {
-  assert.deepEqual(dependencyBatchBases("develop", "develop", "main"), ["develop"]);
-});
-
-test("missing config fields drop out rather than producing an empty-string base", () => {
+test("a missing base drops out rather than producing an empty-string base", () => {
   // An empty string would match no PR, but it would also read as a configured
   // branch in the refusal log. Filter it at the source.
-  assert.deepEqual(dependencyBatchBases(undefined, "develop", "main"), ["develop"]);
-  assert.deepEqual(dependencyBatchBases("features", undefined, "main"), ["features"]);
-  assert.deepEqual(dependencyBatchBases("", "", "main"), []);
-  assert.deepEqual(dependencyBatchBases(undefined, undefined, "main"), []);
+  assert.deepEqual(dependencyBatchBases(undefined, "main"), []);
+  assert.deepEqual(dependencyBatchBases("", "main"), []);
 });
 
 test("a custom development branch name is honoured, not hardcoded to develop", () => {
-  // baseBranch/featureBranch are per-repo config. Nothing here may assume the
-  // house names — the guards are "not main" and "not the feature branch", never
-  // "one of two known strings".
-  assert.deepEqual(dependencyBatchBases("wip", "staging", "main"), ["wip", "staging"]);
+  // baseBranch is per-repo config. Nothing here may assume the house names:
+  // the guard is "not the production branch", never "one of two known strings".
+  assert.deepEqual(dependencyBatchBases("staging", "main"), ["staging"]);
 });
 
 test("the configured production branch is the one excluded, not the literal main", () => {
-  assert.deepEqual(dependencyBatchBases("features", "release", "release"), ["features"]);
-  assert.deepEqual(dependencyBatchBases("work", "main", "release"), ["work", "main"]);
+  assert.deepEqual(dependencyBatchBases("release", "release"), []);
+  assert.deepEqual(dependencyBatchBases("main", "release"), ["main"]);
 });
