@@ -45,13 +45,8 @@ interface PrView {
   commits: PrCommit[];
 }
 
-// One read per PR within a pass; cleared at the start of each pass so a corrected PR body is re-read.
-const prViews = new Map<string, PrView>();
-
-/** Forget the cached PR reads. For tests. */
-export function resetReleaseCarry(): void {
-  prViews.clear();
-}
+/** One read per PR within a `listCarriedMerges` call, so a corrected PR body is re-read next call. */
+type PrViews = Map<string, PrView>;
 
 const MERGE_COMMIT_RE = /^Merge pull request #(\d+)\b/;
 const SQUASH_SUFFIX_RE = /\(#(\d+)\)\s*$/;
@@ -62,7 +57,7 @@ export function mergedPrNumber(headline: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-function readPr(repo: string, pr: number, cwd: string): PrView {
+function readPr(prViews: PrViews, repo: string, pr: number, cwd: string): PrView {
   const key = `${repo}#${pr}`;
   const known = prViews.get(key);
   if (known) return known;
@@ -86,7 +81,7 @@ function readPr(repo: string, pr: number, cwd: string): PrView {
  */
 export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unresolved?: number[]): CarriedMerge[] | null {
   const { githubRepo: repo, productionBranch, baseBranch, repoPath: cwd } = repoConfig;
-  prViews.clear();
+  const prViews: PrViews = new Map();
   try {
     const out = gh([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}?per_page=100`, "--paginate",
@@ -105,7 +100,7 @@ export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unreso
       // A `(#N)` suffix on a commit inside a merge is usually an ISSUE number, so
       // the number may not be a PR at all: skip it, never abandon the inventory.
       let view: PrView;
-      try { view = readPr(repo, pr, cwd); } catch (err) {
+      try { view = readPr(prViews, repo, pr, cwd); } catch (err) {
         // Not-a-PR is the normal case for an issue number; any other failure leaves a merge
         // unread, so the caller that must be sure of the inventory is told which one.
         const f = formatGhError(err);

@@ -23,7 +23,7 @@ import { tryRelease, resetReleaseStage, SOAK_DELAY_MS } from "../dist/phases/rel
 import { tryPromotion, resetHeldNotesForTests } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/plugins/sre.js";
-import { readPvResult, resetSignoff, configureIssueCache, productionDriftFiles, mergedPrNumber, resetReleaseCarry } from "../dist/github.js";
+import { readPvResult, configureIssueCache, productionDriftFiles, mergedPrNumber } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -32,7 +32,8 @@ import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, repoRecordOf, seed, recordOf, breakRecords, breakPrRecords, seedRelease, releaseOf } from "./issue-records.mjs";
 import { dropRelease, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
-import { registerPlugin, startPlugins, activeWorkSource } from "../dist/plugins/registry.js";
+import { registerPlugin, startPlugins, activeWorkSource, setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
 
 await startAgentPlugins();
 
@@ -224,10 +225,9 @@ function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {
   stateDir = mkdtempSync(join(tmp, "state-"));
   setStatePath(stateDir);
   resetReleaseStage();
-  resetReleaseCarry();
-  resetSignoff();
   memoryRecords();
   resetHeldNotesForTests();
+  setCodeHost(githubCodeHost()); // a fresh code host: its release sign-off memory starts empty
 }
 const gh = () => JSON.parse(readFileSync(GH_STATE, "utf8"));
 const ghCalls = () => readFileSync(GH_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));

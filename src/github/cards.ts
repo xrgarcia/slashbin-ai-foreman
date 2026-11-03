@@ -104,90 +104,89 @@ function repoArgs(repo: string): string {
   return `owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}`;
 }
 
-/** repo → when its last good closed read started. */
-const closedReadAt = new Map<string, number>();
-/** repo → when its next closed read is due. */
-const closedDueAt = new Map<string, number>();
-
-/** Forget every watermark and cached reason (tests). */
-export function resetCardReads(): void {
-  closedReadAt.clear();
-  closedDueAt.clear();
-  holdCache.clear();
-}
-
 /**
- * The issues in `repo` closed (and so last updated) since its last read, or []
- * when no read is due yet. A failed read is logged and gives []; the watermark
- * stays, so the next read covers the gap.
+ * What the board reads remember between passes: each repo's closed-issue
+ * watermark and the hold reasons read recently. Each work-source connector
+ * owns one, so two connectors never share a watermark.
  */
-export function recentlyClosed(repo: string, cwd: string, logger: Logger, now = Date.now()): ClosedIssue[] {
-  if (now < (closedDueAt.get(repo) ?? 0)) return [];
-  closedDueAt.set(repo, now + CLOSED_READ_MS);
-  const last = closedReadAt.get(repo);
-  const since = new Date(last === undefined ? now - CLOSED_FIRST_LOOKBACK_MS : last - CLOSED_OVERLAP_MS).toISOString();
-  const out: ClosedIssue[] = [];
-  try {
-    let after: string | null = null;
-    for (let page = 0; page < CLOSED_MAX_PAGES; page++) {
-      const d = graphql(`query { repository(${repoArgs(repo)}) {
-  issues(states: CLOSED, filterBy: { since: ${JSON.stringify(since)} }, first: ${CLOSED_PAGE_SIZE}, orderBy: { field: UPDATED_AT, direction: DESC }${after ? `, after: ${JSON.stringify(after)}` : ""}) {
-    pageInfo { hasNextPage endCursor } nodes { number title url stateReason } } } }`, cwd);
-      const conn = (d.repository as { issues?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ number: number; title: string; url: string; stateReason?: string | null }> } } | null)?.issues;
-      if (!conn) throw new Error(`${repo}: not readable`);
-      for (const n of conn.nodes ?? []) {
-        out.push({ number: n.number, title: n.title, url: n.url, state: n.stateReason === "NOT_PLANNED" ? "not_planned" : "completed" });
-      }
-      if (!conn.pageInfo?.hasNextPage || !conn.pageInfo.endCursor) {
-        closedReadAt.set(repo, now);
-        return out;
-      }
-      after = conn.pageInfo.endCursor;
-    }
-    // More than the pages allow: what was read is used; the watermark stays, so the rest comes next time.
-    logger.warn(`cards: ${repo} closed more than ${CLOSED_PAGE_SIZE * CLOSED_MAX_PAGES} issues since ${since}; the rest are read next time`);
-    return out;
-  } catch (err) {
-    logger.warn(`cards: ${repo} closed issues not read: ${err instanceof Error ? err.message : String(err)}`);
-    return out;
-  }
-}
+export class CardReads {
+  /** repo → when its last good closed read started. */
+  private readonly closedReadAt = new Map<string, number>();
+  /** repo → when its next closed read is due. */
+  private readonly closedDueAt = new Map<string, number>();
+  /** `repo#N` → its hold reason and when it was read. */
+  private readonly holdCache = new Map<string, { at: number; hold: SnapshotHold }>();
 
-/** `repo#N` → its hold reason and when it was read. */
-const holdCache = new Map<string, { at: number; hold: SnapshotHold }>();
-
-/**
- * Why each of `numbers` (open, carrying `label`) is held. A reason read within
- * HOLD_TTL_MS is reused. One that cannot be read is left out: the card keeps
- * what it says. Never throws.
- */
-export function holdReasons(repo: string, cwd: string, label: string, numbers: readonly number[], logger: Logger, now = Date.now()): Map<number, SnapshotHold> {
-  const out = new Map<number, SnapshotHold>();
-  const due: number[] = [];
-  for (const n of numbers) {
-    const c = holdCache.get(`${repo}#${n}`);
-    if (c && now - c.at < HOLD_TTL_MS) out.set(n, c.hold);
-    else due.push(n);
-  }
-  for (let i = 0; i < due.length; i += HOLDS_PER_REQUEST) {
-    const batch = due.slice(i, i + HOLDS_PER_REQUEST);
+  /**
+   * The issues in `repo` closed (and so last updated) since its last read, or []
+   * when no read is due yet. A failed read is logged and gives []; the watermark
+   * stays, so the next read covers the gap.
+   */
+  recentlyClosed(repo: string, cwd: string, logger: Logger, now = Date.now()): ClosedIssue[] {
+    if (now < (this.closedDueAt.get(repo) ?? 0)) return [];
+    this.closedDueAt.set(repo, now + CLOSED_READ_MS);
+    const last = this.closedReadAt.get(repo);
+    const since = new Date(last === undefined ? now - CLOSED_FIRST_LOOKBACK_MS : last - CLOSED_OVERLAP_MS).toISOString();
+    const out: ClosedIssue[] = [];
     try {
-      const d = graphql(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `h${j}: issue(number: ${n}) {
-  timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent { createdAt actor { login } label { name } } } }
-  comments(last: 50) { nodes { url createdAt author { login } body } } }`).join("\n")} } }`, cwd);
-      const r = d.repository as Record<string, { timelineItems?: { nodes?: LabelEvent[] }; comments?: { nodes?: IssueComment[] } } | null> | null;
-      batch.forEach((n, j) => {
-        const issue = r?.[`h${j}`];
-        if (!issue) return;
-        const hold = holdReason(label, issue.timelineItems?.nodes ?? [], issue.comments?.nodes ?? []);
-        holdCache.set(`${repo}#${n}`, { at: now, hold });
-        out.set(n, hold);
-      });
+      let after: string | null = null;
+      for (let page = 0; page < CLOSED_MAX_PAGES; page++) {
+        const d = graphql(`query { repository(${repoArgs(repo)}) {
+    issues(states: CLOSED, filterBy: { since: ${JSON.stringify(since)} }, first: ${CLOSED_PAGE_SIZE}, orderBy: { field: UPDATED_AT, direction: DESC }${after ? `, after: ${JSON.stringify(after)}` : ""}) {
+      pageInfo { hasNextPage endCursor } nodes { number title url stateReason } } } }`, cwd);
+        const conn = (d.repository as { issues?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ number: number; title: string; url: string; stateReason?: string | null }> } } | null)?.issues;
+        if (!conn) throw new Error(`${repo}: not readable`);
+        for (const n of conn.nodes ?? []) {
+          out.push({ number: n.number, title: n.title, url: n.url, state: n.stateReason === "NOT_PLANNED" ? "not_planned" : "completed" });
+        }
+        if (!conn.pageInfo?.hasNextPage || !conn.pageInfo.endCursor) {
+          this.closedReadAt.set(repo, now);
+          return out;
+        }
+        after = conn.pageInfo.endCursor;
+      }
+      // More than the pages allow: what was read is used; the watermark stays, so the rest comes next time.
+      logger.warn(`cards: ${repo} closed more than ${CLOSED_PAGE_SIZE * CLOSED_MAX_PAGES} issues since ${since}; the rest are read next time`);
+      return out;
     } catch (err) {
-      logger.warn(`cards: ${repo} hold reasons not read: ${err instanceof Error ? err.message : String(err)}`);
+      logger.warn(`cards: ${repo} closed issues not read: ${err instanceof Error ? err.message : String(err)}`);
+      return out;
     }
   }
-  return out;
+
+  /**
+   * Why each of `numbers` (open, carrying `label`) is held. A reason read within
+   * HOLD_TTL_MS is reused. One that cannot be read is left out: the card keeps
+   * what it says. Never throws.
+   */
+  holdReasons(repo: string, cwd: string, label: string, numbers: readonly number[], logger: Logger, now = Date.now()): Map<number, SnapshotHold> {
+    const out = new Map<number, SnapshotHold>();
+    const due: number[] = [];
+    for (const n of numbers) {
+      const c = this.holdCache.get(`${repo}#${n}`);
+      if (c && now - c.at < HOLD_TTL_MS) out.set(n, c.hold);
+      else due.push(n);
+    }
+    for (let i = 0; i < due.length; i += HOLDS_PER_REQUEST) {
+      const batch = due.slice(i, i + HOLDS_PER_REQUEST);
+      try {
+        const d = graphql(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `h${j}: issue(number: ${n}) {
+    timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent { createdAt actor { login } label { name } } } }
+    comments(last: 50) { nodes { url createdAt author { login } body } } }`).join("\n")} } }`, cwd);
+        const r = d.repository as Record<string, { timelineItems?: { nodes?: LabelEvent[] }; comments?: { nodes?: IssueComment[] } } | null> | null;
+        batch.forEach((n, j) => {
+          const issue = r?.[`h${j}`];
+          if (!issue) return;
+          const hold = holdReason(label, issue.timelineItems?.nodes ?? [], issue.comments?.nodes ?? []);
+          this.holdCache.set(`${repo}#${n}`, { at: now, hold });
+          out.set(n, hold);
+        });
+      } catch (err) {
+        logger.warn(`cards: ${repo} hold reasons not read: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return out;
+  }
 }
 
 /**
