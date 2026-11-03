@@ -2,8 +2,8 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { isGitHubStateEnabled, stateOpenPrs } from "../github-state.js";
-import { issueCacheTtlMs } from "./cache.js";
+import { fleetState } from "../github-state.js";
+import { reads } from "./cache.js";
 import { gh } from "./gh.js";
 
 
@@ -22,14 +22,6 @@ export function byReviewer(review: { author?: { login?: string } }, reviewerLogi
  * head has already been reviewed). On any lookup failure returns false — we'd
  * rather (rarely) re-review than silently never review.
  */
-/**
- * hasFreshReview answers, keyed by the PR's head commit and last-update time
- * from the fleet state. A new commit moves the head; a submitted review bumps
- * the PR's updatedAt — either one misses this cache. Without it, every idle
- * cycle re-read the reviews of every open feature PR waiting on a human.
- */
-export const freshReviewCache = new Map<string, { key: string; fresh: boolean }>();
-
 export function hasFreshReview(
   config: RepoConfig,
   prNumber: number,
@@ -39,17 +31,17 @@ export function hasFreshReview(
   let cacheKey: string | null = null;
   const id = `${config.githubRepo}#${prNumber}`;
   try {
-    if (issueCacheTtlMs > 0 && isGitHubStateEnabled(config.githubRepo)) {
-      const pr = stateOpenPrs(config.githubRepo).find((p) => p.number === prNumber);
+    if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo)) {
+      const pr = fleetState.openPrs(config.githubRepo).find((p) => p.number === prNumber);
       if (pr) {
         cacheKey = `${pr.headRefOid}@${pr.updatedAt}@${reviewerLogin ?? ""}`;
-        const hit = freshReviewCache.get(id);
+        const hit = reads.freshReviews.get(id);
         if (hit && hit.key === cacheKey) return hit.fresh;
       }
     }
   } catch { /* state unavailable — read live */ }
   const fresh = readFreshReview(config, prNumber, reviewerLogin, logger);
-  if (cacheKey) freshReviewCache.set(id, { key: cacheKey, fresh });
+  if (cacheKey) reads.freshReviews.set(id, { key: cacheKey, fresh });
   return fresh;
 }
 
