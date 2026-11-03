@@ -29,7 +29,7 @@ const host = new Proxy({}, {
         case "findPRsNeedingReview": return { prNumber: 7, prUrl: "u", issueNumbers: [5], adopted: [] };
         case "blockedAmong": return [];
         case "getPRCheckVerdict": return { state: "passing", pending: [], failing: [] };
-        case "readPrState": return state;
+        case "readPrState": if (state === "THROW") throw new Error("TLS handshake timeout"); return state;
         case "forgetOpenPrs": return undefined;
         default: throw new Error(`fake code host: ${String(key)}`);
       }
@@ -75,13 +75,13 @@ test("a closed PR starts no review either", async () => {
   assert.equal(existsSync(ranMarker), false);
 });
 
-test("a PR whose state cannot be read waits a pass: no review is spent", async () => {
-  state = null; calls.length = 0;
-  assert.equal(await tryReview(repo, config, quiet, 1), false);
+test("a PR whose state cannot be read fails the pass: no review is spent", async () => {
+  state = "THROW"; calls.length = 0;
+  await assert.rejects(() => tryReview(repo, config, quiet, 1));
   assert.equal(existsSync(ranMarker), false);
 });
 
-test("readPrState reads the live state from gh and says null when gh fails", () => {
+test("readPrState reads the live state from gh and throws when gh fails", () => {
   mkdirSync(join(tmp, "bin"), { recursive: true });
   const gh = (body) => { writeFileSync(join(tmp, "bin/gh"), `#!/bin/sh\n${body}\n`); chmodSync(join(tmp, "bin/gh"), 0o755); };
   process.env.PATH = `${join(tmp, "bin")}:${saved.PATH}`;
@@ -90,6 +90,6 @@ test("readPrState reads the live state from gh and says null when gh fails", () 
   gh('echo \'{"state":"OPEN"}\'');
   assert.equal(readPrState(repo, 7, quiet), "OPEN");
   gh('echo "TLS handshake timeout" >&2; exit 1');
-  assert.equal(readPrState(repo, 7, quiet), null);
+  assert.throws(() => readPrState(repo, 7, quiet));
   process.env.PATH = saved.PATH;
 });

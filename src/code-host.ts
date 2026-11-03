@@ -555,7 +555,7 @@ export interface CodeHost {
     deletions: number;
     changedFiles: number;
 } | null;
-  readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState | null;
+  readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState;
 
   // Review and revision queues.
   findPRsNeedingReview(config: RepoConfig, reviewerLogin: string | undefined, logger: Logger): ReviewCandidate | null;
@@ -563,10 +563,10 @@ export interface CodeHost {
   findQaPendingPr(config: RepoConfig, reviewerLogin: string | undefined, logger: Logger): QaPendingPr | null;
   /** The issues among `issueNumbers` that carry `github.blockedLabel` (the EM's hold). */
   blockedAmong(config: RepoConfig, issueNumbers: ReadonlyArray<number>, logger: Logger): number[];
-  /** The PR's current head SHA, or null when it cannot be read. */
-  readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string | null;
-  /** The PR's state read live, or null when GitHub cannot say. */
-  readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED" | null;
+  /** The PR's current head SHA. Throws when it cannot be read (EM#1244 f5). */
+  readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string;
+  /** The PR's state read live. Throws when GitHub cannot say (EM#1244 f5). */
+  readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED";
   hasPendingRevisions(config: RepoConfig, logger: Logger): boolean;
 
   // Skip holds.

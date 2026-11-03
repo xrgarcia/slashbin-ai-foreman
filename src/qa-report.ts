@@ -366,8 +366,9 @@ export function reportAlreadyPosted(comments: readonly PrComment[], marker: stri
 }
 
 /**
- * The PR's changed files, never throwing. Unreadable: QA's client root stands in, so a 0-shot PASS is held
- * rather than trusted (never an advance on an unknown).
+ * The PR's changed files. Unreadable: QA's client root stands in, so a 0-shot PASS is held rather than
+ * trusted (never an advance on an unknown). The gates around it never throw, and a QA run already paid for
+ * is not thrown away by a failed read, so this one place holds instead of failing the pass.
  */
 async function changedOf(pr: number, deps: QaDeps): Promise<string[]> {
   if (!deps.changedFiles) return [];

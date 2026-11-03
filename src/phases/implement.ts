@@ -636,7 +636,7 @@ export async function tryBatchImplementation(
         }
       } else if (referencedAll === null) {
         repoLogger.warn(
-          `getReferencedIssuesFromOpenPR returned null (lookup failed) — labeling full discovery batch as conservative fallback (#${actionableIssues.join(", #")})`,
+          `No open feature PR found after a successful run — labeling the full discovery batch (#${actionableIssues.join(", #")})`,
         );
       }
 

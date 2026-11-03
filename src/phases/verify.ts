@@ -31,7 +31,7 @@ export function isDeployFailureHold(reason: string): boolean {
   return reason === "dev-verify-failed" || reason.startsWith("deploy=");
 }
 
-/** The files a PR touched, for the EM's call; empty when unreadable (best effort, never throws). */
+/** The files a PR touched, for the EM's call; an unreadable list throws and fails the pass (EM#1244 f5). */
 function prFilesTouched(repoConfig: RepoConfig, pr: number, vlog: Logger): string[] {
   return codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog).slice(0, 40);
 }
