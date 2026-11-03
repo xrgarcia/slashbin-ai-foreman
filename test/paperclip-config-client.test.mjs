@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
+import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { PaperclipClient, PaperclipClientError, createPaperclipClient } from "../dist/paperclip/client.js";
 import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
@@ -242,11 +243,78 @@ for (const status of [404, 500]) {
   });
 }
 
-test("a network failure throws PaperclipClientError with status 0, no retry", async () => {
+// Tiny waits so the retries run at once; the real windows are backoff.paperclip's.
+configureBackoff({ ...DEFAULT_BACKOFF, paperclip: { ...DEFAULT_BACKOFF.paperclip, baseMs: 1, capMs: 2 } });
+
+test("a GET with no answer is tried backoff.paperclip.maxAttempts times, then throws PaperclipClientError with status 0", async () => {
   let calls = 0;
   const fn = async () => { calls++; throw new TypeError("fetch failed"); };
   await assert.rejects(make(fn).listAgents(), (err) => err instanceof PaperclipClientError && err.status === 0);
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
+});
+
+test("a GET is retried on each transient status and succeeds on a later try; the warn names the retry", async () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) {
+    let calls = 0;
+    const warned = [];
+    const fn = async () => (++calls < 3 ? new Response("busy", { status }) : new Response("[]", { status: 200 }));
+    const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: fn, warn: (m) => warned.push(m) });
+    assert.deepEqual(await c.listAgents(), [], `status ${status}`);
+    assert.equal(calls, 3);
+    assert.equal(warned.length, 2);
+  }
+});
+
+test("a GET refused for a reason that is not passing (400, 401, 403, 404, 422) is not retried", async () => {
+  for (const status of [400, 401, 403, 404, 422]) {
+    let calls = 0;
+    const fn = async () => { calls++; return new Response("no", { status }); };
+    await assert.rejects(make(fn).listAgents(), (err) => err.status === status);
+    assert.equal(calls, 1, `status ${status}`);
+  }
+});
+
+test("a write is never retried: a timeout, a rejection or a 503 sends it once", async () => {
+  const c = (fn) => make(fn);
+  for (const fn of [
+    async () => { throw new TypeError("fetch failed"); },
+    async () => new Response("busy", { status: 503 }),
+    async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); },
+  ]) {
+    for (const write of [
+      (x) => x.createIssue({ title: "t", status: "todo" }),
+      (x) => x.updateIssue("i", { status: "done" }),
+      (x) => x.createComment("i", "hi"),
+      (x) => x.createLabel({ name: "n", color: "#000" }),
+      (x) => x.createAgent({ name: "a" }),
+    ]) {
+      let calls = 0;
+      await assert.rejects(write(c(async (...a) => { calls++; return fn(...a); })), PaperclipClientError);
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test("a request that never answers rejects at timeoutMs with status 0 and is retried as a GET", async () => {
+  let calls = 0;
+  const hang = (_url, init) => { calls++; return new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason))); };
+  const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: hang, timeoutMs: 15 });
+  await assert.rejects(c.listAgents(), (err) => err.status === 0 && /timeout/i.test(err.body));
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(c.createIssue({ title: "t", status: "todo" }), (err) => err.status === 0);
+  assert.equal(calls, 1, "a write that timed out is not re-sent");
+});
+
+test("listIssues sends updatedSince when asked and counts GETs and rows read", async () => {
+  const urls = [];
+  const fn = async (url) => { urls.push(String(url)); return new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }); };
+  const c = make(fn);
+  const got = [];
+  for await (const r of c.listIssues({ updatedSince: "2026-11-03T10:00:00.000Z" })) got.push(r.id);
+  assert.deepEqual(got, ["a", "b"]);
+  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&updatedSince=2026-11-03T10%3A00%3A00.000Z"));
+  assert.deepEqual({ ...c.reads }, { calls: 1, rows: 2 });
 });
 
 test("a 2xx body that is not JSON throws PaperclipClientError", async () => {

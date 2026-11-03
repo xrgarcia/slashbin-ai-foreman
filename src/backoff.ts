@@ -96,6 +96,15 @@ export const backoffConfigSchema = z.object({
   // retried in place, up to `maxAttempts` tries in all. A rate limit is never
   // retried here (that is `upstream`). Default 1 s, then 3 s.
   gh: z.object({ ...win(1_000, 30_000, 3), maxAttempts: count(3) }).prefault({}),
+  // One Paperclip READ (a GET) that failed for a passing reason (no answer, a
+  // timeout, HTTP 408/429/500/502/503/504) is retried in place, up to `maxAttempts`
+  // tries in all. A write is never retried: a timeout does not prove it failed.
+  // Default 0.5 s, then 1 s.
+  paperclip: z.object({ ...win(500, 5_000, 2), maxAttempts: count(3) }).prefault({}),
+  // One registry `repo_identity` request (the mirror's owner-free repo key) that
+  // failed for the same passing reasons is retried in place the same way.
+  // Default 0.5 s, then 1 s.
+  registry: z.object({ ...win(500, 5_000, 2), maxAttempts: count(3) }).prefault({}),
   // How long after a PR merged before its issue, still unadvanced, is reported as
   // stuck (the dead zone). Shorter flags a merge the review is still settling.
   stuckMergeGraceMs: ms.default(900_000),
@@ -116,6 +125,28 @@ export function backoffDelay(n: number | undefined, w: BackoffWindow): number {
   const k = Math.max(1, Math.floor(n ?? 1));
   // Past ~50 doublings the product is beyond any cap; stop before Infinity.
   return Math.min(w.baseMs * w.factor ** Math.min(k - 1, 50), w.capMs);
+}
+
+/**
+ * Run `op`, retrying in place while `isTransient(err)` holds, up to `maxAttempts`
+ * tries in all, waiting `backoffDelay(attempt, window)` between tries. The one retry
+ * loop for the Paperclip and registry clients; the caller says what is safe to retry.
+ * `onRetry` is told the attempt that failed and the wait that follows.
+ */
+export async function retryAsync<T>(
+  op: () => Promise<T>,
+  o: { window: BackoffWindow; maxAttempts: number; isTransient: (err: unknown) => boolean; onRetry?: (err: unknown, attempt: number, waitMs: number) => void },
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      if (attempt >= o.maxAttempts || !o.isTransient(err)) throw err;
+      const wait = backoffDelay(attempt, o.window);
+      o.onRetry?.(err, attempt, wait);
+      await new Promise<void>((r) => setTimeout(r, wait));
+    }
+  }
 }
 
 /** A wait's length for a log line: "45 s", "5 min", "1.5 h". */
