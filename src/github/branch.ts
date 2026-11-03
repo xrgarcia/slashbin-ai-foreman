@@ -2,7 +2,7 @@
 
 import type { Logger } from "../logger.js";
 import { findOpenPrs, formatGhError } from "./cache.js";
-import { gh, ghAsTechLead, isBackoffRefusal } from "./gh.js";
+import { gh, ghAsTechLead, ghHttpStatus, isBackoffRefusal } from "./gh.js";
 import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
 import { OpenPromotionPR } from "./promotion.js";
 import type { BranchDrift } from "../code-host.js";
@@ -58,17 +58,21 @@ export function getRemoteBranchSha(
   cwd: string,
   logger: Logger,
 ): string | null {
-  let sha: string;
+  let out: string;
   try {
-    sha = gh([
+    // --include puts the HTTP status line ahead of the body, on a failure too, so absence is read from the
+    // response's own status and never from text that can carry the branch name (a branch "fix-404").
+    out = gh([
       "api",
       `repos/${repo}/branches/${encodeURIComponent(branch)}`,
+      "--include",
       "--jq", ".commit.sha",
     ], cwd);
   } catch (err) {
-    if (/\b404\b|not found/i.test(`${formatGhError(err).message}\n${formatGhError(err).stderr}`)) return null;
+    if (ghHttpStatus(err) === 404) return null;
     throw err;
   }
+  const sha = out.split("\n").pop()?.trim() ?? "";
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`${repo}@${branch}: GitHub returned no head sha`);
   return sha;
 }

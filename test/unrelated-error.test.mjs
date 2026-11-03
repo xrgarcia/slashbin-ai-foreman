@@ -7,7 +7,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
-import { memoryRecords, repoRecordOf, recordOf } from "./issue-records.mjs";
+import { memoryRecords, repoRecordOf, recordOf, breakRecords } from "./issue-records.mjs";
+import { activeWorkSource } from "../dist/plugins/registry.js";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { noteUnrelated, unrelatedSignature, UNSTICK_KINDS } from "../dist/unstick.js";
 import { parseUnrelatedErrors, parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
@@ -84,4 +87,27 @@ test("two PRs with the same signature plus one distinct: exactly two EM calls, n
   assert.equal(await noteUnrelated(repo, { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, "o/ue PR #7 (dev)"), 0);
   assert.equal(await tryUnstick(repo, config, logger, 2, {}), 0);
   assert.equal(calls().length, 2);
+});
+
+// EM#1244 f5 review (Foreman PR #197): the hand-off is written before the event that raised it is acknowledged.
+for (const [name, saves] of [["the repo record is unavailable", false], ["the repo record cannot be saved", true]]) {
+  test(`${name}: noteUnrelated throws, nothing is dropped, and after recovery the same error is recorded once`, async () => {
+    const { repo } = setup();
+    const source = activeWorkSource();
+    const [load, save] = [source.loadRecord, source.saveRecord];
+    breakRecords([0], { saves, kind: "repo" });
+    const seen = parseUnrelatedErrors(sreOut(5, [stripe("1111")]));
+    await assert.rejects(noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), (e) => e.name === "HandoffNotSaved");
+    source.loadRecord = load; source.saveRecord = save;
+    assert.equal(Object.keys((await repoRecordOf(repo)).unstick ?? {}).length, 0, "nothing half-written");
+    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), 1, "the same report, raised once the record is back");
+    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)"), 0, "and not again");
+  });
+}
+
+test("dev verify raises the unrelated-error hand-off before the card advances, and lets its failure out", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "verify.ts"), "utf8");
+  const note = src.indexOf("await noteUnrelated(");
+  assert.ok(note > 0 && note < src.indexOf('"verifyPassed"'), "persisted ahead of the advance");
+  assert.doesNotMatch(src.slice(note - 40, note + 260), /catch|\.catch\(/, "a failed save is not swallowed");
 });

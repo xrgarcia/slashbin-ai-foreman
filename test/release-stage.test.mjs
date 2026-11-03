@@ -368,6 +368,49 @@ test("closing an epic's child in production asks the EM whether the epic is read
   assert.equal((await epicEntries()).length, 1, "a later cycle adds nothing");
 });
 
+// EM#1244 f5 review: a hand-off to the EM is saved BEFORE the event that raised it is acknowledged. Unsaved, the
+// pass fails closed with the child still open, and the next healthy pass raises it again.
+const REPO_RECORD = { kind: "repo" };
+/** Break the repo record (`saves`: only its saves), run `during`, then put the work source back the way it was. */
+async function withRepoRecordBroken(saves, during) {
+  const source = activeWorkSource();
+  const [load, save] = [source.loadRecord, source.saveRecord];
+  breakRecords([0], { saves, ...REPO_RECORD });
+  try { await during(); } finally { source.loadRecord = load; source.saveRecord = save; }
+}
+
+for (const [name, saves] of [["R1: the repo record is unavailable", false], ["R2: the repo record cannot be saved", true]]) {
+  test(`epic hand-off ${name}: the child is not closed, and the next healthy pass closes it with the hand-off recorded`, async () => {
+    world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
+    await trackedMerged([5, 6]);
+    setBodies({ 5: "## References\n- engineering-manager #880" });
+    await withRepoRecordBroken(saves, async () => {
+      await assert.rejects(run(), /hand-off to the EM could not be saved|epic-ready-to-close/);
+    });
+    assert.equal(gh().issues[5].state, "OPEN", "the child is still open: the trigger is intact");
+    assert.equal(commentsOn(5).length, 0, "and was not commented on");
+    assert.equal((await epicEntries()).length, 0);
+    assert.equal(await run(2), true, "the healthy pass");
+    assertClosedVerified(5);
+    const e = await epicEntries();
+    assert.equal(e.length, 1, "the hand-off survived the failure and is recorded");
+    assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
+  });
+}
+
+for (const [name, saves] of [["unavailable", false], ["unsaved", true]]) {
+  test(`prod verification's unrelated error, repo record ${name}: the issue stays open and the next healthy pass raises it once`, async () => {
+    const v = VERIFY(90);
+    world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: { ...v, out: `${TRIAGE("")}\n${v.out}` } });
+    await withRepoRecordBroken(saves, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+    assert.equal(gh().issues[7].state, "OPEN", "nothing was closed on a verdict whose hand-off is lost");
+    assert.equal((await unrelatedEntries()).length, 0);
+    assert.equal(await run(2), true);
+    assertClosedVerified(7);
+    assert.equal((await unrelatedEntries()).length, 1, "recorded once, with no second report of the error needed");
+  });
+}
+
 test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
   const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
   assert.equal(neutral.repos[0].epicRefLabel, undefined);
