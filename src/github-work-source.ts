@@ -16,8 +16,9 @@ import { laterStageLabels } from "./github/lifecycle-scan.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
 import { acceptanceVerdict } from "./github/acceptance-gate.js";
 import { announceHold, parseReadiness, type HoldKind, readIssueBody, unmetReadiness } from "./github/readiness.js";
-import { holdReasons, issueStates, recentlyClosed } from "./github/cards.js";
+import { CardReads, issueStates } from "./github/cards.js";
 import { GitHubRecordStore } from "./github/record-store.js";
+import { ForemanIdentity } from "./github/skip-hold.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
 export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
@@ -87,18 +88,6 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
   soakHeld: (c, cfg, n, log) => c.prodHeld(cfg, n, log),
 });
 
-/** repo → the covered issue set last announced by implement's "all have linked PRs" skip. */
-const coveredSkipAnnounced = new Map<string, string>();
-
-/** `repo#issue` → the hold last logged for it, so a held issue is announced once, not every cycle. */
-const blockerHoldAnnounced = new Map<string, string>();
-
-/** `repo#issue|kind` → the reason of that kind already on the issue as a comment, so GitHub is read for it once per run, not every cycle. */
-const holdCommented = new Map<string, string>();
-
-/** repo → the issues the last full eligibility pass held for an invalid Acceptance, with the reason: the board's view of the hold. */
-const acceptanceHeld = new Map<string, WaitingItem[]>();
-
 /**
  * GitHub issues as a work source — the first `WorkSourceAdapter` connector.
  *
@@ -129,7 +118,9 @@ const acceptanceHeld = new Map<string, WaitingItem[]>();
  * there the release stage's moves are the only writers until the close
  * (EM#578), so no issue is left closed-but-unverified or open-but-unlabelled.
  *
- * Stateless: construct one where it is used.
+ * Its memory (announce-once maps, the acceptance holds the board shows, the
+ * closed-issue watermarks) lives on the instance: the GitHub plugin holds the
+ * one the daemon uses, and a test builds a fresh one.
  */
 
 /**
@@ -145,7 +136,25 @@ export function closedWins(open: readonly SnapshotCard[], closed: readonly Snaps
 
 export class GitHubIssueConnector implements WorkSourceAdapter {
   /** Durable per-item records, kept as one Foreman comment on the issue or PR (github/record-store.ts). */
-  private readonly records = new GitHubRecordStore();
+  private readonly records: GitHubRecordStore;
+  /** Closed-issue watermarks and recent hold reasons for `cards` and `closed`. */
+  private readonly cardReads = new CardReads();
+  /** repo → the covered issue set last announced by implement's "all have linked PRs" skip. */
+  private readonly coveredSkipAnnounced = new Map<string, string>();
+
+  /** `repo#issue` → the hold last logged for it, so a held issue is announced once, not every cycle. */
+  private readonly blockerHoldAnnounced = new Map<string, string>();
+
+  /** `repo#issue|kind` → the reason of that kind already on the issue as a comment, so GitHub is read for it once per run, not every cycle. */
+  private readonly holdCommented = new Map<string, string>();
+
+  /** repo → the issues the last full eligibility pass held for an invalid Acceptance, with the reason: the board's view of the hold. */
+  private readonly acceptanceHeld = new Map<string, WaitingItem[]>();
+
+  /** `identity` is the Foreman login, shared with the code host; a test gets its own. */
+  constructor(private readonly identity: ForemanIdentity = new ForemanIdentity()) {
+    this.records = new GitHubRecordStore({ run: gh, login: (cwd) => identity.login(cwd) });
+  }
 
   loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad> {
     return this.records.loadRecord(key, repoConfig);
@@ -160,7 +169,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   }
 
   heldWork(repoConfig: RepoConfig): ReadonlyArray<WaitingItem> {
-    return acceptanceHeld.get(repoConfig.githubRepo) ?? [];
+    return this.acceptanceHeld.get(repoConfig.githubRepo) ?? [];
   }
 
   async record(event: WorkEvent, repoConfig: RepoConfig, logger: Logger): Promise<boolean> {
@@ -189,7 +198,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     }
     const open = getOpenIssues(repo, repoConfig.repoPath, logger);
     const labelsOf = (i: { labels: { name: string }[] }) => i.labels.map((l) => l.name);
-    const holds = holdReasons(repo, repoConfig.repoPath, blockedLabel,
+    const holds = this.cardReads.holdReasons(repo, repoConfig.repoPath, blockedLabel,
       open.filter((i) => labelsOf(i).includes(blockedLabel)).map((i) => i.number), logger);
     const out: SnapshotCard[] = open.map((i) => {
       const hold = holds.get(i.number);
@@ -203,7 +212,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         labels: labelsOf(i),
       };
     });
-    const closed = recentlyClosed(repo, repoConfig.repoPath, logger)
+    const closed = this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger)
       .map((c): SnapshotCard => ({ item: { issueNumber: c.number, repo }, title: c.title, url: c.url, state: c.state, stage: null }));
     return closedWins(out, closed);
   }
@@ -211,7 +220,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   /** The issues closed since the last read (github/cards.ts), for a mirror that does not own the cards. */
   async closed(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotClosed[]> {
     const repo = repoConfig.githubRepo;
-    return recentlyClosed(repo, repoConfig.repoPath, logger).map((c) => ({ item: { issueNumber: c.number, repo }, state: c.state }));
+    return this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger).map((c) => ({ item: { issueNumber: c.number, repo }, state: c.state }));
   }
 
   /** Each issue's state read live from GitHub, not from the open-issue view (github/cards.ts issueStates). */
@@ -637,7 +646,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       if (this.waitsOnBlocker(config, issue.number, logger, held)) continue;
       actionable.push(issue.number);
     }
-    acceptanceHeld.set(config.githubRepo, held);
+    this.acceptanceHeld.set(config.githubRepo, held);
     return actionable;
   }
 
@@ -675,20 +684,20 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       }
     }
     if (hold === null) {
-      blockerHoldAnnounced.delete(key);
-      holdCommented.delete(`${key}|readiness`);
-      holdCommented.delete(`${key}|acceptance`);
+      this.blockerHoldAnnounced.delete(key);
+      this.holdCommented.delete(`${key}|readiness`);
+      this.holdCommented.delete(`${key}|acceptance`);
       return false;
     }
     if (announce?.kind === "acceptance") held.push({ item: { issueNumber: num, repo: config.githubRepo }, reason: hold });
     if (announce) {
       const memo = `${key}|${announce.kind}`;
-      if (holdCommented.get(memo) !== hold && announceHold(config, num, announce.kind, announce.reasons)) {
-        holdCommented.set(memo, hold);
+      if (this.holdCommented.get(memo) !== hold && announceHold(config, num, announce.kind, announce.reasons, this.identity.login(config.repoPath))) {
+        this.holdCommented.set(memo, hold);
       }
     }
-    if (blockerHoldAnnounced.get(key) !== hold) {
-      blockerHoldAnnounced.set(key, hold);
+    if (this.blockerHoldAnnounced.get(key) !== hold) {
+      this.blockerHoldAnnounced.set(key, hold);
       logger.info(`Holding #${num}: ${hold}`);
     }
     return true;
@@ -745,7 +754,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       }
 
       if (uncovered.length > 0) {
-        coveredSkipAnnounced.delete(repo);
+        this.coveredSkipAnnounced.delete(repo);
         return uncovered;
       }
 
@@ -754,9 +763,9 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       // merged ones; this line only says why implement is idle.
       const episode = [...actionable].sort((a, b) => a - b).join(",");
       const msg = `Skipped ${repo}: ${actionable.length} approved issue(s), all have linked PRs (open or merged)`;
-      if (coveredSkipAnnounced.get(repo) === episode) logger.debug(msg);
+      if (this.coveredSkipAnnounced.get(repo) === episode) logger.debug(msg);
       else {
-        coveredSkipAnnounced.set(repo, episode);
+        this.coveredSkipAnnounced.set(repo, episode);
         logger.info(msg);
       }
       return [];
