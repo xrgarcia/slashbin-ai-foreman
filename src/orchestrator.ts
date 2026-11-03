@@ -169,9 +169,12 @@ export async function runLanePass(
   const delivers = lane.stages.some((s) => !isCustomStage(s) && s.type === "skill-deliver");
   if (!!repoConfig.syncOnly !== delivers) return { processed: 0, lastImplementation: null, events: [] };
   // No lane runs on a repo before it is onboarded: its labels exist (onboarding.ts).
-  if (config.onboarding && !(await rt.onboarding.onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
-  // The legacy per-issue entries of `.agent-state.json` move into the record store once, before any lane reads a record.
-  await rt.legacy.importLegacyRecords(repoConfig, logger, config.allRepos ?? config.repos);
+  // A sync-only repo skips onboarding and the records import: both write (labels, records) and delivery must not depend on them.
+  if (!repoConfig.syncOnly) {
+    if (config.onboarding && !(await rt.onboarding.onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
+    // The legacy per-issue entries of `.agent-state.json` move into the record store once, before any lane reads a record.
+    await rt.legacy.importLegacyRecords(repoConfig, logger, config.allRepos ?? config.repos);
+  }
   const key = `${repoConfig.name}/${lane.name}`;
   lanePassesInFlight.set(key, (lanePassesInFlight.get(key) ?? 0) + 1);
   try {
@@ -280,7 +283,7 @@ async function runLaneCycle(
     base.debug(`Lane pass stopped at stage "${stage}" (${outcome}${reason ? `: ${reason}` : ""}) — later stages of the ${lane.name} lane skipped this pass`);
   }
 
-  if (snapshot === "always" || (snapshot === "if-work" && processed > 0)) await publishBoard(rt, repoConfig, base);
+  if (!repoConfig.syncOnly && (snapshot === "always" || (snapshot === "if-work" && processed > 0))) await publishBoard(rt, repoConfig, base);
 
   return { processed, lastImplementation, events };
 }
