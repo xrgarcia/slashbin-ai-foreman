@@ -7,9 +7,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
-import { memoryRecords, repoRecordOf, recordOf } from "./issue-records.mjs";
+import { memoryRecords, repoRecordOf, recordOf, breakRecords } from "./issue-records.mjs";
+import { activeWorkSource } from "../dist/plugins/registry.js";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tryUnstick } from "../dist/phases/unstick.js";
-import { noteUnrelated, unrelatedSignature, UNSTICK_KINDS } from "../dist/unstick.js";
+import { noteUnrelated, settleHandoffs, unrelatedSignature, UNSTICK_KINDS } from "../dist/unstick.js";
 import { parseUnrelatedErrors, parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
 import { verifyVerdict } from "../dist/plugins/sre.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
@@ -64,8 +67,8 @@ test("a signature differing only by ids and counts is the same signature", () =>
 
 test("two PRs with the same signature plus one distinct: exactly two EM calls, no hold", async () => {
   const { repo, config, calls } = setup();
-  assert.equal(await noteUnrelated(repo, parseUnrelatedErrors(sreOut(5, [stripe("1111")])), "o/ue PR #5 (dev)"), 1);
-  assert.equal(await noteUnrelated(repo, parseUnrelatedErrors(sreOut(6, [stripe("2222"), "worker: redis timeout"])), "o/ue PR #6 (dev)"), 1);
+  assert.equal(await noteUnrelated(repo, parseUnrelatedErrors(sreOut(5, [stripe("1111")])), "o/ue PR #5 (dev)", "o/ue#5"), 1);
+  assert.equal(await noteUnrelated(repo, parseUnrelatedErrors(sreOut(6, [stripe("2222"), "worker: redis timeout"])), "o/ue PR #6 (dev)", "o/ue#6"), 1);
 
   assert.equal(await tryUnstick(repo, config, logger, 1, {}), 2);
   // A record store keeps keys sorted, so the order the two questions are asked in is the signature hash's, not arrival order.
@@ -81,7 +84,67 @@ test("two PRs with the same signature plus one distinct: exactly two EM calls, n
   // Nothing holds the release, and a later PR seeing either error again calls no one.
   assert.equal(Object.keys((await repoRecordOf(repo)).unstick ?? {}).length, 2, "the two distinct signatures sit in the repo's record");
   assert.deepEqual((await recordOf(repo, 5)).verifyHeld, undefined, "no issue's record holds anything");
-  assert.equal(await noteUnrelated(repo, { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, "o/ue PR #7 (dev)"), 0);
+  assert.equal(await noteUnrelated(repo, { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, "o/ue PR #7 (dev)", "o/ue#7"), 0);
   assert.equal(await tryUnstick(repo, config, logger, 2, {}), 0);
   assert.equal(calls().length, 2);
+});
+
+// EM#1244 f5 review (Foreman PR #197): the SRE's report has no re-readable source, so a report whose save failed is
+// held IN MEMORY under its PR (never a core state file) and drained at the gate every transition passes through.
+for (const [name, saves] of [["R1: the repo record is unavailable", false], ["R2: the repo record cannot be saved", true]]) {
+  test(`${name}: noteUnrelated throws; the gate keeps failing while the record is down; after recovery the ORIGINAL is recorded once without the error recurring`, async () => {
+    const { repo } = setup();
+    const source = activeWorkSource();
+    const [load, save] = [source.loadRecord, source.saveRecord];
+    breakRecords([0], { saves, kind: "repo" });
+    const seen = parseUnrelatedErrors(sreOut(5, [stripe("1111")]));
+    await assert.rejects(noteUnrelated(repo, seen, "o/ue PR #5 (dev)", "o/ue#5"), (e) => e.name === "HandoffNotSaved");
+    await assert.rejects(settleHandoffs(repo, "o/ue#5"), (e) => e.name === "HandoffNotSaved", "a clean pass still cannot get past the gate");
+    source.loadRecord = load; source.saveRecord = save;
+    assert.equal(Object.keys((await repoRecordOf(repo)).unstick ?? {}).length, 0, "nothing half-written");
+    assert.equal(await settleHandoffs(repo, "o/ue#6"), 0, "another PR's gate has nothing pending");
+    assert.equal(await settleHandoffs(repo, "o/ue#5"), 1, "the original, raised once the record is back, with no recurrence");
+    const [e] = Object.values((await repoRecordOf(repo)).unstick);
+    assert.match(e.reason, /Expired API Key/);
+    assert.equal(await settleHandoffs(repo, "o/ue#5"), 0, "and not again");
+    assert.equal(await noteUnrelated(repo, seen, "o/ue PR #5 (dev)", "o/ue#5"), 0, "a recurrence adds nothing");
+  });
+}
+
+test("dev R1: A unsaved, then the next result reports B while the drain still fails (and a clean one reports nothing): B is kept; recovery records both once", async () => {
+  const { repo } = setup();
+  const source = activeWorkSource();
+  const [load, save] = [source.loadRecord, source.saveRecord];
+  breakRecords([0], { saves: true, kind: "repo" });
+  const A = { errors: [stripe("1111")], evidence: [] }, B = { errors: ["worker: redis connection refused"], evidence: [] };
+  await assert.rejects(noteUnrelated(repo, A, "o/ue PR #5 (dev)", "o/ue#5"), (e) => e.name === "HandoffNotSaved");
+  await assert.rejects(settleHandoffs(repo, "o/ue#5", { seen: B, seenOn: "o/ue PR #5 (dev)" }), (e) => e.name === "HandoffNotSaved", "B is buffered even though the drain throws");
+  await assert.rejects(settleHandoffs(repo, "o/ue#5"), (e) => e.name === "HandoffNotSaved", "a clean pass cannot pass");
+  source.loadRecord = load; source.saveRecord = save;
+  assert.equal(await settleHandoffs(repo, "o/ue#5"), 2, "A and B, with no recurrence");
+  const reasons = Object.values((await repoRecordOf(repo)).unstick).map((x) => x.reason).join("\n");
+  assert.match(reasons, /Expired API Key/); assert.match(reasons, /redis connection refused/);
+  assert.equal(await settleHandoffs(repo, "o/ue#5"), 0);
+});
+
+test("two pending reports of one signature, and a recurrence, are one entry per signature", async () => {
+  const { repo } = setup();
+  const source = activeWorkSource();
+  const [load, save] = [source.loadRecord, source.saveRecord];
+  breakRecords([0], { saves: true, kind: "repo" });
+  for (const id of ["1111", "2222"]) await assert.rejects(noteUnrelated(repo, { errors: [stripe(id), "worker: redis timeout"], evidence: [] }, "o/ue PR #5 (dev)", "o/ue#5"));
+  source.loadRecord = load; source.saveRecord = save;
+  assert.equal(await noteUnrelated(repo, { errors: [stripe("3333")], evidence: [] }, "o/ue PR #5 (dev)", "o/ue#5"), 2, "both signatures, once each");
+  assert.equal(Object.keys((await repoRecordOf(repo)).unstick).length, 2);
+});
+
+test("dev verify raises the unrelated-error hand-off before the card advances, and lets its failure out", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "verify.ts"), "utf8");
+  const note = src.indexOf("await noteUnrelated(");
+  const gate = src.indexOf("else await settleHandoffs(");
+  const rel = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "release.ts"), "utf8");
+  const sk = rel.slice(rel.indexOf("async function soak("));
+  assert.ok(sk.indexOf("await settleHandoffs(") < sk.indexOf("fromVerifyResult(") && /settleHandoffs\([^;]*r\.unrelated/s.test(sk), "soak buffers its result's reports in the gate call, ahead of the drop");
+  assert.ok(note > 0 && gate > note && gate < src.indexOf('"verifyPassed"'), "the gate runs on every result, ahead of the advance");
+  assert.doesNotMatch(src.slice(note - 40, gate + 120), /catch|\.catch\(/, "a failed save is not swallowed");
 });

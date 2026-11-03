@@ -33,6 +33,7 @@ require("node:fs").appendFileSync(${JSON.stringify(ghLog)}, args.join(" ") + "\\
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(JSON.stringify([{ number: 1, title: "one", labels: [{ name: "approved" }] }]));
 else if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs");
 else if (args[0] === "ls-files") process.stdout.write("f0\\nf1");
+else if (args[0] === "api" && /\\/branches\\//.test(args[1])) process.stdout.write("0".repeat(40));
 else process.stdout.write("[]");
 `);
   writeFileSync(join(bin, "claude"), `#!/usr/bin/env node

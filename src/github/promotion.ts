@@ -31,6 +31,7 @@ export function findReadyForProdIssues(
   }
 }
 
+/** The open promotion PR, or null when there is none. A failed read throws (EM#1244 f5): it must never open a second PR. */
 export function findOpenPromotionPR(
   repo: string,
   productionBranch: string,
@@ -38,13 +39,8 @@ export function findOpenPromotionPR(
   cwd: string,
   logger?: Logger,
 ): OpenPromotionPR | null {
-  try {
-    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: productionBranch, head: baseBranch, limit: 1 });
-    return prs.length > 0 ? prs[0] : null;
-  } catch (err) {
-    logger?.warn("findOpenPromotionPR: gh pr list failed", { ...formatGhError(err) });
-    return null;
-  }
+  const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: productionBranch, head: baseBranch, limit: 1 });
+  return prs.length > 0 ? prs[0] : null;
 }
 
 /**

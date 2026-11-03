@@ -368,6 +368,138 @@ test("closing an epic's child in production asks the EM whether the epic is read
   assert.equal((await epicEntries()).length, 1, "a later cycle adds nothing");
 });
 
+// EM#1244 f5 review: a hand-off to the EM is saved BEFORE the event that raised it is acknowledged. Unsaved, the
+// pass fails closed with the child still open, and the next healthy pass raises it again.
+const REPO_RECORD = { kind: "repo" };
+/** Break the repo record (`saves`: only its saves), run `during`, then put the work source back the way it was. */
+async function withRepoRecordBroken(saves, during) {
+  const source = activeWorkSource();
+  const [load, save] = [source.loadRecord, source.saveRecord];
+  breakRecords([0], { saves, ...REPO_RECORD });
+  try { await during(); } finally { source.loadRecord = load; source.saveRecord = save; }
+}
+
+for (const [name, saves] of [["R1: the repo record is unavailable", false], ["R2: the repo record cannot be saved", true]]) {
+  test(`epic hand-off ${name}: the child is not closed, and the next healthy pass closes it with the hand-off recorded`, async () => {
+    world({ ...pending(), prs: [mergedPr(100, "- #5\n- #6", MERGE, 5)] }, { prod: VERIFY(100) });
+    await trackedMerged([5, 6]);
+    setBodies({ 5: "## References\n- engineering-manager #880" });
+    await withRepoRecordBroken(saves, async () => {
+      await assert.rejects(run(), /hand-off to the EM could not be saved|epic-ready-to-close/);
+    });
+    assert.equal(gh().issues[5].state, "OPEN", "the child is still open: the trigger is intact");
+    assert.equal(commentsOn(5).length, 0, "and was not commented on");
+    assert.equal((await epicEntries()).length, 0);
+    assert.equal(await run(2), true, "the healthy pass");
+    assertClosedVerified(5);
+    const e = await epicEntries();
+    assert.equal(e.length, 1, "the hand-off survived the failure and is recorded");
+    assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
+  });
+}
+
+// EM#1244 f5 (Foreman PR #197), unrelated R1-R9: an unrelated-error report whose save failed is held IN MEMORY under its
+// PR and drained at the gate every transition passes through, so a clean re-verification cannot advance, settle or drop
+// the release past an unsaved report, and the ORIGINAL is recorded exactly once after recovery.
+const setCtl = (ctl) => writeFileSync(CTL, JSON.stringify(ctl));
+const DIRTY = (v) => ({ ...v, out: `${TRIAGE("")}\n${v.out}` });
+const original = (e) => e.length === 1 && /Expired API Key/.test(e[0].reason) && /Evidence: https:\/\/example\.test\/pv-ev/.test(e[0].reason);
+
+for (const [name, saves] of [["unavailable", false], ["unsaved", true]]) {
+  test(`prod merged phase, repo record ${name}: the issue stays open; the CLEAN re-verification still saves the original report once, then closes`, async () => {
+    world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: DIRTY(VERIFY(90)) });
+    await withRepoRecordBroken(saves, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+    assert.equal(gh().issues[7].state, "OPEN", "nothing was closed on a verdict whose hand-off is unsaved");
+    assert.equal((await unrelatedEntries()).length, 0);
+    setCtl({ prod: VERIFY(90) }); // the error does not recur
+    await withRepoRecordBroken(saves, async () => { await assert.rejects(run(2), /hand-off to the EM could not be saved/); });
+    assert.equal(gh().issues[7].state, "OPEN", "a clean result does not get past the gate while the record is down");
+    assert.equal(await run(3), true);
+    assertClosedVerified(7);
+    assert.ok(original(await unrelatedEntries()), "the original, once");
+    await run(4);
+    assert.equal((await unrelatedEntries()).length, 1, "and not again");
+  });
+}
+
+test("prod merged phase: a repeat of the same error and the pending one save once", async () => {
+  world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: DIRTY(VERIFY(90)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+  assert.equal(await run(2), true, "the error recurs: the pending report and the new one are one signature");
+  assertClosedVerified(7);
+  assert.equal((await unrelatedEntries()).length, 1);
+});
+
+test("prod held phase: the clean re-verification (prodReverified) waits for the saved report, then records the original once", async () => {
+  world({ issues: [issue(5, "prod verification held")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 20)], compareFiles: 0, prodHead: MERGE }, { prod: DIRTY(VERIFY(100)) });
+  await seedRelease(repo, { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: new Date().toISOString(), attempts: 1, hold: "x", retryAt: new Date(Date.now() - 1000).toISOString(), since: new Date().toISOString() });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+  assert.equal((await prodReleases())[100].phase, "held", "not settled");
+  setCtl({ prod: VERIFY(100) });
+  assert.equal(await run(2), true);
+  assertClosedVerified(5);
+  assert.ok(original(await unrelatedEntries()));
+});
+
+test("prod deploy origin: the merged deploy's report survives a clean recovery verification, recorded once, without redeploying", async () => {
+  const d = DEPLOYED("pass", " evidence=https://example.test/pv");
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `${TRIAGE("verify: ")}\n${d.out}` }, prod: VERIFY(100) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+  assert.equal((await unrelatedEntries()).length, 0);
+  assert.equal(await run(2), true, "recovery recognizes the merge and verifies; that verification is clean");
+  assertClosedVerified(5);
+  assert.ok(original(await unrelatedEntries()));
+  assert.equal(agentCalls().filter((c) => c[1] === "deploy").length, 1, "deployed once");
+});
+
+test("soak: the clean soak that follows a failed hand-off does not drop the release until the original is saved, then records it once", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: DIRTY(VERIFY(100)) });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(2), /hand-off to the EM could not be saved/); });
+  assert.ok((await prodReleases())[100], "the release is kept");
+  setCtl({ approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(3), /hand-off to the EM could not be saved/); });
+  assert.ok((await prodReleases())[100], "a clean soak cannot drop it while the record is down");
+  assert.equal(await run(4), true);
+  assert.equal((await prodReleases())[100], undefined, "settled once saved");
+  assert.ok(original(await unrelatedEntries()));
+});
+
+// R1 (round 4): while A's drain is still failing, a result reporting a NEW error B must still keep B. The gate buffers
+// the fresh result's reports before it drains, at every site.
+const DIRTY_B = (v) => ({ ...v, out: `Evidence: https://example.test/b-ev\nNot caused by this release, needs triage: worker: redis connection refused here\n${v.out}` });
+const bothRecorded = async () => {
+  const e = await unrelatedEntries();
+  return e.length === 2 && e.some((x) => /Expired API Key/.test(x.reason)) && e.some((x) => /redis connection refused/.test(x.reason));
+};
+
+test("soak R1: A unsaved, then a soak reports B while the drain still fails; B is kept, and a later clean soak records both before dropping", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: DIRTY(VERIFY(100)) });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(2), /hand-off to the EM could not be saved/); });
+  setCtl({ approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: DIRTY_B(VERIFY(100)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(3), /hand-off to the EM could not be saved/); });
+  assert.ok((await prodReleases())[100], "kept");
+  setCtl({ approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
+  assert.equal(await run(4), true);
+  assert.equal((await prodReleases())[100], undefined, "settled once saved");
+  assert.ok(await bothRecorded(), "A and B, once each");
+});
+
+test("merged R1: A unsaved, then the re-verification reports B while the drain still fails; B is kept, and a clean pass records both before closing", async () => {
+  world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: DIRTY(VERIFY(90)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+  setCtl({ prod: DIRTY_B(VERIFY(90)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(2), /hand-off to the EM could not be saved/); });
+  assert.equal(gh().issues[7].state, "OPEN");
+  setCtl({ prod: VERIFY(90) });
+  assert.equal(await run(3), true);
+  assertClosedVerified(7);
+  assert.ok(await bothRecorded(), "A and B, once each");
+});
+
 test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
   const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
   assert.equal(neutral.repos[0].epicRefLabel, undefined);
