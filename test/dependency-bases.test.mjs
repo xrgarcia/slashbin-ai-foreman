@@ -45,3 +45,8 @@ test("the configured production branch is the one excluded, not the literal main
   assert.deepEqual(dependencyBatchBases("release", "release"), []);
   assert.deepEqual(dependencyBatchBases("main", "release"), ["main"]);
 });
+
+test("the legacy shared branch stays discoverable through the cutover, production still excluded (#208 review S2)", () => {
+  assert.deepEqual(dependencyBatchBases("develop", "main", "features"), ["develop", "features"]);
+  assert.deepEqual(dependencyBatchBases("develop", "main", "main"), ["develop"]);
+});

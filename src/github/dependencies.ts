@@ -61,8 +61,10 @@ export type { DependencyChange } from "../code-host.js";
 export function dependencyBatchBases(
   baseBranch: string | undefined,
   productionBranch: string,
+  legacyFeatureBranch?: string,
 ): string[] {
-  return [...new Set([baseBranch])]
+  // The legacy shared branch stays DISCOVERABLE through the cutover (producers still target it); batches name baseBranch.
+  return [...new Set([baseBranch, legacyFeatureBranch])]
     .filter((b): b is string => !!b && b !== productionBranch);
 }
 
@@ -242,7 +244,7 @@ export function buildDependencyBatchIssue(
   const body = [
     `## Problem`,
     ``,
-    `${n} Dependabot pull request${n === 1 ? "" : "s"} target \`${landingBranch}\` and ${n === 1 ? "is" : "are"} not merged.`,
+    `${n} Dependabot pull request${n === 1 ? "" : "s"} target \`${landingBranch}\` (or the legacy shared branch) and ${n === 1 ? "is" : "are"} not merged.`,
     `They do not reach \`${baseBranch}\` on their own: a bump aimed at the feature branch has no`,
     `mechanical merge path, because a CI check rollup proves the code compiles and never`,
     `proves the application still runs.`,
@@ -257,11 +259,11 @@ export function buildDependencyBatchIssue(
     ``,
     `## Required Changes`,
     ``,
-    `Land every PR above on \`${landingBranch}\`, or leave behind the ones that cannot be landed`,
+    `Land every PR above through this issue's own PR into \`${landingBranch}\`, or leave behind the ones that cannot be landed`,
     `and say which and why. Merging them is not the work — **exercising them is**:`,
     ``,
-    `1. Merge the branches into \`${landingBranch}\` locally.`,
-    `2. Install from the lockfile as the deploy does, not with a resolver flag that papers over a peer conflict.`,
+    `1. Merge the Dependabot branches into **this issue's own assigned branch** (\`foreman/<N>-<slug>\`, cut from \`origin/${landingBranch}\`). Never merge into \`${landingBranch}\` locally and never commit to it.`,
+    `2. Build and exercise on that same branch. Install from the lockfile as the deploy does, not with a resolver flag that papers over a peer conflict.`,
     `3. Build.`,
     `4. **Start the application and confirm it serves.** A dependency upgrade that compiles and does not boot is the failure this issue exists to catch.`,
     `5. Exercise the flows the changed packages sit under — a web framework means a real request through a real route; a date or validation library means the code paths that parse and format.`,
@@ -286,7 +288,7 @@ export function buildDependencyBatchIssue(
     `## Pre-Flight`,
     ``,
     `- **Design locked.** Land and exercise the listed PRs; drop and report the ones that fail. No open decision.`,
-    `- **Preconditions:** none. The PRs already exist and target \`${landingBranch}\`.`,
+    `- **Preconditions:** none. The PRs already exist and target \`${landingBranch}\` (or the legacy shared branch).`,
     `- **Dev-safety: read-only, no customer writes.** A dependency upgrade changes no request handler, no worker and no outbound integration by itself. The smoke test exercises the app's own routes; it writes to no external system.`,
     ``,
     `## References`,

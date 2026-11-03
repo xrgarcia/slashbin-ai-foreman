@@ -78,7 +78,7 @@ export function tryFileDependencyBatchIssue(
   cycleNumber: number,
 ): number | null {
   const depLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "dependencies" });
-  const bases = codeHost().dependencyBatchBases(repoConfig.baseBranch, repoConfig.productionBranch);
+  const bases = codeHost().dependencyBatchBases(repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.featureBranch);
   if (bases.length === 0) return null;
 
   let prs = codeHost().findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger, repoConfig.github);

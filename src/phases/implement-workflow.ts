@@ -25,6 +25,12 @@ export function workItemsLine(issueNumbers: number[]): string {
   return `Implement exactly these work items, and no others: ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
 }
 
+/** The per-issue branch contract appended to every implement prompt. */
+export function branchContract(config: RepoConfig, branchMap: Record<number, string>, branchList: string): string {
+  const base = config.baseBranch;
+  return `\n\nIMPORTANT — Branch contract (this OVERRIDES any branch step in the skill or prompt above): each issue is built on its own branch. Your assigned branches, by issue number: ${JSON.stringify(branchMap)} (also in the FOREMAN_BRANCHES environment variable; use the one for the issue you pick: ${branchList}). Cut it from origin/${base} (\`git fetch origin\`, then \`git checkout -B <branch> origin/${base}\`); if origin/<branch> already exists, check it out and rebase it onto origin/${base}. Commit there, push it, and open the PR \`<branch> → ${base}\` with the body starting "Related to #N". NEVER commit or push to \`${config.featureBranch}\` or \`${base}\`, and never push to any branch that is not your assigned one. A PR from any other head is treated as a failed run.`;
+}
+
 /**
  * Invoke Claude CLI to implement the selected work items for a repo.
  *
@@ -57,6 +63,8 @@ export async function implementApprovedIssues(
   // Captured so a DECLARED skip can be distinguished from a declaration made
   // while the agent was in fact pushing work. Evidence beats narrative in both
   // directions: the trailer is only honoured when the branch really did not move.
+  // A PR open BEFORE the run (a legacy `features` PR draining, or a prior attempt's branch) may legitimately be the head afterwards.
+  const preExistingHead = codeHost().findOpenFeaturePR(config)?.headBranch ?? null;
   const beforeShas = new Map(candidates.map((b) => [b, shaOf(b)] as const));
   /** The first candidate branch whose remote sha differs from before the session (a new branch counts as moved). */
   const movedBranch = (): { branch: string; before: string | null; after: string } | null => {
@@ -117,6 +125,10 @@ Work autonomously. Do not ask questions.`;
   }
 
   if (overlay.ok) prompt += overlay.text;
+
+  // The branch contract rides in the prompt for EVERY skill mode (a repo-local skill, the built-in one, a custom prompt):
+  // the Foreman cannot rely on a repo's skill copy knowing about per-issue branches. It overrides any branch step in the skill.
+  prompt += branchContract(config, branchMap, branchList);
 
   // Skip-signaling protocol: an issue body may explicitly direct the agent NOT
   // to implement (e.g., investigation-first, blocked on external verification).
@@ -258,6 +270,14 @@ Work autonomously. Do not ask questions.`;
   // The head the session built on: the open Foreman PR's own branch, else the branch that moved, else the first candidate.
   const openPr = codeHost().findOpenFeaturePR(config);
   const headBranch = openPr?.headBranch ?? movedBranch()?.branch ?? candidates[0] ?? `${config.branchPrefix}unknown`;
+
+  // The assigned branch is the contract. A PR from any other head is not success for a fresh issue; the legacy shared
+  // head counts only for a PR that was already open before this run.
+  if (candidates.length > 0 && !candidates.includes(headBranch) && headBranch !== preExistingHead && (prUrl || openPr)) {
+    const reason = `branch contract violated: the PR head is "${headBranch}", not the assigned ${branchList} (cut from origin/${config.baseBranch})`;
+    logger.error(`${reason} — marking as failed`);
+    return { success: false, error: reason };
+  }
 
   if (prUrl) {
     // Verify the PR actually exists on GitHub

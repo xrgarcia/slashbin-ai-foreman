@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
+import { implementApprovedIssues } from "../dist/phases/implement-workflow.js";
 import { runRepoPass } from "../dist/orchestrator.js";
 import { tryReview } from "../dist/phases/review.js";
 import { configureIssueCache } from "../dist/github.js";
@@ -64,7 +65,7 @@ before(() => {
   bin = join(tmp, "bin");
   mkdirSync(bin);
   writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}');
-  F = { ghLog: join(tmp, "gh.log"), claudeLog: join(tmp, "claude.log"), prOpen: join(tmp, "pr-open"), issues: join(tmp, "issues.json") };
+  F = { ghLog: join(tmp, "gh.log"), claudeLog: join(tmp, "claude.log"), prOpen: join(tmp, "pr-open"), issues: join(tmp, "issues.json"), head: join(tmp, "pr-head") };
   // GitHub's own pick would be #1 (approved); the fake source offers #7. The
   // feature PR exists once `prOpen` does (the fake session creates it).
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
@@ -72,7 +73,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(F.ghLog)}, args.join(" ") + "\\n");
 const pr = { number: 50, url: "https://github.com/example/fake/pull/50", title: "Build #7", body: "Closes #7",
-  headRefName: "features", baseRefName: "develop", headRefOid: "abc", updatedAt: "2026-11-01T00:00:00Z", commits: [], files: [{ path: "a.ts" }] };
+  headRefName: fs.existsSync(${JSON.stringify(F.head)}) ? fs.readFileSync(${JSON.stringify(F.head)}, "utf8").trim() : "foreman/7", baseRefName: "develop", headRefOid: "abc", updatedAt: "2026-11-01T00:00:00Z", commits: [], files: [{ path: "a.ts" }] };
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(fs.existsSync(${JSON.stringify(F.issues)}) ? fs.readFileSync(${JSON.stringify(F.issues)}, "utf8") : "[]");
 else if (args[0] === "pr" && args[1] === "list") process.stdout.write(fs.existsSync(${JSON.stringify(F.prOpen)}) ? JSON.stringify([pr]) : "[]");
 else if (args[0] === "pr" && args[1] === "view" && args.join(" ").includes("--json state")) process.stdout.write(JSON.stringify({ state: "OPEN" }));
@@ -109,7 +110,7 @@ after(() => {
 beforeEach(() => {
   resetRegistryForTests();
   githubCalls.length = 0;
-  for (const f of [F.ghLog, F.claudeLog, F.prOpen, F.issues]) rmSync(f, { force: true });
+  for (const f of [F.ghLog, F.claudeLog, F.prOpen, F.issues, F.head]) rmSync(f, { force: true });
 });
 
 function load(top = {}, repo = {}) {
@@ -237,4 +238,55 @@ test("with no code host enabled, startup refuses (exit 78) before any GitHub or 
   assert.match(run.stdout + run.stderr, /Refusing to start: no code host is enabled \(codeHost: "nowhere"\)/);
   assert.ok(!existsSync(F.ghLog), `gh was called: ${existsSync(F.ghLog) ? readFileSync(F.ghLog, "utf8") : ""}`);
   assert.ok(!existsSync(F.claudeLog), "claude was launched");
+});
+
+// foreman#208 (Tech Lead S2 #1): the branch contract is in the prompt in EVERY skill mode, and a fresh issue whose PR
+// head is not its assigned branch is not success.
+const lastPrompt = () => JSON.parse(readFileSync(F.claudeLog, "utf8").trim().split("\n").pop()).prompt;
+async function implementOnce(extra) {
+  mkdirSync(join(tmp, "logs/implement"), { recursive: true });
+  const config = load({ workSource: "github", stages: [{ type: "implement" }] }, { skillPath: "builtin:", ...extra });
+  await boot(config);
+  const res = await implementApprovedIssues(rt.trust, config.repos[0], logger, undefined, null, [7], [7], { 7: "foreman/7-thing" });
+  return { res, config };
+}
+
+test("the branch contract is in the prompt for a repo-local skill, the built-in skill and a custom prompt", async () => {
+  mkdirSync(join(tmp, "logs/implement"), { recursive: true });
+  mkdirSync(join(tmp, ".claude/skills/x"), { recursive: true });
+  writeFileSync(join(tmp, ".claude/skills/x/SKILL.md"), "---\nname: x\n---\nPush to features.");
+  for (const extra of [{ skillPath: ".claude/skills/x/SKILL.md" }, { skillPath: "builtin:" }, { skillPath: undefined, prompt: "Commit to features." }]) {
+    rmSync(F.claudeLog, { force: true });
+    rmSync(F.prOpen, { force: true });
+    resetRegistryForTests();
+    await implementOnce(extra);
+    const prompt = lastPrompt();
+    assert.match(prompt, /Branch contract \(this OVERRIDES any branch step/, JSON.stringify(extra));
+    assert.match(prompt, /"7":"foreman\/7-thing"/);
+    assert.match(prompt, /origin\/develop/);
+    assert.match(prompt, /NEVER commit or push to `features` or `develop`/);
+    assert.match(prompt, /Related to #N/);
+  }
+});
+
+test("a fresh issue whose PR head is not its assigned branch fails the run; the assigned head succeeds", async () => {
+  writeFileSync(F.head, "features");
+  resetRegistryForTests();
+  const bad = await implementOnce({});
+  assert.equal(bad.res.success, false);
+  assert.match(bad.res.error, /branch contract violated: the PR head is "features", not the assigned foreman\/7-thing/);
+
+  rmSync(F.head, { force: true }); rmSync(F.prOpen, { force: true });
+  writeFileSync(F.head, "foreman/7-thing");
+  resetRegistryForTests();
+  const good = await implementOnce({});
+  assert.equal(good.res.success, true, JSON.stringify(good.res));
+});
+
+test("a legacy features PR that was already open before the run is still accepted", async () => {
+  writeFileSync(F.head, "features");
+  writeFileSync(F.prOpen, "");
+  resetRegistryForTests();
+  const { res } = await implementOnce({});
+  assert.doesNotMatch(res.error ?? "", /branch contract violated/);
 });
