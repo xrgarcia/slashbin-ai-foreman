@@ -614,8 +614,10 @@ async function soak(repoConfig: RepoConfig, config: AgentConfig, rel: ProdReleas
   const path = transcript(repoConfig, `soak-pr${rel.pr}`, cycleNumber);
   logger.info(`Release PR #${rel.pr}: SRE 30-minute soak, transcript: ${path}`);
   const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "soak"));
-  // The gate: neither a clean soak nor "no soak to run" drops the release while a report for this PR is unsaved.
-  await settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, rel.pr));
+  // The gate: neither a clean soak nor "no soak to run" drops the release while a report for this PR is unsaved. This
+  // result's own reports are buffered BEFORE the drain, so a new error B survives a drain still failing on an earlier A.
+  await settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, rel.pr),
+    r.kind !== "error" && r.kind !== "nothing" && r.unrelated ? { seen: r.unrelated, seenOn: `${repoConfig.githubRepo} PR #${rel.pr} (prod)` } : undefined);
   if (r.kind === "nothing") {
     logger.info(`Release PR #${rel.pr}: no soak to run (${r.reason}); done`);
     await dropRelease(repoConfig, rel.pr, logger);

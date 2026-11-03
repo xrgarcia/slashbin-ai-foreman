@@ -274,14 +274,30 @@ const pendingHandoffs = new Map<string, Map<string, { tag: string; reason: strin
 /** The subject a hand-off and the transitions that wait on it share: the PR the SRE verified. */
 export const handoffSubject = (githubRepo: string, pr: number): string => `${githubRepo}#${pr}`;
 
+/** The unrelated errors a fresh SRE result reported, and where they were first seen. */
+export interface FreshUnrelated {
+  seen: { errors: readonly string[]; evidence: readonly string[] };
+  seenOn: string;
+}
+
 /**
  * THE gate every lifecycle transition for `subject` (verify advance, merged/held settle, prodReverified, the
- * deploy-recovery verify, the soak drop) passes through first: drain the subject's pending hand-offs to the repo's
- * EM triage record. Throws HandoffNotSaved when the record cannot take them, so the transition does not happen this
- * pass whatever the new verification says. One entry per signature: a pending report and a recurring one save once.
- * Resolves how many were new.
+ * deploy-recovery verify, the soak drop) passes through first, and the one entry for "this result's reports". Order,
+ * always: (1) buffer the fresh result's unrelated errors into the subject's pending set (deduped by signature), THEN
+ * (2) drain the set to the repo's EM triage record. So a report B that arrives while an earlier report A is still
+ * unsaved is kept even though the drain throws. Throws HandoffNotSaved when the record cannot take them, so the
+ * transition does not happen this pass whatever the new verification says. A pending report and a recurring one
+ * save once. Resolves how many were new.
  */
-export async function settleHandoffs(repoConfig: RepoConfig, subject: string): Promise<number> {
+export async function settleHandoffs(repoConfig: RepoConfig, subject: string, fresh?: FreshUnrelated): Promise<number> {
+  if (fresh) {
+    const evidence = fresh.seen.evidence.length ? ` Evidence: ${fresh.seen.evidence.slice(0, 4).join(" ")}` : "";
+    const held = pendingHandoffs.get(subject) ?? pendingHandoffs.set(subject, new Map()).get(subject)!;
+    for (const error of fresh.seen.errors) {
+      const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
+      if (!held.has(tag)) held.set(tag, { tag, reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${fresh.seenOn}): ${error.trim().slice(0, 600)}.${evidence}` });
+    }
+  }
   const held = pendingHandoffs.get(subject);
   if (!held || held.size === 0) return 0;
   const added = await persistHandoffs(repoConfig, "unrelated-error", [...held.values()]);
@@ -294,27 +310,13 @@ export function resetPendingHandoffsForTests(): void {
   pendingHandoffs.clear();
 }
 
-/**
- * Raise `unrelated-error` once per distinct signature per repo, with the PR and the SRE's evidence links, never again for
- * a signature it has already raised, from any PR. Repo-level (issue 0), so it outlives the issue it was seen on and
- * never holds a release. The report is held in memory under `subject` first (see pendingHandoffs) and then drained, so
- * a failed save leaves the original payload pending for the gate (settleHandoffs) and the pass fails closed with
- * HandoffNotSaved. Returns how many were new.
- */
-export async function noteUnrelated(
+/** `settleHandoffs` with this result's reports: buffered first, then drained (see there). Returns how many were new. */
+export const noteUnrelated = (
   repoConfig: RepoConfig,
-  seen: { errors: readonly string[]; evidence: readonly string[] },
+  seen: FreshUnrelated["seen"],
   seenOn: string,
   subject: string,
-): Promise<number> {
-  const evidence = seen.evidence.length ? ` Evidence: ${seen.evidence.slice(0, 4).join(" ")}` : "";
-  const held = pendingHandoffs.get(subject) ?? pendingHandoffs.set(subject, new Map()).get(subject)!;
-  for (const error of seen.errors) {
-    const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
-    if (!held.has(tag)) held.set(tag, { tag, reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${evidence}` });
-  }
-  return settleHandoffs(repoConfig, subject);
-}
+): Promise<number> => settleHandoffs(repoConfig, subject, { seen, seenOn });
 
 /** The block on `issue` was released (`unblocked`): its questions are over. */
 export async function clearUnstick(repoConfig: RepoConfig, issue: number): Promise<boolean> {

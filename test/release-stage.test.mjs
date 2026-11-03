@@ -466,6 +466,40 @@ test("soak: the clean soak that follows a failed hand-off does not drop the rele
   assert.ok(original(await unrelatedEntries()));
 });
 
+// R1 (round 4): while A's drain is still failing, a result reporting a NEW error B must still keep B. The gate buffers
+// the fresh result's reports before it drains, at every site.
+const DIRTY_B = (v) => ({ ...v, out: `Evidence: https://example.test/b-ev\nNot caused by this release, needs triage: worker: redis connection refused here\n${v.out}` });
+const bothRecorded = async () => {
+  const e = await unrelatedEntries();
+  return e.length === 2 && e.some((x) => /Expired API Key/.test(x.reason)) && e.some((x) => /redis connection refused/.test(x.reason));
+};
+
+test("soak R1: A unsaved, then a soak reports B while the drain still fails; B is kept, and a later clean soak records both before dropping", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: DIRTY(VERIFY(100)) });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(2), /hand-off to the EM could not be saved/); });
+  setCtl({ approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: DIRTY_B(VERIFY(100)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(3), /hand-off to the EM could not be saved/); });
+  assert.ok((await prodReleases())[100], "kept");
+  setCtl({ approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
+  assert.equal(await run(4), true);
+  assert.equal((await prodReleases())[100], undefined, "settled once saved");
+  assert.ok(await bothRecorded(), "A and B, once each");
+});
+
+test("merged R1: A unsaved, then the re-verification reports B while the drain still fails; B is kept, and a clean pass records both before closing", async () => {
+  world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: DIRTY(VERIFY(90)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+  setCtl({ prod: DIRTY_B(VERIFY(90)) });
+  await withRepoRecordBroken(true, async () => { await assert.rejects(run(2), /hand-off to the EM could not be saved/); });
+  assert.equal(gh().issues[7].state, "OPEN");
+  setCtl({ prod: VERIFY(90) });
+  assert.equal(await run(3), true);
+  assertClosedVerified(7);
+  assert.ok(await bothRecorded(), "A and B, once each");
+});
+
 test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
   const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
   assert.equal(neutral.repos[0].epicRefLabel, undefined);

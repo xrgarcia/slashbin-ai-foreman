@@ -111,6 +111,22 @@ for (const [name, saves] of [["R1: the repo record is unavailable", false], ["R2
   });
 }
 
+test("dev R1: A unsaved, then the next result reports B while the drain still fails (and a clean one reports nothing): B is kept; recovery records both once", async () => {
+  const { repo } = setup();
+  const source = activeWorkSource();
+  const [load, save] = [source.loadRecord, source.saveRecord];
+  breakRecords([0], { saves: true, kind: "repo" });
+  const A = { errors: [stripe("1111")], evidence: [] }, B = { errors: ["worker: redis connection refused"], evidence: [] };
+  await assert.rejects(noteUnrelated(repo, A, "o/ue PR #5 (dev)", "o/ue#5"), (e) => e.name === "HandoffNotSaved");
+  await assert.rejects(settleHandoffs(repo, "o/ue#5", { seen: B, seenOn: "o/ue PR #5 (dev)" }), (e) => e.name === "HandoffNotSaved", "B is buffered even though the drain throws");
+  await assert.rejects(settleHandoffs(repo, "o/ue#5"), (e) => e.name === "HandoffNotSaved", "a clean pass cannot pass");
+  source.loadRecord = load; source.saveRecord = save;
+  assert.equal(await settleHandoffs(repo, "o/ue#5"), 2, "A and B, with no recurrence");
+  const reasons = Object.values((await repoRecordOf(repo)).unstick).map((x) => x.reason).join("\n");
+  assert.match(reasons, /Expired API Key/); assert.match(reasons, /redis connection refused/);
+  assert.equal(await settleHandoffs(repo, "o/ue#5"), 0);
+});
+
 test("two pending reports of one signature, and a recurrence, are one entry per signature", async () => {
   const { repo } = setup();
   const source = activeWorkSource();
@@ -126,6 +142,9 @@ test("dev verify raises the unrelated-error hand-off before the card advances, a
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "verify.ts"), "utf8");
   const note = src.indexOf("await noteUnrelated(");
   const gate = src.indexOf("else await settleHandoffs(");
+  const rel = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "phases", "release.ts"), "utf8");
+  const sk = rel.slice(rel.indexOf("async function soak("));
+  assert.ok(sk.indexOf("await settleHandoffs(") < sk.indexOf("fromVerifyResult(") && /settleHandoffs\([^;]*r\.unrelated/s.test(sk), "soak buffers its result's reports in the gate call, ahead of the drop");
   assert.ok(note > 0 && gate > note && gate < src.indexOf('"verifyPassed"'), "the gate runs on every result, ahead of the advance");
   assert.doesNotMatch(src.slice(note - 40, gate + 120), /catch|\.catch\(/, "a failed save is not swallowed");
 });
