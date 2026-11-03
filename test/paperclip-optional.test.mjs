@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
 import { runRepoPass } from "../dist/orchestrator.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { wantsSessionReports, wantsSnapshot, drainObservers } from "../dist/work-source.js";
 import {
   registerPlugin, startPlugins, reconfigurePlugins, pluginsFor, observers, addObserver, resetRegistryForTests,

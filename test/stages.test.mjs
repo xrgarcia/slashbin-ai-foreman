@@ -15,7 +15,7 @@ import { loadConfig, configSchema } from "../dist/config.js";
 import { BUILTIN_STAGES, dispatchStages, parseStageTrailer } from "../dist/stages.js";
 import { runRepoPass } from "../dist/orchestrator.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 

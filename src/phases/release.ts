@@ -37,7 +37,7 @@ import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues, loadReleases, putRelease as putReleaseRecord, dropRelease as dropReleaseRecord, noteLiveRelease } from "../release-tracker.js";
-import type { ProdRelease } from "../state.js";
+import type { ProdRelease } from "../issue-records.js";
 import { fieldTable, loadIssueRecords, loadPrRecord, actionableIssues, updateIssueRecord, updatePrRecord } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
@@ -109,10 +109,10 @@ function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): string
   }
 }
 
-function fromVerifyResult(r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger): Verdict {
+async function fromVerifyResult(r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger): Promise<Verdict> {
   if (r.kind === "error") return { kind: "defer", reason: r.error };
   // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
-  if (r.unrelated) noteUnrelated(repoConfig.name, r.unrelated, `${repoConfig.githubRepo} PR #${pr} (prod)`);
+  if (r.unrelated) await noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr} (prod)`);
   const evidence = evidenceFor(repoConfig, pr, logger);
   if (r.pass) return { kind: "pass", ...(evidence ? { evidence } : {}) };
   return holdVerdict(r.reason ?? "prod-verify-held", evidence);
@@ -199,7 +199,7 @@ function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger): num
  * The epics a closed issue belongs to: those its body names, or for a
  * "follow-up to #N" those #N names. A read failure never touches the release.
  */
-function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger: Logger): void {
+async function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger: Logger): Promise<void> {
   // No epic label configured (`epicRefLabel`): epics are not tracked, so nothing is read or raised.
   const label = repoConfig.epicRefLabel;
   if (!label) return;
@@ -207,7 +207,7 @@ function noteEpicClose(repoConfig: RepoConfig, n: number, title: string, logger:
     let epics = epicRefs(codeHost().readIssueBody(repoConfig, n), label);
     const parent = /follow-up to #(\d+)/i.exec(title);
     if (!epics.length && parent) epics = epicRefs(codeHost().readIssueBody(repoConfig, Number(parent[1])), label);
-    if (noteEpicChildClosed(repoConfig.name, repoConfig.githubRepo, n, epics, label) > 0) {
+    if ((await noteEpicChildClosed(repoConfig, n, epics, label)) > 0) {
       logger.info(`#${n} closed in production; asking the EM whether ${label} ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
     }
   } catch (err) {
@@ -243,7 +243,7 @@ async function passRelease(repoConfig: RepoConfig, rel: ProdRelease, move: Move,
   for (const n of writable(repoConfig, rel, logger).filter((i) => open.has(i) && saved.has(i))) {
     comment(repoConfig, n, line, logger);
     await advance(itemOf(repoConfig, n), move, repoConfig, logger);
-    noteEpicClose(repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
+    await noteEpicClose(repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
   }
   if (unsaved.length > 0) return;
   logger.info(`Release PR #${rel.pr} verified in production; closed ${[...saved].map((n) => `#${n}`).join(", ")}`);
@@ -581,7 +581,7 @@ async function mergedVerdict(repoConfig: RepoConfig, config: AgentConfig, rel: P
   logger.info(`Release PR #${rel.pr}: SRE prod verification, transcript: ${path}`);
   const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "prod"));
   if (r.kind === "nothing") return { kind: "defer", reason: r.reason };
-  return fromVerifyResult(r, repoConfig, rel.pr, logger);
+  return await fromVerifyResult(r, repoConfig, rel.pr, logger);
 }
 
 /** Act on a verdict for a release that has merged (first verification, or a held re-verify). */
@@ -619,7 +619,7 @@ async function soak(repoConfig: RepoConfig, config: AgentConfig, rel: ProdReleas
     await dropRelease(repoConfig, rel.pr, logger);
     return;
   }
-  const v = fromVerifyResult(r, repoConfig, rel.pr, logger);
+  const v = await fromVerifyResult(r, repoConfig, rel.pr, logger);
   switch (v.kind) {
     case "pass":
       logger.info(`Release PR #${rel.pr}: soak passed; done`);
@@ -771,7 +771,7 @@ async function deploy(repoConfig: RepoConfig, config: AgentConfig, logger: Logge
     try { mergeSha = codeHost().viewReleasePr(repoConfig, pr.number).mergeSha; } catch { /* read again next pass */ }
   }
   const merged: ProdRelease = { ...rel, phase: "merged", mergedAt: iso(now()), ...(mergeSha ? { mergeSha } : {}) };
-  if (r.unrelated) noteUnrelated(repoConfig.name, r.unrelated, `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)`);
+  if (r.unrelated) await noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)`);
   logger.info(`Release PR #${pr.number} merged by the SRE as ${short(mergeSha ?? undefined)} (verify=${tr.verify}${tr.hold ? `, hold=${tr.hold}` : ""})`);
   // The PR is merged. If "merged" cannot be recorded the "deploying" record stands: the next pass reads the PR as
   // MERGED, moves it to merged and verifies it, so the release is neither deployed again nor skipped.
@@ -924,7 +924,7 @@ export async function tryRelease(
     const path = transcript(repoConfig, `verify-pr${held.pr}`, cycleNumber);
     rlog.info(`Release PR #${held.pr}: re-verifying production after ${held.hold ?? "a hold"}, transcript: ${path}`);
     const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held.pr, rlog, signal, path, "prod"));
-    const v: Verdict = r.kind === "nothing" ? { kind: "defer", reason: r.reason } : fromVerifyResult(r, repoConfig, held.pr, rlog);
+    const v: Verdict = r.kind === "nothing" ? { kind: "defer", reason: r.reason } : await fromVerifyResult(r, repoConfig, held.pr, rlog);
     await settle(repoConfig, config, held, v, rlog);
     return true;
   }

@@ -48,7 +48,7 @@ test("only true divergence stops the session, and it is never auto-resolved", ()
   assert.match(fn, /ahead > 0 && behind > 0/, "divergence is both sides carrying unique commits");
   assert.match(
     orchestrator,
-    /ffOutcome === "diverged"[\s\S]{0,400}?return null;/,
+    /ffOutcome === "diverged"[\s\S]{0,700}?return null;/,
     "a diverged features branch must skip implementation — the tree is unknown",
   );
   assert.doesNotMatch(fn, /checkout",\s*"--theirs|"--ours"|-X\s*ours|-X\s*theirs/, "never resolve a conflict unattended");

@@ -111,7 +111,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
     epic-ready-to-close (`UNSTICK_KINDS`, `src/unstick.ts`). A hold with
     retries left is not called for. Divergence is repo-level, so it is called once per
     issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes
-    are kept in `RepoState.unstick`, keyed `<issue>:<kind>`: exit 0 `invoked`, 2
+    are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked`, 2
     `escalated` (no retry until the reason changes), 3 `declined`, anything else
     `failed` (retried to 3 attempts). The Foreman never clears a block on exit 0 and
     never writes Paperclip; the EM releases the hold on GitHub and the unblock checks
@@ -122,7 +122,7 @@ Other behaviour of the loop:
 - **Poll interval is configurable** — default 5 minutes (`pollIntervalMs`).
 - **Multi-repo** — one daemon manages many repos, each with its own skill paths and
   settings ([config-guide.md](config-guide.md#multi-repo-mode)).
-- **Persists state across restarts** — in `.agent-state.json`; it picks up where it
+- **Persists state across restarts** — in the work source's records; it picks up where it
   left off.
 - **Failure cooldown** — after `maxFailures` (2) failed sessions in a row on a repo,
   it waits before retrying it, 5 min doubling to 1 h (`backoff.repoFailure`,

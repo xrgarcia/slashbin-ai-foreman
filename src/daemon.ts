@@ -8,7 +8,7 @@ import { stageName } from "./stages.js";
 import { join } from "node:path";
 import { codeHost } from "./plugins/registry.js";
 import { addObserver } from "./work-source.js";
-import { stateDir } from "./state.js";
+import { stateDir } from "./state-dir.js";
 import { configureBackoff } from "./backoff.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";

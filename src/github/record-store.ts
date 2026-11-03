@@ -15,6 +15,13 @@ import { formatGhError } from "./cache.js";
 import { gh } from "./gh.js";
 import { foremanLogin } from "./skip-hold.js";
 
+/**
+ * The issue a repo's own record lives on (EM#1244 f4): a repo has no item to hold a comment, so the store keeps
+ * one closed issue with this title, created by the Foreman's login on the first save, and puts the repo record
+ * in its comment like any other. Found by title and author, never by number, so a lost cache costs one search.
+ */
+export const REPO_RECORD_TITLE = "Foreman repo records (bookkeeping, do not close or edit)";
+
 /** First line of every record comment; what a read looks for. */
 export const RECORD_MARKER = "<!-- foreman:record v1 -->";
 const DATA_PREFIX = "<!-- foreman:record-data ";
@@ -59,6 +66,8 @@ const COMMENT_FILTER = `.[] | select(.body | startswith("${RECORD_MARKER}")) | {
 
 export class GitHubRecordStore {
   private readonly cache = new Map<string, Entry>();
+  /** The anchor issue of each repo's record, once found: null = looked for, none exists yet. */
+  private readonly anchors = new Map<string, number | null>();
 
   constructor(private readonly io: RecordStoreIo = realIo) {}
 
@@ -80,8 +89,10 @@ export class GitHubRecordStore {
       const json = canonicalJson(record);
       if (entry.json === json) return true;
       const body = recordBody(record);
+      const number = key.kind === "repo" ? this.anchorFor(key.repo, cwd, true) : key.number;
+      if (number === null) return false;
       const commentId = entry.commentId === null
-        ? Number(this.io.run(["api", "-X", "POST", `repos/${key.repo}/issues/${key.number}/comments`, "-f", `body=${body}`, "--jq", ".id"], cwd))
+        ? Number(this.io.run(["api", "-X", "POST", `repos/${key.repo}/issues/${number}/comments`, "-f", `body=${body}`, "--jq", ".id"], cwd))
         : this.edit(key.repo, entry.commentId, body, cwd);
       if (!Number.isFinite(commentId)) return false;
       this.cache.set(recordId(key), { commentId, json });
@@ -104,7 +115,14 @@ export class GitHubRecordStore {
     if (cached) return cached;
     const self = this.io.login(cwd)?.toLowerCase();
     if (!self) throw new Error("the Foreman's login could not be resolved");
-    const out = this.io.run(["api", "--paginate", `repos/${key.repo}/issues/${key.number}/comments?per_page=100`, "--jq", COMMENT_FILTER], cwd);
+    const number = key.kind === "repo" ? this.anchorFor(key.repo, cwd, false) : key.number;
+    // A repo whose anchor issue does not exist yet holds no record.
+    if (number === null) {
+      const none: Entry = { commentId: null, json: null };
+      this.cache.set(id, none);
+      return none;
+    }
+    const out = this.io.run(["api", "--paginate", `repos/${key.repo}/issues/${number}/comments?per_page=100`, "--jq", COMMENT_FILTER], cwd);
     const mine = out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as CommentRow)
       .filter((c) => c.login?.toLowerCase() === self);
     // Comments come oldest first; if a race ever left two, the oldest is the record.
@@ -112,10 +130,36 @@ export class GitHubRecordStore {
     let entry: Entry = { commentId: null, json: null };
     if (comment) {
       const record = parseRecordBody(comment.body);
-      if (!record) throw new Error(`the record comment ${comment.id} on ${key.repo}#${key.number} is unreadable`);
+      if (!record) throw new Error(`the record comment ${comment.id} on ${key.repo}#${number} is unreadable`);
       entry = { commentId: comment.id, json: canonicalJson(record) };
     }
     this.cache.set(id, entry);
     return entry;
+  }
+
+  /**
+   * The number of the issue holding `repo`'s record. Found by title among the Foreman's own issues; created
+   * (and closed at once, so it is on no board) only when `create` and none exists. Null: none, and not created.
+   * Throws when GitHub cannot be read.
+   */
+  private anchorFor(repo: string, cwd: string, create: boolean): number | null {
+    const known = this.anchors.get(repo);
+    if (known !== undefined && (known !== null || !create)) return known;
+    const self = this.io.login(cwd);
+    if (!self) throw new Error("the Foreman's login could not be resolved");
+    if (known === undefined) {
+      const q = encodeURIComponent(`repo:${repo} is:issue author:${self} in:title "${REPO_RECORD_TITLE}"`);
+      const out = this.io.run(["api", `search/issues?q=${q}&per_page=30&sort=created&order=asc`, "--jq", `.items[] | select(.title == "${REPO_RECORD_TITLE}") | .number`], cwd);
+      const first = out.split("\n").map((l) => Number(l.trim())).find((n) => Number.isFinite(n) && n > 0);
+      this.anchors.set(repo, first ?? null);
+      if (first !== undefined) return first;
+    }
+    if (!create) return null;
+    const number = Number(this.io.run(["api", "-X", "POST", `repos/${repo}/issues`, "-f", `title=${REPO_RECORD_TITLE}`, "-f", "body=The Foreman keeps this repo's own bookkeeping in the comment below. Nothing here is work; leave it closed.", "--jq", ".number"], cwd));
+    if (!Number.isFinite(number) || number <= 0) throw new Error(`the repo record issue on ${repo} could not be created`);
+    this.anchors.set(repo, number);
+    // Closed at once so it never reaches a board; a failure here leaves a usable (open) anchor.
+    try { this.io.run(["api", "-X", "PATCH", `repos/${repo}/issues/${number}`, "-f", "state=closed", "-f", "state_reason=not_planned"], cwd); } catch { /* the record still works open */ }
+    return number;
   }
 }

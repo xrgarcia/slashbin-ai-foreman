@@ -9,7 +9,6 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
-import { loadRepoState, saveRepoState } from "../state.js";
 import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
 import { releaseIssues, followReleasePrs, loadReleases } from "../release-tracker.js";
 import { STALL_CHECK_CYCLE_INTERVAL, itemOf, lastStallCheckCycle, notifyOnce } from "./common.js";
@@ -227,16 +226,22 @@ function describeHeld(repoConfig: RepoConfig, n: number, fallbackPr: number | nu
 
 /**
  * `develop` carries work whose release a stop is holding. Named in the log
- * once per change of the held set (persisted, so a restart does not repeat
- * it); while it is unchanged, each check is a debug line. The issue already
+ * once per change of the held set (kept in memory; a restart repeats the note
+ * once); while it is unchanged, each check is a debug line. The issue already
  * carries the stop's own comment, so nothing is commented here. Returns the
  * line for observers.
  */
+/** The held set last named, per repo. In memory only: a restart costs one repeated note (EM#1244 f4). */
+const heldNoted = new Map<string, string>();
+
+export function resetHeldNotesForTests(): void {
+  heldNoted.clear();
+}
+
 function noteHeldRelease(repoConfig: RepoConfig, held: number[], files: number, logger: Logger): string {
   const key = held.join(",");
-  const st = loadRepoState(repoConfig.name);
   const prefix = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}: `;
-  if (st.promotionHeldNoted === key) {
+  if (heldNoted.get(repoConfig.name) === key) {
     const line = held.map((n) => `release of #${n} held (${repoConfig.github.blockedLabel})`).join("; ");
     logger.debug(`${prefix}${line} — unchanged since last noted`);
     return line;
@@ -245,17 +250,13 @@ function noteHeldRelease(repoConfig: RepoConfig, held: number[], files: number, 
   const listed = open ? new Set(releaseIssues(open.body)) : new Set<number>();
   const line = held.map((n) => describeHeld(repoConfig, n, open && listed.has(n) ? open.number : null, logger)).join("; ");
   logger.warn(`${prefix}${line}.`);
-  st.promotionHeldNoted = key;
-  saveRepoState(repoConfig.name, st);
+  heldNoted.set(repoConfig.name, key);
   return line;
 }
 
 /** Forget the noted held release once it no longer holds `develop`, so a later stop is named again. */
 function clearHeldNote(repoConfig: RepoConfig): void {
-  const st = loadRepoState(repoConfig.name);
-  if (st.promotionHeldNoted === undefined) return;
-  delete st.promotionHeldNoted;
-  saveRepoState(repoConfig.name, st);
+  heldNoted.delete(repoConfig.name);
 }
 
 /**

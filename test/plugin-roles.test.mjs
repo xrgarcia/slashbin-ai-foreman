@@ -21,7 +21,8 @@ import { realQaDeps, realQaLocalDeps } from "../dist/qa-report.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { settleHumanMerge, resumeHumanMerges, HUMAN_MERGE_CLOSE_MARK } from "../dist/phases/reconcile.js";
 import { registerWorkSource } from "../dist/work-source.js";
-import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
+import { loadRepoState, saveRepoState } from "./_legacy-state.mjs";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, seed } from "./issue-records.mjs";
 

@@ -18,7 +18,7 @@ await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 const repo = { name: "r", githubRepo: "o/r" };
-const opts = { verifyMaxAttempts: 3, isDeployFailureHold: (r) => r === "dev-verify-failed" || r.startsWith("deploy="), divergenceReason: () => "features diverged" };
+const opts = { verifyMaxAttempts: 3, isDeployFailureHold: (r) => r === "dev-verify-failed" || r.startsWith("deploy=") };
 const held = (reason, attempts, prNumber = 5) => ({ heldAt: "2026-10-20T10:00:00Z", prNumber, reason, attempts });
 
 test("the kinds are the EM contract, verbatim", () => {
@@ -47,9 +47,10 @@ test("a no-merged-pr hold is stuck at once (it is born at its cap)", () => {
 });
 
 test("divergence: once per announced issue, or issue 0 when none", () => {
-  const block = (announced) => ({ featureBranch: "features", baseBranch: "develop", ahead: 1, behind: 2, since: "t", announced });
-  assert.deepEqual(derivedCandidates({ branchBlock: block([7, 8]) }, opts).map((c) => [c.issue, c.kind]), [[7, "divergence"], [8, "divergence"]]);
-  assert.deepEqual(derivedCandidates({ branchBlock: block([]) }, opts).map((c) => [c.issue, c.kind]), [[0, "divergence"]]);
+  const standing = (announced) => ({ divergence: { reason: "features diverged", announced } });
+  assert.deepEqual(derivedCandidates(standing([7, 8]), opts).map((c) => [c.issue, c.kind, c.reason]), [[7, "divergence", "features diverged"], [8, "divergence", "features diverged"]]);
+  assert.deepEqual(derivedCandidates(standing([]), opts).map((c) => [c.issue, c.kind]), [[0, "divergence"]]);
+  assert.deepEqual(derivedCandidates({}, opts), [], "no standing divergence, no question");
 });
 
 test("an escalated skip is stuck; an unescalated one is not", () => {

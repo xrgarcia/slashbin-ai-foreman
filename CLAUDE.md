@@ -62,7 +62,7 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
    Discord. See docs/lifecycle.md.
 9. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
    `emRepoPath`) — the EM plugin's `bin/em.mjs unstick` takes each stuck issue; the outcome is
-   `RepoState.unstick`. See docs/pipeline.md.
+   the `unstick` record. See docs/pipeline.md.
 
 Priority within a cycle is encoded by stage order. Only one Claude session runs at a
 time (`implementing` mutex) for git-state safety.
@@ -102,22 +102,20 @@ Disabled by default; opt in per repo with `reviewEnabled`, which needs `techLead
 
 ## State (persisted to disk)
 
-Durable state lives in `.agent-state.json` in the daemon's directory (not the target
-repo), written after every change and loaded on startup so the daemon survives restarts.
+Durable state is records in the work source (EM#1244), only through `src/issue-records.ts`: one
+marker comment per issue and per PR, and one on a closed Foreman-owned anchor issue for the repo.
+There is no `.agent-state.json`; `src/legacy-records.ts` moves a leftover one in once and deletes it.
 
-- `implemented` — issue numbers already delivered by a PR (self-heals when a tracked
-  entry has no delivering PR — see `docs/implemented-cache-self-heal.md`).
-- `skipped` — per-issue back-off records for issues the agent deliberately declined
-  (investigation-only, blocked-on-external-verification); cleared on success or after
-  the `backoff.skip` window. Some transient skip reasons are re-checked and admitted early.
-- `verifyHeld` — merged PRs whose dev verification failed, with their attempt count;
-  re-verified per `backoff.verifyRetry`.
-- `failed` / failure counters — per-repo consecutive-failure counts. After
-  `backoff.repoFailure.maxFailures` in a row the stage pauses for an exponential window.
-  A run refused by an upstream limit (GitHub rate limit, Claude session limit) is never charged.
+- Issue record: `skipped` (back-off for declined issues, cleared on success or after
+  `backoff.skip`), `held`, `verifyHeld` (re-verified per `backoff.verifyRetry`), `unstick`,
+  `prodVerified`, `promotionStallNoted`, `divergenceTold`.
+- PR record: release stage, no-commit streak, rejected head.
+- Repo record: `unstick` questions naming no issue, `divergenceRuled`, `cardBlocks`.
+- Derived, never stored: `implemented` (labels and `selectWork`), the branch block (`readDivergence`).
 
-In-memory only: the `implementing` mutex, the repo-failure and agent-unavailable waits, and
-the upstream back-off state (all reset on restart — safe, it only retries sooner).
+In-memory only: the `implementing` mutex, the repo-failure and agent-unavailable waits, the
+upstream back-off state, the last divergence observation, and the promotion held note
+(all reset on restart — safe, it only retries sooner or repeats one note).
 
 ## Back-offs
 
@@ -159,7 +157,7 @@ src/
 ├── backoff.ts       # Every retry wait: the `backoff` config block, the one formula, BackoffTracker
 ├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
 ├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
-├── state.ts         # Disk persistence (.agent-state.json)
+├── issue-records.ts # Issue, PR and repo records (work-source store)
 ├── stages.ts        # Stage schema, default order, dispatch loop
 ├── orchestrator.ts  # Stage pass per repo, failure cooldowns, the session slot; dispatches to phases/
 ├── phases/          # One file per stage: reconcile, implement, revise, verify, review, promote, custom;
@@ -208,5 +206,4 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
   `.ai-agent.json` files keep working unchanged. Every key is commented where it is
   declared; `docs/configuration.md` is generated from those comments and the generator
   fails on an uncommented key. `docs/README.md` is the docs index.
-- **Disk persistence** — `.agent-state.json` survives restarts; the daemon resumes where
-  it left off.
+- **Persistence** — work-source records survive restarts; the daemon resumes where it left off.

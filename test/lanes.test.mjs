@@ -20,7 +20,7 @@ import { loadConfig } from "../dist/config.js";
 import { lanesFor, withCheckoutLock, withLaneLock, withSessionSlot, setSessionLimit, stageNeedsCheckout } from "../dist/lanes.js";
 import { runRepoPass, runLanePass, requestShutdown, drainInFlight, getActiveLanePasses, getActiveRunCount } from "../dist/orchestrator.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 
@@ -204,25 +204,6 @@ test("maxConcurrentSessions: 0 is unbounded; N caps concurrent sessions at N", a
   setSessionLimit(0);
   await Promise.all(Array.from({ length: 6 }, session));
   assert.equal(peak, 6);
-});
-
-// --- State written by concurrent lanes ------------------------------------------
-
-test("state: two lanes saving one repo keep each other's fields", () => {
-  const build = loadRepoState("statesafe");
-  const rel = loadRepoState("statesafe");
-  build.implemented.push(41);
-  saveRepoState("statesafe", build);
-  // The release lane loaded before the build saved, and saves a field of its own.
-  saveRepoState("statesafe", { ...rel, promotionHeldNoted: "41" });
-  const after = loadRepoState("statesafe");
-  assert.deepEqual(after.implemented, [41], "the release lane's stale copy did not erase the build's record");
-  assert.equal(after.promotionHeldNoted, "41");
-  // A copy saved twice diffs from its own last save.
-  build.implemented.push(42);
-  saveRepoState("statesafe", build);
-  assert.deepEqual(loadRepoState("statesafe").implemented, [41, 42]);
-  assert.equal(loadRepoState("statesafe").promotionHeldNoted, "41");
 });
 
 // --- (a) a long build does not delay the same repo's release --------------------

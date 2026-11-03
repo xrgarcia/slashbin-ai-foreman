@@ -16,7 +16,7 @@
 
 import type { RepoConfig } from "./config.js";
 import { loadPrRecord, updatePrRecord } from "./issue-records.js";
-import type { NoCommitStreak } from "./state.js";
+import type { NoCommitStreak } from "./issue-records.js";
 
 // The streak lives on the PR's record in the work source (EM#1244 f3). A read
 // that fails is not "no streak": the caller leaves the PR alone this pass.

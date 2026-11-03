@@ -110,7 +110,7 @@ export interface WorkSourceAdapter {
   states?(repoConfig: RepoConfig, issueNumbers: readonly number[], logger: Logger): Promise<Map<number, ItemState>>;
 
   /**
-   * The durable record kept for one issue or PR (EM#1244 f1). `found` carries it,
+   * The durable record kept for one issue, PR or repo (EM#1244 f1, f4). `found` carries it,
    * `absent` means the source was read and holds none, `unavailable` means the
    * source could not be read after its own retries: a caller must never treat
    * that as `absent`. Never throws.
@@ -118,7 +118,7 @@ export interface WorkSourceAdapter {
   loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad>;
 
   /**
-   * Replace the durable record for one issue or PR. Resolves `true` when the
+   * Replace the durable record for one issue, PR or repo. Resolves `true` when the
    * source holds exactly `record` afterwards (a record already identical makes no
    * write), `false` when it could not be stored; a failed save leaves what a
    * later `loadRecord` returns unchanged. Never throws.
@@ -126,8 +126,11 @@ export interface WorkSourceAdapter {
   saveRecord(key: RecordKey, record: ItemRecord, repoConfig: RepoConfig): Promise<boolean>;
 }
 
-/** What a record is kept for: an issue or a pull request. */
-export type RecordKind = "issue" | "pr";
+/**
+ * What a record is kept for: an issue, a pull request, or the repo itself (EM#1244 f4: the facts no issue or PR
+ * owns). A repo record's number is always 0.
+ */
+export type RecordKind = "issue" | "pr" | "repo";
 
 /** One record's address: repo, kind and number. An issue #5 and a PR #5 never share a record. */
 export interface RecordKey {

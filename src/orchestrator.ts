@@ -169,7 +169,7 @@ export async function runLanePass(
   // No lane runs on a repo before it is onboarded: its labels exist (onboarding.ts).
   if (config.onboarding && !(await onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
   // The legacy per-issue entries of `.agent-state.json` move into the record store once, before any lane reads a record.
-  await importLegacyRecords(repoConfig, logger);
+  await importLegacyRecords(repoConfig, logger, config.allRepos ?? config.repos);
   const key = `${repoConfig.name}/${lane.name}`;
   lanePassesInFlight.set(key, (lanePassesInFlight.get(key) ?? 0) + 1);
   try {

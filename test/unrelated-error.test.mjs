@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setStatePath, loadRepoState } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
+import { memoryRecords, repoRecordOf, recordOf } from "./issue-records.mjs";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { noteUnrelated, unrelatedSignature, UNSTICK_KINDS } from "../dist/unstick.js";
 import { parseUnrelatedErrors, parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
@@ -27,6 +28,7 @@ const sreOut = (pr, errors) => [
 
 function setup() {
   setStatePath(mkTmp("ue-state-"));
+  memoryRecords();
   const em = mkTmp("ue-em-");
   const log = join(em, "calls.jsonl");
   mkdirSync(join(em, "bin"));
@@ -62,11 +64,12 @@ test("a signature differing only by ids and counts is the same signature", () =>
 
 test("two PRs with the same signature plus one distinct: exactly two EM calls, no hold", async () => {
   const { repo, config, calls } = setup();
-  assert.equal(noteUnrelated("ue", parseUnrelatedErrors(sreOut(5, [stripe("1111")])), "o/ue PR #5 (dev)"), 1);
-  assert.equal(noteUnrelated("ue", parseUnrelatedErrors(sreOut(6, [stripe("2222"), "worker: redis timeout"])), "o/ue PR #6 (dev)"), 1);
+  assert.equal(await noteUnrelated(repo, parseUnrelatedErrors(sreOut(5, [stripe("1111")])), "o/ue PR #5 (dev)"), 1);
+  assert.equal(await noteUnrelated(repo, parseUnrelatedErrors(sreOut(6, [stripe("2222"), "worker: redis timeout"])), "o/ue PR #6 (dev)"), 1);
 
   assert.equal(await tryUnstick(repo, config, logger, 1, {}), 2);
-  const made = calls();
+  // A record store keeps keys sorted, so the order the two questions are asked in is the signature hash's, not arrival order.
+  const made = calls().sort((a, b) => a[a.indexOf("--reason") + 1].localeCompare(b[b.indexOf("--reason") + 1]));
   assert.equal(made.length, 2);
   for (const argv of made) {
     assert.equal(argv[argv.indexOf("--kind") + 1], "unrelated-error");
@@ -76,8 +79,9 @@ test("two PRs with the same signature plus one distinct: exactly two EM calls, n
   assert.match(made[1][made[1].indexOf("--reason") + 1], /first seen on o\/ue PR #6 \(dev\).*redis timeout.*Evidence: https:\/\/github\.com\/o\/ue\/pull\/6#issuecomment-1/);
 
   // Nothing holds the release, and a later PR seeing either error again calls no one.
-  assert.deepEqual(loadRepoState("ue").verifyHeld ?? {}, {});
-  assert.equal(noteUnrelated("ue", { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, "o/ue PR #7 (dev)"), 0);
+  assert.equal(Object.keys((await repoRecordOf(repo)).unstick ?? {}).length, 2, "the two distinct signatures sit in the repo's record");
+  assert.deepEqual((await recordOf(repo, 5)).verifyHeld, undefined, "no issue's record holds anything");
+  assert.equal(await noteUnrelated(repo, { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, "o/ue PR #7 (dev)"), 0);
   assert.equal(await tryUnstick(repo, config, logger, 2, {}), 0);
   assert.equal(calls().length, 2);
 });

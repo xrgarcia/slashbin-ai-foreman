@@ -86,7 +86,7 @@ FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-
 ```
 
 The Foreman then neither sets the label nor re-verifies behind it, and surfaces the
-issue as *held* rather than failed. The hold is persisted in `.agent-state.json`, so
+issue as *held* rather than failed. The hold is persisted in the issue's record, so
 it survives restarts, and clears automatically once the issue leaves the dead zone.
 
 Without this, a deliberate hold and a dropped label are the same observation, and
