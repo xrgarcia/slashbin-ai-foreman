@@ -13,7 +13,7 @@ import { foremanOwnsCard, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX as PLUGIN_HOLD_PRE
 import { pickCard } from "../dist/paperclip/mirror.js";
 import { HOLD_PREFIX, holdReason } from "../dist/github/cards.js";
 import { addObserver, drainObservers, publishSnapshot, registerWorkSource, wantsCards } from "../dist/work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 
 const logger = createLogger({ format: "text", level: "error" });

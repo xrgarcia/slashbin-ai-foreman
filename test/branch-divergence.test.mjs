@@ -16,7 +16,7 @@ const orchestrator = orchestratorSource();
 const reconciler = readFileSync(join(root, "src/reconciler.ts"), "utf-8");
 const { divergenceNotice } = await import(join(root, "dist/orchestrator.js"));
 
-const block = { featureBranch: "features", baseBranch: "develop", mergeBase: "abc", ahead: 8, behind: 3, since: "", announced: [] };
+const block = { featureBranch: "features", baseBranch: "develop", mergeBase: "abc", ahead: 8, behind: 3, };
 const repo = { name: "r", githubRepo: "acme/r", repoPath: "/tmp", featureBranch: "features", baseBranch: "develop" };
 
 test("the notice names both counts, both branches and a reconciling command", () => {
@@ -33,8 +33,8 @@ test("the reconciler no longer warns every cycle — the orchestrator announces 
 });
 
 test("an episode is keyed on the merge base and an unknown result never clears it", () => {
-  assert.match(orchestrator, /prior\.mergeBase === mergeBase/);
-  assert.match(orchestrator, /ffOutcome !== "unknown" && repoState\.branchBlock/);
+  assert.match(orchestrator, /seen\.before\?\.mergeBase !== now\.mergeBase/);
+  assert.match(orchestrator, /ffOutcome !== "unknown"\) \{\s*const \{ before \} = observeDivergence\(repoConfig, null\)/);
 });
 
 test("a recorded block is re-checked read-only before the pending-revision gate", () => {

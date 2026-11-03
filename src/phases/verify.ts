@@ -359,7 +359,7 @@ export async function tryVerify(
     const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
-    if (sre.kind === "verdict" && sre.unrelated) noteUnrelated(repoName, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`);
+    if (sre.kind === "verdict" && sre.unrelated) await noteUnrelated(repoConfig, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.

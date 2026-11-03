@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, chmodSync } 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plugins/registry.js";
 import { TechLeadPlugin } from "../dist/plugins/tech-lead.js";
 import { tryReview } from "../dist/phases/review.js";

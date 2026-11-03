@@ -14,7 +14,9 @@ import { importLegacyRecords, resetLegacyImportForTests } from "../dist/legacy-r
 import { loadReleases, putRelease, resetReleaseTrackerForTests } from "../dist/release-tracker.js";
 import { readNoCommitStreak, recordNoCommit, clearNoCommitStreak, resetNoCommitStreaksForTests } from "../dist/no-commit-streak.js";
 import { foremanHolds } from "../dist/work-source.js";
-import { legacyPrEntries, loadRepoState, saveRepoState, setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
+import { legacyFile, legacyPrEntries, saveRepoState } from "./_legacy-state.mjs";
+import { existsSync } from "node:fs";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { mkTmp } from "./tmp-dir.mjs";
 
@@ -81,7 +83,7 @@ const filePrs = () => {
 
 test("import: every live entry moves to its PR's record; a finished one is dropped; the file keeps none", async () => {
   legacyState();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal((await loadPrRecord(repo, 10)).release.phase, "deploying", "an unfinished release moves");
   assert.deepEqual((await loadPrRecord(repo, 10)).tracked, { pr: 10, url: "u", issues: [1010] }, "the release pointer rides on the release PR");
   assert.equal((await loadPrRecord(repo, 11)).release, undefined, "a release whose PR closed unmerged is finished");
@@ -92,29 +94,29 @@ test("import: every live entry moves to its PR's record; a finished one is dropp
   assert.equal((await loadPrRecord(repo, 30)).rejectedHead, "h1", "the branch is stored on its last closed-unmerged PR");
   assert.equal((await loadPrRecord(repo, 31)).rejectedHead, undefined, "a branch whose head moved since the alert has nothing to remember");
   assert.deepEqual(filePrs(), { releases: [], streaks: [], rejected: [], tracked: undefined });
-  assert.deepEqual(loadRepoState("r").implemented, [3], "the rest of the file is untouched");
+  assert.equal(existsSync(legacyFile()), false, "everything moved: the file is deleted");
 });
 
 test("import is idempotent: a second run writes nothing and changes nothing", async () => {
   legacyState();
-  await importLegacyRecords(repo, quiet);
-  const before = JSON.stringify(loadRepoState("r"));
+  await importLegacyRecords(repo, quiet, [repo]);
+  assert.equal(existsSync(legacyFile()), false);
   const snapshot = JSON.stringify(await Promise.all([10, 12, 20, 30].map((n) => loadPrRecord(repo, n))));
   let saves = 0;
   const source = activeWorkSource();
   const save = source.saveRecord;
   source.saveRecord = (...a) => { saves++; return save(...a); };
   resetLegacyImportForTests();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal(saves, 0);
-  assert.equal(JSON.stringify(loadRepoState("r")), before);
+  assert.equal(existsSync(legacyFile()), false);
   assert.equal(JSON.stringify(await Promise.all([10, 12, 20, 30].map((n) => loadPrRecord(repo, n)))), snapshot);
 });
 
 test("what the store already holds wins over the legacy copy", async () => {
   legacyState();
   await updatePrRecord(repo, 10, (d) => { d.release = rel(10, "merged"); });
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal((await loadPrRecord(repo, 10)).release.phase, "merged");
   assert.deepEqual(filePrs().releases, []);
 });
@@ -122,7 +124,7 @@ test("what the store already holds wins over the legacy copy", async () => {
 test("a failed save leaves the legacy entry, withholds the PR, and the next import finishes it", async () => {
   legacyState();
   failSave.add(12); failSave.add(20); failSave.add(30);
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.deepEqual(filePrs(), { releases: [12], streaks: [20], rejected: ["feat-a"], tracked: undefined }, "nothing live is lost");
   assert.equal(await loadPrRecord(repo, 12), null, "until imported the PR reads as unreadable, never as empty");
   assert.equal(await loadPrRecord(repo, 20), null);
@@ -131,7 +133,7 @@ test("a failed save leaves the legacy entry, withholds the PR, and the next impo
   assert.equal((await loadPrRecord(repo, 10)).release.phase, "deploying", "the others moved");
   failSave.clear();
   resetLegacyImportForTests();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal((await loadPrRecord(repo, 12)).release.phase, "soaking");
   assert.equal((await loadPrRecord(repo, 30)).rejectedHead, "h1");
   assert.equal(branchUnresolved(repo, "feat-a"), false);
@@ -142,14 +144,14 @@ test("an unreadable PR state counts as live, and a failed branch lookup leaves t
   legacyState();
   prStates.delete(11); prStates.delete(22); // GitHub cannot say
   throwClosed = true;
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.equal((await loadPrRecord(repo, 11)).release.phase, "held", "unknown is not finished");
   assert.deepEqual((await loadPrRecord(repo, 22)).noCommit, { head: "s3", count: 1 });
   assert.deepEqual(filePrs().rejected.sort(), ["feat-a", "feat-b", "feat-gone"], "no lookup, no decision");
   assert.equal(branchUnresolved(repo, "feat-b"), true);
   throwClosed = false;
   resetLegacyImportForTests();
-  await importLegacyRecords(repo, quiet);
+  await importLegacyRecords(repo, quiet, [repo]);
   assert.deepEqual(filePrs().rejected, []);
   assert.equal(branchUnresolved(repo, "feat-b"), false);
 });
@@ -217,13 +219,9 @@ const sources = () => {
   return files;
 };
 
-test("RepoState declares none of the four fields", () => {
-  const text = readFileSync(join(srcDir, "state.ts"), "utf8");
-  const body = text.slice(text.indexOf("export interface RepoState"));
-  const decl = body.slice(0, body.indexOf("\n}\n"));
-  for (const field of ["prodReleases", "noCommitStreaks", "rejectedBranches", "release"]) {
-    assert.doesNotMatch(decl, new RegExp(`^\\s*${field}\\??:`, "m"), `RepoState still declares ${field}`);
-  }
+test("src/state.ts is gone: no module declares a RepoState", () => {
+  assert.equal(existsSync(join(srcDir, "state.ts")), false);
+  for (const p of sources()) assert.doesNotMatch(readFileSync(p, "utf8"), /interface RepoState\b/, p);
 });
 
 test("only the import touches the legacy PR accessors, and no core file reads the old fields from state", () => {
@@ -231,7 +229,6 @@ test("only the import touches the legacy PR accessors, and no core file reads th
   const reads = /(?:loadRepoState\([^)]*\)|\b(?:repoState|rs|st))\??\.(?:prodReleases|noCommitStreaks|rejectedBranches|release)\b/;
   for (const p of sources()) {
     const rel = p.slice(srcDir.length + 1);
-    if (rel === "state.ts") continue;
     const text = readFileSync(p, "utf8");
     if (rel !== "legacy-records.ts" && /\b(?:legacyPrEntries|dropLegacyPrEntries)\b/.test(text)) offenders.push(`${rel}: legacy accessor`);
     text.split("\n").forEach((line, i) => { if (!/^\s*(\/\/|\*)/.test(line) && reads.test(line)) offenders.push(`${rel}:${i + 1}: ${line.trim()}`); });

@@ -6,10 +6,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
 import { epicRefs, noteEpicChildClosed, UNSTICK_KINDS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { memoryRecords } from "./issue-records.mjs";
 import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
 /** The epic label Slashbin's issues use (`epicRefLabel`, from its profile). */
@@ -34,6 +35,7 @@ test("no epicRefLabel: no epic is parsed from any body", () => {
 
 test("two children of one epic: two EM calls, one per close; a repeat close adds none", async () => {
   setStatePath(mkTmp("erc-state-"));
+  memoryRecords();
   const em = mkTmp("erc-em-");
   const log = join(em, "calls.jsonl");
   mkdirSync(join(em, "bin"));
@@ -42,9 +44,9 @@ test("two children of one epic: two EM calls, one per close; a repeat close adds
   const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } } };
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
-  assert.equal(noteEpicChildClosed("erc", "o/erc", 5, [880], LABEL), 1);
-  assert.equal(noteEpicChildClosed("erc", "o/erc", 6, [880], LABEL), 1);
-  assert.equal(noteEpicChildClosed("erc", "o/erc", 5, [880], LABEL), 0);
+  assert.equal(await noteEpicChildClosed(repo, 5, [880], LABEL), 1);
+  assert.equal(await noteEpicChildClosed(repo, 6, [880], LABEL), 1);
+  assert.equal(await noteEpicChildClosed(repo, 5, [880], LABEL), 0);
   assert.equal(await tryUnstick(repo, config, logger, 1, {}), 2);
   const made = calls();
   assert.equal(made.length, 2);

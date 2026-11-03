@@ -167,16 +167,26 @@ export type FastForwardOutcome =
  * 2026-10-05). Returns undefined when git fails: that proves nothing.
  */
 export function divergenceStillHolds(config: RepoConfig): boolean | undefined {
+  const d = readDivergence(config);
+  return d === undefined ? undefined : d !== null;
+}
+
+/**
+ * The branch divergence git shows right now (EM#1244 f4: derived from git, never stored). Read-only, as
+ * `divergenceStillHolds` always was. null: reconciled (or divergence in name only: base's unique commits change
+ * no files). undefined: git failed, which proves nothing.
+ */
+export function readDivergence(config: RepoConfig): { ahead: number; behind: number; mergeBase: string } | null | undefined {
   const { repoPath, baseBranch, featureBranch } = config;
-  if (!baseBranch || !featureBranch || baseBranch === featureBranch) return false;
+  if (!baseBranch || !featureBranch || baseBranch === featureBranch) return null;
   try {
     git(["fetch", "origin", baseBranch, featureBranch, "--quiet"], repoPath);
     const ahead = parseInt(git(["rev-list", "--count", `origin/${baseBranch}..origin/${featureBranch}`], repoPath), 10);
     const behind = parseInt(git(["rev-list", "--count", `origin/${featureBranch}..origin/${baseBranch}`], repoPath), 10);
     if (Number.isNaN(ahead) || Number.isNaN(behind)) return undefined;
-    if (!(ahead > 0 && behind > 0)) return false;
-    const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
-    return git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) !== "";
+    if (!(ahead > 0 && behind > 0)) return null;
+    const mergeBase = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
+    return git(["diff", "--name-only", mergeBase, `origin/${baseBranch}`], repoPath) !== "" ? { ahead, behind, mergeBase } : null;
   } catch {
     return undefined;
   }

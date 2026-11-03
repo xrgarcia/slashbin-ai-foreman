@@ -22,7 +22,7 @@ import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { loadPrRecord, updatePrRecord } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
-import type { ProdRelease } from "./state.js";
+import type { ProdRelease } from "./issue-records.js";
 
 /** The release PR a repo is waiting on, persisted between cycles. */
 export interface SavedRelease {

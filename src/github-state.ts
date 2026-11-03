@@ -24,7 +24,7 @@ import type { Logger } from "./logger.js";
  * (the old snapshot TTL), and a repo the Foreman — or a session it ran — just
  * wrote to is marked dirty and re-synced before the next read.
  *
- * The state is persisted next to `.agent-state.json`, so a restart resumes with
+ * The state is persisted in the Foreman's state directory, so a restart resumes with
  * a delta instead of a cold full poll.
  *
  * Off unless `configureGitHubState` is called (the daemon does): callers fall
@@ -435,6 +435,6 @@ function persist(): void {
   try {
     writeFileSync(opts.persistPath, JSON.stringify(out));
   } catch {
-    // Best-effort, like .agent-state.json — the next refresh rebuilds it.
+    // Best-effort — the next refresh rebuilds it.
   }
 }

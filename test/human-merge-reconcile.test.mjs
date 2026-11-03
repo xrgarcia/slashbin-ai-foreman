@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { runReconcileStage, HUMAN_MERGE_CLOSE_MARK } from "../dist/phases/reconcile.js";
 import { configureIssueCache } from "../dist/github.js";
 import { loadConfig } from "../dist/config.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 
