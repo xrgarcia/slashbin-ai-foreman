@@ -51,6 +51,7 @@ else if (args[0] === "pr" && args[1] === "list" && args.includes("--head") && pr
 else if (args[0] === "api" && args[1] === "repos/example/ordered/issues/3/dependencies/blocked_by") process.stdout.write(JSON.stringify([{ number: 2, state: "open", labels: [{ name: "approved" }] }]));
 else if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) { process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs"); }
 else if (args[0] === "ls-files") process.stdout.write(Array.from({ length: 40 }, (_, i) => "f" + i).join("\\n"));
+else if (args[0] === "api" && /\\/branches\\//.test(args[1])) process.stdout.write("0".repeat(40));
 else process.stdout.write("[]");
 `);
   writeFileSync(join(bin, "claude"), `#!/usr/bin/env node

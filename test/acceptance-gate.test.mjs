@@ -68,6 +68,7 @@ else if (a[0] === "api" && a[1] === "graphql") {
 else if (a[0] === "api" && /\\/dependencies\\/blocked_by$/.test(a[1])) out("[]");
 else if (a[0] === "api" && /^repos\\/example\\/repo\\/issues\\/\\d+$/.test(a[1])) out(S.body);
 else if (a[0] === "api" && a[1].startsWith("repos/o/m/contents/")) { if (S.fileOnMain) out("sha"); else { process.stderr.write("gh: Not Found (HTTP 404)"); process.exit(1); } }
+else if (a[0] === "api" && /\\/branches\\//.test(a[1])) out("0".repeat(40));
 else out("[]");
 `);
   chmodSync(join(bin, "gh"), 0o755);

@@ -76,8 +76,8 @@ export async function tryRevision(
   // The EM's `blocked` label on the PR's issue pauses revise (docs/em-coordination.md §1).
   if (pausedByBlockedLabel(repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
 
-  // The head the no-commit streak is keyed on. An empty head (unreadable) keeps the streak counting.
-  const head = pending.pr.headRefOid ?? codeHost().readPrHeadSha(repoConfig, prNumber, revLogger) ?? "";
+  // The head the no-commit streak is keyed on. An unreadable head throws and fails the pass (EM#1244 f5).
+  const head = pending.pr.headRefOid ?? codeHost().readPrHeadSha(repoConfig, prNumber, revLogger);
 
   // A stopped revision resumes when someone pushes to the PR out of band.
   // Read once, up front: a streak that cannot be read is not "no streak", and a paid session is not started on a guess.
@@ -122,7 +122,7 @@ export async function tryRevision(
   // rounds (2026-10-13) because each fix answered the last finding and the
   // spec question underneath reached no one who owned the spec.
   const ruling = codeHost().readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
-  if (ruling && (ruling.roundsSinceRuling >= REVIEW_ROUNDS_ALERT || ruling.escalateRequested)) {
+  if (ruling.roundsSinceRuling >= REVIEW_ROUNDS_ALERT || ruling.escalateRequested) {
     const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}@${ruling.latestReviewId ?? "none"}`;
     if (!reviewRoundsAlerted.has(roundsKey)) {
       reviewRoundsAlerted.add(roundsKey);

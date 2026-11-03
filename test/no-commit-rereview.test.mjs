@@ -37,8 +37,8 @@ test("the reply is the configured prUnderReview label, applied strictly after th
   assert.match(body, /> verdictMs/);
 });
 
-test("lookup failure keeps the old behaviour instead of reviewing every cycle", () => {
-  assert.match(body, /catch \(err\)[\s\S]*return false;/);
+test("a lookup failure throws and fails the pass: no catch, no guess (EM#1244 f5)", () => {
+  assert.doesNotMatch(body, /catch \(/);
 });
 
 test("paginated label events are parsed line by line, not as one JSON document", () => {

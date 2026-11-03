@@ -1335,8 +1335,8 @@ Work autonomously. Do not ask questions.`;
   // to `pr under review` — that would lie about the PR's state and cause the
   // EM to re-review unchanged code.
   //
-  // Conservative on lookup failures: if either SHA is null (transient gh
-  // error), we trust the exit code rather than fail spuriously.
+  // A branch that does not exist yet reads null; a read that FAILS throws and fails the
+  // pass (EM#1244 f5): neither a trailer nor an exit code is trusted on an unread branch.
   const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, config.featureBranch, config.repoPath, logger);
   if (beforeSha && afterSha && beforeSha === afterSha) {
     // Declared no-commit: the revision determined the branch is already correct
