@@ -266,6 +266,10 @@ test("the branch contract is in the prompt for a repo-local skill, the built-in 
     assert.match(prompt, /origin\/develop/);
     assert.match(prompt, /NEVER commit or push to `features` or `develop`/);
     assert.match(prompt, /Related to #N/);
+    assert.match(prompt, /git checkout -B <branch> develop/, "cut from LOCAL base (carries the skill-sync commit)");
+    assert.match(prompt, /git checkout -B <branch> origin\/<branch> && git merge --no-edit develop/, "resume by merge");
+    assert.match(prompt, /Never rebase, never force-push, never push `develop`/);
+    assert.doesNotMatch(prompt, /rebase it onto/);
   }
 });
 

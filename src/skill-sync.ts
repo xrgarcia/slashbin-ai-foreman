@@ -305,6 +305,32 @@ export type SyncOutcome =
  * The skill sync's memory for one daemon: the cached golden, the last
  * unreadable-golden error, and which drift each repo was last told about.
  */
+/**
+ * Make local `<base>` equal `origin/<base>` (fetch, then fast-forward only) before every session, sync or not: the
+ * session cuts its issue branch from local `<base>`, which must be `origin/<base>` plus at most the one skill-sync
+ * commit made next. Never throws. Local commits origin lacks are left alone (reported, not discarded); the branch
+ * contract tells the session to cut from `origin/<base>` then.
+ */
+export function alignLocalBase(repo: Pick<SkillSyncRepo, "repoPath" | "baseBranch">, logger: Logger): { status: "level" | "fast-forwarded" | "ahead" | "skipped"; reason?: string } {
+  const cwd = repo.repoPath;
+  const fb = repo.baseBranch;
+  try {
+    if (git(["status", "--porcelain", "--untracked-files=no"], cwd)) return { status: "skipped", reason: "the checkout has uncommitted changes" };
+    git(["fetch", "--quiet", "origin", fb], cwd);
+    if (git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) !== fb) git(["checkout", "--quiet", fb], cwd);
+    const ahead = Number(git(["rev-list", "--count", `origin/${fb}..HEAD`], cwd));
+    const behind = Number(git(["rev-list", "--count", `HEAD..origin/${fb}`], cwd));
+    if (ahead > 0) {
+      logger.warn(`Local ${fb} has ${ahead} commit(s) origin/${fb} does not — left as is`);
+      return { status: "ahead", reason: `local ${fb} has ${ahead} commit(s) origin/${fb} does not` };
+    }
+    if (behind > 0) { git(["merge", "--quiet", "--ff-only", `origin/${fb}`], cwd); return { status: "fast-forwarded" }; }
+    return { status: "level" };
+  } catch (err) {
+    return { status: "skipped", reason: firstLine(err) };
+  }
+}
+
 export class SkillSync {
   private cache: { key: string; at: number; golden: Golden } | null = null;
   private lastGoldenError: string | null = null;

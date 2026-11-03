@@ -313,3 +313,39 @@ test("the builtin source reads the package's own skills", () => {
   assert.ok(g.skills.has("implement") && g.skills.has("revise"));
   assert.equal(g.label, "slashbin-ai-agent");
 });
+
+// foreman#208 (Tech Lead, EM#1279 R1): the issue branch is cut from LOCAL base, so the sync commit is in its history.
+test("local base is fast-forwarded before any session, and a branch cut from it carries the sync commit", () => {
+  const cfg = cfgFor(makeGolden(tmp));
+  const repo = makeRepo(tmp, CURRENT);
+  const seed = join(tmp, "seed");
+  put(seed, "src.txt", "someone else's work\n");
+  git(seed, "add", "-A"); git(seed, "commit", "--quiet", "-m", "z");
+  git(seed, "push", "--quiet", "origin", "develop");
+  assert.equal(ss.alignLocalBase({ repoPath: repo, baseBranch: "develop" }, logger()).status, "fast-forwarded");
+  assert.equal(git(repo, "rev-parse", "develop"), git(repo, "rev-parse", "origin/develop"));
+  assert.equal(ss.alignLocalBase({ repoPath: repo, baseBranch: "develop" }, logger()).status, "level");
+
+  // Make the copy stale (committed and pushed, so base stays level), then the sync commit on local develop, then the session's cut: git checkout -B <branch> develop.
+  put(repo, ".claude/skills/clean-code/SKILL.md", "stale\n");
+  git(repo, "add", "-A"); git(repo, "commit", "--quiet", "-m", "stale copy"); git(repo, "push", "--quiet", "origin", "develop");
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, baseBranch: "develop" }, [5], logger());
+  assert.equal(out.status, "synced");
+  git(repo, "checkout", "--quiet", "-B", "foreman/5-x", "develop");
+  assert.equal(git(repo, "rev-parse", "HEAD"), out.sha, "the sync commit is the tip of the issue branch");
+  assert.equal(git(repo, "rev-parse", "HEAD~1"), git(repo, "rev-parse", "origin/develop"), "on top of origin/develop");
+  // After the session, settle puts local develop back; the branch keeps the commit.
+  });
+
+test("local base ahead of origin is reported and left alone", () => {
+  const repo = makeRepo(tmp, CURRENT);
+  put(repo, "local.txt", "x\n"); git(repo, "add", "-A"); git(repo, "commit", "--quiet", "-m", "local");
+  const r = ss.alignLocalBase({ repoPath: repo, baseBranch: "develop" }, logger());
+  assert.equal(r.status, "ahead");
+});
+
+test("the implement phase aligns local base before the sync and the session", () => {
+  const src = readFileSync(join(root, "src/phases/implement.ts"), "utf8");
+  const align = src.indexOf("alignLocalBase(repoConfig, repoLogger)");
+  assert.ok(align > 0 && align < src.indexOf("skillSync = rt.skillSync.syncSkillsForIssue(") && align < src.indexOf("await implementApprovedIssues("));
+});

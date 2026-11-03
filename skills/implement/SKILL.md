@@ -60,12 +60,16 @@ object of issue number to branch name (`foreman/<N>-<slug>`); read the chosen is
 node -e 'console.log(JSON.parse(process.env.FOREMAN_BRANCHES)[<N>])'
 ```
 
-1. `git checkout <base> && git merge --ff-only origin/<base>` (a no-op when already level;
-   a local sync commit the Foreman made on `<base>` is carried into the branch below).
-2. If `origin/<branch>` already exists (a prior attempt), `git checkout -B <branch> origin/<branch>`
-   then `git rebase <base>`. A conflict you cannot resolve mechanically is a stop:
-   `git rebase --abort`, comment, and end with a `skipped issue=<N>` trailer.
-3. Otherwise `git checkout -B <branch> <base>`.
+Local `<base>` was prepared by the Foreman as `origin/<base>` plus at most one skill-sync
+commit (subject `chore(skills): sync ...`). Never push `<base>`.
+
+1. Fresh branch: `git checkout -B <branch> <base>` (cut from LOCAL `<base>`, so the sync commit
+   rides in). If `git rev-list --count origin/<base>..<base>` is more than that one sync commit,
+   cut from `origin/<base>` instead.
+2. If `origin/<branch>` already exists (a prior attempt), do NOT rebase:
+   `git checkout -B <branch> origin/<branch> && git merge --no-edit <base>`. A merge keeps the
+   published commits, so a normal push works. On a conflict, `git merge --abort`, comment, and end
+   with `FOREMAN_RESULT: skipped issue=<N> reason="merge conflict: <files>"`. Never force-push.
 
 Never build on, commit to or push to another issue's branch, `<base>`, or a branch you
 did not cut here.
