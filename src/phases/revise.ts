@@ -1,6 +1,5 @@
 // The revise phase: address review feedback on an open PR.
 
-import { buildEnded, buildStarted } from "../build-in-flight.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
@@ -9,37 +8,15 @@ import { revisePRFeedback } from "../agent.js";
 import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { type BlockKind } from "../unblock.js";
-import {
-  MAX_CONSECUTIVE_NO_COMMIT,
-  clearNoCommitStreak,
-  noCommitCount,
-  prsWithNoCommitStreak,
-  readNoCommitStreak,
-  admitRevision,
-  isUnconfirmed,
-  resolveUnconfirmed,
-  recordNoCommit,
-  stalemateHead,
-} from "../no-commit-streak.js";
-import {
-  CycleEvent,
-  REVIEW_ROUNDS_ALERT,
-  activeRuns,
-  itemOf,
-  pausedByBlockedLabel,
-  prReport,
-  releaseIfResolved,
-  reviewRoundsAlerted,
-  revisionEscalated,
-  revisionFailureCount,
-  revisionStoppedHead,
-  stoppedReason,
-} from "./common.js";
+import { MAX_CONSECUTIVE_NO_COMMIT, noCommitCount, isUnconfirmed, stalemateHead } from "../no-commit-streak.js";
+import { CycleEvent, REVIEW_ROUNDS_ALERT, activeRuns, itemOf, pausedByBlockedLabel, prReport, releaseIfResolved, stoppedReason } from "./common.js";
 import { reportLaunchThrew } from "./implement.js";
 import { codeHost } from "../plugins/registry.js";
 import type { PendingRevisionInfo } from "../code-host.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 export async function tryRevision(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
@@ -51,7 +28,7 @@ export async function tryRevision(
 
   if (isUpstreamBlocked("claude")) return null;
 
-  let failures = revisionFailureCount.get(repoName) ?? 0;
+  let failures = rt.memory.revisionFailureCount.get(repoName) ?? 0;
   // Failed revisions before the PR is escalated to a person (backoff.repoFailure).
   const { maxFailures } = config.backoff.repoFailure;
 
@@ -64,39 +41,39 @@ export async function tryRevision(
   // exhausted, and then deadlocked the whole repo: revision skipped forever, and
   // implement is gated on "no pending revision", so #412 could not build either.
   // Clearing `pr pending actions` for one pass now resets it, as the comment on
-  // `revisionEscalated` always claimed.
+  // `rt.memory.revisionEscalated` always claimed.
   const pending = codeHost().findPendingRevisions(repoConfig, revLogger);
   if (!pending) {
-    if (failures > 0) revisionFailureCount.set(repoName, 0);
-    revisionEscalated.delete(repoName);
-    revisionStoppedHead.delete(repoName);
-    await forgetClosedPrStreaks(repoConfig, revLogger);
+    if (failures > 0) rt.memory.revisionFailureCount.set(repoName, 0);
+    rt.memory.revisionEscalated.delete(repoName);
+    rt.memory.revisionStoppedHead.delete(repoName);
+    await forgetClosedPrStreaks(rt, repoConfig, revLogger);
     return null;
   }
   const prNumber = pending.pr.number;
 
   // The EM's `blocked` label on the PR's issue pauses revise (docs/em-coordination.md §1).
-  if (pausedByBlockedLabel(repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
+  if (pausedByBlockedLabel(rt, repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
 
   // The head the no-commit streak is keyed on. An unreadable head throws and fails the pass (EM#1244 f5).
   const head = pending.pr.headRefOid ?? codeHost().readPrHeadSha(repoConfig, prNumber, revLogger);
 
   // A stopped revision resumes when someone pushes to the PR out of band.
   // Read once, up front: a streak that cannot be read is not "no streak", and a paid session is not started on a guess.
-  const read = await readNoCommitStreak(repoConfig, prNumber);
+  const read = await rt.streaks.read(repoConfig, prNumber);
   if (!read.ok) {
     revLogger.info(`Skipping ${repoName} revision — PR #${prNumber}'s no-commit record cannot be read from the work source`);
     return null;
   }
   let streak = read.streak;
-  const stoppedAt = revisionStoppedHead.get(repoName) ?? stalemateHead(streak);
+  const stoppedAt = rt.memory.revisionStoppedHead.get(repoName) ?? stalemateHead(streak);
   if (stoppedAt !== undefined) {
     const kind: BlockKind = failures >= maxFailures ? "revision-exhausted" : "revision-stalemate";
-    if (await releaseIfResolved(kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
-      revisionStoppedHead.delete(repoName);
-      revisionFailureCount.set(repoName, 0);
-      revisionEscalated.delete(repoName);
-      if (streak && await clearNoCommitStreak(repoConfig, prNumber)) streak = undefined;
+    if (await releaseIfResolved(rt, kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
+      rt.memory.revisionStoppedHead.delete(repoName);
+      rt.memory.revisionFailureCount.set(repoName, 0);
+      rt.memory.revisionEscalated.delete(repoName);
+      if (streak && await rt.streaks.clear(repoConfig, prNumber)) streak = undefined;
       failures = 0;
     }
   }
@@ -126,8 +103,8 @@ export async function tryRevision(
   const ruling = codeHost().readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
   if (ruling.roundsSinceRuling >= REVIEW_ROUNDS_ALERT || ruling.escalateRequested) {
     const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}@${ruling.latestReviewId ?? "none"}`;
-    if (!reviewRoundsAlerted.has(roundsKey)) {
-      reviewRoundsAlerted.add(roundsKey);
+    if (!rt.memory.reviewRoundsAlerted.has(roundsKey)) {
+      rt.memory.reviewRoundsAlerted.add(roundsKey);
       const why = ruling.escalateRequested
         ? `the Tech Lead flagged a spec question on PR #${pending.pr.number}`
         : `PR #${pending.pr.number} has been sent back ${ruling.roundsSinceRuling} times${ruling.rulingAt ? " since the last ruling" : ""}`;
@@ -136,7 +113,7 @@ export async function tryRevision(
         `(issues ${pending.issueNumbers.map((n) => `#${n}`).join(", ")}); a PR comment opening "**EM scope ruling" resumes it.`;
       revLogger.warn(`${why} — revision paused for an EM scope ruling`);
       events.push({ message: `⚠️ ${repoConfig.githubRepo} — ${ask}`, level: "warn" });
-      for (const n of pending.issueNumbers) await emit({ kind: "escalated", item: itemOf(repoConfig, n), reason: ask, stuck: "needs-ruling" }, repoConfig, revLogger);
+      for (const n of pending.issueNumbers) await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason: ask, stuck: "needs-ruling" }, repoConfig, revLogger);
     } else {
       revLogger.debug(`Skipping ${repoName} revision — PR #${pending.pr.number} awaits an EM scope ruling`);
     }
@@ -154,10 +131,10 @@ export async function tryRevision(
   if (isUnconfirmed(prior, head)) {
     // An earlier attempt on this head has no confirming read, and this pass could read the branch: settle it
     // (neither counted nor consumed) and pay for nothing this pass. One unconfirmed attempt per head, then a free pass.
-    if (!await resolveUnconfirmed(repoConfig, prNumber, head, prior)) revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s unconfirmed attempt cannot be settled in the work source`);
+    if (!await rt.streaks.resolveUnconfirmed(repoConfig, prNumber, head, prior)) revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s unconfirmed attempt cannot be settled in the work source`);
     return null;
   }
-  if (!await admitRevision(repoConfig, prNumber, head, prior)) {
+  if (!await rt.streaks.admitRevision(repoConfig, prNumber, head, prior)) {
     revLogger.warn(`Skipping ${repoName} revision — PR #${prNumber}'s revision marker cannot be saved to the work source`);
     return null;
   }
@@ -165,7 +142,7 @@ export async function tryRevision(
   if (!tryAcquire("claude")) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
-  buildStarted(repoName);
+  rt.builds.started(repoName);
   revLogger.info(`Triggering PR revision for ${repoName} — PR #${pending.pr.number}, issues: ${pending.issueNumbers.map(n => `#${n}`).join(", ")}`);
   const session: Omit<SessionEvent, "status"> = {
     phase: "revise", repo: repoConfig.githubRepo, pr: pending.pr.number,
@@ -177,11 +154,11 @@ export async function tryRevision(
   try {
     // A read that fails (the branch sha after the session, the QA lines) throws out of here: the pass fails closed,
     // the marker saved at admission stays as it is (outcome unknown), and nothing is written to take back.
-    await emit({ kind: "session", session: { ...session, status: "started" } }, null, revLogger);
+    await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, revLogger);
     // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
     const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
     const result = await revisePRFeedback(
-      repoConfig, revLogger, runAbort.signal,
+      rt.trust, repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha,
     ).catch(reportLaunchThrew);
     reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
@@ -194,13 +171,13 @@ export async function tryRevision(
     }
 
     if (result.success) {
-      revisionFailureCount.set(repoName, 0);
-      revisionEscalated.delete(repoName);
+      rt.memory.revisionFailureCount.set(repoName, 0);
+      rt.memory.revisionEscalated.delete(repoName);
 
       if (result.noCommit) {
         // The session completed and the read after it showed the head unchanged: the round counts now. A count that
         // cannot be saved leaves the marker and the issue where they are (unconfirmed), to be answered on a later pass.
-        const seen = await recordNoCommit(repoConfig, prNumber, head, prior);
+        const seen = await rt.streaks.record(repoConfig, prNumber, head, prior);
         if (seen === null) {
           revLogger.warn(`PR #${pending.pr.number}'s no-commit round could not be saved to the work source — not advancing it; the next pass answers it`);
           return null;
@@ -227,7 +204,7 @@ export async function tryRevision(
           // Stopped for a person: the board must say so, not leave it "in review".
           // The streak records the head it stopped on; a push to the PR resumes it.
           const why = `reviewer and reviser disagree on PR #${pending.pr.number} after ${seen} no-commit rounds — EM to rule, or push to the PR and the Foreman resumes. Last reason: ${result.noCommitReason ?? "not given"}`;
-          for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why, stuck: "revision-stalemate" }, repoConfig, revLogger);
+          for (const n of pending.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why, stuck: "revision-stalemate" }, repoConfig, revLogger);
           return null;
         }
 
@@ -236,14 +213,14 @@ export async function tryRevision(
         );
       } else {
         // It committed: the marker admitted above was not a no-commit round.
-        await clearNoCommitStreak(repoConfig, prNumber);
+        await rt.streaks.clear(repoConfig, prNumber);
       }
 
       // Transition issue labels: `prPendingActions` → `prUnderReview`
       // The orchestrator owns this because the skill runs in the service repo
       // and may not have the right context to find the issue labels.
       for (const n of pending.issueNumbers) {
-        await advance(itemOf(repoConfig, n), "revised", repoConfig, revLogger);
+        await advance(rt, itemOf(repoConfig, n), "revised", repoConfig, revLogger);
       }
 
       revLogger.info("PR revision succeeded");
@@ -254,23 +231,23 @@ export async function tryRevision(
       // The card still goes to Blocked: the work has stopped, and the board says why.
       if (result.upstreamLimit || isUpstreamBlocked("github")) {
         const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, isUpstreamBlocked("github"));
-        for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
+        for (const n of pending.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
         return null;
       }
       const newCount = failures + 1;
-      revisionFailureCount.set(repoName, newCount);
+      rt.memory.revisionFailureCount.set(repoName, newCount);
       revLogger.warn(`PR revision failed (${newCount}/${maxFailures}): ${result.error}`);
       if (newCount < maxFailures) {
         const why = stoppedReason(`Revision of PR #${pending.pr.number}`, result, false, `${newCount}/${maxFailures}`);
-        for (const n of pending.issueNumbers) await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
+        for (const n of pending.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, revLogger);
       }
 
       // Retries exhausted. This is the end of the automated road for this PR: every
       // later cycle takes the skip branch above and does nothing. Say so out loud,
       // once, with the PR and the reason — a stuck PR that nobody is told about is
       // only discovered by someone thinking to look.
-      if (newCount >= maxFailures && !revisionEscalated.has(repoName)) {
-        revisionEscalated.add(repoName);
+      if (newCount >= maxFailures && !rt.memory.revisionEscalated.has(repoName)) {
+        rt.memory.revisionEscalated.add(repoName);
         const issues = pending.issueNumbers.map((n) => `#${n}`).join(", ");
         revLogger.error(
           `Revision retries exhausted on PR #${pending.pr.number} — no further attempts will be made ` +
@@ -283,10 +260,10 @@ export async function tryRevision(
             `STOPPED retrying it${issues ? ` (issues ${issues})` : ""}. It needs a human. Last failure: ${result.error ?? "unknown"}`,
           level: "error",
         });
-        if (pending.pr.headRefOid) revisionStoppedHead.set(repoName, pending.pr.headRefOid);
+        if (pending.pr.headRefOid) rt.memory.revisionStoppedHead.set(repoName, pending.pr.headRefOid);
         const blocked = `Revision retries exhausted on PR #${pending.pr.number}: ${result.error ?? "unknown"} — push to the PR and the Foreman resumes`;
         for (const n of pending.issueNumbers) {
-          await emit({ kind: "blocked", item: itemOf(repoConfig, n), reason: blocked, stuck: "revision-exhausted" }, repoConfig, revLogger);
+          await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: blocked, stuck: "revision-exhausted" }, repoConfig, revLogger);
         }
       }
     }
@@ -294,16 +271,16 @@ export async function tryRevision(
     return null;
   } finally {
     activeRuns.delete(runAbort);
-    buildEnded(repoName);
-    await emit({ kind: "session", session: { ...session, ...ended, ...(report ? { report } : {}) } }, null, revLogger);
+    rt.builds.ended(repoName);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(report ? { report } : {}) } }, null, revLogger);
   }
 }
 
 /** A closed or merged PR's no-commit streak is over: forget every one whose PR is no longer open. */
-async function forgetClosedPrStreaks(repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  for (const pr of prsWithNoCommitStreak(repoConfig)) {
+async function forgetClosedPrStreaks(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  for (const pr of rt.streaks.prsWithStreak(repoConfig)) {
     const open = codeHost().isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
-    if (open === false) await clearNoCommitStreak(repoConfig, pr);
+    if (open === false) await rt.streaks.clear(repoConfig, pr);
     else if (open === null) logger.debug(`PR #${pr}: no-commit streak kept, GitHub could not say whether it is open`);
   }
 }

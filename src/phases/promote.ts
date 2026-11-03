@@ -9,11 +9,12 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
-import { fieldTable, loadIssueRecords, updateIssueRecord } from "../issue-records.js";
-import { releaseIssues, followReleasePrs, loadReleases } from "../release-tracker.js";
-import { STALL_CHECK_CYCLE_INTERVAL, itemOf, lastStallCheckCycle, notifyOnce } from "./common.js";
+import { fieldTable } from "../issue-records.js";
+import { releaseIssues } from "../release-tracker.js";
+import { STALL_CHECK_CYCLE_INTERVAL, itemOf, notifyOnce } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { PromotionIssue, ReleaseCarry } from "../code-host.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 export function trySyncDrift(
   repoConfig: RepoConfig,
@@ -139,8 +140,8 @@ export function tryFileDependencyBatchIssue(
  * behind release PR #1206). Exported for the release stage, which calls it the
  * moment the SRE merges, so the board does not wait a pass.
  */
-export async function followRelease(repoConfig: RepoConfig, logger: Logger, owned = false): Promise<void> {
-  await followReleasePrs(repoConfig, logger, async (release) => { await emit({ kind: "release", release }, null, logger); }, owned);
+export async function followRelease(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger, owned = false): Promise<void> {
+  await rt.releases.followReleasePrs(repoConfig, logger, async (release) => { await emit(rt, { kind: "release", release }, null, logger); }, owned);
 }
 
 /** Marks the promote stage's one stall comment on an issue. */
@@ -154,14 +155,14 @@ const STALL_MARK = "<!-- foreman:promotion-stall -->";
  * so a later stall comments again. With nobody to comment on, the log line is
  * the record.
  */
-async function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): Promise<void> {
+async function noteStall(rt: ForemanRuntime, repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
   const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const waiting = open
     .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel))
     .map((i) => i.number);
   // An issue whose record cannot be read may already have been commented on: it is left alone this pass.
-  const loaded = await loadIssueRecords(repoConfig, open.map((i) => i.number));
+  const loaded = await rt.records.loadIssueRecords(repoConfig, open.map((i) => i.number));
   const noted = new Set(waiting.filter((n) => loaded.records.get(n)?.promotionStallNoted === true));
   const fresh = waiting.filter((n) => loaded.records.has(n) && !noted.has(n));
   // A held release names the work: `noteHeldRelease` already said whose it is.
@@ -193,7 +194,7 @@ async function noteStall(repoConfig: RepoConfig, files: number, logger: Logger, 
     if (loaded.unavailable.has(n)) continue;
     const mark = noted.has(n);
     if (mark !== (loaded.records.get(n)?.promotionStallNoted === true)) {
-      await updateIssueRecord(repoConfig, n, (d) => { if (mark) d.promotionStallNoted = true; else delete d.promotionStallNoted; });
+      await rt.records.updateIssueRecord(repoConfig, n, (d) => { if (mark) d.promotionStallNoted = true; else delete d.promotionStallNoted; });
     }
   }
 }
@@ -224,24 +225,10 @@ function describeHeld(repoConfig: RepoConfig, n: number, fallbackPr: number | nu
     `${pr ? ` on PR #${pr}` : ""} — waiting on a person`;
 }
 
-/**
- * `develop` carries work whose release a stop is holding. Named in the log
- * once per change of the held set (kept in memory; a restart repeats the note
- * once); while it is unchanged, each check is a debug line. The issue already
- * carries the stop's own comment, so nothing is commented here. Returns the
- * line for observers.
- */
-/** The held set last named, per repo. In memory only: a restart costs one repeated note (EM#1244 f4). */
-const heldNoted = new Map<string, string>();
-
-export function resetHeldNotesForTests(): void {
-  heldNoted.clear();
-}
-
-function noteHeldRelease(repoConfig: RepoConfig, held: number[], files: number, logger: Logger): string {
+function noteHeldRelease(rt: ForemanRuntime, repoConfig: RepoConfig, held: number[], files: number, logger: Logger): string {
   const key = held.join(",");
   const prefix = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}: `;
-  if (heldNoted.get(repoConfig.name) === key) {
+  if (rt.memory.heldNoted.get(repoConfig.name) === key) {
     const line = held.map((n) => `release of #${n} held (${repoConfig.github.blockedLabel})`).join("; ");
     logger.debug(`${prefix}${line} — unchanged since last noted`);
     return line;
@@ -250,13 +237,13 @@ function noteHeldRelease(repoConfig: RepoConfig, held: number[], files: number, 
   const listed = open ? new Set(releaseIssues(open.body)) : new Set<number>();
   const line = held.map((n) => describeHeld(repoConfig, n, open && listed.has(n) ? open.number : null, logger)).join("; ");
   logger.warn(`${prefix}${line}.`);
-  heldNoted.set(repoConfig.name, key);
+  rt.memory.heldNoted.set(repoConfig.name, key);
   return line;
 }
 
 /** Forget the noted held release once it no longer holds `develop`, so a later stop is named again. */
-function clearHeldNote(repoConfig: RepoConfig): void {
-  heldNoted.delete(repoConfig.name);
+function clearHeldNote(rt: ForemanRuntime, repoConfig: RepoConfig): void {
+  rt.memory.heldNoted.delete(repoConfig.name);
 }
 
 /**
@@ -265,11 +252,11 @@ function clearHeldNote(repoConfig: RepoConfig): void {
  * on the release PR when promote rewrites it, and are re-queued onto a new
  * one if the old one was closed unmerged.
  */
-async function carriedIssues(repoConfig: RepoConfig, logger: Logger): Promise<PromotionIssue[] | null> {
+async function carriedIssues(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<PromotionIssue[] | null> {
   const { releasePending } = repoConfig.lifecycleLabels;
   const merged = new Set<number>();
   // A release whose record cannot be read may have merged: nothing is rewritten or re-queued until it can be read.
-  const loaded = await loadReleases(repoConfig, logger);
+  const loaded = await rt.releases.loadReleases(repoConfig, logger);
   if (!loaded || loaded.unreadable.size > 0) return null;
   for (const r of loaded.releases) {
     if (r.phase !== "deploying") for (const n of r.issues) merged.add(n);
@@ -297,6 +284,7 @@ function union(a: PromotionIssue[], b: PromotionIssue[]): PromotionIssue[] {
  * stripped and a person merges and closes.
  */
 export async function tryPromotion(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   logger: Logger,
   cycleNumber: number,
@@ -312,19 +300,19 @@ export async function tryPromotion(
 
   // Before the ready-for-prod read: a release PR stays open, and merges, after
   // its issues have lost that label.
-  await followRelease(repoConfig, promoLogger, releaseActive);
+  await followRelease(rt, repoConfig, promoLogger, releaseActive);
 
   let issues = codeHost().findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
   );
-  const carried = releaseActive ? await carriedIssues(repoConfig, promoLogger) : [];
+  const carried = releaseActive ? await carriedIssues(rt, repoConfig, promoLogger) : [];
   if (carried === null) {
     // Which issues the release stage carries is unknown (a release record cannot be read): promote rewrites no release PR on a guess.
     promoLogger.info(`${repoName}: a release record cannot be read from the work source; promotion waits for a later cycle`);
     return null;
   }
   const queue = async (nums: number[]): Promise<void> => {
-    for (const n of nums) await advance(itemOf(repoConfig, n), "releaseQueued", repoConfig, promoLogger);
+    for (const n of nums) await advance(rt, itemOf(repoConfig, n), "releaseQueued", repoConfig, promoLogger);
   };
 
   if (issues.length === 0 && carried.length === 0) {
@@ -336,9 +324,9 @@ export async function tryPromotion(
     // Rate-limited because it costs a compare API call and the discovery budget
     // is repos x cycles/hour (see docs on the GitHub API budget) — a stall lasts
     // cycles, so hourly is early enough to catch it and cheap enough to keep.
-    const last = lastStallCheckCycle.get(repoName) ?? -Infinity;
+    const last = rt.memory.lastStallCheckCycle.get(repoName) ?? -Infinity;
     if (cycleNumber - last >= STALL_CHECK_CYCLE_INTERVAL) {
-      lastStallCheckCycle.set(repoName, cycleNumber);
+      rt.memory.lastStallCheckCycle.set(repoName, cycleNumber);
       const drift = codeHost().checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
       // Gate on CHANGED FILES, never on commit count. Every repo sits 1 commit
       // ahead in the steady state — the main -> develop sync PR's merge commit,
@@ -352,9 +340,9 @@ export async function tryPromotion(
         const held = heldReleaseIssues(repoConfig, promoLogger);
         let detail: string;
         if (held.length > 0) {
-          detail = noteHeldRelease(repoConfig, held, files, promoLogger);
+          detail = noteHeldRelease(rt, repoConfig, held, files, promoLogger);
         } else {
-          clearHeldNote(repoConfig);
+          clearHeldNote(rt, repoConfig);
           promoLogger.info(
             `${repoName}: ${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch} ` +
             `(${drift.developAheadOfMain} commit(s) ahead) but no issue carries "${repoConfig.lifecycleLabels.readyForProd}" — ` +
@@ -364,8 +352,8 @@ export async function tryPromotion(
           detail = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}; ` +
             `no issue carries "${repoConfig.lifecycleLabels.readyForProd}"`;
         }
-        await noteStall(repoConfig, files, promoLogger, held);
-        await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail }, null, promoLogger);
+        await noteStall(rt, repoConfig, files, promoLogger, held);
+        await emit(rt, { kind: "promotionStall", repo: repoConfig.githubRepo, detail }, null, promoLogger);
       } else if (drift) {
         if (drift.developAheadFiles > 0) {
           promoLogger.debug(
@@ -373,16 +361,16 @@ export async function tryPromotion(
             `(${drift.developAheadFiles} file(s)): no production effect, rides the next release`,
           );
         }
-        clearHeldNote(repoConfig);
-        await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
+        clearHeldNote(rt, repoConfig);
+        await emit(rt, { kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
       }
     }
     return null;
   }
 
   // Issues are ready, so promotion is moving, not stalled.
-  clearHeldNote(repoConfig);
-  await emit({ kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
+  clearHeldNote(rt, repoConfig);
+  await emit(rt, { kind: "promotionStall", repo: repoConfig.githubRepo, detail: null }, null, promoLogger);
   if (issues.length > 0) promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
   // Check if a promotion PR already exists
@@ -454,7 +442,7 @@ export async function tryPromotion(
     if (issues.length === 0) return null;  // carried only: the release stage owns them
     // An unreadable record is not "no verification": that issue is untouched this pass (no close, no queue,
     // no label strip, no notification, no event), and the issues below are the readable ones only.
-    const recorded = await loadIssueRecords(repoConfig, issues.map((i) => i.number));
+    const recorded = await rt.records.loadIssueRecords(repoConfig, issues.map((i) => i.number));
     const nums = issues.map((i) => i.number).filter((n) => !recorded.unavailable.has(n));
     if (nums.length < issues.length) promoLogger.warn(`Already promoted: ${issues.length - nums.length} issue(s) with an unreadable record left alone this pass`);
     if (nums.length === 0) return null;
@@ -476,13 +464,13 @@ export async function tryPromotion(
         (close.length > 0 ? `; closing ${close.map((n) => `#${n}`).join(", ")} (prod-verified at ${head?.slice(0, 10)})` : "") +
         (pending.length > 0 ? `; ${pending.map((n) => `#${n}`).join(", ")} → release pending for prod verification` : ""),
       );
-      await emit({ kind: "release", release: {
+      await emit(rt, { kind: "release", release: {
         repo: repoConfig.githubRepo, state: "merged",
         issues: nums.map((n) => itemOf(repoConfig, n)), productionBranch: repoConfig.productionBranch,
       } }, null, promoLogger);
-      for (const n of close) await advance(itemOf(repoConfig, n), "alreadyReleased", repoConfig, promoLogger);
+      for (const n of close) await advance(rt, itemOf(repoConfig, n), "alreadyReleased", repoConfig, promoLogger);
       await queue(pending);
-      await notifyOnce("promoted", repoConfig, nums, promoLogger);
+      await notifyOnce(rt, "promoted", repoConfig, nums, promoLogger);
       return null;
     }
     // Legacy (no release stage): strip the label to remove them from the promote
@@ -495,8 +483,8 @@ export async function tryPromotion(
     );
     codeHost().stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
     // Confirmed in main: the promotion these issues were waiting for happened.
-    await notifyOnce("promoted", repoConfig, nums, promoLogger);
-    await emit({ kind: "release", release: {
+    await notifyOnce(rt, "promoted", repoConfig, nums, promoLogger);
+    await emit(rt, { kind: "release", release: {
       repo: repoConfig.githubRepo,
       state: "merged",
       issues: nums.map((n) => itemOf(repoConfig, n)),
@@ -540,7 +528,7 @@ export async function tryPromotion(
       // owns these issues, so the next cycle does not promote them again.
       codeHost().stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
     }
-    await notifyOnce("promoted", repoConfig, nums, promoLogger);
+    await notifyOnce(rt, "promoted", repoConfig, nums, promoLogger);
     return "promoted";
   } else {
     promoLogger.warn("Failed to create promotion PR");

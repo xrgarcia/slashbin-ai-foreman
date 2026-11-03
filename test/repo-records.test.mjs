@@ -12,15 +12,14 @@ import { fileURLToPath } from "node:url";
 import { activeWorkSource } from "../dist/plugins/registry.js";
 import { GitHubRecordStore, REPO_RECORD_TITLE, RECORD_MARKER } from "../dist/github/record-store.js";
 import { InMemoryRecordStore } from "../dist/record-store.js";
-import { loadRepoRecord, updateRepoRecord, updateIssueRecord, loadIssueRecord, resetIssueRecordsForTests } from "../dist/issue-records.js";
 import { createCardBlockStore } from "../dist/card-blocks.js";
-import { standingDivergence, observeDivergence, resetDivergenceForTests } from "../dist/divergence.js";
-import { importLegacyRecords, resetLegacyImportForTests } from "../dist/legacy-records.js";
 import { foremanHolds } from "../dist/work-source.js";
 import { setStateDir } from "../dist/state-dir.js";
 import { legacyFile, readLegacy, writeLegacy, removeLegacy } from "./_legacy-state.mjs";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { mkTmp } from "./tmp-dir.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
 const mk = (name) => ({ name, githubRepo: `example/${name}`, repoPath: mkTmp(`repo-records-${name}-`) });
@@ -49,9 +48,7 @@ beforeEach(() => {
   const source = activeWorkSource();
   source.loadRecord = async (key, rc) => (failLoad && key.kind === "repo" ? { status: "unavailable" } : store.loadRecord(key, rc));
   source.saveRecord = async (key, record, rc) => (failSave && key.kind === "repo" ? false : store.saveRecord(key, record, rc));
-  resetIssueRecordsForTests();
-  resetDivergenceForTests();
-  resetLegacyImportForTests();
+  rt = new ForemanRuntime();
   removeLegacy();
 });
 
@@ -137,52 +134,52 @@ test("repo key: an issue and a PR numbered 0 never exist, so the repo key cannot
 // --- the facade -----------------------------------------------------------------------------------------
 
 test("repo record: absent reads as {}, an empty change saves nothing, concurrent changes to different fields both land", async () => {
-  assert.deepEqual(await loadRepoRecord(repoA), {});
-  assert.equal(await updateRepoRecord(repoA, () => {}), true);
+  assert.deepEqual(await rt.records.loadRepoRecord(repoA), {});
+  assert.equal(await rt.records.updateRepoRecord(repoA, () => {}), true);
   assert.equal(store.records.size, 0, "no record for nothing to record");
   await Promise.all([
-    updateRepoRecord(repoA, (d) => { d.unstick = { "0:x": question("x", "r") }; }),
-    updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1"]; }),
-    updateRepoRecord(repoA, (d) => { d.cardBlocks = { c1: block("b") }; }),
+    rt.records.updateRepoRecord(repoA, (d) => { d.unstick = { "0:x": question("x", "r") }; }),
+    rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1"]; }),
+    rt.records.updateRepoRecord(repoA, (d) => { d.cardBlocks = { c1: block("b") }; }),
   ]);
-  const r = await loadRepoRecord(repoA);
+  const r = await rt.records.loadRepoRecord(repoA);
   assert.deepEqual(Object.keys(r).sort(), ["cardBlocks", "divergenceRuled", "unstick"]);
-  assert.deepEqual(await loadRepoRecord(repoB), {}, "another repo's record is its own");
+  assert.deepEqual(await rt.records.loadRepoRecord(repoB), {}, "another repo's record is its own");
 });
 
 test("repo record: an unreadable record reads as null and nothing is written over it", async () => {
-  await updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1"]; });
+  await rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1"]; });
   failLoad = true;
-  assert.equal(await loadRepoRecord(repoA), null);
-  assert.equal(await updateRepoRecord(repoA, (d) => { d.divergenceRuled = []; }), false);
+  assert.equal(await rt.records.loadRepoRecord(repoA), null);
+  assert.equal(await rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = []; }), false);
   failLoad = false;
-  assert.deepEqual((await loadRepoRecord(repoA)).divergenceRuled, ["c:1"]);
+  assert.deepEqual((await rt.records.loadRepoRecord(repoA)).divergenceRuled, ["c:1"]);
   failSave = true;
-  assert.equal(await updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1", "c:2"]; }), false);
+  assert.equal(await rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1", "c:2"]; }), false);
 });
 
 // --- the card-block store ---------------------------------------------------------------------------------
 
 test("card blocks: a block is saved in its repo's record, read back merged, and moved when its card's repo is known", async () => {
   const repos = [repoA, repoB];
-  const blocks = createCardBlockStore(() => repos);
+  const blocks = createCardBlockStore(() => repos, rt.records, rt.legacy);
   assert.deepEqual(await blocks.load(), {});
   assert.equal(await blocks.save("c1", block("one"), "example/a"), true);
   assert.equal(await blocks.save("c2", block("two"), "example/b"), true);
-  assert.deepEqual(Object.keys((await loadRepoRecord(repoA)).cardBlocks), ["c1"]);
-  assert.deepEqual(Object.keys((await loadRepoRecord(repoB)).cardBlocks), ["c2"]);
-  assert.deepEqual(Object.keys(await createCardBlockStore(() => repos).load()).sort(), ["c1", "c2"], "a restart sees both");
+  assert.deepEqual(Object.keys((await rt.records.loadRepoRecord(repoA)).cardBlocks), ["c1"]);
+  assert.deepEqual(Object.keys((await rt.records.loadRepoRecord(repoB)).cardBlocks), ["c2"]);
+  assert.deepEqual(Object.keys(await createCardBlockStore(() => repos, rt.records, rt.legacy).load()).sort(), ["c1", "c2"], "a restart sees both");
   // c1's card turns out to belong to repo b: it is re-filed and leaves a's record.
   assert.equal(await blocks.save("c1", block("one"), "example/b"), true);
-  assert.equal((await loadRepoRecord(repoA)).cardBlocks, undefined);
-  assert.deepEqual(Object.keys((await loadRepoRecord(repoB)).cardBlocks).sort(), ["c1", "c2"]);
+  assert.equal((await rt.records.loadRepoRecord(repoA)).cardBlocks, undefined);
+  assert.deepEqual(Object.keys((await rt.records.loadRepoRecord(repoB)).cardBlocks).sort(), ["c1", "c2"]);
   assert.equal(await blocks.save("c1", null), true, "a release is forgotten from the repo that holds it");
-  assert.deepEqual(Object.keys((await loadRepoRecord(repoB)).cardBlocks), ["c2"]);
+  assert.deepEqual(Object.keys((await rt.records.loadRepoRecord(repoB)).cardBlocks), ["c2"]);
 });
 
 test("card blocks: any repo's record unreadable makes the whole load null, and a failed save says so", async () => {
   const repos = [repoA, repoB];
-  const blocks = createCardBlockStore(() => repos);
+  const blocks = createCardBlockStore(() => repos, rt.records, rt.legacy);
   await blocks.save("c1", block("one"), "example/a");
   failLoad = true;
   assert.equal(await blocks.load(), null, "never a partial answer");
@@ -196,26 +193,26 @@ test("card blocks: any repo's record unreadable makes the whole load null, and a
 // --- derived: the branch block --------------------------------------------------------------------------
 
 test("branch block: derived from the last git observation, held in memory only, ends when git shows it reconciled", async () => {
-  assert.equal(standingDivergence(repoA), null);
-  const first = observeDivergence(repoA, { ahead: 2, behind: 1, mergeBase: "abc" });
+  assert.equal(rt.divergence.standing(repoA), null);
+  const first = rt.divergence.observe(repoA, { ahead: 2, behind: 1, mergeBase: "abc" });
   assert.equal(first.before, null);
   assert.equal(first.now.mergeBase, "abc");
-  assert.equal(standingDivergence(repoA).mergeBase, "abc");
-  assert.equal(standingDivergence(repoB), null, "per repo");
-  assert.equal((await foremanHolds(repoA, [7], quiet))(7), true, "a standing divergence holds the repo's issues");
-  assert.equal((await foremanHolds(repoB, [7], quiet))(7), false);
-  assert.equal(observeDivergence(repoA, { ahead: 2, behind: 1, mergeBase: "abc" }).before.mergeBase, "abc", "the same episode");
-  observeDivergence(repoA, null);
-  assert.equal(standingDivergence(repoA), null);
-  assert.equal((await foremanHolds(repoA, [7], quiet))(7), false);
-  assert.deepEqual(await loadRepoRecord(repoA), {}, "the block itself was never stored");
+  assert.equal(rt.divergence.standing(repoA).mergeBase, "abc");
+  assert.equal(rt.divergence.standing(repoB), null, "per repo");
+  assert.equal((await foremanHolds(rt, repoA, [7], quiet))(7), true, "a standing divergence holds the repo's issues");
+  assert.equal((await foremanHolds(rt, repoB, [7], quiet))(7), false);
+  assert.equal(rt.divergence.observe(repoA, { ahead: 2, behind: 1, mergeBase: "abc" }).before.mergeBase, "abc", "the same episode");
+  rt.divergence.observe(repoA, null);
+  assert.equal(rt.divergence.standing(repoA), null);
+  assert.equal((await foremanHolds(rt, repoA, [7], quiet))(7), false);
+  assert.deepEqual(await rt.records.loadRepoRecord(repoA), {}, "the block itself was never stored");
 });
 
 test("branch block: the issues told and the rulings carried out are the only persisted parts", async () => {
-  await updateIssueRecord(repoA, 7, (d) => { d.divergenceTold = "abc"; });
-  await updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["comment:1"]; });
-  assert.equal((await loadIssueRecord(repoA, 7)).divergenceTold, "abc");
-  assert.deepEqual((await loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
+  await rt.records.updateIssueRecord(repoA, 7, (d) => { d.divergenceTold = "abc"; });
+  await rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["comment:1"]; });
+  assert.equal((await rt.records.loadIssueRecord(repoA, 7)).divergenceTold, "abc");
+  assert.deepEqual((await rt.records.loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
 });
 
 // --- the held note: memory only --------------------------------------------------------------------------
@@ -228,14 +225,14 @@ test("promotionHeldNoted is gone from every module but the import's list of dead
   const using = files.filter((p) => /promotionHeldNoted/.test(readFileSync(p, "utf8"))).map((p) => p.slice(src.length + 1));
   assert.deepEqual(using, ["legacy-records.ts"]);
   const promote = readFileSync(join(src, "phases", "promote.ts"), "utf8");
-  assert.match(promote, /resetHeldNotesForTests/);
-  assert.match(promote, /heldNoted = new Map/);
+  assert.doesNotMatch(promote, /ForTests/, "the held note lives on the runtime's phase memory, which a test builds fresh");
+  assert.match(readFileSync(join(src, "phase-memory.ts"), "utf8"), /heldNoted = new Map/);
 });
 
 // --- the one-time import ----------------------------------------------------------------------------------
 
 const cfgs = [repoA, repoB];
-const runImport = async () => { for (const r of cfgs) await importLegacyRecords(r, quiet, cfgs); };
+const runImport = async () => { for (const r of cfgs) await rt.legacy.importLegacyRecords(r, quiet, cfgs); };
 const fileState = () => (existsSync(legacyFile()) ? readLegacy() : null);
 
 function legacy() {
@@ -258,10 +255,10 @@ function legacy() {
 test("import: repo-level entries and card blocks move, dead fields and orphans go, the file is deleted", async () => {
   legacy();
   await runImport();
-  const a = await loadRepoRecord(repoA);
+  const a = await rt.records.loadRepoRecord(repoA);
   assert.deepEqual(Object.keys(a.unstick).sort(), ["0:epic-ready-to-close:e1", "0:needs-ruling", "0:unrelated-error:t1"]);
   assert.deepEqual(a.cardBlocks, { c1: block("blocked: x") }, "a legacy block names no repo: the first configured repo holds it");
-  assert.deepEqual(await loadRepoRecord(repoB), {});
+  assert.deepEqual(await rt.records.loadRepoRecord(repoB), {});
   assert.equal(existsSync(legacyFile()), false, "implemented, promotionHeldNoted, the empty shells and both orphans are dropped; nothing is left");
 });
 
@@ -273,7 +270,7 @@ test("import is idempotent: a second run (and a restart with no file) writes not
   const source = activeWorkSource();
   const save = source.saveRecord;
   source.saveRecord = (...a) => { saves++; return save(...a); };
-  resetLegacyImportForTests();
+  rt = new ForemanRuntime();
   await runImport();
   assert.equal(saves, 0);
   assert.equal(JSON.stringify([...store.records.entries()].sort()), snapshot);
@@ -288,12 +285,12 @@ test("import: an entry leaves the file only after its save; a failed save keeps 
   assert.ok(kept, "the file stays while anything is unmoved");
   assert.deepEqual(Object.keys(kept.repos.a.repoUnstick).sort(), ["0:epic-ready-to-close:e1", "0:needs-ruling"], "the questions are still in the file");
   assert.deepEqual(Object.keys(kept.cardBlocks), ["c1"], "and so is the card block");
-  assert.equal(await loadRepoRecord(repoA), null, "until its questions are in the record the repo reads as unreadable, not as empty");
-  assert.equal(await updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1"]; }), false, "and nothing is written over them");
+  assert.equal(await rt.records.loadRepoRecord(repoA), null, "until its questions are in the record the repo reads as unreadable, not as empty");
+  assert.equal(await rt.records.updateRepoRecord(repoA, (d) => { d.divergenceRuled = ["c:1"]; }), false, "and nothing is written over them");
   failSave = false;
-  resetLegacyImportForTests();
+  rt = new ForemanRuntime();
   await runImport();
-  assert.equal(Object.keys((await loadRepoRecord(repoA)).unstick).length, 3);
+  assert.equal(Object.keys((await rt.records.loadRepoRecord(repoA)).unstick).length, 3);
   assert.equal(existsSync(legacyFile()), false);
 });
 
@@ -304,20 +301,20 @@ test("import: a record that cannot be read counts as live, so nothing in the fil
   assert.ok(fileState().repos.a.repoUnstick["0:needs-ruling"], "an unreadable record: the file keeps the entry");
   assert.ok(fileState().cardBlocks.c1);
   failLoad = false;
-  resetLegacyImportForTests();
+  rt = new ForemanRuntime();
   await runImport();
   assert.equal(existsSync(legacyFile()), false);
 });
 
 test("import: a branch block is carried over only while git still shows its episode", async () => {
   writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } }, b: { branchBlock: { reason: "diverged", mergeBase: "old", announced: [8], ruled: ["comment:2"] } } } });
-  observeDivergence(repoA, { ahead: 1, behind: 1, mergeBase: "abc" });
-  observeDivergence(repoB, null);
+  rt.divergence.observe(repoA, { ahead: 1, behind: 1, mergeBase: "abc" });
+  rt.divergence.observe(repoB, null);
   await runImport();
-  assert.deepEqual((await loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
-  assert.equal((await loadIssueRecord(repoA, 7)).divergenceTold, "abc", "an issue already told stays told");
-  assert.deepEqual(await loadRepoRecord(repoB), {}, "repo b is reconciled: its block is dropped");
-  assert.equal((await loadIssueRecord(repoB, 8)) ?.divergenceTold, undefined);
+  assert.deepEqual((await rt.records.loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
+  assert.equal((await rt.records.loadIssueRecord(repoA, 7)).divergenceTold, "abc", "an issue already told stays told");
+  assert.deepEqual(await rt.records.loadRepoRecord(repoB), {}, "repo b is reconciled: its block is dropped");
+  assert.equal((await rt.records.loadIssueRecord(repoB, 8)) ?.divergenceTold, undefined);
   assert.equal(existsSync(legacyFile()), false);
 });
 
@@ -331,7 +328,7 @@ test("import: a file with nothing but dead fields and orphans is deleted at once
   writeLegacy({ repos: { a: { implemented: [1], prodReleases: {}, rejectedBranches: {} }, ws: { implemented: [] } } });
   await runImport();
   assert.equal(existsSync(legacyFile()), false);
-  resetLegacyImportForTests();
+  rt = new ForemanRuntime();
   await runImport();
   assert.equal(existsSync(legacyFile()), false);
 });
@@ -352,14 +349,14 @@ test("src/state.ts is gone and nothing but the import reads or writes .agent-sta
 test("import: one repo's pass keeps every other configured repo's entries (--repo narrows the lanes, not the file)", async () => {
   legacy();
   writeLegacy({ repos: { a: { repoUnstick: { "0:x": question("x", "a's") } }, b: { repoUnstick: { "0:y": question("y", "b's") }, held: { 5: { reason: "r" } } }, ws: { implemented: [1] } }, cardBlocks: { c1: block("blocked: x") } });
-  await importLegacyRecords(repoA, quiet, cfgs); // the daemon narrowed to repo a
-  assert.deepEqual(Object.keys(await (async () => (await loadRepoRecord(repoA)).unstick)()), ["0:x"]);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs); // the daemon narrowed to repo a
+  assert.deepEqual(Object.keys(await (async () => (await rt.records.loadRepoRecord(repoA)).unstick)()), ["0:x"]);
   assert.ok(fileState().repos.b.repoUnstick["0:y"], "b's question is still in the file");
   assert.ok(fileState().repos.b.held, "and its issue hold");
   assert.equal(fileState().repos.ws, undefined, "an orphan (no configured repo of that name) is dropped");
-  assert.deepEqual(await loadRepoRecord(repoB), {});
-  await importLegacyRecords(repoB, quiet, cfgs); // b's own pass later
-  assert.deepEqual(Object.keys((await loadRepoRecord(repoB)).unstick), ["0:y"]);
+  assert.deepEqual(await rt.records.loadRepoRecord(repoB), {});
+  await rt.legacy.importLegacyRecords(repoB, quiet, cfgs); // b's own pass later
+  assert.deepEqual(Object.keys((await rt.records.loadRepoRecord(repoB)).unstick), ["0:y"]);
   assert.equal(existsSync(legacyFile()), false, "the file goes when every configured repo's entries have moved");
   const orch = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "orchestrator.ts"), "utf8");
   assert.match(orch, /importLegacyRecords\(repoConfig, logger, config\.allRepos \?\? config\.repos\)/);
@@ -369,31 +366,31 @@ test("import: one repo's pass keeps every other configured repo's entries (--rep
 const repoG = { ...repoA, baseBranch: "main", featureBranch: "features" };
 test("import: git unreadable keeps the branch block's history for the retry; unknown is never obsolete", async () => {
   writeLegacy({ repos: { a: { branchBlock: { reason: "diverged", mergeBase: "abc", announced: [7], ruled: ["comment:1"] } } } });
-  await importLegacyRecords(repoG, quiet, cfgs); // repoG is no git checkout: readDivergence is undefined
+  await rt.legacy.importLegacyRecords(repoG, quiet, cfgs); // repoG is no git checkout: readDivergence is undefined
   assert.ok(fileState().repos.a.branchBlock, "the episode stays in the file");
-  assert.equal(await loadRepoRecord(repoA), null, "and the repo reads as unreadable until it is settled");
-  resetLegacyImportForTests();
-  observeDivergence(repoG, { ahead: 1, behind: 1, mergeBase: "abc" }); // git is readable now and still shows it
-  await importLegacyRecords(repoG, quiet, cfgs);
-  assert.deepEqual((await loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
-  assert.equal((await loadIssueRecord(repoA, 7)).divergenceTold, "abc");
+  assert.equal(await rt.records.loadRepoRecord(repoA), null, "and the repo reads as unreadable until it is settled");
+  rt = new ForemanRuntime();
+  rt.divergence.observe(repoG, { ahead: 1, behind: 1, mergeBase: "abc" }); // git is readable now and still shows it
+  await rt.legacy.importLegacyRecords(repoG, quiet, cfgs);
+  assert.deepEqual((await rt.records.loadRepoRecord(repoA)).divergenceRuled, ["comment:1"]);
+  assert.equal((await rt.records.loadIssueRecord(repoA, 7)).divergenceTold, "abc");
   assert.equal(existsSync(legacyFile()), false);
 });
 
 test("import: a pending card block makes its repo and the block store unavailable, before the import and while a save fails", async () => {
   writeLegacy({ cardBlocks: { c1: block("blocked: x") } });
-  const blocks = createCardBlockStore(() => cfgs);
+  const blocks = createCardBlockStore(() => cfgs, rt.records, rt.legacy);
   assert.equal(await blocks.load(), null, "the import has not run: the blocks read now are not the whole set");
   failSave = true;
-  await importLegacyRecords(repoA, quiet, cfgs);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
   assert.ok(fileState().cardBlocks.c1, "the block stays in the file");
-  assert.equal(await loadRepoRecord(repoA), null, "its home repo reads unavailable, not {}");
+  assert.equal(await rt.records.loadRepoRecord(repoA), null, "its home repo reads unavailable, not {}");
   assert.equal(await blocks.load(), null);
   failSave = false;
-  resetLegacyImportForTests();
-  await importLegacyRecords(repoA, quiet, cfgs);
-  assert.deepEqual(await blocks.load(), { c1: block("blocked: x") });
-  assert.deepEqual(await loadRepoRecord(repoA), { cardBlocks: { c1: block("blocked: x") } });
+  rt = new ForemanRuntime();
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
+  assert.deepEqual(await createCardBlockStore(() => cfgs, rt.records, rt.legacy).load(), { c1: block("blocked: x") });
+  assert.deepEqual(await rt.records.loadRepoRecord(repoA), { cardBlocks: { c1: block("blocked: x") } });
 });
 
 test("import: migrating n card blocks saves the record once and copies O(n) entries (EM#1244 f5 review)", async () => {
@@ -401,24 +398,23 @@ test("import: migrating n card blocks saves the record once and copies O(n) entr
   for (const n of [100, 200]) {
     setStateDir(mkTmp("repo-records-state-"));
     store = new InMemoryRecordStore();
-    resetIssueRecordsForTests();
-    resetLegacyImportForTests();
+    rt = new ForemanRuntime();
     const source = activeWorkSource();
     let saves = 0, entries = 0;
     source.saveRecord = async (key, record, rc) => {
       if (key.kind === "repo") { saves++; entries += Object.keys(record.cardBlocks ?? {}).length; }
       return store.saveRecord(key, record, rc);
     };
-    await updateRepoRecord(repoA, (d) => { d.cardBlocks = { kept: block("already stored") }; });
+    await rt.records.updateRepoRecord(repoA, (d) => { d.cardBlocks = { kept: block("already stored") }; });
     saves = 0; entries = 0;
     const legacy = Object.fromEntries(Array.from({ length: n }, (_, i) => [`c${i}`, block(`legacy ${i}`)]));
     legacy.kept = block("the legacy copy loses");
     legacy.junk = "not a block";
     writeLegacy({ cardBlocks: legacy });
-    await importLegacyRecords(repoA, quiet, cfgs);
+    await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
     assert.equal(saves, 1, `${n} blocks, one save`);
     sizes.push(entries);
-    const got = (await loadRepoRecord(repoA)).cardBlocks;
+    const got = (await rt.records.loadRepoRecord(repoA)).cardBlocks;
     assert.equal(Object.keys(got).length, n + 1, "every block survived");
     assert.equal(got.kept.reason, "already stored", "a value already stored wins");
     assert.equal(existsSync(legacyFile()), false, "the exhausted legacy file is gone");
@@ -429,22 +425,22 @@ test("import: migrating n card blocks saves the record once and copies O(n) entr
 test("import: a card-block save that fails keeps every block in the file for the retry", async () => {
   writeLegacy({ cardBlocks: { c1: block("a"), c2: block("b"), bad: 7 } });
   failSave = true;
-  await importLegacyRecords(repoA, quiet, cfgs);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
   assert.deepEqual(Object.keys(fileState().cardBlocks).sort(), ["c1", "c2"], "unsaved blocks stay; only the entry that is no block left");
   failSave = false;
-  resetLegacyImportForTests();
-  await importLegacyRecords(repoA, quiet, cfgs);
-  assert.deepEqual(Object.keys((await loadRepoRecord(repoA)).cardBlocks).sort(), ["c1", "c2"]);
+  rt = new ForemanRuntime();
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
+  assert.deepEqual(Object.keys((await rt.records.loadRepoRecord(repoA)).cardBlocks).sort(), ["c1", "c2"]);
 });
 
 test("card blocks: a cleared imported block stays cleared after a restart, whichever repo the import filed it under", async () => {
   writeLegacy({ cardBlocks: { c1: block("blocked: x") } });
-  await importLegacyRecords(repoA, quiet, cfgs);
-  const blocks = createCardBlockStore(() => cfgs);
+  await rt.legacy.importLegacyRecords(repoA, quiet, cfgs);
+  const blocks = createCardBlockStore(() => cfgs, rt.records, rt.legacy);
   assert.deepEqual(Object.keys(await blocks.load()), ["c1"]);
   assert.equal(await blocks.save("c1", null, "example/b"), true, "the card belongs to repo b");
-  assert.equal((await loadRepoRecord(repoA)).cardBlocks, undefined, "and the first repo's copy is gone");
-  assert.deepEqual(await createCardBlockStore(() => cfgs).load(), {});
+  assert.equal((await rt.records.loadRepoRecord(repoA)).cardBlocks, undefined, "and the first repo's copy is gone");
+  assert.deepEqual(await createCardBlockStore(() => cfgs, rt.records, rt.legacy).load(), {});
 });
 
 test("issue-records: issue, PR and repo records go through one mutation pipeline", () => {

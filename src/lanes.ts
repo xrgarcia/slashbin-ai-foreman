@@ -131,7 +131,9 @@ async function withKeyedLock<T>(locks: Map<string, Mutex>, key: string, fn: () =
   }
 }
 
+/** Process-wide: a checkout on disk is one resource however many runtimes name it. */
 const checkoutLocks = new Map<string, Mutex>();
+/** Process-wide: a lane's passes are serial for the whole process. */
 const laneLocks = new Map<string, Mutex>();
 
 /** Run `fn` holding `repoName`'s checkout lock: one clone-touching stage at a time per repo. */
@@ -150,7 +152,9 @@ export function withLaneLock<T>(repoName: string, lane: string, fn: () => Promis
 
 // --- Optional fleet-wide session ceiling -------------------------------------
 
+/** Process-wide: the fleet-wide session ceiling is one budget for the process. */
 let sessionLimit = 0; // 0 = unbounded
+/** Process-wide: sessions counted against the one process-wide ceiling. */
 let sessionsInUse = 0;
 const sessionWaiters: Array<() => void> = [];
 

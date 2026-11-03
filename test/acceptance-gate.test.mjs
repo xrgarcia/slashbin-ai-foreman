@@ -13,6 +13,8 @@ import { configureIssueCache } from "../dist/github.js";
 import { createLogger } from "../dist/logger.js";
 import { setCodeHost } from "../dist/plugins/registry.js";
 import { githubCodeHost } from "../dist/plugins/github.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 setCodeHost(githubCodeHost());
 
@@ -173,7 +175,7 @@ async function cycleWaiting(restart) {
   const seen = [];
   registerWorkSource(await connector(restart));
   addObserver({ async onEvent(e) { if (e.kind === "waiting") seen.push(e); } });
-  await tryBatchImplementation(cfg.repos[0], cfg, logger, 1);
+  await tryBatchImplementation(rt, cfg.repos[0], cfg, logger, 1);
   await drainObservers();
   registerWorkSource(null);
   return seen;

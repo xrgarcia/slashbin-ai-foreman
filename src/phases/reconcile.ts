@@ -9,19 +9,11 @@ import { reconcileRepo } from "../reconciler.js";
 import { roleFor } from "../plugins/registry.js";
 import { hasStage } from "../stages.js";
 import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
-import { branchUnresolved, loadPrRecord, updatePrRecord } from "../issue-records.js";
-import { fieldTable, loadIssueRecords, updateIssueRecord, type HeldIssue } from "../issue-records.js";
-import {
-  CycleEvent,
-  deadZoneAlerted,
-  deadZoneRecoveryAttempted,
-  itemOf,
-  labelFromTrailer,
-  notifyOnce,
-  workStateOf,
-} from "./common.js";
+import { fieldTable, type HeldIssue } from "../issue-records.js";
+import { CycleEvent, itemOf, labelFromTrailer, notifyOnce, workStateOf } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
+import type { ForemanRuntime } from "../runtime.js";
 
 /**
  * Set the outcome label the review run reported, for issues it merged but left at
@@ -49,6 +41,7 @@ import type { CodeHost } from "../code-host.js";
  * Returns the issues still stuck after reconciliation — the genuine dead zone.
  */
 export async function reconcileReviewOutcomeLabels(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   stuck: number[],
   trailers: ReviewTrailer[],
@@ -93,7 +86,7 @@ export async function reconcileReviewOutcomeLabels(
       continue;
     }
     const to = workStateOf(outcome);
-    if (await advance(itemOf(repoConfig, issueNumber), reviewMove(to), repoConfig, logger)) {
+    if (await advance(rt, itemOf(repoConfig, issueNumber), reviewMove(to), repoConfig, logger)) {
       events?.push({
         message: `${repoConfig.githubRepo} #${issueNumber} — review merged PR #${ref.prNumber} without labeling; reconciled to "${repoConfig.lifecycleLabels[outcome]}" from its own trailer`,
         level: outcome === "prPendingActions" ? "warn" : "info",
@@ -110,7 +103,7 @@ export async function reconcileReviewOutcomeLabels(
     const at = new Date().toISOString();
     for (const h of held) {
       // A hold that could not be saved is declared again on the next pass: the issue stays at its label.
-      if (!(await updateIssueRecord(repoConfig, h.issue, (d) => { d.held = { heldAt: at, prNumber: h.pr, reason: h.reason }; }))) {
+      if (!(await rt.records.updateIssueRecord(repoConfig, h.issue, (d) => { d.held = { heldAt: at, prNumber: h.pr, reason: h.reason }; }))) {
         logger.warn(`#${h.issue}: the reviewer's hold (PR #${h.pr}) could not be recorded; it is declared again next pass`);
         continue;
       }
@@ -152,6 +145,7 @@ function nothingReleases(repoConfig: RepoConfig, config: AgentConfig): boolean {
  * already carries it. Returns how far it got, or null when nothing moved.
  */
 export async function settleHumanMerge(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   merged: { issueNumber: number; prNumber: number },
@@ -161,10 +155,10 @@ export async function settleHumanMerge(
 ): Promise<"merged" | "approved" | "closed" | null> {
   const item = itemOf(repoConfig, merged.issueNumber);
   if (from === "start") {
-    if (!await advance(item, "humanMerged", repoConfig, logger)) return null;
+    if (!await advance(rt, item, "humanMerged", repoConfig, logger)) return null;
     if (roleFor("verifier", config)) return "merged";
   }
-  if (from !== "approved" && !await advance(item, "humanMergedApproved", repoConfig, logger)) return from === "start" ? "merged" : null;
+  if (from !== "approved" && !await advance(rt, item, "humanMergedApproved", repoConfig, logger)) return from === "start" ? "merged" : null;
   const reached = from === "approved" ? null : "approved";
   if (!nothingReleases(repoConfig, config)) return reached;
   let commented: boolean;
@@ -185,7 +179,7 @@ export async function settleHumanMerge(
       return reached;
     }
   }
-  return await advance(item, "closedNoRelease", repoConfig, logger) ? "closed" : reached;
+  return await advance(rt, item, "closedNoRelease", repoConfig, logger) ? "closed" : reached;
 }
 
 /**
@@ -201,6 +195,7 @@ export async function settleHumanMerge(
  * already uses: no new scan. A no-op whenever a reviewer is enabled.
  */
 export async function resumeHumanMerges(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
@@ -222,8 +217,8 @@ export async function resumeHumanMerges(
   const out: { issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[] = [];
   for (const m of (deps.mergedToBase ?? codeHost().findIssuesMergedToBase)(repoConfig, [...inReview, ...atMerged, ...atApproved], logger)) {
     const from = inReview.includes(m.issueNumber) ? "start" : atMerged.includes(m.issueNumber) ? "merged" : "approved";
-    if (from === "start") await notifyOnce("merged", repoConfig, [m.issueNumber], logger);
-    const settled = await settleHumanMerge(repoConfig, config, m, logger, deps, from);
+    if (from === "start") await notifyOnce(rt, "merged", repoConfig, [m.issueNumber], logger);
+    const settled = await settleHumanMerge(rt, repoConfig, config, m, logger, deps, from);
     if (settled) out.push({ issueNumber: m.issueNumber, prNumber: m.prNumber, settled });
   }
   return out;
@@ -235,6 +230,7 @@ export async function resumeHumanMerges(
  * its own failure, as it did when this was inline Phase 0.
  */
 export async function runReconcileStage(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   base: Logger,
@@ -250,8 +246,8 @@ export async function runReconcileStage(
       // PR is verified, as when the reconciler wrote the label itself.
       for (const n of result.issueNumbers) {
         const item = itemOf(repoConfig, n);
-        if (result.prUrl) await emit({ kind: "prLink", item, prUrl: result.prUrl }, repoConfig, reconLogger);
-        await advance(item, "implemented", repoConfig, reconLogger);
+        if (result.prUrl) await emit(rt, { kind: "prLink", item, prUrl: result.prUrl }, repoConfig, reconLogger);
+        await advance(rt, item, "implemented", repoConfig, reconLogger);
       }
       reconLogger.info(
         `Reconciled ${result.commitCount} orphaned commit(s) — PR created: ${result.prUrl}`,
@@ -274,8 +270,8 @@ export async function runReconcileStage(
     for (const r of result.rejected ?? []) {
       // What the EM was told lives on the rejected PR's record. One that cannot be read (or whose legacy entry is
       // not imported yet) is not "never told": the branch is left for a later cycle rather than alerted twice.
-      if (branchUnresolved(repoConfig, r.branch)) continue;
-      const record = await loadPrRecord(repoConfig, r.prNumber);
+      if (rt.records.branchUnresolved(repoConfig, r.branch)) continue;
+      const record = await rt.records.loadPrRecord(repoConfig, r.prNumber);
       if (!record) {
         reconLogger.debug(`PR #${r.prNumber}'s record cannot be read; the alert for ${r.branch} waits`);
         continue;
@@ -283,7 +279,7 @@ export async function runReconcileStage(
       if (record.rejectedHead === r.headSha) continue;
 
       // Recorded before the alert goes out: an alert whose record could not be saved is sent on a later cycle, never twice.
-      if (!(await updatePrRecord(repoConfig, r.prNumber, (d) => { d.rejectedHead = r.headSha; }))) continue;
+      if (!(await rt.records.updatePrRecord(repoConfig, r.prNumber, (d) => { d.rejectedHead = r.headSha; }))) continue;
       const issues = r.issueNumbers.length > 0
         ? ` (issues ${r.issueNumbers.map((n) => `#${n}`).join(", ")})`
         : "";
@@ -319,8 +315,8 @@ export async function runReconcileStage(
   // clears when the issue leaves it, so a genuine re-entry alerts again.
   try {
     const stuck = codeHost().findStuckMergedIssues(repoConfig, reconLogger);
-    const seen = deadZoneAlerted.get(repoConfig.name) ?? new Set<number>();
-    const tried = deadZoneRecoveryAttempted.get(repoConfig.name) ?? new Set<number>();
+    const seen = rt.memory.deadZoneAlerted.get(repoConfig.name) ?? new Set<number>();
+    const tried = rt.memory.deadZoneRecoveryAttempted.get(repoConfig.name) ?? new Set<number>();
     const current = new Set(stuck.map((s) => s.issueNumber));
 
     // Issues whose reviewer DECLARED a hold are not dead — they are waiting on
@@ -328,18 +324,18 @@ export async function runReconcileStage(
     // human-grade judgment ("this criterion is not observable until 03:00Z") with
     // an automated verdict. Surface them, never overwrite them.
     // An issue whose record cannot be read is not "unheld": leave it alone this cycle.
-    const loaded = await loadIssueRecords(repoConfig, stuck.map((s) => s.issueNumber));
+    const loaded = await rt.records.loadIssueRecords(repoConfig, stuck.map((s) => s.issueNumber));
     const heldIssues = fieldTable(loaded, "held");
     const labels = repoConfig.lifecycleLabels;
 
     for (const s of stuck) {
       if (loaded.unavailable.has(s.issueNumber)) continue;
       // Its PR merged — whatever happens to the label next.
-      await notifyOnce("merged", repoConfig, [s.issueNumber], reconLogger);
+      await notifyOnce(rt, "merged", repoConfig, [s.issueNumber], reconLogger);
       let hold: HeldIssue | undefined = heldIssues[s.issueNumber];
       // A hold belongs to the PR whose review declared it. One left by an earlier PR is stale: this PR is a re-entry, and recovery is allowed.
       if (hold && hold.prNumber !== s.prNumber) {
-        await updateIssueRecord(repoConfig, s.issueNumber, (d) => { delete d.held; });
+        await rt.records.updateIssueRecord(repoConfig, s.issueNumber, (d) => { delete d.held; });
         hold = undefined;
       }
       if (hold) {
@@ -370,7 +366,7 @@ export async function runReconcileStage(
       }
       if (roleFor("verifier", config) && !tried.has(s.issueNumber)) {
         tried.add(s.issueNumber);
-        if (await advance(itemOf(repoConfig, s.issueNumber), "recoverMerged", repoConfig, reconLogger)) {
+        if (await advance(rt, itemOf(repoConfig, s.issueNumber), "recoverMerged", repoConfig, reconLogger)) {
           events.push({
             message: `${repoConfig.githubRepo} #${s.issueNumber} dead-zone: PR #${s.prNumber} merged with the issue left unadvanced → labeled "${labels.prMerged}" for dev verification`,
             level: "info",
@@ -391,7 +387,7 @@ export async function runReconcileStage(
       // Never a hand-written label: the EM writes only `ready for prod release`. With a
       // verify stage, recovery hands the issue to it (`recoverMerged`), so landing here
       // means that label write failed; recovery is tried once per daemon run.
-      await emit({
+      await emit(rt, {
         kind: "blocked",
         item: itemOf(repoConfig, s.issueNumber),
         reason: `PR #${s.prNumber} merged but the issue never advanced and recovery could not move it; restarting the Foreman retries recovery, which hands it to the SRE's dev verification`,
@@ -402,10 +398,10 @@ export async function runReconcileStage(
     // issue that genuinely re-enters the dead zone later can be retried.
     for (const n of [...seen]) if (!current.has(n)) seen.delete(n);
     for (const n of [...tried]) if (!current.has(n)) tried.delete(n);
-    deadZoneAlerted.set(repoConfig.name, seen);
-    deadZoneRecoveryAttempted.set(repoConfig.name, tried);
+    rt.memory.deadZoneAlerted.set(repoConfig.name, seen);
+    rt.memory.deadZoneRecoveryAttempted.set(repoConfig.name, tried);
 
-    for (const r of await resumeHumanMerges(repoConfig, config, reconLogger)) {
+    for (const r of await resumeHumanMerges(rt, repoConfig, config, reconLogger)) {
       events.push({ message: `${repoConfig.githubRepo} #${r.issueNumber}: human merge of PR #${r.prNumber} resumed → ${r.settled}`, level: "info" });
       processed++;
     }
@@ -426,7 +422,7 @@ export async function runReconcileStage(
     // return it to the queue. Safe precisely BECAUSE nothing merged —
     // re-implementing cannot duplicate work that was never done.
     for (const num of codeHost().findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
-      if (await advance(itemOf(repoConfig, num), "release", repoConfig, reconLogger)) {
+      if (await advance(rt, itemOf(repoConfig, num), "release", repoConfig, reconLogger)) {
         events.push({
           message: `${repoConfig.githubRepo} #${num} released back to the implement queue — it carried a lifecycle label but no PR covers it and nothing merged, so the work never landed.`,
           level: "warn",

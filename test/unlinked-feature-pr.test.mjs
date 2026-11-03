@@ -66,33 +66,33 @@ const issue = (number, labels, state = "OPEN") => ({ number, state, title: `t${n
 
 test("a feature PR that names only a closed ref is reviewed with no issues", () => {
   const cfg = arrange({ issues: [issue(98, ["approved"], "CLOSED"), issue(102, ["approved", "chore"])] });
-  assert.deepEqual(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits), { prNumber: 99, prUrl: `https://github.com/${cfg.githubRepo}/pull/99`, issueNumbers: [], adopted: [] });
+  assert.deepEqual(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), { prNumber: 99, prUrl: `https://github.com/${cfg.githubRepo}/pull/99`, issueNumbers: [], adopted: [] });
 });
 
 test("a feature PR that names nothing at all is reviewed with no issues", () => {
   const cfg = arrange({ body: "" });
-  assert.deepEqual(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits)?.issueNumbers, []);
+  assert.deepEqual(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false)?.issueNumbers, []);
 });
 
 test("a current verdict by the reviewer is not reviewed again", () => {
   const cfg = arrange({ reviews: [{ author: { login: "slasbhin-techlead" }, state: "CHANGES_REQUESTED", submittedAt: "2026-10-08T20:08:13Z" }] });
-  assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits), null);
+  assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), null);
 });
 
 test("an approved issue the PR names is still adopted as before", () => {
   const cfg = arrange({ body: "Closes #98", issues: [issue(98, ["approved"])] });
-  const c = findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits);
+  const c = findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false);
   assert.deepEqual([c?.issueNumbers, c?.adopted], [[98], [98]]);
 });
 
 test("a PR whose issue is in revise or past review is left to that stage", () => {
   for (const labels of [["approved", "pr pending actions"], ["approved", "ready for prod release"]]) {
     const cfg = arrange({ body: "Closes #98", issues: [issue(98, labels)] });
-    assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits), null, labels.join(","));
+    assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), null, labels.join(","));
   }
 });
 
 test("a ref that cannot be read holds the PR for a later pass", () => {
   const cfg = arrange({ body: "Closes #77" });
-  assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits), null);
+  assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), null);
 });

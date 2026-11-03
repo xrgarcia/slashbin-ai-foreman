@@ -6,6 +6,7 @@ import { join } from "node:path";
 // FOREMAN_STATE_DIR is set by `npm test` only. Without it a test run in the live checkout read and wrote the
 // daemon's own state file: on 2026-10-30 a test recorded a skip for its fake repo "ws" there, and
 // acceptance-gate R2 failed on it from then on.
+/** Process-wide: the one state directory of this process, fixed at start (tests point it at a temp dir). */
 let dir = process.env.FOREMAN_STATE_DIR ?? ".";
 
 /** Point the Foreman's local files at `to` (tests, and the CLI when a state directory is configured). */

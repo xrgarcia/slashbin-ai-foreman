@@ -30,36 +30,34 @@ export const labelsFor = requiredLabels;
 
 type Entry = { done: true } | { done: false; inFlight: Promise<boolean> };
 
-// Keyed by repo and label set, so renaming a label in the config onboards again.
-const onboarded = new Map<string, Entry>();
-
 function keyOf(repo: RepoConfig): string {
   return `${repo.githubRepo}\n${labelsFor(repo).join("\n")}`;
 }
 
-/** Test hook: forget every repo onboarded in this process. */
-export function resetOnboarding(): void {
-  onboarded.clear();
-}
+/** The repos one runtime has onboarded. */
+export class Onboarding {
+  /** Keyed by repo and label set, so renaming a label in the config onboards again. */
+  private readonly onboarded = new Map<string, Entry>();
 
-/**
- * True once `repo` carries every label it needs. The first call does the work;
- * later calls answer from memory, and every lane of the repo shares one attempt.
- * A failure is forgotten, so the repo's next pass tries again.
- */
-export async function onboardRepo(repo: RepoConfig, logger: Logger): Promise<boolean> {
-  const key = keyOf(repo);
-  const entry = onboarded.get(key);
-  if (entry?.done) return true;
-  if (entry) return entry.inFlight;
+  /**
+   * True once `repo` carries every label it needs. The first call does the work;
+   * later calls answer from memory, and every lane of the repo shares one attempt.
+   * A failure is forgotten, so the repo's next pass tries again.
+   */
+  async onboardRepo(repo: RepoConfig, logger: Logger): Promise<boolean> {
+    const key = keyOf(repo);
+    const entry = this.onboarded.get(key);
+    if (entry?.done) return true;
+    if (entry) return entry.inFlight;
 
-  const log = logger.child({ repo: repo.name, phase: "onboard" });
-  const attempt = Promise.resolve().then(() => installLabels(repo, log));
-  onboarded.set(key, { done: false, inFlight: attempt });
-  const ok = await attempt;
-  if (ok) onboarded.set(key, { done: true });
-  else onboarded.delete(key);
-  return ok;
+    const log = logger.child({ repo: repo.name, phase: "onboard" });
+    const attempt = Promise.resolve().then(() => installLabels(repo, log));
+    this.onboarded.set(key, { done: false, inFlight: attempt });
+    const ok = await attempt;
+    if (ok) this.onboarded.set(key, { done: true });
+    else this.onboarded.delete(key);
+    return ok;
+  }
 }
 
 function firstLine(err: unknown): string {

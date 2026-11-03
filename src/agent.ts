@@ -9,7 +9,7 @@ import { checkoutPathFor } from "./review-checkout.js";
 import { isUpstreamBlocked } from "./upstream-backoff.js";
 import { parseStageTrailer, type CustomStage } from "./stages.js";
 import { redactAll } from "./redact.js";
-import { claudeTrustEnabled, ensureClaudeTrust, isUntrustedWarning } from "./claude-trust.js";
+import { isUntrustedWarning, type ClaudeTrust } from "./claude-trust.js";
 import { contractBlock, contractReaderPath } from "./handoff-contract.js";
 import { codeHost } from "./plugins/registry.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./config-schema/github.js";
@@ -52,6 +52,7 @@ export function sessionSettings(): string {
   });
 }
 
+/** Process-wide: the secret-gate notice is logged once per process. */
 let secretGateLogged = false;
 
 /**
@@ -414,6 +415,8 @@ function readOverlay(config: RepoConfig, overlayPath: string | undefined, field:
 }
 
 export interface SpawnOptions {
+  /** The runtime's Claude Code trust: the checkout is trusted before the session starts. */
+  trust: ClaudeTrust;
   /** Working directory for the claude process. */
   cwd: string;
   /** Daemon env names the session inherits on top of SESSION_ENV_ESSENTIALS (config `sessionEnv`). */
@@ -678,7 +681,7 @@ function spawnClaudeWithOptions(
   // Claude Code ignores an untrusted checkout's .claude/settings.json and .mcp.json
   // and only says so on stderr. Trust it first — under the session's own HOME /
   // CLAUDE_CONFIG_DIR, which is where this session will look (src/claude-trust.ts).
-  ensureClaudeTrust(opts.cwd, logger, env);
+  opts.trust.ensure(opts.cwd, logger, env);
 
   // Everything the child prints is redacted at each sink — transcript, logger
   // lines, and the stdout/stderr handed back (which feed trailer parsing and
@@ -697,9 +700,9 @@ function spawnClaudeWithOptions(
     // session in this checkout is clean. This session is not re-run.
     if (!untrustedSeen && isUntrustedWarning(line)) {
       untrustedSeen = true;
-      if (claudeTrustEnabled()) {
+      if (opts.trust.isEnabled()) {
         logger.warn(`Claude Code reports ${opts.cwd} is not trusted — this session ran without the repo's .claude/settings.json and .mcp.json; trusting it for the next one`);
-        const outcome = ensureClaudeTrust(opts.cwd, logger, env, "untrusted warning on stderr");
+        const outcome = opts.trust.ensure(opts.cwd, logger, env, "untrusted warning on stderr");
         if (outcome === "already") {
           logger.warn(`Claude Code trust: ${opts.cwd} is already marked trusted in the config this session reads, yet Claude Code still reports it untrusted — check HOME / CLAUDE_CONFIG_DIR in sessionEnv`);
         }
@@ -798,6 +801,7 @@ function spawnClaudeWithOptions(
  * the Foreman token with the narrow tool set, final-text output, no transcript.
  */
 function spawnClaude(
+  trust: ClaudeTrust,
   prompt: string,
   config: RepoConfig,
   logger: Logger,
@@ -807,6 +811,7 @@ function spawnClaude(
   return spawnClaudeWithOptions(
     prompt,
     {
+      trust,
       cwd: config.repoPath,
       sessionEnv: config.sessionEnv,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,
@@ -973,6 +978,7 @@ export function workItemsLine(issueNumbers: number[]): string {
  * and PR creation. Foreman just triggers and detects the result.
  */
 export async function implementApprovedIssues(
+  trust: ClaudeTrust,
   config: RepoConfig,
   logger: Logger,
   abortSignal?: AbortSignal,
@@ -1058,7 +1064,7 @@ Work autonomously. Do not ask questions.`;
 
   const transcriptPath = phaseTranscriptPath("implement", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
-  const result = await spawnClaude(prompt, config, logger, abortSignal, transcriptPath);
+  const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath);
   // The session may have opened a PR the cached list predates.
   codeHost().forgetOpenPrs(config.githubRepo);
 
@@ -1249,6 +1255,7 @@ Work autonomously. Do not ask questions.`;
  * skill doesn't need to search by label (which historically was unreliable).
  */
 export async function revisePRFeedback(
+  trust: ClaudeTrust,
   config: RepoConfig,
   logger: Logger,
   abortSignal?: AbortSignal,
@@ -1318,7 +1325,7 @@ Work autonomously. Do not ask questions.`;
 
   const transcriptPath = phaseTranscriptPath("revise", config.name);
   logger.info(`Transcript: ${transcriptPath}`);
-  const result = await spawnClaude(prompt, config, logger, abortSignal, transcriptPath);
+  const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath);
 
   if (result.timedOut) {
     return { success: false, error: "timed out" };
@@ -1395,6 +1402,7 @@ export interface CustomStageResult {
  * its skill does.
  */
 export async function runCustomStage(
+  trust: ClaudeTrust,
   config: RepoConfig,
   stage: CustomStage,
   input: CustomStageInput,
@@ -1419,6 +1427,7 @@ export async function runCustomStage(
   const result = await spawnClaudeWithOptions(
     prompt,
     {
+      trust,
       cwd: config.repoPath,
       sessionEnv: config.sessionEnv,
       ghToken: process.env.FOREMAN_GITHUB_TOKEN,

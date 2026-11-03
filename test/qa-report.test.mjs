@@ -3,9 +3,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { QA_HEADING, qaApplies, qaReportBody, runQaReport } from "../dist/qa-report.js";
+import { QA_HEADING, qaApplies, qaReportBody } from "../dist/qa-report.js";
 import { QA_MAX_DURATION_MS, readOutcome } from "../dist/plugins/qa.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 await startAgentPlugins();
 
@@ -38,7 +40,7 @@ test("QA applies only to a configured repo on an install with a QA checkout", ()
 
 test("a pass on Console runs QA once and posts the report under its heading", async () => {
   const d = deps();
-  await runQaReport(CONSOLE, 1485, d, logger);
+  await rt.qaReports.run(CONSOLE, 1485, d, logger);
   assert.equal(d.runs, 1);
   assert.equal(d.posted.length, 1);
   const { pr, body } = d.posted[0];
@@ -54,7 +56,7 @@ test("a pass on Console runs QA once and posts the report under its heading", as
 
 test("a second pass does not run or re-post: an existing heading comment ends it", async () => {
   const d = deps({ hasReport: async () => true });
-  await runQaReport(CONSOLE, 1485, d, logger);
+  await rt.qaReports.run(CONSOLE, 1485, d, logger);
   assert.equal(d.runs, 0);
   assert.equal(d.posted.length, 0);
 });
@@ -62,9 +64,9 @@ test("a second pass does not run or re-post: an existing heading comment ends it
 test("a run already in flight is not started twice", async () => {
   let release;
   const d = deps({ run: () => new Promise((r) => { release = () => r({ kind: "manifest", exitCode: 0, manifest }); }) });
-  const first = runQaReport(CONSOLE, 7, d, logger);
+  const first = rt.qaReports.run(CONSOLE, 7, d, logger);
   await new Promise((r) => setImmediate(r));
-  await runQaReport(CONSOLE, 7, d, logger);
+  await rt.qaReports.run(CONSOLE, 7, d, logger);
   release();
   await first;
   assert.equal(d.posted.length, 1);
@@ -72,15 +74,15 @@ test("a run already in flight is not started twice", async () => {
 
 test("a crash, a timeout and a post failure never reject, and the crash is told on the PR", async () => {
   const crash = deps({ run: async () => { throw new Error("boom"); } });
-  await runQaReport(CONSOLE, 1, crash, logger);
+  await rt.qaReports.run(CONSOLE, 1, crash, logger);
   assert.equal(crash.posted.length, 1);
   assert.match(crash.posted[0].body, /QA errored/);
   assert.ok(logs.some((l) => /errored/.test(l)), "and logged");
 
   const broken = deps({ post: async () => { throw new Error("gh down"); } });
-  await assert.doesNotReject(runQaReport(CONSOLE, 2, broken, logger));
+  await assert.doesNotReject(rt.qaReports.run(CONSOLE, 2, broken, logger));
   const unreadable = deps({ hasReport: async () => { throw new Error("gh down"); } });
-  await assert.doesNotReject(runQaReport(CONSOLE, 3, unreadable, logger));
+  await assert.doesNotReject(rt.qaReports.run(CONSOLE, 3, unreadable, logger));
 });
 
 test("readOutcome: 0, 1 and 3 with a manifest are results; a timeout or another exit is an error", () => {
@@ -103,11 +105,11 @@ test("an errored body says QA errored and carries no process output", () => {
 test("verify wiring: the card advances first, QA is started after and never awaited", () => {
   const src = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf-8");
   const advanceAt = src.indexOf('"verifyPassed"');
-  const qaAt = src.indexOf("runQaReport(");
+  const qaAt = src.indexOf("rt.qaReports.run(");
   assert.ok(advanceAt > 0 && qaAt > advanceAt, "QA starts after the advance to pr approved");
-  assert.ok(!/await\s+runQaReport/.test(src), "nothing waits on QA");
+  assert.ok(!/await\s+rt\.qaReports\.run/.test(src), "nothing waits on QA");
   assert.match(src.slice(qaAt - 200, qaAt), /qaApplies\(/, "gated on the QA repo list");
-  assert.equal((src.match(/runQaReport\(/g) ?? []).length, 1, "only the pass path runs QA");
+  assert.equal((src.match(/qaReports\.run\(/g) ?? []).length, 1, "only the pass path runs QA");
 });
 
 test("a timer fires while a slow lookup and a slow post are pending: runQaReport blocks nothing", async () => {
@@ -115,7 +117,7 @@ test("a timer fires while a slow lookup and a slow post are pending: runQaReport
   const d = deps({ hasReport: async () => { await slow(150); return false; }, post: async (pr, body) => { await slow(150); d.posted.push({ pr, body }); } });
   let ticks = 0;
   const timer = setInterval(() => ticks++, 10);
-  const started = runQaReport(CONSOLE, 4242, d, logger);
+  const started = rt.qaReports.run(CONSOLE, 4242, d, logger);
   assert.equal(d.runs, 0, "the call returns before any work starts");
   assert.equal(ticks, 0);
   await started;

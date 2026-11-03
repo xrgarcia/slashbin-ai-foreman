@@ -7,13 +7,13 @@ import { findConfigFile, loadConfig, type AgentConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
-import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
 import { registerBuiltinPlugins } from "./plugins/index.js";
 import { codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
 import type { PluginContext } from "./plugins/contract.js";
 import { workSourceRefusal } from "./work-source.js";
+import { ForemanRuntime } from "./runtime.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -75,7 +75,7 @@ function getArg(args: string[], flag: string): string | undefined {
   return idx !== -1 ? args[idx + 1] : undefined;
 }
 
-async function main(): Promise<void> {
+async function main(rt: ForemanRuntime): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.includes("--version")) {
@@ -95,7 +95,7 @@ async function main(): Promise<void> {
   // A plugin's own command (e.g. the read-only `paperclip:doctor`). Handled here,
   // before anything that needs a GitHub token, a logger or the PID file: a
   // plugin command needs only the config.
-  registerBuiltinPlugins();
+  registerBuiltinPlugins(rt);
   const command = args[0] ? pluginCommand(args[0]) : undefined;
   if (command) {
     let doctorConfig;
@@ -171,10 +171,10 @@ async function main(): Promise<void> {
   if (once) {
     // Single cycle mode. The daemon does this on start and reload; --once must
     // too, or trustManagedRepos: false would be ignored here.
-    configureClaudeTrust({ enabled: config.trustManagedRepos });
-    trustManagedRepos(config.repos, logger);
+    rt.trust.configure({ enabled: config.trustManagedRepos });
+    rt.trust.trustManagedRepos(config.repos, logger);
     try {
-      const { lastImplementation } = await runCycle(config, logger, 1);
+      const { lastImplementation } = await runCycle(rt, config, logger, 1);
       process.exit(lastImplementation?.success === false ? 1 : 0);
     } catch (err) {
       logger.error("Cycle failed", {
@@ -214,7 +214,7 @@ async function main(): Promise<void> {
         }
       });
     };
-    const daemon = startDaemon(config, logger, { configPath, repoFilter, onReload });
+    const daemon = startDaemon(rt, config, logger, { configPath, repoFilter, onReload });
 
     const shutdown = async () => {
       await daemon.stop();
@@ -243,4 +243,4 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+main(new ForemanRuntime());

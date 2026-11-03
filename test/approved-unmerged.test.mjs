@@ -65,24 +65,24 @@ function arrange({ approvedMinAgo = 300, state = "APPROVED", issues = [{ number:
 
 test("the #1271 shape: approved five hours ago, still open — offered again", () => {
   const cfg = arrange();
-  assert.deepEqual(findPRsNeedingReview(cfg, TL, logger, waits), { prNumber: 1271, prUrl: `https://github.com/${cfg.githubRepo}/pull/1271`, issueNumbers: [1270], adopted: [] });
+  assert.deepEqual(findPRsNeedingReview(cfg, TL, logger, waits, () => false), { prNumber: 1271, prUrl: `https://github.com/${cfg.githubRepo}/pull/1271`, issueNumbers: [1270], adopted: [] });
 });
 
 test("once offered it waits a window before the next offer, so a held PR is not reviewed every cycle", () => {
   const cfg = arrange();
-  assert.ok(findPRsNeedingReview(cfg, TL, logger, waits));
-  assert.equal(findPRsNeedingReview(cfg, TL, logger, waits), null);
+  assert.ok(findPRsNeedingReview(cfg, TL, logger, waits, () => false));
+  assert.equal(findPRsNeedingReview(cfg, TL, logger, waits, () => false), null);
 });
 
 test("an approval younger than the window is a merge still settling — not offered", () => {
-  assert.equal(findPRsNeedingReview(arrange({ approvedMinAgo: 2 }), TL, logger, waits), null);
+  assert.equal(findPRsNeedingReview(arrange({ approvedMinAgo: 2 }), TL, logger, waits, () => false), null);
 });
 
 test("an unlinked approved PR that never merged is offered with no issues", () => {
   const cfg = arrange({ issues: [] });
-  assert.deepEqual(findPRsNeedingReview(cfg, TL, logger, waits)?.issueNumbers, []);
+  assert.deepEqual(findPRsNeedingReview(cfg, TL, logger, waits, () => false)?.issueNumbers, []);
 });
 
 test("a current CHANGES_REQUESTED is not an approval waiting on merge", () => {
-  assert.equal(findPRsNeedingReview(arrange({ state: "CHANGES_REQUESTED" }), TL, logger, waits)?.stranded, true);
+  assert.equal(findPRsNeedingReview(arrange({ state: "CHANGES_REQUESTED" }), TL, logger, waits, () => false)?.stranded, true);
 });

@@ -22,6 +22,8 @@ const { violation, fileViolation } = await import(HOOK);
 const { implementApprovedIssues, revisePRFeedback, runCustomStage, sessionSettings, SESSION_SECRET_GATE } =
   await import(join(root, "dist/agent.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
+const { ClaudeTrust } = await import(join(root, "dist/claude-trust.js"));
+const trust = new ClaudeTrust();
 const { createLogger } = await import(join(root, "dist/logger.js"));
 const { setCodeHost } = await import(join(root, "dist/plugins/registry.js"));
 const { githubCodeHost } = await import(join(root, "dist/plugins/github.js"));
@@ -170,9 +172,9 @@ const settingsArg = async (fn) => {
 };
 
 for (const [name, fn] of [
-  ["implement", () => implementApprovedIssues(repo(), logger)],
-  ["revise", () => revisePRFeedback(repo(), logger, undefined, 7, [3])],
-  ["custom stage", () => runCustomStage(repo(), { id: "lint", skillPath: "/opt/lint/SKILL.md" },
+  ["implement", () => implementApprovedIssues(trust, repo(), logger)],
+  ["revise", () => revisePRFeedback(trust, repo(), logger, undefined, 7, [3])],
+  ["custom stage", () => runCustomStage(trust, repo(), { id: "lint", skillPath: "/opt/lint/SKILL.md" },
     { prNumber: 7, headSha: "a".repeat(40), issueNumbers: [3] }, logger)],
 ]) {
   test(`${name}: the session is spawned with the secret gate`, async () => {
