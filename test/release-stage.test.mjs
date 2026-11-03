@@ -28,7 +28,6 @@ import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
-import { drainHandoffs } from "../dist/unstick.js";
 import { createLogger } from "../dist/logger.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, repoRecordOf, seed, recordOf, breakRecords, breakPrRecords, seedRelease, releaseOf } from "./issue-records.mjs";
@@ -332,17 +331,19 @@ test("the first prod deploy's excluded error reaches the EM with its evidence; t
   assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-ev/);
 });
 
-test("prod deploy origin, repo record down: the release closes, the report is drained once after recovery with its evidence", async () => {
-  const d = DEPLOYED("pass", " evidence=https://example.test/pv");
-  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `${TRIAGE("verify: ")}\n${d.out}` } });
-  await withRepoRecordBroken(true, async () => { assert.equal(await run(), true); });
-  assertClosedVerified(5);
-  assert.equal((await unrelatedEntries()).length, 0);
-  assert.equal(await drainHandoffs(repo), 1);
-  const u = await unrelatedEntries();
-  assert.match(u[0].reason, /PR #100 \(prod deploy\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-ev/);
-  assert.equal(await drainHandoffs(repo), 0);
-});
+for (const [name, saves] of [["unavailable", false], ["unsaved", true]]) {
+  test(`prod deploy origin, repo record ${name}: the deploy verdict fails closed (nothing advances), and the healthy pass re-verifies and records the report once with its evidence`, async () => {
+    const d = DEPLOYED("pass", " evidence=https://example.test/pv");
+    world(pending(), { approve: { exit: 0, out: "approved" }, deploy: { ...d, out: `${TRIAGE("verify: ")}\n${d.out}` }, prod: { ...VERIFY(100), out: `${TRIAGE("")}\n${VERIFY(100).out}` } });
+    await withRepoRecordBroken(saves, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+    assert.equal((await unrelatedEntries()).length, 0);
+    assert.equal(await run(2), true, "the merged release is verified again, and that run reproduces the report");
+    assertClosedVerified(5);
+    const u = await unrelatedEntries();
+    assert.equal(u.length, 1, "one entry per signature");
+    assert.match(u[0].reason, /PR #100 \((prod|prod deploy)\).*Expired API Key.*Evidence: https:\/\/example\.test\/pv-ev/);
+  });
+}
 
 test("a prod deploy whose evidence is only on its SRE_DEPLOY trailer still hands that link to the EM", async () => {
   const d = DEPLOYED("pass", " evidence=https://example.test/pv-trailer");
@@ -412,28 +413,17 @@ for (const [name, saves] of [["R1: the repo record is unavailable", false], ["R2
 }
 
 for (const [name, saves] of [["unavailable", false], ["unsaved", true]]) {
-  test(`prod verification's unrelated error, repo record ${name}: the release closes, the report waits in the outbox, and the next healthy unstick pass records it once with no recurrence`, async () => {
+  test(`prod verification's unrelated error, repo record ${name}: the issue stays open and the next healthy pass raises it once`, async () => {
     const v = VERIFY(90);
     world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: { ...v, out: `${TRIAGE("")}\n${v.out}` } });
-    await withRepoRecordBroken(saves, async () => { assert.equal(await run(), true, "the verdict is not held hostage by the triage record"); });
+    await withRepoRecordBroken(saves, async () => { await assert.rejects(run(), /hand-off to the EM could not be saved/); });
+    assert.equal(gh().issues[7].state, "OPEN", "nothing was closed on a verdict whose hand-off is lost");
+    assert.equal((await unrelatedEntries()).length, 0);
+    assert.equal(await run(2), true);
     assertClosedVerified(7);
-    assert.equal((await unrelatedEntries()).length, 0, "the record was down");
-    assert.equal(await drainHandoffs(repo), 1, "recovered: the outbox, not a recurrence, supplies the report");
-    const [e] = await unrelatedEntries();
-    assert.match(e.reason, /example\/rel PR #90 \(prod\).*Expired API Key/s);
-    assert.equal(await drainHandoffs(repo), 0, "recorded once");
-    assert.equal((await unrelatedEntries()).length, 1);
+    assert.equal((await unrelatedEntries()).length, 1, "recorded once, with no second report of the error needed");
   });
 }
-
-test("prod verification: a clean re-run after the report was saved does not repeat the error", async () => {
-  const v = VERIFY(90);
-  world({ issues: [issue(7, "pr approved")], prs: [mergedPr(90, "- #7: Issue 7", MERGE, 60)] }, { prod: { ...v, out: `${TRIAGE("")}\n${v.out}` } });
-  assert.equal(await run(), true);
-  assert.equal((await unrelatedEntries()).length, 1);
-  assert.equal(await drainHandoffs(repo), 0);
-  assert.equal((await unrelatedEntries()).length, 1);
-});
 
 test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
   const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
