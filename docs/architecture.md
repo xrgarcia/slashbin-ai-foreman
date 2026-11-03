@@ -56,7 +56,7 @@ at startup, hands them each config reload, and resolves each role; every enabled
 hears every event. `src/plugins/index.ts` is the only file that names a plugin. Each
 plugin, its roles and the key that turns it on: [README](../README.md#plugins).
 
-Paperclip is an observer (`src/plugins/paperclip.ts`, delegating to `src/paperclip/mirror.ts`)
+Paperclip is an observer (`src/plugins/paperclip.ts`, delegating to `src/paperclip/mirror.ts`, a facade over five collaborators: card index, placement, session lease, snapshot sync, thread notes; none imports another)
 and is optional: off (`paperclip.enabled` false, or no `companyId` / `agentId`) it is never
 started, and the core makes no Paperclip call and no observer-only GitHub read
 (`observersWantSnapshot`, `observersWantSessionReports`). On, it is self-sufficient: each
@@ -120,7 +120,7 @@ src/
 ├── redact.ts          # Secret redaction in transcripts, logs and errors
 ├── orchestrator.ts    # Lane pass per (repo, lane), failure cooldowns, shutdown drain
 ├── phases/            # One file per stage (reconcile, review, verify, promote, release, revise, implement, custom)
-├── paperclip/         # Paperclip plugin code: the board mirror, client, doctor
+├── paperclip/         # Paperclip plugin code: the mirror facade and its five collaborators, client, doctor
 ├── issue-records.ts   # Issue, PR and repo records in the work-source store (the daemon's persistence)
 ├── legacy-records.ts  # One-time import of a leftover .agent-state.json
 ├── daemon.ts          # One poll loop per (repo, lane), config hot-reload, graceful shutdown
