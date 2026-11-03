@@ -19,6 +19,20 @@ const LEGACY_LIVE_NOTE = "retired: the board is the queue now; each task's statu
 /** A lookup that misses rescans once the last scan is this old, so a row another writer added since is found within a minute. */
 const MISS_RESCAN_MS = 60_000;
 
+/** At most this many registry lookups in flight at once. */
+export const REGISTRY_CONCURRENCY = 4;
+
+/**
+ * A scan reads only the rows Paperclip changed since the last read (`updatedSince`), merged
+ * into the rows already held; the whole list is re-read once this old, which also drops a row
+ * deleted since. Every card, done or cancelled included, stays in the index: a closed issue's
+ * card must be found, never created again.
+ */
+export const FULL_READ_TTL_MS = 60 * 60_000;
+
+/** Back-dating of the `updatedSince` mark, so a clock a little apart from Paperclip's loses no change. */
+const DELTA_OVERLAP_MS = 120_000;
+
 /** With `ownsCards`, the most second cards one housekeeping pass retires. */
 const RETIRES_PER_PASS = 25;
 
@@ -68,6 +82,13 @@ export class CardIndex {
   duplicates: Duplicate[] = [];
   /** The repos a snapshot has named: the ones the Foreman serves, so the only ones housekeeping may label. */
   readonly servedRepos = new Set<string>();
+  /** Every company row as the last successful scan left it, by id; a delta scan merges into it. */
+  private rows: Map<string, PaperclipIssue> | null = null;
+  private fullReadAt = 0;
+  private lastReadStartedAt = 0;
+  /** Repos whose registry lookup failed during the scan in progress: asked once, then compared on their last known key. */
+  private readonly unresolved = new Set<string>();
+  private scanning = false;
   /** The Unplaced project's id, or the lookup in flight; cleared when it finds none or an ambiguous set. */
   private unplacedLookup: Promise<string | null> | null = null;
 
@@ -110,15 +131,35 @@ export class CardIndex {
     return this.repoKeys.get(repo) ?? repo;
   }
 
-  /** Ask for `repo`'s key ahead of a synchronous comparison; an outage is logged and the repo compares as written. */
-  async warm(...repos: string[]): Promise<void> {
-    for (const repo of repos) {
+  /**
+   * `repo`'s key, never throwing: the key if the registry answers, else the last known key (else the
+   * repo as written) after one warn. During a scan a failed repo is asked once; the rest of that scan
+   * compares it on what is known.
+   */
+  async keyForScan(repo: string): Promise<string> {
+    if (!this.scanning || !this.unresolved.has(repo)) {
       try {
-        await this.keyFor(repo);
+        return await this.keyFor(repo);
       } catch (e) {
+        if (this.scanning) this.unresolved.add(repo);
         this.env.log("warn", `Paperclip mirror: registry identity for ${repo} unavailable: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    return this.keyNow(repo);
+  }
+
+  /** Resolve many repos, at most REGISTRY_CONCURRENCY in flight; a failed one is logged by name and the rest go on. Never throws. */
+  async resolveAll(repos: readonly string[]): Promise<void> {
+    const queue = [...new Set(repos)];
+    const worker = async () => {
+      for (let repo = queue.shift(); repo !== undefined; repo = queue.shift()) await this.keyForScan(repo);
+    };
+    await Promise.all(Array.from({ length: Math.min(REGISTRY_CONCURRENCY, queue.length) }, worker));
+  }
+
+  /** Ask for `repo`'s key ahead of a synchronous comparison; an outage is logged and the repo compares as written. */
+  async warm(...repos: string[]): Promise<void> {
+    await this.resolveAll(repos);
   }
 
   async warmEvent(event: WorkEvent): Promise<void> {
@@ -265,11 +306,17 @@ export class CardIndex {
     if (!fresh && this.index && Date.now() - this.indexedAt <= INDEX_TTL_MS) return true;
     const keyRe = this.env.keyPattern();
     const cancelled = this.env.statusName("cancelled");
-    // One registry answer per distinct repo per scan. A registry failure throws inside the scan,
-    // so it takes the `!scanned.ok` path below and the previous index stays.
+    // One registry answer per distinct repo per REPO_KEY_TTL_MS. A repo the registry cannot answer
+    // compares on its last known key for this scan (a warn names it); the scan goes on.
     this.env.identity?.beginScan();
+    this.unresolved.clear();
+    this.scanning = true;
+    const started = Date.now();
+    const reads0 = { ...this.env.client.reads };
+    const registry0 = this.env.identity?.requests?.() ?? 0;
+    const delta = this.rows !== null && started - this.fullReadAt < FULL_READ_TTL_MS;
     const scanned = await this.env.safeCall("scan tasks", async () => {
-      for (const r of this.env.cfg.repos ?? []) await this.keyFor(r);
+      await this.resolveAll(this.env.cfg.repos ?? []);
       const idx = new Map<string, string>();
       const state = new Map<string, string>();
       const repoOf = new Map<string, string>();
@@ -281,11 +328,15 @@ export class CardIndex {
       // issue under two owner spellings is one group. A line that is no card line groups as written.
       const byLine = new Map<string, PaperclipIssue[]>();
       const keyed = new Map<string, string>();
-      for await (const row of this.env.client.listIssues()) {
+      // The rows held, plus the ones Paperclip changed since the last read; or every row.
+      const rows = new Map(delta ? this.rows : []);
+      const since = delta ? new Date(this.lastReadStartedAt - DELTA_OVERLAP_MS).toISOString() : undefined;
+      for await (const row of this.env.client.listIssues(since ? { updatedSince: since } : {})) rows.set(row.id, row);
+      for (const row of rows.values()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
         if (!line) continue;
         const m = keyRe.exec(line);
-        const group = m?.groups ? this.indexLine(await this.keyFor(m.groups.repo), Number(m.groups.N)) : line;
+        const group = m?.groups ? this.indexLine(await this.keyForScan(m.groups.repo), Number(m.groups.N)) : line;
         keyed.set(row.id, line);
         byLine.set(group, [...(byLine.get(group) ?? []), row]);
       }
@@ -312,9 +363,16 @@ export class CardIndex {
         state.set(row.id, blocked && action ? `waiting\n${action}` : blocked ? "waiting\n" : `status:${row.status}`);
         if (row.status === this.env.statusName("blocked") && action) actions.set(row.id, String(action));
       }
-      return { idx, state, repoOf, numberOf, actions, content, duplicates };
+      return { idx, state, repoOf, numberOf, actions, content, duplicates, rows };
     });
+    this.scanning = false;
     if (!scanned.ok) return !!this.index;
+    this.rows = scanned.value.rows;
+    this.lastReadStartedAt = started;
+    if (!delta) this.fullReadAt = started;
+    const gets = this.env.client.reads.calls - reads0.calls;
+    const read = this.env.client.reads.rows - reads0.rows;
+    this.env.log("info", `Paperclip mirror: scan ${delta ? "since last read" : "of every row"}: ${gets} Paperclip GETs, ${read} rows read (${this.rows.size} held), ${(this.env.identity?.requests?.() ?? 0) - registry0} registry requests, ${Date.now() - started} ms`);
     this.index = scanned.value.idx;
     this.indexedAt = Date.now();
     this.rowState.clear();
