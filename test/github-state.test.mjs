@@ -149,3 +149,73 @@ test("a hot-reloaded repo list adds and drops repos", () => {
   s.setRepos(["a/z"]);
   assert.equal(s.isEnabled("a/x"), false);
 });
+
+// ---- one unreachable repo must not fail the fleet (2026-11-03 incident) ----
+
+// What `gh api graphql` does when an alias is NOT_FOUND: prints the body, exits 1.
+function ghPartial(data, errors) {
+  const e = new Error("gh: Could not resolve to a Repository (HTTP 200)");
+  e.stdout = JSON.stringify({ data, errors });
+  e.status = 1;
+  return e;
+}
+const notFound = (alias, name) => ({ type: "NOT_FOUND", path: [alias], message: `Could not resolve to a Repository with the name '${name}'.` });
+function spyLogger() {
+  const warns = [];
+  return { warns, debug() {}, info() {}, error() {}, warn: (m, d) => warns.push({ m, d }) };
+}
+const empty = () => ({ issues: conn([]), pullRequests: conn([]) });
+
+test("a NOT_FOUND alias fails only that repo; the others resolve from the partial body", () => {
+  const h = harness([ghPartial({ r0: { issues: conn([issue(2)]), pullRequests: conn([pr(5)]) }, r1: null, r2: empty() }, [notFound("r1", "a/gone")])]);
+  const log = spyLogger();
+  s.configure({ repos: ["a/x", "a/gone", "a/z"], refreshMs: 30_000, run: h.run, logger: log, now: h.now });
+  assert.deepEqual(s.openIssues("a/x").map((i) => i.number), [2]);
+  assert.deepEqual(s.openPrs("a/x").map((p) => p.number), [5]);
+  assert.deepEqual(s.openIssues("a/z"), []);
+  assert.throws(() => s.openIssues("a/gone"), /a\/gone unreachable \(NOT_FOUND\)/);
+  assert.equal(h.queries.length, 1);
+  assert.equal(log.warns.length, 1);
+  assert.equal(log.warns[0].d.repo, "a/gone");
+  assert.equal(log.warns[0].d.type, "NOT_FOUND");
+});
+
+test("an unreachable repo is left out of the next queries and warned about once, then retried after the back-off", () => {
+  const h = harness([
+    ghPartial({ r0: empty(), r1: null }, [notFound("r1", "a/gone")]),
+    { r0: empty() },
+    ghPartial({ r0: null, r1: empty() }, [notFound("r0", "a/gone")]), // retry: a/gone (full) is r0, a/x (delta) r1
+  ]);
+  const log = spyLogger();
+  s.configure({ repos: ["a/x", "a/gone"], refreshMs: 30_000, run: h.run, logger: log, now: h.now });
+  s.openIssues("a/x");
+  h.tick(31_000);
+  s.openIssues("a/x");
+  assert.doesNotMatch(h.queries[1], /gone/);
+  assert.throws(() => s.openIssues("a/gone"), /unreachable/);
+  assert.equal(h.queries.length, 2, "no query for the unreachable repo inside the back-off");
+  h.tick(10 * 60_000);
+  s.openIssues("a/x");
+  assert.match(h.queries[2], /gone/, "retried after the back-off");
+  assert.throws(() => s.openIssues("a/gone"), /unreachable/);
+  assert.equal(log.warns.length, 1, "the same failure is not logged again");
+});
+
+test("a repo that becomes reachable again is read normally", () => {
+  const h = harness([
+    ghPartial({ r0: empty(), r1: null }, [notFound("r1", "a/back")]),
+    { r0: { issues: conn([issue(9)]), pullRequests: conn([]) }, r1: empty() }, // the full read (a/back) is r0, a/x delta r1
+  ]);
+  s.configure({ repos: ["a/x", "a/back"], refreshMs: 30_000, run: h.run, logger: spyLogger(), now: h.now });
+  s.openIssues("a/x");
+  h.tick(11 * 60_000);
+  assert.deepEqual(s.openIssues("a/back").map((i) => i.number), [9]);
+});
+
+test("a gh failure with no data in its body is still a whole-query failure", () => {
+  const e = new Error("gh: HTTP 401");
+  e.stdout = JSON.stringify({ errors: [{ message: "Bad credentials" }] });
+  const h = harness([e]);
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run: h.run, logger, now: h.now });
+  assert.throws(() => s.openIssues("a/x"), /HTTP 401/);
+});

@@ -99,6 +99,12 @@ const DEFAULT_FULL_REFRESH_MS = 15 * 60_000;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 const FAILURE_COOLDOWN_MS = 15_000;
+/** An unreachable repo (NOT_FOUND, FORBIDDEN...) is left out of the bulk query this long before it is tried again. */
+const UNREACHABLE_RETRY_MS = 10 * 60_000;
+
+interface GraphqlError { message?: string; type?: string; path?: unknown[] }
+/** A repo the bulk query could not resolve: why, and when to try it again. */
+interface Unreachable { type: string; message: string; retryAt: number }
 
 /**
  * The fleet state. Its memory lives on the instance: the GitHub plugin owns the
@@ -112,6 +118,8 @@ export class GitHubState {
   /** The last failed refresh — re-thrown, not re-run, for a short while (see ensureFresh). */
   private lastFailure: { at: number; err: unknown } | null = null;
   private readonly dirty = new Set<string>();
+  /** Repos the bulk query could not resolve. Reads of these throw; no other repo is affected. */
+  private readonly unreachable = new Map<string, Unreachable>();
   /** GraphQL points the state's own queries spent, as GitHub reported them. */
   private pointsSpent = 0;
   private queriesRun = 0;
@@ -131,6 +139,7 @@ export class GitHubState {
     this.lastRefreshAt = 0;
     this.lastFailure = null;
     this.dirty.clear();
+    this.unreachable.clear();
     if (o.persistPath) {
       try {
         const saved = JSON.parse(readFileSync(o.persistPath, "utf-8")) as Persisted;
@@ -232,6 +241,9 @@ export class GitHubState {
   private ensureFresh(repo: string): void {
     if (!this.opts || !this.opts.repos.includes(repo)) return;
     const t = this.now();
+    // A repo GitHub cannot resolve fails its own reads only, and is not re-queried until its retry time.
+    const bad = this.unreachable.get(repo);
+    if (bad && t < bad.retryAt) throw unreachableError(repo, bad);
     const stale = t - this.lastRefreshAt >= this.opts.refreshMs || !this.views.has(repo);
     if (!stale && !this.dirty.has(repo)) return;
     // A failed bulk query fails every repo's read at once. Without this, each of
@@ -245,6 +257,8 @@ export class GitHubState {
       this.lastFailure = { at: t, err };
       throw err;
     }
+    const still = this.unreachable.get(repo);
+    if (still) throw unreachableError(repo, still);
   }
 
   private refresh(repos: string[]): void {
@@ -255,6 +269,11 @@ export class GitHubState {
     const full: string[] = [];
     const delta: string[] = [];
     for (const r of repos) {
+      const bad = this.unreachable.get(r);
+      if (bad && t < bad.retryAt) {
+        this.dirty.delete(r);
+        continue;
+      }
       const v = this.views.get(r);
       if (!v || !v.syncedAt || !v.fullAt || t - Date.parse(v.fullAt) >= fullEvery) full.push(r);
       else delta.push(r);
@@ -273,13 +292,21 @@ export class GitHubState {
     });
     if (blocks.length === 0) return;
 
-    const data = this.graphql(`query { ${blocks.join("\n")} }`);
+    const { data, errors } = this.graphql(`query { ${blocks.join("\n")} }`);
     for (const [alias, { repo, kind }] of aliases) {
       const node = data[alias] as RepoNode | null | undefined;
       if (!node) {
+        // GitHub names the alias in each error's path: that repo failed, the others did not.
+        const err = errors.find((e) => e.path?.[0] === alias);
+        if (err) {
+          this.markUnreachable(repo, err);
+          this.dirty.delete(repo);
+          continue;
+        }
         o.logger.warn("github-state: repo missing from bulk response — keeping its last state", { repo });
         continue;
       }
+      this.clearUnreachable(repo);
       if (kind === "full") {
         this.applyFull(repo, node, startedAt);
       } else if (!this.applyDelta(repo, node, startedAt)) {
@@ -291,7 +318,7 @@ export class GitHubState {
     // More than DELTA_WINDOW changes since the last sync: read that repo whole.
     if (overflow.length > 0) {
       const fb = overflow.map((repo, i) => repoBlock(`r${i}`, repo, "full"));
-      const d2 = this.graphql(`query { ${fb.join("\n")} }`);
+      const d2 = this.graphql(`query { ${fb.join("\n")} }`).data;
       overflow.forEach((repo, i) => {
         const node = d2[`r${i}`] as RepoNode | null | undefined;
         if (node) this.applyFull(repo, node, startedAt);
@@ -300,21 +327,50 @@ export class GitHubState {
     this.persist();
   }
 
-  private graphql(query: string): Record<string, unknown> {
-    const out = this.opts!.run(["api", "graphql", "-f", `query=${query.replace(/^query \{/, "query { rateLimit { cost } ")}`]);
-    const parsed = JSON.parse(out || "{}") as { data?: Record<string, unknown>; errors?: { message?: string; path?: unknown[] }[] };
-    // A repo that no longer resolves comes back as a null block plus an error;
-    // the rest of the response is still good, so only an empty `data` is fatal.
+  private graphql(query: string): { data: Record<string, unknown>; errors: GraphqlError[] } {
+    let out: string;
+    try {
+      out = this.opts!.run(["api", "graphql", "-f", `query=${query.replace(/^query \{/, "query { rateLimit { cost } ")}`]);
+    } catch (err) {
+      // `gh api graphql` exits non-zero when any alias errored, but still prints the JSON body
+      // (partial `data` plus `errors`). Use that body; a failure with no data is a real failure.
+      const body = (err as { stdout?: Buffer | string } | null)?.stdout;
+      out = typeof body === "string" ? body : body?.toString() ?? "";
+      let usable = false;
+      try { usable = !!(JSON.parse(out) as { data?: unknown }).data; } catch { /* not JSON */ }
+      if (!usable) throw err;
+    }
+    const parsed = JSON.parse(out || "{}") as { data?: Record<string, unknown>; errors?: GraphqlError[] };
+    // A repo that does not resolve comes back as a null block plus an error with that alias in its
+    // path; the rest of the response is still good, so only an empty `data` is fatal.
     if (!parsed.data) {
       throw new Error(`github-state: bulk query failed: ${(parsed.errors ?? []).map((e) => e.message).join("; ") || "no data"}`);
     }
     this.queriesRun++;
     const cost = (parsed.data.rateLimit as { cost?: number } | undefined)?.cost;
     if (typeof cost === "number") this.pointsSpent += cost;
-    if (parsed.errors?.length) {
-      this.opts!.logger.warn("github-state: bulk query returned errors", { errors: parsed.errors.map((e) => e.message).slice(0, 5) });
+    const errors = parsed.errors ?? [];
+    // Errors tied to a repo alias are logged once per repo by markUnreachable; the rest are logged here.
+    const other = errors.filter((e) => !(typeof e.path?.[0] === "string" && /^r\d+$/.test(e.path[0]) && parsed.data![e.path[0]] == null));
+    if (other.length) {
+      this.opts!.logger.warn("github-state: bulk query returned errors", { errors: other.map((e) => e.message).slice(0, 5) });
     }
-    return parsed.data;
+    return { data: parsed.data, errors };
+  }
+
+  /** One WARN per state change (new, or a different error type) — a retry that fails the same way is silent. */
+  private markUnreachable(repo: string, err: GraphqlError): void {
+    const type = err.type ?? "UNKNOWN";
+    const prior = this.unreachable.get(repo);
+    const message = err.message ?? type;
+    this.unreachable.set(repo, { type, message, retryAt: this.now() + UNREACHABLE_RETRY_MS });
+    if (!prior || prior.type !== type) {
+      this.opts!.logger.warn("github-state: repo unreachable — its lanes fail, every other repo is unaffected", { repo, type, error: message, retryMinutes: UNREACHABLE_RETRY_MS / 60_000 });
+    }
+  }
+
+  private clearUnreachable(repo: string): void {
+    if (this.unreachable.delete(repo)) this.opts!.logger.info("github-state: repo reachable again", { repo });
   }
 
   private applyFull(repo: string, node: RepoNode, startedAt: string): void {
@@ -324,7 +380,7 @@ export class GitHubState {
     let page = node.issues?.pageInfo;
     // Past 100 open issues: page this one repo until done or at the limit.
     while (page?.hasNextPage && page.endCursor && issues.length < limit) {
-      const d = this.graphql(`query { ${repoBlock("r0", repo, "full", undefined, page.endCursor)} }`);
+      const d = this.graphql(`query { ${repoBlock("r0", repo, "full", undefined, page.endCursor)} }`).data;
       const n = d.r0 as RepoNode | null;
       issues.push(...(n?.issues?.nodes ?? []).map(toIssue));
       page = n?.issues?.pageInfo;
@@ -387,6 +443,10 @@ export class GitHubState {
       // Best-effort — the next refresh rebuilds it.
     }
   }
+}
+
+function unreachableError(repo: string, bad: Unreachable): Error {
+  return new Error(`github-state: ${repo} unreachable (${bad.type}): ${bad.message}`);
 }
 
 function sinceFor(v: RepoView): string {
