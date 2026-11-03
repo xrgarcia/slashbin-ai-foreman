@@ -12,7 +12,7 @@ import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-b
 import { backoffDelay, formatWait } from "../backoff.js";
 import { fieldTable } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
-import { settleSkillSync, type SyncOutcome } from "../skill-sync.js";
+import { alignLocalBase, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import { CycleEvent, activeRuns, itemOf, notifyOnce, prReport, releaseIfResolved, startReport, stoppedReason } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
@@ -464,6 +464,9 @@ export async function tryBatchImplementation(
     // A stale skill copy is brought to the golden in a commit the session
     // builds on and pushes with its work (docs/skill-sync.md). The code makes
     // it, never the session; it cannot fail the issue.
+    // Local <base> is always made equal to origin/<base> first (fast-forward only), sync or not: the session cuts its
+    // branch from it. The optional sync commit is then the only thing local <base> can carry.
+    alignLocalBase(repoConfig, repoLogger);
     if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
 
     const priorFailure = rt.memory.lastFailureReason.get(repoName) || null;
