@@ -24,7 +24,8 @@ import { z } from "zod";
  * `srePath` and `techLeadPath` are set (config.ts refuses an explicit one
  * without them; the default skips it with a startup warning). `unstick` is
  * last and runs only when `emRepoPath` is set: it calls the EM for work that
- * is stuck (src/unstick.ts), whether or not Paperclip is on.
+ * is stuck (src/unstick.ts), whether or not Paperclip is on. `skill-deliver` is
+ * the only stage a sync-only (human-lane) repo runs, and a sync-only repo runs no other.
  */
 export const BUILTIN_STAGES = [
   "reconcile",
@@ -37,6 +38,7 @@ export const BUILTIN_STAGES = [
   "branch-sync",
   "dependabot",
   "unstick",
+  "skill-deliver",
 ] as const;
 
 export const stageTypeSchema = z.enum(BUILTIN_STAGES);
