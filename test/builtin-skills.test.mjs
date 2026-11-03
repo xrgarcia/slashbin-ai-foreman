@@ -18,7 +18,8 @@ import { githubCodeHost } from "../dist/plugins/github.js";
 setCodeHost(githubCodeHost());
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { implementApprovedIssues, revisePRFeedback } = await import(join(root, "dist/agent.js"));
+const { implementApprovedIssues } = await import(join(root, "dist/phases/implement-workflow.js"));
+const { revisePRFeedback } = await import(join(root, "dist/phases/revise-workflow.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
 const { ClaudeTrust } = await import(join(root, "dist/claude-trust.js"));
 const trust = new ClaudeTrust();

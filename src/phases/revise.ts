@@ -4,7 +4,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
-import { revisePRFeedback } from "../agent.js";
+import { revisePRFeedback } from "./revise-workflow.js";
 import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { type BlockKind } from "../unblock.js";

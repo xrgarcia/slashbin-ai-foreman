@@ -13,10 +13,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync 
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { agentSource, between } from "./source-text.mjs";
 import {
   announceDeadBlocker, closeAlreadyLanded, isDeadBlockerReason, deadBlockerComment, dependentRef,
 } from "../dist/github/dead-blocker.js";
-import { detectDeclaredLanded } from "../dist/agent.js";
+import { detectDeclaredLanded } from "../dist/session/protocol.js";
 import { prBlockingSkip } from "../dist/phases/implement.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -124,11 +125,13 @@ test("the landed trailer needs its issue, starts a line, and the last one wins",
 });
 
 test("wiring: landed is checked before PR attribution and behind the SHA guard; skips tell dependents", () => {
-  const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
-  const fn = agent.slice(agent.indexOf("export async function implementApprovedIssues"), agent.indexOf("export async function revisePRFeedback"));
+  const fn = between(agentSource(), "export async function implementApprovedIssues", "export async function revisePRFeedback");
   const landedAt = fn.indexOf("detectDeclaredLanded(result.stdout)");
-  assert.ok(landedAt > 0 && landedAt < fn.indexOf("const prMatch = result.stdout.match"));
-  assert.match(fn.slice(landedAt, fn.indexOf("const declaredSkip")), /beforeSha !== afterSha/);
+  assert.ok(landedAt > 0, "the landed check is gone from implementApprovedIssues");
+  const prMatchAt = fn.indexOf("const prMatch = result.stdout.match");
+  assert.ok(prMatchAt > 0, "PR extraction is gone - test needs updating");
+  assert.ok(landedAt < prMatchAt);
+  assert.match(between(fn, "detectDeclaredLanded(result.stdout)", "const declaredSkip"), /beforeSha !== afterSha/);
   const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
   assert.match(impl, /actionableIssues\.includes\(result\.landedIssue\)/, "only an issue in the batch may be closed");
   assert.match(impl, /await tellDependents\(/);
@@ -149,11 +152,13 @@ test("a dependent is escalated under ITS repo's config, with a stuck kind the un
 });
 
 test("the landed protocol is in the COMMON prompt, so a repo-local skill hears it", () => {
-  const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
-  const fn = agent.slice(agent.indexOf("export async function implementApprovedIssues"), agent.indexOf("export async function revisePRFeedback"));
+  const fn = between(agentSource(), "export async function implementApprovedIssues", "export async function revisePRFeedback");
   const at = fn.indexOf("Nothing-to-land protocol");
   assert.ok(at > 0, "the prompt no longer teaches landed");
-  assert.ok(at > fn.indexOf("Skip protocol") && at < fn.indexOf("PRIOR ATTEMPT FAILED"));
+  const skipAt = fn.indexOf("Skip protocol");
+  const priorAt = fn.indexOf("PRIOR ATTEMPT FAILED");
+  assert.ok(skipAt >= 0 && priorAt >= 0, "prompt anchors moved - test needs updating");
+  assert.ok(at > skipAt && at < priorAt);
   assert.match(fn.slice(at, at + 900), /FOREMAN_RESULT: landed issue=/);
 });
 

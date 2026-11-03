@@ -12,7 +12,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { claudeConfigPath, isUntrustedWarning } from "../dist/claude-trust.js";
-import { runCustomStage } from "../dist/agent.js";
+import { runCustomStage } from "../dist/phases/custom-workflow.js";
 import { loadConfig } from "../dist/config.js";
 import { ForemanRuntime } from "../dist/runtime.js";
 let rt = new ForemanRuntime();

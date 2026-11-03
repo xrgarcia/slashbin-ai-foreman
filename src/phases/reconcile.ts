@@ -8,7 +8,7 @@ import { reviewMove } from "../lifecycle.js";
 import { reconcileRepo } from "../reconciler.js";
 import { roleFor } from "../plugins/registry.js";
 import { hasStage } from "../stages.js";
-import { QA_PENDING_HOLD, type ReviewTrailer } from "../agent.js";
+import { QA_PENDING_HOLD, type ReviewTrailer } from "../session/protocol.js";
 import { fieldTable, type HeldIssue } from "../issue-records.js";
 import { CycleEvent, itemOf, labelFromTrailer, notifyOnce, workStateOf } from "./common.js";
 import { codeHost } from "../plugins/registry.js";

@@ -2,7 +2,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { pickEnv, SESSION_ENV_ESSENTIALS } from "../agent.js";
+import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import type { QaManifest, QaOutcome } from "../qa-report.js";
 import { runAgentCli, type CliRun } from "./agent-cli.js";
 import type { ForemanPlugin, QaRunner } from "./contract.js";

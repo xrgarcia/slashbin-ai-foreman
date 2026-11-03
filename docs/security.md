@@ -50,12 +50,12 @@ The Tech Lead hand-off gets the same essentials and `sessionEnv` names,
 `TECHLEAD_GITHUB_KEY`, its own `TECH_LEAD_*` settings and the two label vars — never
 `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
 
-Code: `src/agent.ts`, `src/redact.ts`.
+Code: `src/session/env.ts`, `src/redact.ts`.
 
 ## The secret gate (PreToolUse hook)
 
 Every Claude session the Foreman spawns runs under a PreToolUse hook,
-`hooks/session-secret-gate.mjs`, passed with `--settings` (`src/agent.ts`). It blocks
+`hooks/session-secret-gate.mjs`, passed with `--settings` (`src/session/secret-gate.ts`). It blocks
 Bash commands that would print an environment or credential *value*, and file-tool
 calls (Read, Grep, Edit, notebooks) on a file whose content is a credential.
 

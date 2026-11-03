@@ -64,20 +64,20 @@ test("ratchet: a new unlisted core file importing ./github.js fails", () => {
 });
 
 test("ratchet: a listed file whose count grows fails", () => {
-  const problems = checkBoundary({ "agent.ts": ["./github.js", "./github-state.js", "./paperclip/client.js"] }, { "agent.ts": 2 });
+  const problems = checkBoundary({ "orchestrator.ts": ["./github.js", "./github-state.js", "./paperclip/client.js"] }, { "orchestrator.ts": 2 });
   assert.equal(problems.length, 1);
   assert.match(problems[0], /grew 2 -> 3/);
 });
 
 test("ratchet: a listed file whose count drops without the allowlist being lowered fails", () => {
-  const problems = checkBoundary({ "agent.ts": ["./github.js"] }, { "agent.ts": 2 });
+  const problems = checkBoundary({ "orchestrator.ts": ["./github.js"] }, { "orchestrator.ts": 2 });
   assert.equal(problems.length, 1);
   assert.match(problems[0], /down to 1 plugin imports from 2/);
-  assert.match(checkBoundary({ "agent.ts": ["./logger.js"] }, { "agent.ts": 1 })[0], /delete the line/);
+  assert.match(checkBoundary({ "orchestrator.ts": ["./logger.js"] }, { "orchestrator.ts": 1 })[0], /delete the line/);
 });
 
 test("ratchet: a listed file at exactly its count passes", () => {
-  assert.deepEqual(checkBoundary({ "agent.ts": ["./github.js", "./config.js"] }, { "agent.ts": 1 }), []);
+  assert.deepEqual(checkBoundary({ "orchestrator.ts": ["./github.js", "./config.js"] }, { "orchestrator.ts": 1 }), []);
 });
 
 test("ratchet: core importing plugins/registry.js or plugins/contract.js is allowed", () => {
@@ -133,7 +133,7 @@ test("ratchet: core importing src/github* fails against the empty list, in any f
 test("ratchet: core spawning gh fails, whichever child_process call; src/github* and the GitHub plugin may", () => {
   const spawns = ['execFileSync("gh", ["pr", "list"])', "spawnSync('gh', args)", "spawn(`gh`, [])", 'execFile("gh", a, cb)', 'execSync("gh api user")', 'exec("gh pr view")', 'execFileAsync("gh", args)'];
   for (const call of spawns) {
-    for (const rel of ["agent.ts", "phases/release.ts", "upstream-backoff.ts", "plugins/paperclip.ts", "paperclip/client.ts"]) {
+    for (const rel of ["session/runner.ts", "phases/release.ts", "upstream-backoff.ts", "plugins/paperclip.ts", "paperclip/client.ts"]) {
       const problems = ghSpawnProblems({ [rel]: `const out = ${call};` });
       assert.equal(problems.length, 1, `${rel}: ${call}`);
       assert.match(problems[0], new RegExp(`src/${rel.replace(/\./g, "\\.")} runs gh directly`));
@@ -144,6 +144,6 @@ test("ratchet: core spawning gh fails, whichever child_process call; src/github*
   }
   // Comments, git and other commands are not gh.
   assert.deepEqual(ghSpawnProblems({
-    "agent.ts": '// execFileSync("gh", [])\n/* spawnSync("gh") */\nspawnSync("git", ["log"]); execFileSync("ghost"); spawn("claude", []);',
+    "session/runner.ts": '// execFileSync("gh", [])\n/* spawnSync("gh") */\nspawnSync("git", ["log"]); execFileSync("ghost"); spawn("claude", []);',
   }), []);
 });

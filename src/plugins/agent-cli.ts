@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentConfig } from "../config.js";
-import { createStreamRedactor, redactAll, secretValues, type ReviewTrailer } from "../agent.js";
+import { createStreamRedactor, secretValues } from "../session/env.js";
+import { redactAll } from "../redact.js";
+import type { ReviewTrailer } from "../session/protocol.js";
 import type { UnrelatedErrors } from "./contract.js";
 
 /**

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QA_PENDING_HOLD, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../dist/agent.js";
+import { QA_PENDING_HOLD, HEAD_MOVED_HOLD, NOT_APPROVED_HOLD } from "../dist/session/protocol.js";
 import { reviewViaTechLead } from "../dist/plugins/tech-lead.js";
 import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
 import { runQaBeforeMerge, qaBeforeMergeApplies, qaVerdictMarker, qaFailLines, qaGateBody, applyQaGate, executeQa } from "../dist/qa-report.js";
@@ -117,7 +117,7 @@ test("4: revise is handed QA's failing lines, cut at 'Pages checked:'", () => {
   assert.doesNotMatch(lines, /Pages checked:/);
   assert.doesNotMatch(lines, /foreman-qa/);
   assert.match(src("phases/revise.ts"), /latestQaFailLines/);
-  assert.match(src("agent.ts"), /qaFeedback/);
+  assert.match(src("phases/revise-workflow.ts"), /qaFeedback/);
 });
 
 test("4: a QA FAIL report counts as a review round for the rounds alert", () => {
