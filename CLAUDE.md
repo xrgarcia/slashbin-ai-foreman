@@ -166,7 +166,7 @@ src/
 ├── plugins/         # contract.ts (roles), registry.ts (core's only way in), index.ts names them; one file each
 ├── code-host.ts     # CodeHost: every PR, branch, merge, comment and label operation
 ├── profiles/        # Named defaults (`"profile"`): default < profile < .ai-agent.json < env
-├── paperclip/       # Paperclip plugin code: mirror (cards), client, agent register, doctor
+├── paperclip/       # Paperclip plugin code: mirror facade over card-index / placement / lease / snapshot-sync / thread-notes, client, agent register, doctor
 └── index.ts         # Public API exports
 ```
 
