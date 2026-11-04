@@ -474,7 +474,10 @@ export class SkillSync {
           mkdirSync(dirname(dest), { recursive: true });
           writeFileSync(dest, bytes);
         }
-        git(["add", "--", ...[...want.keys()].map((p) => `${base}/${p}`)], cwd);
+        // Forced: these are the sync's own files, and a repo that ignores `.claude/`
+        // (jerky_labor_forecaster) otherwise refuses them and the sync fails open,
+        // leaving the session on a stale or missing skill (EM, 2026-11-04).
+        git(["add", "--force", "--", ...[...want.keys()].map((p) => `${base}/${p}`)], cwd);
       }
       if (!git(["diff", "--cached", "--name-only"], cwd)) return { status: "current" };
 
