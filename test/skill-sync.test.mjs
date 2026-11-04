@@ -165,6 +165,15 @@ test("a stale copy is synced in one local commit naming the issue, byte for byte
   assert.equal(git(repo, "status", "--porcelain", "--untracked-files=no"), "");
 });
 
+test("a repo that ignores .claude/ still gets its skills committed", () => {
+  const cfg = cfgFor(makeGolden(tmp));
+  const repo = makeRepo(tmp, { ".gitignore": ".claude/\n" });
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, baseBranch: "develop" }, [56], logger());
+  assert.equal(out.status, "synced", out.reason);
+  assert.deepEqual(out.skills, ["clean-code", "implement-approved-issues", "revise-pr-feedback"]);
+  assert.equal(git(repo, "show", "HEAD:.claude/skills/clean-code/SKILL.md"), "clean v1");
+});
+
 test("no commit when the copy is already current", () => {
   const cfg = cfgFor(makeGolden(tmp));
   const repo = makeRepo(tmp, CURRENT);
