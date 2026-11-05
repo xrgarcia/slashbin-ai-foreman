@@ -33,6 +33,9 @@ export const FULL_READ_TTL_MS = 60 * 60_000;
 /** Back-dating of the `updatedSince` mark, so a clock a little apart from Paperclip's loses no change. */
 const DELTA_OVERLAP_MS = 120_000;
 
+/** A whole-list read that failed part way is resumed only this long; older, it starts over. */
+const PARTIAL_READ_TTL_MS = 15 * 60_000;
+
 /** With `ownsCards`, the most second cards one housekeeping pass retires. */
 const RETIRES_PER_PASS = 25;
 
@@ -86,6 +89,13 @@ export class CardIndex {
   private rows: Map<string, PaperclipIssue> | null = null;
   private fullReadAt = 0;
   private lastReadStartedAt = 0;
+  /**
+   * A whole-list read that failed part way: the rows its finished pages gave, where it stopped, and
+   * when it began. The next scan resumes there. Without it a slow board (a page timing out through
+   * every retry) restarts the read at row 0 each scan and never builds an index, so nothing is
+   * placed: SLA-3778 sat untouched from a restart through merge and release (Foreman #100).
+   */
+  private partial: { rows: Map<string, PaperclipIssue>; offset: number; startedAt: number } | null = null;
   /** Repos whose registry lookup failed during the scan in progress: asked once, then compared on their last known key. */
   private readonly unresolved = new Set<string>();
   private scanning = false;
@@ -339,9 +349,26 @@ export class CardIndex {
       const byLine = new Map<string, PaperclipIssue[]>();
       const keyed = new Map<string, string>();
       // The rows held, plus the ones Paperclip changed since the last read; or every row.
-      const rows = new Map(delta ? this.rows : []);
+      const resume = !delta && this.partial && started - this.partial.startedAt < PARTIAL_READ_TTL_MS ? this.partial : null;
+      const rows = new Map(delta ? this.rows : resume ? resume.rows : []);
       const since = delta ? new Date(this.lastReadStartedAt - DELTA_OVERLAP_MS).toISOString() : undefined;
-      for await (const row of this.env.client.listIssues(since ? { updatedSince: since } : {})) rows.set(row.id, row);
+      const from = resume?.offset ?? 0;
+      let got = 0;
+      try {
+        for await (const row of this.env.client.listIssues(since ? { updatedSince: since } : { startOffset: from })) {
+          rows.set(row.id, row);
+          got++;
+        }
+        // Rows that changed while the pages were being read can shift later pages: read them again.
+        if (resume) {
+          const mark = new Date(resume.startedAt - DELTA_OVERLAP_MS).toISOString();
+          for await (const row of this.env.client.listIssues({ updatedSince: mark })) rows.set(row.id, row);
+        }
+      } catch (err) {
+        // Only whole pages were yielded, so the next page starts right after them.
+        if (!delta) this.partial = { rows, offset: from + got, startedAt: resume?.startedAt ?? started };
+        throw err;
+      }
       for (const row of rows.values()) {
         const line = String(row.description ?? "").split("\n")[0].trim();
         if (!line) continue;
@@ -380,7 +407,10 @@ export class CardIndex {
     this.rows = scanned.value.rows;
     this.staleRepos = new Set(this.unresolved);
     this.lastReadStartedAt = started;
-    if (!delta) this.fullReadAt = started;
+    if (!delta) {
+      this.fullReadAt = started;
+      this.partial = null;
+    }
     const gets = this.env.client.reads.calls - reads0.calls;
     const read = this.env.client.reads.rows - reads0.rows;
     this.env.log("info", `Paperclip mirror: scan ${delta ? "since last read" : "of every row"}: ${gets} Paperclip GETs, ${read} rows read (${this.rows.size} held), ${(this.env.identity?.requests?.() ?? 0) - registry0} registry requests, ${Date.now() - started} ms`);

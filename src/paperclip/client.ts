@@ -183,11 +183,12 @@ export class PaperclipClient {
 
   /**
    * Every issue in the company, fetched a page at a time; with `updatedSince` (ISO),
-   * only those changed at or after it (the server's `updatedSince` filter).
+   * only those changed at or after it (the server's `updatedSince` filter). With
+   * `startOffset` (a multiple of the page size) the list resumes at that row.
    */
-  async *listIssues(opts: { updatedSince?: string } = {}): AsyncIterableIterator<PaperclipIssue> {
+  async *listIssues(opts: { updatedSince?: string; startOffset?: number } = {}): AsyncIterableIterator<PaperclipIssue> {
     const since = opts.updatedSince ? `&updatedSince=${encodeURIComponent(opts.updatedSince)}` : "";
-    for (let offset = 0; ; offset += PAPERCLIP_PAGE_SIZE) {
+    for (let offset = opts.startOffset ?? 0; ; offset += PAPERCLIP_PAGE_SIZE) {
       const page = await this.request<PaperclipIssue[]>(
         "GET",
         `${this.companyPath()}/issues?limit=${PAPERCLIP_PAGE_SIZE}&offset=${offset}${since}`,
