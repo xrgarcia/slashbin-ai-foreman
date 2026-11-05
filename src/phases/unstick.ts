@@ -75,18 +75,21 @@ export const EM_UPSTREAM = "EM";
 /** The entry an outcome leaves: what each kind spends, and when a refusal may be called again. Pure, exported for tests. */
 export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number, upstream: { baseMs: number; capMs: number; factor: number }): UnstickEntry {
   const at = new Date(nowMs).toISOString();
+  // The recalls made on a standing handoff; undefined when none was handed off. An `invoked` entry written before
+  // `recalls` existed is a handoff too, with none made yet.
+  const handedOff = cur.recalls ?? (cur.status === "invoked" ? 0 : undefined);
   const { waitUntil: _w, ...rest } = cur;
   if (o.kind === "refused") {
     const refusals = (cur.refusals ?? 0) + 1;
     const until = o.resetAtMs !== undefined && o.resetAtMs > nowMs ? o.resetAtMs : nowMs + backoffDelay(refusals, upstream);
     // A refusal is not an answer: the prior status's recall count is kept, the attempt is not spent.
-    return { ...rest, status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
+    return { ...rest, ...(handedOff !== undefined ? { recalls: handedOff } : {}), status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
   }
   const { refusals: _r, ...clean } = rest;
   // A recall the EM declines as already answered: the handoff stands and the watch goes on (a decline is final
   // only for a question never handed off). `recalls` is set exactly while a handoff is being watched.
-  if (o.kind === "declined" && cur.recalls !== undefined) {
-    return { ...clean, status: "invoked", attempts: cur.attempts + 1, lastCallAt: at, recalls: cur.recalls + 1, ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}) };
+  if (o.kind === "declined" && handedOff !== undefined) {
+    return { ...clean, status: "invoked", attempts: cur.attempts + 1, lastCallAt: at, recalls: handedOff + 1, ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}) };
   }
   // `recalls` starts at 0 with the first handoff; every later handoff for the same reason is a recall.
   return {
@@ -94,7 +97,7 @@ export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number
     status: toStatus(o),
     attempts: cur.attempts + 1,
     lastCallAt: at,
-    ...(o.kind === "invoked" ? { recalls: cur.recalls === undefined ? 0 : cur.recalls + 1 } : {}),
+    ...(o.kind === "invoked" ? { recalls: handedOff === undefined ? 0 : handedOff + 1 } : {}),
     ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}),
   };
 }
