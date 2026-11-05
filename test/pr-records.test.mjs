@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { mkTmp } from "./tmp-dir.mjs";
 import { ForemanRuntime } from "../dist/runtime.js";
+const withoutAt = (s) => { if (!s) return s; const { at, ...rest } = s; return rest; };
 let rt = new ForemanRuntime();
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
@@ -83,7 +84,7 @@ test("import: every live entry moves to its PR's record; a finished one is dropp
   assert.deepEqual((await rt.records.loadPrRecord(repo, 10)).tracked, { pr: 10, url: "u", issues: [1010] }, "the release pointer rides on the release PR");
   assert.equal((await rt.records.loadPrRecord(repo, 11)).release, undefined, "a release whose PR closed unmerged is finished");
   assert.equal((await rt.records.loadPrRecord(repo, 12)).release.phase, "soaking", "a merged release not yet verified and soaked is not finished");
-  assert.deepEqual((await rt.records.loadPrRecord(repo, 20)).noCommit, { head: "s1", count: 1 });
+  assert.deepEqual(withoutAt((await rt.records.loadPrRecord(repo, 20)).noCommit), { head: "s1", count: 1 });
   assert.equal((await rt.records.loadPrRecord(repo, 21)).noCommit, undefined, "a streak on a merged PR is finished");
   assert.equal((await rt.records.loadPrRecord(repo, 22)).noCommit, undefined, "a streak on a closed PR is finished");
   assert.equal((await rt.records.loadPrRecord(repo, 30)).rejectedHead, "h1", "the branch is stored on its last closed-unmerged PR");
@@ -141,7 +142,7 @@ test("an unreadable PR state counts as live, and a failed branch lookup leaves t
   throwClosed = true;
   await rt.legacy.importLegacyRecords(repo, quiet, [repo]);
   assert.equal((await rt.records.loadPrRecord(repo, 11)).release.phase, "held", "unknown is not finished");
-  assert.deepEqual((await rt.records.loadPrRecord(repo, 22)).noCommit, { head: "s3", count: 1 });
+  assert.deepEqual(withoutAt((await rt.records.loadPrRecord(repo, 22)).noCommit), { head: "s3", count: 1 });
   assert.deepEqual(filePrs().rejected.sort(), ["feat-a", "feat-b", "feat-gone"], "no lookup, no decision");
   assert.equal(rt.records.branchUnresolved(repo, "feat-b"), true);
   throwClosed = false;
@@ -200,7 +201,9 @@ test("a record survives a restart: nothing but the store carries it", async () =
   assert.equal(await rt.streaks.record(repo, 20, "h", undefined), 1);
   rt = new ForemanRuntime();
   assert.equal((await rt.records.loadPrRecord(repo, 10)).release.mergeSha, "m");
-  assert.deepEqual((await rt.streaks.read(repo, 20)).streak, { head: "h", count: 1 });
+  const { at, ...kept } = (await rt.streaks.read(repo, 20)).streak;
+  assert.deepEqual(kept, { head: "h", count: 1 });
+  assert.ok(Number.isFinite(Date.parse(at)), "the round's time is kept: a later ruling releases the stalemate");
   assert.deepEqual(legacyPrEntries("r").releases.size, 0, "the state file never held it");
 });
 

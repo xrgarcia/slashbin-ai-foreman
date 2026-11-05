@@ -216,6 +216,8 @@ export type RulingState = {
   escalateRequested: boolean;
   /** When the last ruling was posted, null when there is none. */
   rulingAt: string | null;
+  /** When the newest review was submitted, null when there is none. */
+  latestReviewAt: string | null;
 };
 
 // From github/skip-hold.ts.

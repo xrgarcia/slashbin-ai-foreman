@@ -40,6 +40,8 @@ export interface BlockFacts {
   specEdited?: boolean;
   /** Someone pushed to the PR after the Foreman stopped on it. */
   prHeadMoved?: boolean;
+  /** The EM posted a scope ruling on the PR after the stalemate's last no-commit round. */
+  rulingPosted?: boolean;
   /** An exhausted verify hold's reason is now a tooling hold, which charges no attempt. */
   holdNoLongerCharged?: boolean;
 }
@@ -53,7 +55,7 @@ export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>
   "verify-held": ["specEdited"],
   "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged"],
   "revision-exhausted": ["prHeadMoved"],
-  "revision-stalemate": ["prHeadMoved"],
+  "revision-stalemate": ["prHeadMoved", "rulingPosted"],
 };
 
 /** The note each check leaves on the card when it releases one. */
@@ -65,6 +67,7 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",
   specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",
   prHeadMoved: "the PR received new commits since the Foreman stopped — resuming",
+  rulingPosted: "the EM posted a scope ruling since the stalemate — revising once more against it",
   holdNoLongerCharged: "the hold's reason means the checker could not run, which no longer spends an attempt — verifying again with a fresh attempt count",
 };
 
