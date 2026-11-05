@@ -18,10 +18,10 @@
 // so the daemon hands the live block over at start and on every reload.
 import { z } from "zod";
 
-/** Claude's refusals: a final stream-json result carrying HTTP 429, or the plain "You've hit your … limit" banner. */
+/** Claude's refusals: a final stream-json result carrying HTTP 429, or the "You've hit your … limit" banner, also behind a wrapper's prefix ("em unstick failed: session ERROR: You've hit …"). */
 export const CLAUDE_REFUSAL_PATTERNS: readonly string[] = Object.freeze([
   String.raw`"api_error_status"\s*:\s*429\b`,
-  String.raw`^You(?:'|’)ve hit your\b.*\blimit`,
+  String.raw`\bYou(?:'|’)ve hit your\b[^\n]*\blimit`,
 ]);
 
 /** Claude's stated reset: `resets 12:10pm (America/Chicago)`. Named groups hour, minute, ampm, zone. */

@@ -12,12 +12,15 @@
 //    UNSTICK_MAX_ATTEMPTS for one reason, then the escalation owner is told.
 //  - refused (the EM's runner was out of tokens or rate-limited): costs no
 //    attempt; called again once the limit lifts (the stated reset, else the
-//    `backoff.upstream` window, longer each refusal in a row). One refusal ends
-//    the pass's calls: every other call would meet the same limit.
+//    `backoff.upstream` window, longer each refusal in a row). The refusal also
+//    pauses the EM's runner daemon-wide (upstream "EM"): no other question, in
+//    this repo or another, is put to it until the limit lifts.
 //  - invoked: a handoff, not a resolution. While the question still stands it
 //    is called again after `backoff.handoff` (2 h, then 4 h, ...), up to
 //    `maxRecalls`; then the escalation owner is told, once.
-//  - escalated / declined: final until the reason changes.
+//  - escalated / declined: final until the reason changes. A decline on a
+//    recall (the EM's "already answered this reason") is the handoff still
+//    standing, not a decision: it counts as a recall, so the watch goes on.
 
 import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
@@ -25,7 +28,7 @@ import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
 import type { UnstickOutcome } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
-import { isUpstreamBlocked } from "../upstream-backoff.js";
+import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
 import { EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
@@ -66,6 +69,9 @@ async function entryOf(rt: ForemanRuntime, repoConfig: RepoConfig, issue: number
 
 const toStatus = (o: UnstickOutcome): UnstickEntry["status"] => o.kind;
 
+/** The EM's own runner, as an upstream: one refusal pauses every EM call daemon-wide until the limit lifts. */
+export const EM_UPSTREAM = "EM";
+
 /** The entry an outcome leaves: what each kind spends, and when a refusal may be called again. Pure, exported for tests. */
 export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number, upstream: { baseMs: number; capMs: number; factor: number }): UnstickEntry {
   const at = new Date(nowMs).toISOString();
@@ -77,6 +83,11 @@ export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number
     return { ...rest, status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
   }
   const { refusals: _r, ...clean } = rest;
+  // A recall the EM declines as already answered: the handoff stands and the watch goes on (a decline is final
+  // only for a question never handed off). `recalls` is set exactly while a handoff is being watched.
+  if (o.kind === "declined" && cur.recalls !== undefined) {
+    return { ...clean, status: "invoked", attempts: cur.attempts + 1, lastCallAt: at, recalls: cur.recalls + 1, ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}) };
+  }
   // `recalls` starts at 0 with the first handoff; every later handoff for the same reason is a recall.
   return {
     ...clean,
@@ -175,6 +186,8 @@ export async function tryUnstick(
         await giveUpHandoff(rt, repoConfig, config, log, c, key, entry, deps);
         continue;
       }
+      // The EM's runner is paused by a refusal (this pass, an earlier one, another repo's): no call until it lifts.
+      if (!tryAcquire(EM_UPSTREAM)) continue;
       const ac = new AbortController();
       activeRuns.set(ac, repoName);
       let outcome: UnstickOutcome;
@@ -185,6 +198,8 @@ export async function tryUnstick(
         activeRuns.delete(ac);
       }
       calls++;
+      const refused = outcome.kind === "refused" ? outcome : undefined;
+      reportRunResult(EM_UPSTREAM, !!refused, refused?.detail, refused?.resetAtMs);
       log.info(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): ${outcome.kind}${outcome.detail ? ` — ${outcome.detail.slice(0, 200)}` : ""}`);
       let spent: UnstickEntry | undefined;
       await mutate(rt, repoConfig, c.issue, (table) => {
@@ -194,10 +209,10 @@ export async function tryUnstick(
         table[key] = applyOutcome(cur, outcome, Date.now(), config.backoff.upstream);
         if (outcome.kind === "failed" && table[key]!.attempts >= UNSTICK_MAX_ATTEMPTS) spent = table[key];
       });
-      // The runner is out of tokens or rate-limited: every other call this pass would be refused too.
-      if (outcome.kind === "refused") {
-        log.warn(`EM unstick refused by its runner — no attempt spent; no more calls this pass`);
-        break;
+      // The runner is out of tokens or rate-limited: reportRunResult paused it, so the calls left wait for the reset.
+      if (refused) {
+        log.warn(`EM unstick refused by its runner — no attempt spent; EM calls paused until the limit lifts`);
+        continue;
       }
       // The attempt that spends the last call: say so once, on the issue. Stored
       // `escalated`, an unchanged reason never comments again; if the post
