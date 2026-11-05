@@ -119,16 +119,64 @@ export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
 export const RELEASE_GATE_REASON = "at `pr approved` — dev verification passed, awaiting the EM outcome gate (`ready for prod release`)";
 
+/** The label that carries the production grant (Ray's). The EM's gate decides; the Foreman only watches for it. */
+export const GRANT_LABEL = "deliver-to-prod";
+/** How deep a "— follow-up to #N" chain is followed, as the EM's own resolver (epic_grant.py `missing_grant`). */
+export const GRANT_FOLLOW_UP_DEPTH = 3;
+
+const REFERENCES = /^##\s+References\b.*?$(.*?)(?=^##\s|$(?![\s\S]))/ims;
+const RELATED_LINE = /^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*Related\b/i;
+
 /**
- * The release-gate reason for one issue: the stable text plus the issue's labels, sorted.
- * A label landing while the issue waits at the gate (a production grant) changes the
- * reason, so `nextStep` calls the EM again and the EM's answered-marker no longer matches.
- * Without it, a grant given after the first call was never gated: the EM declined every
- * recall as "already answered" (jerky_ops#201/#198, jerky_public_api#181, 2026-11-05).
+ * Each EM issue (`owner/repo#N`) a body names inside its `## References` section, sorted. A reference is
+ * `<label> #N`, `<repo-name>#N` or `<owner>/<repo-name>#N`, where `emRepo` is `owner/repo-name` and `label` is the
+ * config's `epicRefLabel` (the repo name, less any prefix). A line labelled `Related` is a cross-reference, not
+ * membership, and is skipped. Mirrors epic_grant.py `referenced_issues`.
  */
-export function releaseGateReason(labels: readonly string[]): string {
+export function referencedEmIssues(body: string, emRepo: string, label: string): string[] {
+  const m = REFERENCES.exec(body ?? "");
+  if (!m) return [];
+  const [owner, name] = emRepo.split("/") as [string, string];
+  const esc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const prefix = name.endsWith(label) ? name.slice(0, name.length - label.length) : "";
+  const ref = new RegExp(`(?:([\\w.-]+)/)?(?:${esc(prefix)})?${esc(label)}\\s*#(\\d+)`, "gi");
+  const text = (m[1] ?? "").split("\n").filter((ln) => !RELATED_LINE.test(ln)).join("\n");
+  const found = new Set<string>();
+  for (const r of text.matchAll(ref)) found.add(`${r[1] || owner}/${name}#${Number(r[2])}`);
+  return [...found].sort();
+}
+
+/** The issue a "— follow-up to #N" title points at, else null. */
+export function followUpOrigin(title: string): number | null {
+  const m = /follow-up to #(\d+)/i.exec(title ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Whether each place the EM's gate looks for a grant carries `deliver-to-prod`: `owner/repo#N` -> true / false,
+ * or null when that place could not be read.
+ */
+export type GrantState = Readonly<Record<string, boolean | null>>;
+
+/** The grant part of the reason: `[grant: a/b#1=no, a/b#2=yes]`, sorted; `?` for an unreadable place. Empty when there is none. */
+export function grantFingerprint(grants: GrantState | undefined): string {
+  const keys = Object.keys(grants ?? {}).sort();
+  if (!keys.length) return "";
+  return ` [grant: ${keys.map((k) => `${k}=${grants![k] === null ? "?" : grants![k] ? "yes" : "no"}`).join(", ")}]`;
+}
+
+/**
+ * The release-gate reason for one issue: the stable text plus the issue's labels (sorted) plus the grant state
+ * of every place the EM's gate looks (the issue, the epics its `## References` name, its sub-issue parent, and
+ * the issue it follows up). A grant landing anywhere changes the reason, so `nextStep` calls the EM again and
+ * the EM's answered-marker no longer matches. The Foreman does not decide whether the release may go: the
+ * fingerprint only has to change when the answer could. Without it, a grant given after the first call was never
+ * gated (jerky_ops#201/#198, jerky_public_api#181, 2026-11-05), and a grant on the EPIC never changed the child's
+ * labels at all (PR #222 review, S2).
+ */
+export function releaseGateReason(labels: readonly string[], grants?: GrantState): string {
   const set = [...new Set(labels)].sort();
-  return set.length ? `${RELEASE_GATE_REASON} [labels: ${set.join(", ")}]` : RELEASE_GATE_REASON;
+  return (set.length ? `${RELEASE_GATE_REASON} [labels: ${set.join(", ")}]` : RELEASE_GATE_REASON) + grantFingerprint(grants);
 }
 
 /**

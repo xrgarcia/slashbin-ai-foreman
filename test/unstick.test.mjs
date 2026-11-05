@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, referencedEmIssues, followUpOrigin, grantFingerprint,
 } from "../dist/unstick.js";
 import { applyOutcome } from "../dist/phases/unstick.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -230,4 +230,47 @@ test("releaseGateReason: a new label changes the reason, so an answered release 
   const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
   const answered = { issue: 5, kind: "release-gate", reason: before, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
   assert.equal(nextStep(answered, { issue: 5, kind: "release-gate", reason: after }, 1, H), "call");
+});
+
+test("releaseGateReason: a grant on the EPIC changes the reason though the child's labels do not (PR #222 S2)", () => {
+  const labels = ["pr approved", "approved"];
+  const no = releaseGateReason(labels, { "xrgarcia/jerky_ops#201": false, "xrgarcia/slashbin-engineering-manager#900": false });
+  const yes = releaseGateReason(labels, { "xrgarcia/slashbin-engineering-manager#900": true, "xrgarcia/jerky_ops#201": false });
+  assert.notEqual(no, yes);
+  assert.match(yes, /slashbin-engineering-manager#900=yes/);
+  const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+  const answered = { issue: 201, kind: "release-gate", reason: no, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: yes }, 1, H), "call");
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: no }, 1, H) === "call", false);
+});
+
+test("grantFingerprint: sorted, deterministic, `?` for an unreadable place, empty for none", () => {
+  assert.equal(grantFingerprint({ "b/x#2": true, "a/x#1": false, "c/x#3": null }), " [grant: a/x#1=no, b/x#2=yes, c/x#3=?]");
+  assert.equal(grantFingerprint({}), "");
+  assert.equal(grantFingerprint(undefined), "");
+});
+
+const EM = "xrgarcia/slashbin-engineering-manager";
+test("referencedEmIssues: only the References section, Related lines skipped, owner defaulted", () => {
+  const body = [
+    "Intro names engineering-manager #1 (ignored: not in References).",
+    "## References",
+    "- Epic: engineering-manager #900",
+    "- Part of other/slashbin-engineering-manager#901",
+    "- Related: engineering-manager #902",
+    "- **Related:** engineering-manager #903",
+    "## Notes",
+    "engineering-manager #904",
+  ].join("\n");
+  assert.deepEqual(referencedEmIssues(body, EM, "engineering-manager"), [
+    "other/slashbin-engineering-manager#901",
+    "xrgarcia/slashbin-engineering-manager#900",
+  ]);
+  assert.deepEqual(referencedEmIssues("no section", EM, "engineering-manager"), []);
+  assert.deepEqual(referencedEmIssues("## References\n- engineering-manager #7", EM, "engineering-manager"), ["xrgarcia/slashbin-engineering-manager#7"]);
+});
+
+test("followUpOrigin: reads the issue a title follows up", () => {
+  assert.equal(followUpOrigin("Fix it — follow-up to #123"), 123);
+  assert.equal(followUpOrigin("plain"), null);
 });

@@ -18,6 +18,14 @@ export interface IssueSnapshot {
   labels: { name: string }[];
 }
 
+/** What the release gate reads off an issue to find a production grant. */
+export interface IssueFacts {
+  title: string;
+  body: string;
+  state: string;
+  labels: string[];
+}
+
 /** One open PR in the per-repo snapshot, with the scalar fields every lookup filters on. */
 export interface PrSnapshot {
   number: number;
@@ -498,6 +506,10 @@ export interface CodeHost {
 
   // Issue bodies.
   readIssueBody(config: RepoConfig, num: number): string;
+  /** One issue of any repo, live: title, body, state and label names. Throws on a gh failure. */
+  readIssueFacts(repo: string, num: number, cwd: string): IssueFacts;
+  /** The GitHub sub-issue parent of an issue, live; null when it has none (404). Throws on any other failure. */
+  readSubIssueParent(repo: string, num: number, cwd: string): (IssueFacts & { repo: string; number: number }) | null;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): ReleaseCarry;

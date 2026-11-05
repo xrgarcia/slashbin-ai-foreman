@@ -119,7 +119,7 @@ except `rework-decision`: the first visual QA FAIL, or the first charged verific
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
 hold hands over to `verify-exhausted` when its retries run out. The Foreman never decides the fix itself.
-`release-gate` fires on any open `pr approved` issue without `ready for prod release`. Its reason carries the issue's labels, so a label that lands while it waits (a production grant) is a new question and calls the EM again at once; never schedule a re-check for a grant.
+`release-gate` fires on any open `pr approved` issue without `ready for prod release`. Its reason carries the issue's labels and the `deliver-to-prod` state of the issue, the epics its `## References` name, its sub-issue parent and its follow-up origin, so a grant that lands on any of them while it waits is a new question and calls the EM again at once (the Foreman does not decide the release; an unreadable place keeps the last reason); never schedule a re-check for a grant.
 `unrelated-error` fires when a dev verification, a prod verification or the first prod deploy prints `Not caused by
 this release, needs triage:` (the SRE passed the release and excluded the error). The reason carries the signature,
 the repo and PR it was first seen on, and the SRE's evidence links. It is repo-level (issue 0), once per distinct signature
