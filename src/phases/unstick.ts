@@ -42,7 +42,7 @@ import type { ForemanRuntime } from "../runtime.js";
  * issues its `## References` name, its GitHub sub-issue parent, and, for "— follow-up to #N", #N and what #N
  * resolves to (depth bounded). A place that cannot be read is null; it never throws.
  */
-function readGrantState(repoConfig: RepoConfig, number: number, title: string, labels: readonly string[], host: CodeHost): GrantState {
+export function readGrantState(repoConfig: RepoConfig, number: number, title: string, labels: readonly string[], host: CodeHost): GrantState {
   const out: Record<string, boolean | null> = {};
   const cwd = repoConfig.repoPath;
   const visit = (repo: string, n: number, ttl: string, lbls: readonly string[] | null, depth: number): void => {
