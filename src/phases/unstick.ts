@@ -30,7 +30,7 @@ import type { UnstickOutcome } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, releaseGateReason, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
@@ -146,7 +146,7 @@ export async function tryUnstick(
       const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
       for (const i of issues) {
         if (codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)) {
-          candidates.push({ issue: i.number, kind: "release-gate", reason: RELEASE_GATE_REASON });
+          candidates.push({ issue: i.number, kind: "release-gate", reason: releaseGateReason(i.labels.map((l) => l.name)) });
         }
       }
     }

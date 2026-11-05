@@ -120,6 +120,18 @@ export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
 export const RELEASE_GATE_REASON = "at `pr approved` — dev verification passed, awaiting the EM outcome gate (`ready for prod release`)";
 
 /**
+ * The release-gate reason for one issue: the stable text plus the issue's labels, sorted.
+ * A label landing while the issue waits at the gate (a production grant) changes the
+ * reason, so `nextStep` calls the EM again and the EM's answered-marker no longer matches.
+ * Without it, a grant given after the first call was never gated: the EM declined every
+ * recall as "already answered" (jerky_ops#201/#198, jerky_public_api#181, 2026-11-05).
+ */
+export function releaseGateReason(labels: readonly string[]): string {
+  const set = [...new Set(labels)].sort();
+  return set.length ? `${RELEASE_GATE_REASON} [labels: ${set.join(", ")}]` : RELEASE_GATE_REASON;
+}
+
+/**
  * What the EM is told about a post-merge verification failure. Stable for one failure (no attempt count, and the
  * evidence is kept from the first run), so the same failure is one call. Pure, exported for tests.
  */

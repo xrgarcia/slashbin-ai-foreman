@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason,
 } from "../dist/unstick.js";
 import { applyOutcome } from "../dist/phases/unstick.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -218,4 +218,16 @@ test("an invoked entry recorded before recalls existed is a standing handoff: a 
   assert.equal(e.recalls, 1);
   e = applyOutcome(legacy, { kind: "invoked", detail: "again" }, t0, up);
   assert.equal(e.recalls, 1, "a second handoff on a legacy entry is its first recall");
+});
+
+// A grant landing at the gate re-calls the EM (jerky_ops#201, 2026-11-05): the reason
+// carries the labels, so an answered gate with a new label is a new question.
+test("releaseGateReason: a new label changes the reason, so an answered release gate is called again", () => {
+  const before = releaseGateReason(["pr approved", "approved"]);
+  const after = releaseGateReason(["approved", "pr approved", "deliver-to-prod"]);
+  assert.equal(before, releaseGateReason(["approved", "pr approved", "approved"]), "order and repeats do not matter");
+  assert.notEqual(before, after);
+  const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+  const answered = { issue: 5, kind: "release-gate", reason: before, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
+  assert.equal(nextStep(answered, { issue: 5, kind: "release-gate", reason: after }, 1, H), "call");
 });
