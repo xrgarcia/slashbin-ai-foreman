@@ -9,6 +9,7 @@ import { codeHost } from "./plugins/registry.js";
 import { addObserver } from "./work-source.js";
 import { stateDir } from "./state-dir.js";
 import { configureBackoff } from "./backoff.js";
+import { configureRunner } from "./refusal.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
 import type { ForemanRuntime } from "./runtime.js";
@@ -39,6 +40,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   // Every back-off and retry limit, for the module-level code that takes no
   // config (gh retries, CI gate, stuck-merge scan, upstream windows).
   configureBackoff(config.backoff);
+  configureRunner(config.runner);
 
   // Every managed checkout trusted before the first session (src/claude-trust.ts);
   // again on each reload, and once more before every spawn.
@@ -171,6 +173,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
 
       host.setStateRepos(fresh.repos.map((r) => r.githubRepo));
       configureBackoff(fresh.backoff);
+      configureRunner(fresh.runner);
       rt.trust.configure({ enabled: fresh.trustManagedRepos });
       rt.trust.trustManagedRepos(fresh.repos, logger);
       options?.onReload?.(fresh);

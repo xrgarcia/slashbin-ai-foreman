@@ -169,6 +169,12 @@ Every wait before the Foreman tries something again — declined issues, failed 
 
 See [Back-offs](#back-offs) below for every group.
 
+### `runner`
+
+Type: object · Default: see `src/config.ts`
+
+The agent CLI builder sessions run on, and how it says it has refused work (a usage, token or rate limit) rather than failed: `name`, `refusalPatterns`, `refusalExitCodes`, `resetPattern`. A refusal is never charged to a retry and pauses that runner daemon-wide until the limit lifts; the EM's unstick calls are read the same way. Claude's by default. See src/refusal.ts.
+
 ### `issueCacheTtlMs`
 
 Type: integer · Default: `30000` (30 s) · Env: `AI_AGENT_ISSUE_CACHE_TTL_MS`
@@ -455,6 +461,7 @@ which only means it retries sooner.
 | `releaseRetry` | 5 min, 10 min, 20 min, 40 min, 1.3 h, 2 h | none |
 | `prodVerifyRetry` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 5.3 h, 6 h | none |
 | `upstream` | 2 min, 4 min, 8 min, 16 min, 32 min, 1 h | none |
+| `handoff` | 10 min, 30 min, 1.5 h, 4.5 h, 13.5 h, 24 h | `maxRecalls` 3 |
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
 | `paperclip` | 1 s, 1 s | `maxAttempts` 3 |
 | `registry` | 1 s, 1 s | `maxAttempts` 3 |
@@ -560,13 +567,24 @@ A release that merged but whose prod verification held or failed. The SRE re-ver
 
 ### `backoff.upstream`
 
-GitHub's rate limit or Claude's session limit refused work. The whole daemon pauses that upstream; a GitHub reset time it reports wins over the window. Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` / `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
+GitHub's rate limit or the runner's limit (see `runner`) refused work. The whole daemon pauses that upstream; a reset time it reports wins over the window. Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` / `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
 
 | Field | Default | Env |
 |---|---|---|
 | `baseMs` | `120000` (2 min) | `AI_AGENT_BACKOFF_UPSTREAM_BASE_MS` |
 | `capMs` | `3600000` (1 h) | `AI_AGENT_BACKOFF_UPSTREAM_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_UPSTREAM_FACTOR` |
+
+### `backoff.handoff`
+
+A handoff the unstick stage made (the agent plugin said it was invoked) that has not moved the issue. The handoff is called again once a window has passed since the last call, longer each time, up to `maxRecalls` times; then the escalation owner is told, once. A seat that took the handoff and then died (out of tokens, crashed) leaves no trace but a stuck issue: this is the only thing that notices. 0 never recalls. Default 10 min, 30 min, 90 min, then 4.5 h before the owner is told (about 7 h in all), 3 recalls.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `600000` (10 min) | `AI_AGENT_BACKOFF_HANDOFF_BASE_MS` |
+| `capMs` | `86400000` (24 h) | `AI_AGENT_BACKOFF_HANDOFF_CAP_MS` |
+| `factor` | `3` | `AI_AGENT_BACKOFF_HANDOFF_FACTOR` |
+| `maxRecalls` | `3` | `AI_AGENT_BACKOFF_HANDOFF_MAX_RECALLS` |
 
 ### `backoff.gh`
 

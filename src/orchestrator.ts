@@ -1,5 +1,6 @@
 import { releaseStageReady, type AgentConfig, type RepoConfig } from "./config.js";
 import { configureBackoff } from "./backoff.js";
+import { configureRunner } from "./refusal.js";
 import type { Logger } from "./logger.js";
 import { publishSnapshot, wantsSnapshot, workSourceFor } from "./work-source.js";
 import { type ImplementationResult } from "./session/protocol.js";
@@ -435,6 +436,7 @@ export async function runCycle(
   const cycleLogger = logger.child({ cycle: cycleNumber, phase: "poll" });
   // `--once` and programmatic callers start here, not in the daemon.
   configureBackoff(config.backoff);
+  configureRunner(config.runner);
   setSessionLimit(config.maxConcurrentSessions);
 
   let totalProcessed = 0;
