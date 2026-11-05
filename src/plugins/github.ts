@@ -118,8 +118,6 @@ export function githubCodeHost(
     stripReadyForProdLabel: promotion.stripReadyForProdLabel,
     updatePromotionPR: promotion.updatePromotionPR,
     readIssueBody: readiness.readIssueBody,
-    readIssueFacts: readiness.readIssueFacts,
-    readSubIssueParent: readiness.readSubIssueParent,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),

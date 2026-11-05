@@ -277,9 +277,6 @@ export const configSchema = z.object({
   // `## References` convention). When an issue closes in production, each epic it
   // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
   epicRefLabel: z.string().min(1).optional(),
-  // The EM's own GitHub repo (owner/name), where epics live: the release gate looks there for a production grant.
-  // Unset = the epics an issue names are not read for the grant.
-  emRepo: z.string().min(1).optional(),
   // The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each
   // review runs through it — Codex judges, its code posts and merges.
   // It exits 3 when it cannot take the review and nothing was written; the PR
@@ -511,8 +508,6 @@ export interface RepoConfig {
   github: GithubConventions;
   /** The epic label in `<label> #N` issue references — the global value; undefined = no epic parsing. */
   epicRefLabel?: string;
-  /** The EM's GitHub repo (owner/name) — where epics live; undefined = epics are not read for the grant. */
-  emRepo?: string;
 }
 
 /**
@@ -562,7 +557,6 @@ export interface AgentConfig {
   unstickEscalationOwner?: string;
   /** The epic label in `<label> #N` issue references; undefined = no epic parsing. */
   epicRefLabel?: string;
-  emRepo?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
@@ -742,7 +736,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
     epicRefLabel: fileConfig.epicRefLabel,
-    emRepo: fileConfig.emRepo,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
@@ -797,7 +790,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
     epicRefLabel: parsed.epicRefLabel,
-    emRepo: parsed.emRepo,
   };
 
   let repos: RepoConfig[];
@@ -953,7 +945,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath,
     unstickEscalationOwner: parsed.unstickEscalationOwner,
     epicRefLabel: parsed.epicRefLabel,
-    emRepo: parsed.emRepo,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
