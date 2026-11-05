@@ -73,7 +73,8 @@ export class NoCommitStreaks {
    */
   async admitRevision(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
     const count = noCommitCount(streak, head);
-    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true }; });
+    const at = count > 0 ? streak?.at : undefined;
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true, ...(at ? { at } : {}) }; });
     if (ok) this.seenOf(repoConfig).add(pr);
     return ok;
   }
@@ -87,7 +88,8 @@ export class NoCommitStreaks {
    */
   async resolveUnconfirmed(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
     const count = noCommitCount(streak, head);
-    return this.records.updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count }; else delete d.noCommit; });
+    const at = streak?.at;
+    return this.records.updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count, ...(at ? { at } : {}) }; else delete d.noCommit; });
   }
 
   /**
@@ -97,7 +99,7 @@ export class NoCommitStreaks {
    */
   async record(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<number | null> {
     const count = noCommitCount(streak, head) + 1;
-    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count }; });
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, at: new Date().toISOString() }; });
     if (!ok) return null;
     this.seenOf(repoConfig).add(pr);
     return count;

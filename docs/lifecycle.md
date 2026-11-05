@@ -209,7 +209,7 @@ give the reason. A skip's comment names what it waits on.
 | `verify-held` | Dev verification failed and is waiting out its back-off; it retries by itself. | Edit the issue's body (the spec the SRE verifies against). |
 | `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch.<br>Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own. |
 | `revision-exhausted` | Revision of the issue's PR failed its retries. | Push a commit to the PR. |
-| `revision-stalemate` | The reviser and the reviewer disagree, and the reviser pushed nothing. | Push a commit to the PR. |
+| `revision-stalemate` | The reviser and the reviewer disagree, and the reviser pushed nothing. | Push a commit to the PR.<br>Post an `**EM scope ruling` comment on the PR (one more revise against it). |
 | the `blocked` label | A person or tool labelled the issue `blocked`: the Foreman never picks it up. | Remove the label. |
 | `needsRuling`: PR not converging | The PR was sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question. | Post a comment on the PR whose first line opens `**EM scope ruling`. |
 | `needsRuling`: skip escalated | A skip used up `backoff.skip.maxAttempts` sessions in a row. | See below. |

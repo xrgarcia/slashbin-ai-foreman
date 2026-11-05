@@ -25,6 +25,7 @@ import { REVIEW_ROUNDS_ALERT } from "../dist/phases/common.js";
 import { createLogger } from "../dist/logger.js";
 import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { ForemanRuntime } from "../dist/runtime.js";
+const withoutAt = (s) => { if (!s) return s; const { at, ...rest } = s; return rest; };
 let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
@@ -139,7 +140,7 @@ test("R1/R2: two passes whose pre-session sha read fails launch nothing and cons
   world({ branchDown: false });
   assert.ok(await pendingPass(config, 3), "GitHub is back: the unchanged head is still eligible");
   assert.equal(claudeRuns(), 1);
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 }, "one declared round, counted once");
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: SHA, count: 1 }, "one declared round, counted once");
 });
 
 test("R2: after a restart the saved record still lets the healthy pass revise", async () => {
@@ -162,7 +163,7 @@ test("R3: a post-session sha read that fails leaves an unconfirmed marker, not a
   world({ branchOkLeft: 1, branchDown: false }); // the read before the session answers, the one after fails
   await assert.rejects(pendingPass(config, 1));
   assert.equal(claudeRuns(), 1, "the session ran: the failure is the read after it");
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 0, inflight: true }, "a marker of unknown outcome, no round");
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: SHA, count: 0, inflight: true }, "a marker of unknown outcome, no round");
   assert.ok(String(JSON.parse(readFileSync(F.world, "utf8")).labels).includes(LABELS.pending), "the issue was not returned to review");
 
   world({ branchOkLeft: undefined, branchDown: false });
@@ -171,7 +172,7 @@ test("R3: a post-session sha read that fails leaves an unconfirmed marker, not a
   assert.equal((await prRecordOf(rt, repo, PR)).noCommit, undefined, "neither counted nor consumed");
   assert.ok(await pendingPass(config, 3), "revision resumes on the unchanged head");
   assert.equal(claudeRuns(), 2);
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 }, "now one confirmed round");
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: SHA, count: 1 }, "now one confirmed round");
 });
 
 // The outage that blocks the read blocks the record's writes too: nothing may need a write to be undone.
@@ -196,7 +197,7 @@ test("R4: the pre-session read fails while saves fail too: nothing launches, not
   world({ branchDown: false });
   assert.ok(await pendingPass(config, 3));
   assert.equal(claudeRuns(), 1);
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 });
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: SHA, count: 1 });
 });
 
 test("R5: the post-session read fails and the record cannot be written: the round is not consumed, the head stays eligible after recovery and a restart", async () => {
@@ -247,5 +248,5 @@ test("R8: a confirmed no-commit round whose count cannot be saved does not advan
   assert.equal((await prRecordOf(rt, repo, PR)).noCommit?.count, 0);
   assert.equal(await pendingPass(config, 2), null);
   assert.ok(await pendingPass(config, 3));
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 1 });
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: SHA, count: 1 });
 });
