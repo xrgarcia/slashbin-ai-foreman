@@ -87,11 +87,19 @@ export const backoffConfigSchema = z.object({
   // when it is later. A new head on the production branch since the last attempt
   // makes the release due now, once per head. Default 10 min rising to 6 h.
   prodVerifyRetry: z.object(win(600_000, 21_600_000, 2)).prefault({}),
-  // GitHub's rate limit or Claude's session limit refused work. The whole daemon
-  // pauses that upstream; a GitHub reset time it reports wins over the window.
+  // GitHub's rate limit or the runner's limit (see `runner`) refused work. The
+  // whole daemon pauses that upstream; a reset time it reports wins over the window.
   // Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` /
   // `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
   upstream: z.object(win(120_000, 3_600_000, 2)).prefault({}),
+  // A handoff the unstick stage made (the agent plugin said it was invoked) that
+  // has not moved the issue. The handoff is called again once a window has passed
+  // since the last call, longer each time, up to `maxRecalls` times; then the
+  // escalation owner is told, once. A seat that took the handoff and then died
+  // (out of tokens, crashed) leaves no trace but a stuck issue: this is the only
+  // thing that notices. 0 never recalls. Default 10 min, 30 min, 90 min, then
+  // 4.5 h before the owner is told (about 7 h in all), 3 recalls.
+  handoff: z.object({ ...win(600_000, 86_400_000, 3), maxRecalls: z.coerce.number().int().nonnegative().default(3) }).prefault({}),
   // One `gh` call that failed for a passing reason (network, 5xx, timeout) is
   // retried in place, up to `maxAttempts` tries in all. A rate limit is never
   // retried here (that is `upstream`). Default 1 s, then 3 s.

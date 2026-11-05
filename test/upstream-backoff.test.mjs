@@ -15,7 +15,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { detectUpstreamLimit, parseClaudeReset } from "../dist/session/protocol.js";
+import { detectUpstreamLimit, parseClaudeReset } from "../dist/refusal.js";
 import { orchestratorSource } from "./source-text.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
@@ -207,18 +207,18 @@ test("a re-entry soon after a clear continues the doubling; a later one starts a
 
 test("Claude: blocked in the window, silent on concurrent refusals, one probe after, clear on success", () => {
   const r = runCase(`
-    B.reportClaudeResult(true, "You've hit your session limit");
-    const inWindow = [B.tryAcquire("claude"), B.isUpstreamBlocked("claude")];
-    B.reportClaudeResult(true, "You've hit your session limit");
+    B.reportRunResult("Claude", true, "You've hit your session limit");
+    const inWindow = [B.tryAcquire("Claude"), B.isUpstreamBlocked("Claude")];
+    B.reportRunResult("Claude", true, "You've hit your session limit");
     const notesInWindow = notes.length;
     await sleep(260);
-    const halfOpenBlocked = B.isUpstreamBlocked("claude");
-    const probe = B.tryAcquire("claude");
-    const second = B.tryAcquire("claude");
-    const probeOutBlocked = B.isUpstreamBlocked("claude");
-    B.reportClaudeResult(false);
+    const halfOpenBlocked = B.isUpstreamBlocked("Claude");
+    const probe = B.tryAcquire("Claude");
+    const second = B.tryAcquire("Claude");
+    const probeOutBlocked = B.isUpstreamBlocked("Claude");
+    B.reportRunResult("Claude", false);
     console.log(JSON.stringify({ inWindow, notesInWindow, halfOpenBlocked, probe, second, probeOutBlocked,
-      after: B.tryAcquire("claude"), notes }));
+      after: B.tryAcquire("Claude"), notes }));
   `);
   assert.deepEqual(r.inWindow, [false, true]);
   assert.equal(r.notesInWindow, 1);
@@ -235,15 +235,15 @@ test("Claude: blocked in the window, silent on concurrent refusals, one probe af
 
 test("Claude: a refused half-open probe extends; a stated reset holds the probe back until it passes", () => {
   const r = runCase(`
-    B.reportClaudeResult(true, "limit");
+    B.reportRunResult("Claude", true, "limit");
     await sleep(260);
-    B.tryAcquire("claude");
+    B.tryAcquire("Claude");
     const resetAt = Date.now() + 900;
-    B.reportClaudeResult(true, "limit", resetAt);    // probe refused → extend to the reset
+    B.reportRunResult("Claude", true, "limit", resetAt);    // probe refused → extend to the reset
     await sleep(500);
-    const beforeReset = B.tryAcquire("claude");
+    const beforeReset = B.tryAcquire("Claude");
     await sleep(600);
-    const afterReset = B.tryAcquire("claude");
+    const afterReset = B.tryAcquire("Claude");
     console.log(JSON.stringify({ beforeReset, afterReset, notes: notes.map((n) => n.t) }));
   `);
   assert.equal(r.beforeReset, false);
@@ -254,12 +254,12 @@ test("Claude: a refused half-open probe extends; a stated reset holds the probe 
 
 test("Claude: a later reset stated while blocked extends to it at window end", () => {
   const r = runCase(`
-    B.reportClaudeResult(true, "limit");
-    B.reportClaudeResult(true, "limit", Date.now() + 700);   // concurrent refusal names a reset
+    B.reportRunResult("Claude", true, "limit");
+    B.reportRunResult("Claude", true, "limit", Date.now() + 700);   // concurrent refusal names a reset
     await sleep(300);
-    const atWindowEnd = B.tryAcquire("claude");
+    const atWindowEnd = B.tryAcquire("Claude");
     await sleep(600);
-    console.log(JSON.stringify({ atWindowEnd, afterReset: B.tryAcquire("claude"), notes: notes.map((n) => n.t) }));
+    console.log(JSON.stringify({ atWindowEnd, afterReset: B.tryAcquire("Claude"), notes: notes.map((n) => n.t) }));
   `);
   assert.equal(r.atWindowEnd, false);
   assert.equal(r.afterReset, true);

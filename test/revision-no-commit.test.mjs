@@ -104,7 +104,7 @@ test("a marker that cannot be saved admits no paid session; a round counts only 
   assert.ok(read > 0 && read < admit, "the branch sha is read BEFORE anything is written: a failed read leaves nothing to take back");
   assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "the marker is saved before the paid session");
   assert.match(fn.slice(admit, admit + 400), /^await rt\.streaks\.admitRevision\([^\n]*\n[^\n]*\n\s+return null;/, "a failed save starts nothing, every pass");
-  assert.ok(admit < fn.indexOf('tryAcquire("claude")'), "and before the slot is taken");
+  assert.ok(admit < fn.indexOf('tryAcquire(runnerName())'), "and before the slot is taken");
   assert.doesNotMatch(fn.slice(read, fn.indexOf("rt.streaks.record(") + 600), /restore/i, "nothing is restored: an outage that blocks reads also blocks the write that would undo a save");
   const counted = fn.indexOf("rt.streaks.record(");
   assert.ok(counted > fn.indexOf("if (result.noCommit)"), "a round is counted only on a completed session whose later read showed the head unchanged");
