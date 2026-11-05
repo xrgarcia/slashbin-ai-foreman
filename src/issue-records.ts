@@ -69,6 +69,8 @@ export interface NoCommitStreak {
   count: number;
   /** A paid session was admitted at `head` and its outcome is not known yet: not a round, never counted (no-commit-streak.ts). */
   inflight?: true;
+  /** When the last no-commit round was counted (ISO). An EM scope ruling posted after it releases the stalemate. Absent on records written before 2026-11-05. */
+  at?: string;
 }
 
 export interface FailedIssue {

@@ -76,7 +76,16 @@ export async function tryRevision(
   const stoppedAt = rt.memory.revisionStoppedHead.get(repoName) ?? stalemateHead(streak);
   if (stoppedAt !== undefined) {
     const kind: BlockKind = failures >= maxFailures ? "revision-exhausted" : "revision-stalemate";
-    if (await releaseIfResolved(rt, kind, { prHeadMoved: head ? head !== stoppedAt : undefined }, pending.issueNumbers, repoConfig, revLogger)) {
+    // An EM scope ruling posted after the stalemate's last no-commit round answers it like a push does: the
+    // reviser gets one more session against the ruling. A ruling older than that round was already answered,
+    // so it never releases again (no loop). Legacy streaks carry no time: the newest review stands in for it.
+    let rulingPosted: boolean | undefined;
+    if (kind === "revision-stalemate" && streak) {
+      const r = codeHost().readRulingState(repoConfig.githubRepo, prNumber, repoConfig.repoPath, revLogger);
+      const since = streak.at ?? r.latestReviewAt;
+      rulingPosted = !!r.rulingAt && !!since && r.rulingAt > since;
+    }
+    if (await releaseIfResolved(rt, kind, { prHeadMoved: head ? head !== stoppedAt : undefined, rulingPosted }, pending.issueNumbers, repoConfig, revLogger)) {
       rt.memory.revisionStoppedHead.delete(repoName);
       rt.memory.revisionFailureCount.set(repoName, 0);
       rt.memory.revisionEscalated.delete(repoName);
@@ -94,7 +103,8 @@ export async function tryRevision(
   // A no-commit stalemate already escalated: the card is Blocked and the EM must
   // rule. Re-running the reviser only re-answers the same review — it launched a
   // paid session on 17 straight cycles for slashbin-io-worker PR #694
-  // (2026-10-03). Clears when the head moves or the PR closes (foreman#167).
+  // (2026-10-03). Clears when the head moves, the PR closes (foreman#167), or an EM
+  // scope ruling is posted after the last no-commit round (released above).
   if (noCommitCount(streak, head) > MAX_CONSECUTIVE_NO_COMMIT) {
     revLogger.debug(`Skipping ${repoName} revision — PR #${prNumber} is in a no-commit stalemate awaiting the EM`);
     return null;

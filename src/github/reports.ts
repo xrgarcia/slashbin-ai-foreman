@@ -90,6 +90,7 @@ export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: Readon
     latestReviewId: latest?.id ?? null,
     escalateRequested: !!latest && latest.state === "CHANGES_REQUESTED" && latest.escalate && (rulingAt === null || latest.at > rulingAt),
     rulingAt,
+    latestReviewAt: latest?.at ?? null,
   };
 }
 

@@ -97,6 +97,7 @@ const CHECK_ACTS = {
   specEdited: "Edit the issue's body (the spec the SRE verifies against).",
   holdNoLongerCharged: "Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own.",
   prHeadMoved: "Push a commit to the PR.",
+  rulingPosted: "Post an `**EM scope ruling` comment on the PR (one more revise against it).",
 };
 for (const [what, known, have] of [["block kind", BLOCK_KINDS, UNBLOCK_CHECKS], ["unblock check", CHECK_ACTS, CHECK_WORDS]]) {
   const unknownK = Object.keys(have).filter((k) => !(k in known));
