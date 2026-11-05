@@ -189,3 +189,17 @@ test("unstickViaEm: a run that ends in the runner's refusal is refused, whatever
   const esc = await unstickViaEm(repo, fakeEm(`console.log("You've hit your session limit"); process.exit(2);`), 9, "skip", "why", logger);
   assert.equal(esc.kind, "escalated", "an explicit escalation stands");
 });
+
+test("a recall the EM declines as already answered keeps the handoff watched", () => {
+  const t0 = Date.parse("2026-11-05T12:00:00Z");
+  const up = DEFAULT_BACKOFF.upstream;
+  let e = { issue: 7, kind: "release-gate", reason: "r", status: "pending", attempts: 0, since: "t" };
+  e = applyOutcome(e, { kind: "declined", detail: "no" }, t0, up);
+  assert.equal(e.status, "declined", "a decline on a question never handed off is final");
+  e = { issue: 7, kind: "release-gate", reason: "r", status: "pending", attempts: 0, since: "t" };
+  e = applyOutcome(e, { kind: "invoked", detail: "handed off" }, t0, up);
+  e = applyOutcome(e, { kind: "declined", detail: "already answered this reason; nothing written" }, t0 + 1, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1, "it counts as a recall");
+  assert.equal(e.attempts, 2);
+});

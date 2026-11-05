@@ -56,3 +56,9 @@ test("configureRunner names the runner daemon-wide", () => {
   }
 });
 
+
+test("a banner behind a wrapper's prefix is a refusal", () => {
+  const r = detectRefusal({ stdout: "", stderr: "em unstick failed: session ERROR: You've hit your session limit · resets 9am (America/Chicago)", exitCode: 1 }, DEFAULT_RUNNER, NOW);
+  assert.ok(r);
+  assert.ok(r.resetAtMs > NOW);
+});
