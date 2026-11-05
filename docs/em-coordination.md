@@ -139,6 +139,17 @@ After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up commen
 logged). **That comment means the EM failed its stage** — a give-up is never the first Ray hears
 of a stuck card.
 
+**An `invoked` answer is a handoff, not a resolution.** If the question still stands, the Foreman
+calls `unstick` again after `backoff.handoff` (10 min, 30 min, 90 min), then posts a second kind of
+give-up — "the EM took this hold but nothing moved" — @ the same owner, about 7 h after the first
+call. So on a re-call, check whether the seat you handed to is still alive before handing again: a
+seat that ran out of tokens leaves a blocked card and nothing else (SLA-3693, 2026-11-05).
+
+**A refusal is not a failure.** When `em.mjs unstick`'s output ends in the runner's limit message
+(out of tokens, rate-limited; the patterns are the Foreman's `runner` config), the outcome is
+`refused`: no attempt is spent, the pass stops calling, and the call is made again once the stated
+reset (or the upstream back-off window) has passed.
+
 ## 4. Release: how work reaches production
 
 - **No timer.** Promote opens or updates the release PR on every poll when an issue is

@@ -6,7 +6,8 @@ import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { revisePRFeedback } from "./revise-workflow.js";
 import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
-import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
+import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
+import { runnerName } from "../refusal.js";
 import { type BlockKind } from "../unblock.js";
 import { MAX_CONSECUTIVE_NO_COMMIT, noCommitCount, isUnconfirmed, stalemateHead } from "../no-commit-streak.js";
 import { CycleEvent, REVIEW_ROUNDS_ALERT, activeRuns, itemOf, pausedByBlockedLabel, prReport, releaseIfResolved, stoppedReason } from "./common.js";
@@ -27,7 +28,7 @@ export async function tryRevision(
   const repoName = repoConfig.name;
   const revLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "revision" });
 
-  if (isUpstreamBlocked("claude")) return null;
+  if (isUpstreamBlocked(runnerName())) return null;
 
   let failures = rt.memory.revisionFailureCount.get(repoName) ?? 0;
   // Failed revisions before the PR is escalated to a person (backoff.repoFailure).
@@ -146,7 +147,7 @@ export async function tryRevision(
     return null;
   }
   // Invoke the revision skill with specific PR and issue context
-  if (!tryAcquire("claude")) return null;
+  if (!tryAcquire(runnerName())) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   rt.builds.started(repoName);
@@ -168,7 +169,7 @@ export async function tryRevision(
       rt.trust, repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha, headBranch,
     ).catch(reportLaunchThrew);
-    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    reportRunResult(runnerName(), !!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
       ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
       : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };

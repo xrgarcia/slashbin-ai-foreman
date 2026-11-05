@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import type { RepoConfig } from "./config.js";
 import type { IssueRecordStore, SkippedIssue, VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
+import { backoffDelay, type BackoffWindow } from "./backoff.js";
 
 /**
  * Every `--kind` the EM's `unstick` command accepts. Shared verbatim with the
@@ -46,8 +47,11 @@ export const UNSTICK_KINDS = [
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
-/** `pending` not yet called · `invoked` EM exit 0 · `escalated` exit 2 · `declined` exit 3 · `failed` anything else. */
-export type UnstickStatus = "pending" | "invoked" | "escalated" | "declined" | "failed";
+/**
+ * `pending` not yet called · `invoked` EM exit 0 · `escalated` exit 2 · `declined` exit 3 ·
+ * `refused` the EM's runner refused the work (a limit; no attempt spent) · `failed` anything else.
+ */
+export type UnstickStatus = "pending" | "invoked" | "escalated" | "declined" | "refused" | "failed";
 
 /** Calls spent on one reason before a failing call stops being retried. */
 export const UNSTICK_MAX_ATTEMPTS = 3;
@@ -86,6 +90,14 @@ export interface UnstickEntry {
   detail?: string;
   /** Tells apart questions that share an issue and kind (`unrelated-error`: one per signature). */
   tag?: string;
+  /** Times an `invoked` handoff that did not move the issue was called again. */
+  recalls?: number;
+  /** Refusals in a row: they lengthen the wait, never spend an attempt. */
+  refusals?: number;
+  /** ISO time before which a `refused` entry is not called again. */
+  waitUntil?: string;
+  /** ISO time the handoff watch gave up with nobody to tell: it does not give up again. */
+  gaveUpAt?: string;
 }
 
 /** Something stuck right now, as read this pass. */
@@ -166,12 +178,63 @@ export function derivedCandidates(
 
 /** Whether a candidate needs an EM call now, given what the table holds for it. Pure. */
 export function needsCall(entry: UnstickEntry | undefined, c: UnstickCandidate, maxAttempts = UNSTICK_MAX_ATTEMPTS): boolean {
-  if (!entry || entry.reason !== c.reason) return true;
+  return nextStep(entry, c, Date.now(), { maxAttempts, handoff: NO_HANDOFF_WATCH }) === "call";
+}
+
+/** How a standing question is followed up: the failure cap and the handoff watch (`backoff.handoff`). */
+export interface UnstickPolicy {
+  maxAttempts: number;
+  handoff: BackoffWindow & { readonly maxRecalls: number };
+}
+
+const NO_HANDOFF_WATCH: UnstickPolicy["handoff"] = Object.freeze({ baseMs: 0, capMs: 0, factor: 1, maxRecalls: 0 });
+
+/**
+ * What the unstick stage does with a standing question this pass. Pure apart from `now` (epoch ms).
+ *
+ *  - `call`: ask the agent (again).
+ *  - `give-up`: a handoff was made `maxRecalls + 1` times and the issue never
+ *    moved; tell the escalation owner, once.
+ *  - `wait`: nothing to do yet.
+ *
+ * An `invoked` answer is a handoff, not a resolution: the seat that took it can
+ * die (out of tokens, crashed) and leave the issue where it was. While the
+ * question still stands, it is called again after `handoff` window n since the
+ * last call. A refusal waits for its `waitUntil` and costs nothing.
+ */
+export function nextStep(entry: UnstickEntry | undefined, c: UnstickCandidate, now: number, policy: UnstickPolicy): "call" | "wait" | "give-up" {
+  if (!entry || entry.reason !== c.reason) return "call";
   switch (entry.status) {
-    case "pending": return true;
-    case "failed": return entry.attempts < maxAttempts;
-    default: return false; // invoked / escalated / declined: wait for the reason to change
+    case "pending": return "call";
+    case "failed": return entry.attempts < policy.maxAttempts ? "call" : "wait";
+    case "refused": return !entry.waitUntil || now >= Date.parse(entry.waitUntil) ? "call" : "wait";
+    case "invoked": {
+      const h = policy.handoff;
+      if (h.maxRecalls <= 0 || entry.gaveUpAt || !entry.lastCallAt) return "wait";
+      const recalls = entry.recalls ?? 0;
+      if (now < Date.parse(entry.lastCallAt) + backoffDelay(recalls + 1, h)) return "wait";
+      return recalls < h.maxRecalls ? "call" : "give-up";
+    }
+    default: return "wait"; // escalated / declined: a person or the EM owns it until the reason changes
   }
+}
+
+/** The comment posted once when a handoff was made again and again and the issue never moved. */
+export function handoffGiveUpComment(owner: string, entry: Pick<UnstickEntry, "kind" | "reason" | "attempts" | "since" | "lastCallAt" | "detail">): string {
+  return [
+    "**Foreman: the EM took this hold but nothing moved**",
+    "",
+    `@${owner} — the EM said it acted ${entry.attempts} times since ${entry.since}, the last at ${entry.lastCallAt ?? "(unknown)"}, and the issue is still stuck for the same reason. The seat it handed to may have stopped (out of tokens, crashed, blocked). The Foreman will not call again unless the reason changes.`,
+    "",
+    `- Kind: \`${entry.kind}\``,
+    `- Reason: ${entry.reason}`,
+    "",
+    "Last answer:",
+    "",
+    "```",
+    (entry.detail ?? "(no detail)").slice(0, 800),
+    "```",
+  ].join("\n");
 }
 
 /** Record a fresh question (or keep the standing one if the reason is unchanged). */

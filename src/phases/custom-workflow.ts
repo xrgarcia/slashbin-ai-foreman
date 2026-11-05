@@ -1,9 +1,10 @@
+import { detectUpstreamLimit } from "../refusal.js";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { ClaudeTrust } from "../claude-trust.js";
 import { parseStageTrailer, type CustomStage } from "../stages.js";
 import { describeSpawnFailure, phaseTranscriptPath, spawnClaudeWithOptions } from "../session/runner.js";
-import { detectUpstreamLimit, type CustomStageResult } from "../session/protocol.js";
+import { type CustomStageResult } from "../session/protocol.js";
 
 /** What a custom stage is handed: the work in flight on the repo when the pass reached it. */
 export interface CustomStageInput {
@@ -83,7 +84,7 @@ export async function runCustomStage(
 
   if (result.timedOut) return { verdict: "failed", reason: "timed out" };
   if (result.exitCode !== 0) {
-    return { verdict: "failed", reason: describeSpawnFailure(result), upstreamLimit: detectUpstreamLimit(result.stdout) };
+    return { verdict: "failed", reason: describeSpawnFailure(result), upstreamLimit: detectUpstreamLimit(result.stdout, result.stderr, result.exitCode) };
   }
   const trailer = parseStageTrailer(result.stdout);
   if (!trailer) return { verdict: "failed", reason: "no FOREMAN_STAGE verdict line — outcome unknown" };

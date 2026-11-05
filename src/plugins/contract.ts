@@ -148,7 +148,13 @@ export type UnstickOutcome =
   | { kind: "escalated"; detail: string }
   | { kind: "declined"; detail: string }
   /** Anything else (error, timeout, not configured): retried up to the attempt cap. */
-  | { kind: "failed"; detail: string };
+  | { kind: "failed"; detail: string }
+  /**
+   * The agent never looked: its runner refused the work (a usage, token or rate
+   * limit; see src/refusal.ts). Costs no attempt; called again once the limit
+   * lifts (`resetAtMs` when the runner stated it, else the upstream window).
+   */
+  | { kind: "refused"; detail: string; resetAtMs?: number };
 
 export interface Unsticker {
   unstick(

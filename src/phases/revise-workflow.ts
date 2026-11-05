@@ -1,9 +1,10 @@
+import { detectUpstreamLimit } from "../refusal.js";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { ClaudeTrust } from "../claude-trust.js";
 import { codeHost } from "../plugins/registry.js";
 import { describeSpawnFailure, phaseTranscriptPath, spawnClaude } from "../session/runner.js";
-import { REVISION_NO_COMMIT, detectUpstreamLimit, extractStreamResult, type RevisionResult } from "../session/protocol.js";
+import { REVISION_NO_COMMIT, extractStreamResult, type RevisionResult } from "../session/protocol.js";
 import { IMAGE_HANDLING_INSTRUCTIONS, readOverlay, skillInstruction } from "./workflow-prompt.js";
 
 /**
@@ -95,7 +96,7 @@ Work autonomously. Do not ask questions.`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout, result.stderr, result.exitCode) };
   }
 
   // Post-revision self-check: confirm Claude actually pushed commits to the

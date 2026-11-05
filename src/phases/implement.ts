@@ -8,7 +8,8 @@ import type { SessionEvent, SessionReport } from "../adapters.js";
 import { selectWork, heldWork, emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
 import { implementApprovedIssues } from "./implement-workflow.js";
 import type { ImplementationResult } from "../session/protocol.js";
-import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
+import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
+import { runnerName } from "../refusal.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { fieldTable } from "../issue-records.js";
 import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
@@ -68,7 +69,7 @@ export function prBlockingSkip(reason: string): number | null {
  * phase directly after the call, ahead of every return.
  */
 export function reportLaunchThrew(err: unknown): never {
-  reportClaudeResult(false);
+  reportRunResult(runnerName(), false);
   throw err;
 }
 
@@ -189,7 +190,7 @@ export async function tryBatchImplementation(
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
-  if (isUpstreamBlocked("claude")) return null;
+  if (isUpstreamBlocked(runnerName())) return null;
 
   // A repo whose sessions keep failing pauses (backoff.repoFailure). When the
   // pause ends the count restarts, but the pause count is kept: tripping again
@@ -438,7 +439,7 @@ export async function tryBatchImplementation(
   events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoConfig.githubRepo}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
 
   // Invoke the skill — one Claude session implements all approved issues
-  if (!tryAcquire("claude")) return null;
+  if (!tryAcquire(runnerName())) return null;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   rt.builds.started(repoName);
@@ -480,7 +481,7 @@ export async function tryBatchImplementation(
     const startRef = resolveStartRef(repoConfig, skillSync);
     const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues, branches, startRef)
       .catch(reportLaunchThrew);
-    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    reportRunResult(runnerName(), !!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
       ? { status: "finished", detail: result.prUrl ? `PR ${result.prUrl}` : "commits added to the open PR" }
       : result.landed
