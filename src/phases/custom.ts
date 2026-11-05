@@ -5,7 +5,8 @@ import type { Logger } from "../logger.js";
 import { emit } from "../work-source.js";
 import { runCustomStage } from "./custom-workflow.js";
 import { type CustomStage, type StageResult } from "../stages.js";
-import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
+import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
+import { runnerName } from "../refusal.js";
 import { CycleEvent, activeRuns, itemOf } from "./common.js";
 import { reportLaunchThrew } from "./implement.js";
 import { codeHost } from "../plugins/registry.js";
@@ -18,7 +19,7 @@ import type { ForemanRuntime } from "../runtime.js";
  * with no session, so a pass with no open PR reaches the stages after it.
  *
  * Goes through the same gates as the other Claude phases: the upstream
- * back-off (`tryAcquire` / `reportClaudeResult`), the per-repo abort
+ * back-off (`tryAcquire` / `reportRunResult`), the per-repo abort
  * controller, and the shutdown check in the dispatch loop. A run the upstream
  * refused is `blocked` without a verdict (not remembered, retried next pass).
  */
@@ -30,7 +31,7 @@ export async function tryCustomStage(
   events: CycleEvent[],
 ): Promise<StageResult & { ran: boolean }> {
   const stageLogger = logger.child({ phase: `stage:${stage.id}` });
-  if (isUpstreamBlocked("github") || isUpstreamBlocked("claude")) {
+  if (isUpstreamBlocked("github") || isUpstreamBlocked(runnerName())) {
     return { outcome: "blocked", reason: "upstream back-off", ran: false };
   }
 
@@ -49,7 +50,7 @@ export async function tryCustomStage(
     return { outcome: prior.outcome, reason: prior.reason, ran: false };
   }
 
-  if (!tryAcquire("claude")) return { outcome: "blocked", reason: "upstream back-off", ran: false };
+  if (!tryAcquire(runnerName())) return { outcome: "blocked", reason: "upstream back-off", ran: false };
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoConfig.name);
   try {
@@ -58,7 +59,7 @@ export async function tryCustomStage(
       { prNumber: pr.number, issueNumbers: pr.issueNumbers, headSha: pr.headSha, headBranch: pr.headBranch },
       stageLogger, runAbort.signal,
     ).catch(reportLaunchThrew);
-    reportClaudeResult(!!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
+    reportRunResult(runnerName(), !!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     if (result.upstreamLimit) return { outcome: "blocked", reason: result.upstreamLimit.reason, ran: false };
 
     const outcome = result.verdict === "pass" ? "ok" : result.verdict;

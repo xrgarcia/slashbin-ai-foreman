@@ -8,8 +8,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, openEntry, unstickKey,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey,
 } from "../dist/unstick.js";
+import { applyOutcome } from "../dist/phases/unstick.js";
+import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { unstickViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS, emUnstickMaxDurationMs } from "../dist/plugins/em.js";
 import { unstickStageReady } from "../dist/config.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
@@ -116,4 +118,104 @@ test("buildEmEnv carries the EM token and no other agent's", () => {
   const env = buildEmEnv({ sessionEnv: [] });
   assert.equal(env.EM_GITHUB_TOKEN, "em-token-not-real");
   assert.equal(env.TECHLEAD_GITHUB_KEY, undefined);
+});
+
+// The handoff watch (SLA-3693, 2026-11-05): the EM answered "invoked" to a
+// release gate, its seat ran out of tokens, and nothing ever looked again.
+const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+const gate = { issue: 5, kind: "release-gate", reason: "at pr approved" };
+const at = (ms) => new Date(ms).toISOString();
+
+test("nextStep: an invoked handoff that never moved is called again on a growing window, then given up", () => {
+  const t0 = 1_000_000;
+  let e = { ...gate, status: "pending", attempts: 0, since: at(t0) };
+  assert.equal(nextStep(e, gate, t0, H), "call");
+  e = applyOutcome(e, { kind: "invoked", detail: "handed to the PO" }, t0, DEFAULT_BACKOFF.upstream);
+  assert.equal(e.recalls, 0);
+  assert.equal(nextStep(e, gate, t0 + 999, H), "wait");
+  assert.equal(nextStep(e, gate, t0 + 1_000, H), "call", "window 1 passed");
+  e = applyOutcome(e, { kind: "invoked", detail: "again" }, t0 + 1_000, DEFAULT_BACKOFF.upstream);
+  assert.equal(e.recalls, 1);
+  assert.equal(nextStep(e, gate, t0 + 1_000 + 1_999, H), "wait", "window 2 is longer");
+  assert.equal(nextStep(e, gate, t0 + 3_000, H), "call");
+  e = applyOutcome(e, { kind: "invoked", detail: "again" }, t0 + 3_000, DEFAULT_BACKOFF.upstream);
+  assert.equal(e.recalls, 2);
+  assert.equal(nextStep(e, gate, t0 + 3_000 + 4_000, H), "give-up", "recalls spent: tell the owner");
+  assert.equal(nextStep({ ...e, gaveUpAt: at(t0) }, gate, t0 + 1e9, H), "wait", "given up once, never again");
+  assert.equal(nextStep(e, { ...gate, reason: "new" }, t0, H), "call", "a changed reason is a new question");
+});
+
+test("nextStep: maxRecalls 0 keeps the old rule (an answer is final)", () => {
+  const e = { ...gate, status: "invoked", attempts: 1, since: at(0), lastCallAt: at(0), recalls: 0 };
+  assert.equal(nextStep(e, gate, 1e12, { ...H, handoff: { ...H.handoff, maxRecalls: 0 } }), "wait");
+  assert.equal(needsCall(e, gate), false, "needsCall carries no handoff watch");
+});
+
+test("a refusal spends no attempt and waits for the stated reset, else the upstream window", () => {
+  const t0 = 5_000_000;
+  const up = { baseMs: 100, capMs: 1_000, factor: 2 };
+  let e = { ...gate, status: "failed", attempts: 2, since: at(t0) };
+  e = applyOutcome(e, { kind: "refused", detail: "You've hit your limit" }, t0, up);
+  assert.equal(e.status, "refused");
+  assert.equal(e.attempts, 2, "not charged");
+  assert.equal(e.waitUntil, at(t0 + 100));
+  assert.equal(nextStep(e, gate, t0 + 99, H), "wait");
+  assert.equal(nextStep(e, gate, t0 + 100, H), "call");
+  e = applyOutcome(e, { kind: "refused", detail: "again" }, t0 + 100, up);
+  assert.equal(e.waitUntil, at(t0 + 100 + 200), "longer each refusal in a row");
+  e = applyOutcome(e, { kind: "refused", detail: "again", resetAtMs: t0 + 60_000 }, t0 + 300, up);
+  assert.equal(e.waitUntil, at(t0 + 60_000), "a stated reset wins");
+  e = applyOutcome(e, { kind: "invoked", detail: "ok" }, t0 + 60_000, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.refusals, undefined, "an answer clears the refusal run");
+  assert.equal(e.waitUntil, undefined);
+});
+
+test("the handoff give-up comment names the owner, the kind and the last answer", () => {
+  const c = handoffGiveUpComment("ray", { kind: "release-gate", reason: "r", attempts: 3, since: "s", lastCallAt: "l", detail: "d" });
+  assert.match(c, /@ray/);
+  assert.match(c, /`release-gate`/);
+  assert.match(c, /acted 3 times/);
+});
+
+test("unstickViaEm: a run that ends in the runner's refusal is refused, whatever its exit", async () => {
+  process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
+  for (const code of [0, 1]) {
+    const r = await unstickViaEm(repo, fakeEm(`console.log("You've hit your session limit · resets 9am (America/Chicago)"); process.exit(${code});`), 9, "release-gate", "why", logger);
+    assert.equal(r.kind, "refused", `exit ${code}`);
+    assert.match(r.detail, /hit your session limit/);
+    assert.ok(r.resetAtMs > Date.now());
+  }
+  const esc = await unstickViaEm(repo, fakeEm(`console.log("You've hit your session limit"); process.exit(2);`), 9, "skip", "why", logger);
+  assert.equal(esc.kind, "escalated", "an explicit escalation stands");
+});
+
+test("a recall the EM declines as already answered keeps the handoff watched", () => {
+  const t0 = Date.parse("2026-11-05T12:00:00Z");
+  const up = DEFAULT_BACKOFF.upstream;
+  let e = { issue: 7, kind: "release-gate", reason: "r", status: "pending", attempts: 0, since: "t" };
+  e = applyOutcome(e, { kind: "declined", detail: "no" }, t0, up);
+  assert.equal(e.status, "declined", "a decline on a question never handed off is final");
+  e = { issue: 7, kind: "release-gate", reason: "r", status: "pending", attempts: 0, since: "t" };
+  e = applyOutcome(e, { kind: "invoked", detail: "handed off" }, t0, up);
+  e = applyOutcome(e, { kind: "declined", detail: "already answered this reason; nothing written" }, t0 + 1, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1, "it counts as a recall");
+  assert.equal(e.attempts, 2);
+});
+
+test("an invoked entry recorded before recalls existed is a standing handoff: a duplicate decline or a refusal keeps it watched", () => {
+  const t0 = Date.parse("2026-11-05T12:00:00Z");
+  const up = DEFAULT_BACKOFF.upstream;
+  const legacy = { issue: 7, kind: "release-gate", reason: "r", status: "invoked", attempts: 1, since: "t", lastCallAt: "2026-11-05T10:00:00Z" };
+  let e = applyOutcome(legacy, { kind: "declined", detail: "already answered this reason; nothing written" }, t0, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1);
+  e = applyOutcome(legacy, { kind: "refused", detail: "You've hit your limit" }, t0, up);
+  assert.equal(e.recalls, 0, "the refusal keeps the handoff marked");
+  e = applyOutcome(e, { kind: "declined", detail: "already answered" }, t0 + 1, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1);
+  e = applyOutcome(legacy, { kind: "invoked", detail: "again" }, t0, up);
+  assert.equal(e.recalls, 1, "a second handoff on a legacy entry is its first recall");
 });

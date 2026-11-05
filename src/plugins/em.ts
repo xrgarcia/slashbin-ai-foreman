@@ -2,6 +2,7 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { cliTail, lastLine, runAgentCli } from "./agent-cli.js";
+import { detectRefusal } from "../refusal.js";
 import type { ForemanPlugin, Unsticker, UnstickOutcome } from "./contract.js";
 
 /**
@@ -33,7 +34,10 @@ export function emUnstickMaxDurationMs(kind: string): number {
 
 /**
  * Ask the EM to unstick `issue` (`em.mjs unstick --repo --issue --kind --reason`),
- * cwd the EM checkout. Exit 0 invoked, 2 escalated, 3 declined, else failed.
+ * cwd the EM checkout. Exit 2 escalated, 3 declined; otherwise a run whose
+ * output ends in the runner's refusal (out of tokens, rate-limited) is `refused`
+ * whatever its exit code, since a seat that never looked has not acted; else
+ * exit 0 invoked, anything else failed.
  */
 export async function unstickViaEm(
   repoConfig: RepoConfig,
@@ -52,11 +56,13 @@ export async function unstickViaEm(
   const r = await runAgentCli(em, "bin/em.mjs",
     ["unstick", "--repo", repoConfig.githubRepo, "--issue", String(issue), "--kind", kind, "--reason", reason],
     buildEmEnv(agentConfig), agentConfig, emUnstickMaxDurationMs(kind), abortSignal, transcriptPath);
-  if (r.timedOut) return { kind: "failed", detail: "EM unstick timed out" };
   const last = lastLine(r);
+  if (!r.timedOut && r.code === 2) return { kind: "escalated", detail: last };
+  if (!r.timedOut && r.code === 3) return { kind: "declined", detail: last };
+  const refusal = detectRefusal({ stdout: r.stdout, stderr: r.stderr, exitCode: r.code });
+  if (refusal) return { kind: "refused", detail: refusal.reason, ...(refusal.resetAtMs !== undefined ? { resetAtMs: refusal.resetAtMs } : {}) };
+  if (r.timedOut) return { kind: "failed", detail: "EM unstick timed out" };
   if (r.code === 0) return { kind: "invoked", detail: last };
-  if (r.code === 2) return { kind: "escalated", detail: last };
-  if (r.code === 3) return { kind: "declined", detail: last };
   return { kind: "failed", detail: `exit ${r.code}: ${cliTail(r)}` };
 }
 

@@ -1,3 +1,4 @@
+import { detectUpstreamLimit } from "../refusal.js";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { GithubConventions } from "../config-schema/github.js";
@@ -6,7 +7,7 @@ import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { codeHost } from "../plugins/registry.js";
 import { describeSpawnFailure, phaseTranscriptPath, spawnClaude } from "../session/runner.js";
 import {
-  detectDeclaredLanded, detectDeclaredSkip, detectSkipSignal, detectUpstreamLimit, extractStreamResult,
+  detectDeclaredLanded, detectDeclaredSkip, detectSkipSignal, extractStreamResult,
   type ImplementationResult,
 } from "../session/protocol.js";
 import { foremanBranchName } from "../foreman-branch.js";
@@ -165,7 +166,7 @@ Work autonomously. Do not ask questions.`;
   if (result.exitCode !== 0) {
     const error = describeSpawnFailure(result);
     logger.error(`Claude CLI exited with code ${result.exitCode}: ${error}`);
-    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout) };
+    return { success: false, error, upstreamLimit: detectUpstreamLimit(result.stdout, result.stderr, result.exitCode) };
   }
 
   // A DECLARED skip, with no new commits, is authoritative — and it has to be

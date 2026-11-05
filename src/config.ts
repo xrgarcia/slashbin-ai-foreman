@@ -10,6 +10,7 @@ import {
 } from "./config-schema/paperclip.js";
 import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./config-schema/github.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
+import { runnerConfigSchema, type RunnerConfig } from "./refusal.js";
 import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSyncConfig } from "./skill-sync.js";
 import { applyProfile, profileNamed } from "./profiles/index.js";
 
@@ -205,6 +206,13 @@ export const configSchema = z.object({
   // docs/configuration.md. The old top-level `skipBackoffMs`,
   // `upstreamBackoffBaseMs` and `upstreamBackoffCapMs` are still read into it.
   backoff: backoffConfigSchema,
+  // The agent CLI builder sessions run on, and how it says it has refused work
+  // (a usage, token or rate limit) rather than failed: `name`,
+  // `refusalPatterns`, `refusalExitCodes`, `resetPattern`. A refusal is never
+  // charged to a retry and pauses that runner daemon-wide until the limit
+  // lifts; the EM's unstick calls are read the same way. Claude's by default.
+  // See src/refusal.ts.
+  runner: runnerConfigSchema,
   // How long a repo's open-issue snapshot stays warm. The discovery phases each
   // used to run their own `gh issue list` against the same repo — six GraphQL
   // requests per repo per cycle, which at 20 repos on a 60s poll blew GitHub's
@@ -531,6 +539,8 @@ export interface AgentConfig {
   buildWaitsForDevVerify: boolean;
   /** Every back-off and retry limit (see src/backoff.ts). */
   backoff: BackoffConfig;
+  /** The agent runner's name and how it signals a refusal (see src/refusal.ts). */
+  runner: RunnerConfig;
   /** How long a repo's open-issue snapshot stays warm (default 30s; 0 disables). */
   issueCacheTtlMs: number;
   /** Page cap for the open-issue snapshot (default 500). */
@@ -717,6 +727,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     allowedTools: fileConfig.allowedTools,
     builderMcpConfig: process.env.AI_AGENT_BUILDER_MCP_CONFIG ?? fileConfig.builderMcpConfig,
     sessionEnv: fileConfig.sessionEnv,
+    runner: fileConfig.runner,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
     profile: fileConfig.profile,
@@ -921,6 +932,11 @@ export function loadConfig(configPath?: string): AgentConfig {
     buildWaitsForDevVerify: parsed.buildWaitsForDevVerify,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,
+    runner: Object.freeze({
+      ...parsed.runner,
+      refusalPatterns: Object.freeze([...parsed.runner.refusalPatterns]),
+      refusalExitCodes: Object.freeze([...parsed.runner.refusalExitCodes]),
+    }) as RunnerConfig,
     issueCacheTtlMs: parsed.issueCacheTtlMs,
     issueSnapshotLimit: parsed.issueSnapshotLimit,
     logFormat: parsed.logFormat,

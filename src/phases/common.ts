@@ -15,10 +15,11 @@ import { BackoffTracker } from "../backoff.js";
 import { codeHost } from "../plugins/registry.js";
 import type { ReviewOutcome } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
+import { runnerName } from "../refusal.js";
 
 /**
  * Why a run stopped, worded for the card. Every stop — the first failure, a
- * Claude usage limit, a GitHub rate limit — moves the card to Blocked so the
+ * runner usage limit, a GitHub rate limit — moves the card to Blocked so the
  * board shows it the moment it happens, not after retries run out. The next
  * attempt's session start moves the card back out on its own.
  */
@@ -27,7 +28,7 @@ export function stoppedReason(what: string, result: { error?: string; upstreamLi
     const at = result.upstreamLimit.resetAtMs
       ? ` — resumes after ${new Date(result.upstreamLimit.resetAtMs).toISOString().slice(11, 16)}Z`
       : " — resumes when the limit lifts";
-    return `${what} stopped: Claude usage limit (${result.upstreamLimit.reason})${at}`;
+    return `${what} stopped: ${runnerName()} usage limit (${result.upstreamLimit.reason})${at}`;
   }
   if (githubBlocked) return `${what} stopped: GitHub rate limit — resumes when it lifts`;
   return `${what} failed${attempt ? ` (${attempt})` : ""}: ${result.error || "unknown"} — retrying next cycle`;
