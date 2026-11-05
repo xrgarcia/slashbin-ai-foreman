@@ -772,6 +772,22 @@ test("an adopted release whose Production Verification failed is held, not close
   assert.ok(!gh().issues[7].labels.includes("pr approved"), "one stage label");
 });
 
+test("adoption never takes back a delivered issue: closed and verified on an older release (foreman#86)", async () => {
+  // jerky_ops#11 shipped on release 16; release 20 shipped #18 and its verification failed. Before the fix the hold
+  // reopened #11 too: its title mention (and any explicit line) made it a candidate, and 16 < 20 let it through.
+  const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance** | FAIL | 500s |";
+  world({
+    issues: [{ number: 11, title: "Issue 11", state: "CLOSED", labels: ["approved"] }, issue(18, "pr approved")],
+    prs: [mergedPr(20, "- #18: Departments (follow-up to #11)\n- #11: listed again by hand", MERGE, 60)],
+    comments: { 20: [{ url: "https://github.com/example/rel/pull/20#issuecomment-1", body: pv, at: "2026-10-10T00:00:00Z" }] },
+  });
+  await seed(rt, repo, 11, { prodVerified: { pr: 16, mergeSha: "old", at: "2026-10-15T17:49:00Z" } });
+  await run();
+  assertHeld(18, "prod-verify-failed");
+  assert.equal(gh().issues[11].state, "CLOSED", "the delivered issue is never reopened");
+  assert.deepEqual(gh().issues[11].labels, ["approved"]);
+});
+
 test("a merged release naming no lifecycle issue, or older than 48 hours, is not adopted", async () => {
   world({
     issues: [{ number: 7, title: "x", state: "OPEN", labels: ["docs"] }, issue(4, "pr approved")],
