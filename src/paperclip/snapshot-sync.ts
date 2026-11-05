@@ -64,7 +64,8 @@ export class SnapshotSync {
       this.env.logger.warn("Paperclip card blocks could not be read; the snapshot pass waits for the next one");
       return;
     }
-    if (!(await this.index.ensureIndex())) return;
+    // This repo's cards unread: place nothing for it this pass; the next snapshot retries (other repos carry on).
+    if (!(await this.index.ensureRepo(_repo))) return;
     const blocked = `status:${this.env.statusName("blocked")}`;
     const cards = read.cards;
     // With `ownsCards`, every issue has a card before the lifecycle pass places
@@ -318,10 +319,11 @@ export class SnapshotSync {
     // A closed issue's card is nobody's: a holder left on it is a seat told to act on finished work.
     if (!(await this.placement.patch(id, { status: target, assigneeAgentId: null, assigneeUserId: null, ...(labelIds ? { labelIds } : {}) }))) return false;
     this.index.setHolder(id, null);
-    if (state === `status:${target}`) return true;
-    this.index.rowState.set(id, `status:${target}`);
     this.placement.labelBlocked.delete(id);
     this.placement.clearBlock(id);
+    // Moved to its terminal state: the card is done with, and never looked for again.
+    this.index.forget(id);
+    if (state === `status:${target}`) return true;
     logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.startsWith("waiting\n") ? "waiting" : state.slice(7)} → ${target}: the issue is closed ${how} on GitHub`);
     return true;
   }
@@ -429,7 +431,10 @@ export class SnapshotSync {
       const labelIds = await this.placement.labelIdsFor(id, undefined);
       if (labelIds) body.labelIds = labelIds;
     }
-    if (!Object.keys(body).length || budget.left <= 0) return;
+    // A closed issue's card at its terminal state is done with: forgotten, never looked for again.
+    const closing = !this.holds.has(id) && c.state !== "open";
+    if (!Object.keys(body).length) { if (closing) this.index.forget(id); return; }
+    if (budget.left <= 0) return;
     budget.left--;
     const holderAgent = body.comment && hold?.author ? await this.agentForLogin(hold.author) : null;
     if (!(await this.placement.patch(id, body, holderAgent ? `agent:${holderAgent}` : null))) return;
@@ -450,6 +455,7 @@ export class SnapshotSync {
       assigneeUserId: "assigneeUserId" in body ? (body.assigneeUserId as string | null) : have?.assigneeUserId ?? null,
       ...(Array.isArray(body.labelIds) ? { labelIds: body.labelIds as string[] } : have?.labelIds ? { labelIds: have.labelIds } : {}),
     });
+    if (closing) this.index.forget(id);
   }
 
   /**

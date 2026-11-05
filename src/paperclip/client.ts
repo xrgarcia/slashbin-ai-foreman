@@ -182,15 +182,17 @@ export class PaperclipClient {
   }
 
   /**
-   * Every issue in the company, fetched a page at a time; with `updatedSince` (ISO),
-   * only those changed at or after it (the server's `updatedSince` filter).
+   * The company's issues in one of `statuses`, fetched a page at a time; with `q`,
+   * only those the server's text search matches. `statuses` is required: a list
+   * with no status filter would read the terminal cards, which the plugin never does.
    */
-  async *listIssues(opts: { updatedSince?: string } = {}): AsyncIterableIterator<PaperclipIssue> {
-    const since = opts.updatedSince ? `&updatedSince=${encodeURIComponent(opts.updatedSince)}` : "";
+  async *listIssues(opts: { q?: string; statuses: readonly string[] }): AsyncIterableIterator<PaperclipIssue> {
+    if (!opts.statuses?.length) throw new Error("listIssues needs a status filter: the plugin never reads terminal cards");
+    const filter = `&status=${opts.statuses.map(encodeURIComponent).join(",")}${opts.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`;
     for (let offset = 0; ; offset += PAPERCLIP_PAGE_SIZE) {
       const page = await this.request<PaperclipIssue[]>(
         "GET",
-        `${this.companyPath()}/issues?limit=${PAPERCLIP_PAGE_SIZE}&offset=${offset}${since}`,
+        `${this.companyPath()}/issues?limit=${PAPERCLIP_PAGE_SIZE}&offset=${offset}${filter}`,
       );
       if (!Array.isArray(page)) {
         throw new PaperclipClientError("Paperclip issue list is not an array", 200, JSON.stringify(page));

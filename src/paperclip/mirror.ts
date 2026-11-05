@@ -166,7 +166,7 @@ export class PaperclipMirror implements WorkObserver {
   private get comments() { return this.env.comments; }
   private get logger(): Logger { return this.env.logger; }
   private get holds() { return this.lease.holds; }
-  get index(): Map<string, string> | null { return this.cardIndex.index; }
+  get index(): Map<string, string> { return this.cardIndex.index; }
   get duplicates() { return this.cardIndex.duplicates; }
   private get rowState() { return this.cardIndex.rowState; }
   private get rowRepo() { return this.cardIndex.rowRepo; }
@@ -181,7 +181,7 @@ export class PaperclipMirror implements WorkObserver {
   private get prOf() { return this.notes.prOf; }
 
   private ensureBlocks(): Promise<boolean> { return this.placement.ensureBlocks(); }
-  private ensureIndex(fresh = false): Promise<boolean> { return this.cardIndex.ensureIndex(fresh); }
+  private ensureRepo(repo: string, fresh = false): Promise<boolean> { return this.cardIndex.ensureRepo(repo, fresh); }
   private resolve(item: WorkItem, create: boolean): Promise<string | null> { return this.cardIndex.resolve(item, create); }
   private refreshRow(id: string): Promise<void> { return this.cardIndex.refreshRow(id); }
   private terminal(id: string): boolean { return this.cardIndex.terminal(id); }
@@ -470,8 +470,8 @@ export class PaperclipMirror implements WorkObserver {
     if (this.housekeeping) return;
     this.housekeeping = true;
     try {
-      if (!(await this.ensureIndex(true))) return;
-      await this.cardIndex.retireLiveTask();
+      // Each served repo is read on its own; one that fails waits for the next pass.
+      for (const repo of new Set([...this.cardIndex.servedRepos, ...(this.cfg.repos ?? [])])) await this.ensureRepo(repo, true);
       if (this.cfg.ownsCards === true) {
         await this.cardIndex.retireDuplicates();
         await this.placement.backfillIssueLabels();
@@ -540,7 +540,7 @@ export class PaperclipMirror implements WorkObserver {
       await this.note(id, fill(step.note, { reason: w.reason }), { event: "progress" });
     }
 
-    if (await this.ensureIndex()) {
+    if (await this.ensureRepo(repo)) {
       for (const [id, state] of this.rowState) {
         if (keep.has(id) || !state.startsWith("waiting\n") || this.rowRepo.get(id) !== this.keyNow(repo)) continue;
         if (!(await this.move(id, this.rowStage.get(id) ?? "approved"))) continue;

@@ -184,7 +184,7 @@ test("listIssues fetches the next page only after a full 1000-row page", async (
     return [200, Array.from({ length: offset === 0 ? 1000 : 2 }, (_, i) => ({ id: `i${offset + i}`, title: "t", status: "todo" }))];
   });
   const ids = [];
-  for await (const i of make(fn).listIssues()) ids.push(i.id);
+  for await (const i of make(fn).listIssues({ statuses: ["todo"] })) ids.push(i.id);
   assert.equal(ids.length, 1002);
   assert.equal(ids[1001], "i1001");
   assert.deepEqual(calls.map((c) => [c.path, c.search.get("limit"), c.search.get("offset")]), [
@@ -196,7 +196,7 @@ test("listIssues fetches the next page only after a full 1000-row page", async (
 test("listIssues stops after one request when the first page is short", async () => {
   const { fn, calls } = fakeFetch(() => [200, [{ id: "a", title: "t", status: "todo" }]]);
   const ids = [];
-  for await (const i of make(fn).listIssues()) ids.push(i.id);
+  for await (const i of make(fn).listIssues({ statuses: ["todo"] })) ids.push(i.id);
   assert.deepEqual(ids, ["a"]);
   assert.equal(calls.length, 1);
 });
@@ -306,14 +306,22 @@ test("a request that never answers rejects at timeoutMs with status 0 and is ret
   assert.equal(calls, 1, "a write that timed out is not re-sent");
 });
 
-test("listIssues sends updatedSince when asked and counts GETs and rows read", async () => {
+test("listIssues needs a status filter: a call without one throws before any request", async () => {
+  let calls = 0;
+  const c = make(async () => { calls++; return new Response("[]", { status: 200 }); });
+  await assert.rejects(async () => { for await (const _ of c.listIssues({})) { /* none */ } }, /status filter/);
+  await assert.rejects(async () => { for await (const _ of c.listIssues({ statuses: [] })) { /* none */ } }, /status filter/);
+  assert.equal(calls, 0);
+});
+
+test("listIssues sends the status filter and q, and counts GETs and rows read", async () => {
   const urls = [];
   const fn = async (url) => { urls.push(String(url)); return new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }); };
   const c = make(fn);
   const got = [];
-  for await (const r of c.listIssues({ updatedSince: "2026-11-03T10:00:00.000Z" })) got.push(r.id);
+  for await (const r of c.listIssues({ q: "jerky ops", statuses: ["todo", "in_review"] })) got.push(r.id);
   assert.deepEqual(got, ["a", "b"]);
-  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&updatedSince=2026-11-03T10%3A00%3A00.000Z"));
+  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&status=todo,in_review&q=jerky%20ops"));
   assert.deepEqual({ ...c.reads }, { calls: 1, rows: 2 });
 });
 

@@ -44,7 +44,10 @@ function fakePaperclip(rows) {
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
-      return ok(rows.slice(off, off + Number(u.searchParams.get("limit"))));
+      // The server's status filter: a terminal card is never returned to a caller that does not ask for it.
+      const want = u.searchParams.get("status")?.split(",");
+      assert.ok(want && !want.includes("done") && !want.includes("cancelled"), "the plugin lists only the statuses in play");
+      return ok(rows.filter((r) => want.includes(r.status)).slice(off, off + Number(u.searchParams.get("limit"))));
     }
     if (method === "GET" && u.pathname === `/api/companies/${CID}/projects`) return ok([]);
     if (method === "POST" && u.pathname === `/api/companies/${CID}/projects`) return ok({ id: "proj-1", ...body }, 201);
@@ -108,7 +111,8 @@ const GITHUB = ["open", "completed", "not_planned", "completed+read", "not_plann
 const CARDS = ["done", "in_review", "cancelled"];
 
 /**
- * The table: the column the card ends in.
+ * The table: the column the card ends in. (A card already done or cancelled is
+ * never read, so it ends where it started.)
  *   - open: the labels' column (none: unchanged with ownsCards off, which has
  *     no card for an unapproved issue; backlog with it on); a cancelled card
  *     of an open issue is a person's call and stays.
@@ -121,6 +125,9 @@ const CARDS = ["done", "in_review", "cancelled"];
  */
 function expected(owns, gh, label, card) {
   const { bucket } = LABELS[label];
+  // Terminal cards are never read (Ray, 2026-11-05): a card already done or cancelled is not found,
+  // so nothing touches it, whatever GitHub says; an open issue gets a fresh card beside it instead.
+  if (card === "done" || card === "cancelled") return card;
   if (gh === "completed+read") return "done";
   if (gh === "not_planned+read") return "cancelled";
   if (gh === "unreadable" || card === "cancelled") return card;
@@ -187,18 +194,18 @@ test("cmneb_data_receiver#218: a done card stays done when the open view carries
 
 test("no state reader, or one that throws: nothing moves", async () => {
   for (const states of [undefined, async () => { throw new Error("rate limited"); }]) {
-    const fake = fakePaperclip([{ id: "r7", title: "t", status: "done", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
+    const fake = fakePaperclip([{ id: "r7", title: "t", status: "in_review", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
     const mirror = mirrorOn(fake);
     const log = logger();
     const items = [{ item: { issueNumber: 7, repo: REPO }, stage: "releasing", detail: "release pending" }];
     await mirror.onEvent({ kind: "snapshot", repo: REPO, items, ...(states ? { states } : {}) }, log);
-    assert.equal(fake.rows[0].status, "done");
+    assert.equal(fake.rows[0].status, "in_review");
     assert.ok(log.lines.some((m) => /left #7 where they are: GitHub state not read/.test(m)));
   }
 });
 
 test("one live read per snapshot, for the cards a label would move only", async () => {
-  const rows = [7, 8, 9].map((n) => ({ id: `r${n}`, title: "t", status: n === 9 ? "in_review" : "done", assigneeAgentId: AGENT, description: `source: ${REPO}#${n}` }));
+  const rows = [7, 8, 9].map((n) => ({ id: `r${n}`, title: "t", status: n === 9 ? "in_review" : "todo", assigneeAgentId: AGENT, description: `source: ${REPO}#${n}` }));
   const fake = fakePaperclip(rows);
   const mirror = mirrorOn(fake);
   const asked = [];
@@ -208,7 +215,7 @@ test("one live read per snapshot, for the cards a label would move only", async 
   assert.deepEqual(fake.rows.map((r) => r.status), ["in_review", "done", "in_review"]);
 });
 
-test("an open release PR naming a closed issue does not pull its card out of done or cancelled", async () => {
+test("an open release PR naming a closed issue does not touch its done or cancelled card (never read)", async () => {
   for (const status of ["done", "cancelled"]) {
     const fake = fakePaperclip([{ id: "r7", title: "t", status, assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
     const mirror = mirrorOn(fake);
@@ -216,6 +223,7 @@ test("an open release PR naming a closed issue does not pull its card out of don
       await mirror.onEvent({ kind: "release", release: { repo: REPO, state: "open", pr: 222, productionBranch: "main", owned, issues: [{ issueNumber: 7, repo: REPO }] } }, logger());
     }
     assert.equal(fake.rows[0].status, status);
+    assert.equal(fake.rows.length, 1, "a release event creates no card");
   }
   const fake = fakePaperclip([{ id: "r7", title: "t", status: "in_review", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
   await mirrorOn(fake).onEvent({ kind: "release", release: { repo: REPO, state: "open", pr: 222, productionBranch: "main", owned: true, issues: [{ issueNumber: 7, repo: REPO }] } }, logger());
