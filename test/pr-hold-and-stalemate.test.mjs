@@ -23,6 +23,7 @@ import { qaFailStandsBody } from "../dist/qa-report.js";
 import { REVIEW_ROUNDS_ALERT } from "../dist/phases/common.js";
 import { createLogger } from "../dist/logger.js";
 import { ForemanRuntime } from "../dist/runtime.js";
+const withoutAt = (s) => { if (!s) return s; const { at, ...rest } = s; return rest; };
 let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
@@ -63,6 +64,8 @@ else if (args[0] === "pr" && args[1] === "view" && has("--json state")) out({ st
 else if (args[0] === "pr" && args[1] === "view" && has("reviews")) out({ reviews: w.reviews ?? [], commits: [{ committedDate: "2026-11-01T19:40:00Z" }] });
 else if (args[0] === "pr" && args[1] === "view") out("{}");
 else if (args[0] === "api" && has("/branches/")) out(w.head);
+else if (args[0] === "api" && has("/pulls/") && has("/reviews")) out((w.apiReviews ?? []).map((r) => JSON.stringify(r)).join("\\n"));
+else if (args[0] === "api" && has("/issues/") && has("/comments")) out((w.comments ?? []).map((c) => JSON.stringify(c)).join("\\n"));
 else if (args[0] === "api" && has("--jq")) out("");
 else out("[]");
 `);
@@ -103,7 +106,7 @@ beforeEach(() => {
   rt = new ForemanRuntime();
   memoryRecords();
   for (const f of [F.world, F.ghLog, F.claudeLog]) rmSync(f, { force: true });
-  world({ labels: ["approved"], head: SHA, reviews: [] });
+  world({ labels: ["approved"], head: SHA, reviews: [], comments: [], apiReviews: [] });
 });
 
 function load(top = {}) {
@@ -134,7 +137,7 @@ test("#1597: QA FAIL → no-commit → a pass with no pending revision → QA FA
   assert.equal(await tryRevision(rt, repo, config, logger, 3, events2), null, "the second no-commit does not relabel");
   assert.equal(claudeRuns(), 2);
   assert.ok(events2.some((e) => e.level === "error" && /answered 2 review rounds with no code change/.test(e.message)), JSON.stringify(events2));
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: SHA, count: 2 }, "persisted on the PR's record, so a restart keeps it");
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: SHA, count: 2 }, "persisted on the PR's record, so a restart keeps it");
 
   assert.equal(await tryRevision(rt, repo, config, logger, 4, []), null);
   assert.equal(claudeRuns(), 2, "no further session on the stalled head");
@@ -154,7 +157,68 @@ test("a push that moves the head clears the stalemate and revise runs again", as
   world({ head: NEW_SHA });
   assert.ok(await tryRevision(rt, repo, config, logger, 4, []), "the new head is revised and goes back to review");
   assert.equal(claudeRuns(), 3);
-  assert.deepEqual((await prRecordOf(rt, repo, PR)).noCommit, { head: NEW_SHA, count: 1 }, "the old head's streak is gone");
+  assert.deepEqual(withoutAt((await prRecordOf(rt, repo, PR)).noCommit), { head: NEW_SHA, count: 1 }, "the old head's streak is gone");
+});
+
+/** Drive the PR into the no-commit stalemate on SHA (two no-commit rounds). */
+async function stall(repo, config) {
+  labelIssue(LABELS.pending);
+  await tryRevision(rt, repo, config, logger, 1, []);
+  labelIssue(LABELS.review);
+  await tryRevision(rt, repo, config, logger, 2, []);
+  labelIssue(LABELS.pending);
+  await tryRevision(rt, repo, config, logger, 3, []);
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit.count, 2, "stalled");
+  assert.equal(claudeRuns(), 2);
+}
+const ruling = (at) => ({ at, head: "**EM scope ruling** — commit the file." });
+
+test("an EM scope ruling posted after the stalemate releases it like a push: revise runs once more on the same head", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  await stall(repo, config);
+  assert.ok((await prRecordOf(rt, repo, PR)).noCommit.at, "a counted round is timestamped");
+
+  world({ comments: [ruling(new Date(Date.now() + 60_000).toISOString())] });
+  assert.ok(await tryRevision(rt, repo, config, logger, 4, []), "the ruling releases the stalemate and the revise goes back to review");
+  assert.equal(claudeRuns(), 3, "one more session");
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit.count, 1, "the streak restarted from the ruling");
+});
+
+test("a ruling older than the stalemate's last round does not release it (no loop)", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  world({ comments: [ruling("2020-01-01T00:00:00Z")] });
+  await stall(repo, config);
+  assert.equal(await tryRevision(rt, repo, config, logger, 4, []), null);
+  assert.equal(claudeRuns(), 2, "no session on a ruling the stalemate already answered");
+});
+
+test("a released stalemate that stalls again is not re-released by the same ruling", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  await stall(repo, config);
+  world({ comments: [ruling(new Date(Date.now() + 1_000).toISOString())] });
+  await new Promise((r) => setTimeout(r, 1_100));
+  assert.ok(await tryRevision(rt, repo, config, logger, 4, []));
+  assert.equal(claudeRuns(), 3);
+  labelIssue(LABELS.pending);
+  assert.equal(await tryRevision(rt, repo, config, logger, 5, []), null, "the second no-commit after the ruling stalls again");
+  assert.equal(claudeRuns(), 4);
+  assert.equal(await tryRevision(rt, repo, config, logger, 6, []), null);
+  assert.equal(claudeRuns(), 4, "the old ruling does not release the new stalemate");
+});
+
+test("a legacy streak with no timestamp is released by a ruling newer than the newest review", async () => {
+  const config = load();
+  const repo = config.repos[0];
+  world({ apiReviews: [{ id: 1, state: "CHANGES_REQUESTED", at: "2026-11-05T11:50:20Z", escalate: false }] });
+  await stall(repo, config);
+  await rt.records.updatePrRecord(repo, PR, (d) => { delete d.noCommit.at; });
+  assert.equal((await prRecordOf(rt, repo, PR)).noCommit.at, undefined);
+  world({ comments: [ruling("2026-11-05T12:15:47Z")] });
+  assert.ok(await tryRevision(rt, repo, config, logger, 4, []), "released");
+  assert.equal(claudeRuns(), 3);
 });
 
 test("a QA FAIL that stands on the same head is a review round: the third goes to needsRuling", () => {

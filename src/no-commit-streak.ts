@@ -73,7 +73,8 @@ export class NoCommitStreaks {
    */
   async admitRevision(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
     const count = noCommitCount(streak, head);
-    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true }; });
+    const at = count > 0 ? streak?.at : undefined;
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, inflight: true, ...(at ? { at } : {}) }; });
     if (ok) this.seenOf(repoConfig).add(pr);
     return ok;
   }
@@ -87,7 +88,8 @@ export class NoCommitStreaks {
    */
   async resolveUnconfirmed(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<boolean> {
     const count = noCommitCount(streak, head);
-    return this.records.updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count }; else delete d.noCommit; });
+    const at = streak?.at;
+    return this.records.updatePrRecord(repoConfig, pr, (d) => { if (count > 0) d.noCommit = { head, count, ...(at ? { at } : {}) }; else delete d.noCommit; });
   }
 
   /**
@@ -97,7 +99,7 @@ export class NoCommitStreaks {
    */
   async record(repoConfig: RepoConfig, pr: number, head: string, streak: NoCommitStreak | undefined): Promise<number | null> {
     const count = noCommitCount(streak, head) + 1;
-    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count }; });
+    const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { d.noCommit = { head, count, at: new Date().toISOString() }; });
     if (!ok) return null;
     this.seenOf(repoConfig).add(pr);
     return count;
@@ -114,4 +116,20 @@ export class NoCommitStreaks {
   prsWithStreak(repoConfig: RepoConfig): number[] {
     return [...this.seenOf(repoConfig)];
   }
+}
+
+/**
+ * Whether an EM scope ruling posted at `rulingAt` answers a stalemate whose last
+ * counted round was at `since`. Compared as instants, never strings: GitHub
+ * stamps whole seconds and rounds are stamped to the millisecond, so a ruling
+ * 600 ms older than the round must not sort after it. No `since` (a legacy
+ * streak on a PR with no review yet) means nothing has answered the stalemate,
+ * so any ruling does; the round that follows records a time, so it never loops.
+ */
+export function rulingAnswersStalemate(rulingAt: string | null | undefined, since: string | null | undefined): boolean {
+  const ruling = rulingAt ? Date.parse(rulingAt) : NaN;
+  if (!Number.isFinite(ruling)) return false;
+  const boundary = since ? Date.parse(since) : NaN;
+  if (!Number.isFinite(boundary)) return true;
+  return ruling > boundary;
 }

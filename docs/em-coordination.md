@@ -97,7 +97,7 @@ itself when its check turns true):
 | `verify-held` | dev verification failed, waiting out back-off | `specEdited` | none — wait |
 | `verify-exhausted` | dev verification spent its attempts | `specEdited`, `baseAdvanced`, `holdNoLongerCharged` | edit the spec or land the fix |
 | `revision-exhausted` | revise failed twice | `prHeadMoved` | rule on scope or file the fix |
-| `revision-stalemate` | revise made no commit twice on the same PR head (kept across restarts and idle passes; cleared by a push or the PR closing) | `prHeadMoved` | rule on scope |
+| `revision-stalemate` | revise made no commit twice on the same PR head (kept across restarts and idle passes; cleared by a push, the PR closing, or an `**EM scope ruling` PR comment newer than the last no-commit round, which buys one more revise) | `prHeadMoved`, `rulingPosted` | rule on scope |
 
 Release-stage stops (`DEPLOY_STOPS`, `src/phases/release.ts`): **`predeploy-stop`,
 `merge-refused-repeatedly`, `merge-blocked-check`** each label the release's issues
