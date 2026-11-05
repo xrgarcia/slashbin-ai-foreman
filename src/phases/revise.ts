@@ -8,7 +8,7 @@ import { revisePRFeedback } from "./revise-workflow.js";
 import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportClaudeResult } from "../upstream-backoff.js";
 import { type BlockKind } from "../unblock.js";
-import { MAX_CONSECUTIVE_NO_COMMIT, noCommitCount, isUnconfirmed, stalemateHead } from "../no-commit-streak.js";
+import { MAX_CONSECUTIVE_NO_COMMIT, noCommitCount, isUnconfirmed, stalemateHead, rulingAnswersStalemate } from "../no-commit-streak.js";
 import { CycleEvent, REVIEW_ROUNDS_ALERT, activeRuns, itemOf, pausedByBlockedLabel, prReport, releaseIfResolved, stoppedReason } from "./common.js";
 import { reportLaunchThrew } from "./implement.js";
 import { codeHost } from "../plugins/registry.js";
@@ -78,12 +78,13 @@ export async function tryRevision(
     const kind: BlockKind = failures >= maxFailures ? "revision-exhausted" : "revision-stalemate";
     // An EM scope ruling posted after the stalemate's last no-commit round answers it like a push does: the
     // reviser gets one more session against the ruling. A ruling older than that round was already answered,
-    // so it never releases again (no loop). Legacy streaks carry no time: the newest review stands in for it.
+    // so it never releases again (no loop). Legacy streaks carry no time: the newest review stands in for it,
+    // and with no review either, any ruling answers it.
     let rulingPosted: boolean | undefined;
     if (kind === "revision-stalemate" && streak) {
       const r = codeHost().readRulingState(repoConfig.githubRepo, prNumber, repoConfig.repoPath, revLogger);
       const since = streak.at ?? r.latestReviewAt;
-      rulingPosted = !!r.rulingAt && !!since && r.rulingAt > since;
+      rulingPosted = rulingAnswersStalemate(r.rulingAt, since);
     }
     if (await releaseIfResolved(rt, kind, { prHeadMoved: head ? head !== stoppedAt : undefined, rulingPosted }, pending.issueNumbers, repoConfig, revLogger)) {
       rt.memory.revisionStoppedHead.delete(repoName);

@@ -117,3 +117,19 @@ export class NoCommitStreaks {
     return [...this.seenOf(repoConfig)];
   }
 }
+
+/**
+ * Whether an EM scope ruling posted at `rulingAt` answers a stalemate whose last
+ * counted round was at `since`. Compared as instants, never strings: GitHub
+ * stamps whole seconds and rounds are stamped to the millisecond, so a ruling
+ * 600 ms older than the round must not sort after it. No `since` (a legacy
+ * streak on a PR with no review yet) means nothing has answered the stalemate,
+ * so any ruling does; the round that follows records a time, so it never loops.
+ */
+export function rulingAnswersStalemate(rulingAt: string | null | undefined, since: string | null | undefined): boolean {
+  const ruling = rulingAt ? Date.parse(rulingAt) : NaN;
+  if (!Number.isFinite(ruling)) return false;
+  const boundary = since ? Date.parse(since) : NaN;
+  if (!Number.isFinite(boundary)) return true;
+  return ruling > boundary;
+}
