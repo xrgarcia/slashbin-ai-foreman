@@ -274,3 +274,31 @@ test("followUpOrigin: reads the issue a title follows up", () => {
   assert.equal(followUpOrigin("Fix it — follow-up to #123"), 123);
   assert.equal(followUpOrigin("plain"), null);
 });
+
+test("readGrantState: the same child labels, the referenced EM epic no -> yes, changes the reason", async () => {
+  const { readGrantState } = await import("../dist/phases/unstick.js");
+  const cfg = { githubRepo: "o/child", repoPath: "/x", emRepo: "o/slashbin-engineering-manager", epicRefLabel: "engineering-manager" };
+  const world = (epicLabels) => ({
+    readIssueFacts: (repo, n) => {
+      if (repo === "o/child" && n === 7) return { title: "t", body: "## References\n- engineering-manager #900", state: "open", labels: ["pr approved"] };
+      if (repo === "o/slashbin-engineering-manager" && n === 900) return { title: "epic", body: "", state: "open", labels: epicLabels };
+      throw new Error("unexpected read");
+    },
+    readSubIssueParent: () => null,
+  });
+  const labels = ["pr approved"];
+  const before = readGrantState(cfg, 7, "t", labels, world(["epic"]));
+  const after = readGrantState(cfg, 7, "t", labels, world(["epic", "deliver-to-prod"]));
+  assert.equal(before["o/slashbin-engineering-manager#900"], false);
+  assert.equal(after["o/slashbin-engineering-manager#900"], true);
+  assert.notEqual(releaseGateReason(labels, before), releaseGateReason(labels, after));
+  const flaky = readGrantState(cfg, 7, "t", labels, { ...world([]), readIssueFacts: (r, n) => { if (n === 900) throw new Error("boom"); return world([]).readIssueFacts(r, n); } });
+  assert.equal(flaky["o/slashbin-engineering-manager#900"], null, "an unreadable epic is null, not a throw");
+});
+
+test("followUpTargets: every target in order; followUpsOf matches only the exact holder", async () => {
+  const { followUpTargets } = await import("../dist/unstick.js");
+  const { followUpsOf } = await import("../dist/phases/verify.js");
+  assert.deepEqual(followUpTargets("a — follow-up to #5, follow-up to #12"), [5, 12]);
+  assert.deepEqual(followUpsOf(12, [1, 2, 3], new Map([[1, "x follow-up to #12"], [2, "x follow-up to #123"], [3, "no"]])), [1]);
+});

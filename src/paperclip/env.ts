@@ -3,6 +3,7 @@
 // the one place a Paperclip call is made safely. The mirror builds it once; a
 // reloaded config is swapped in here, so every collaborator reads the new one.
 
+import { escapeRegex } from "../regex.js";
 import { redactAll } from "../redact.js";
 import type { Logger } from "../logger.js";
 import type { WorkItem } from "../adapters.js";
@@ -57,10 +58,9 @@ export class PaperclipEnv {
 
   /** `identityKeyFormat` as a pattern capturing `repo` and `N`. */
   keyPattern(): RegExp {
-    const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const src = this.cfg.identityKeyFormat
       .split(/(\{repo\}|\{N\})/)
-      .map((part) => (part === "{repo}" ? "(?<repo>[^\\s#]+/[^\\s#]+)" : part === "{N}" ? "(?<N>\\d+)" : esc(part)))
+      .map((part) => (part === "{repo}" ? "(?<repo>[^\\s#]+/[^\\s#]+)" : part === "{N}" ? "(?<N>\\d+)" : escapeRegex(part)))
       .join("");
     return new RegExp(`^${src}$`);
   }

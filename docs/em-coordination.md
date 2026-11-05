@@ -14,8 +14,10 @@ a PR comment opening `**EM scope ruling` · a PR comment opening `**EM QA re-run
 edit or a lifted `blocked` label · a new corrective issue. Everything else the Foreman, Tech Lead and SRE do by themselves. If the
 action you are about to take is not one of these seven, you are doing someone else's stage.
 
-`deliver-to-prod` on an epic is **not** a Foreman input: `src/` never reads it. It is the
-EM's own gate (the deliver-to-prod skill) for applying `ready for prod release`.
+`deliver-to-prod` on an epic is **not** an input the Foreman acts on: it never decides a release
+from it. The Foreman only reads it, at the `release-gate` (§3), to notice that a grant landed and
+call the EM again. The gate itself is the EM's (the deliver-to-prod skill) for applying
+`ready for prod release`.
 
 ## 1. Lifecycle stages (GitHub labels; the Paperclip card when that plugin is on)
 

@@ -20,6 +20,7 @@
 //    `unblocked` event, the issue closing, or a new reason replaces them.
 
 import { createHash } from "node:crypto";
+import { escapeRegex } from "./regex.js";
 import type { RepoConfig } from "./config.js";
 import type { IssueRecordStore, SkippedIssue, VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
@@ -137,19 +138,22 @@ export function referencedEmIssues(body: string, emRepo: string, label: string):
   const m = REFERENCES.exec(body ?? "");
   if (!m) return [];
   const [owner, name] = emRepo.split("/") as [string, string];
-  const esc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const prefix = name.endsWith(label) ? name.slice(0, name.length - label.length) : "";
-  const ref = new RegExp(`(?:([\\w.-]+)/)?(?:${esc(prefix)})?${esc(label)}\\s*#(\\d+)`, "gi");
+    const prefix = name.endsWith(label) ? name.slice(0, name.length - label.length) : "";
+  const ref = new RegExp(`(?:([\\w.-]+)/)?(?:${escapeRegex(prefix)})?${escapeRegex(label)}\\s*#(\\d+)`, "gi");
   const text = (m[1] ?? "").split("\n").filter((ln) => !RELATED_LINE.test(ln)).join("\n");
   const found = new Set<string>();
   for (const r of text.matchAll(ref)) found.add(`${r[1] || owner}/${name}#${Number(r[2])}`);
   return [...found].sort();
 }
 
-/** The issue a "— follow-up to #N" title points at, else null. */
+/** Every issue a title says it follows up ("— follow-up to #N"), in order. The one parser for that phrase. */
+export function followUpTargets(title: string): number[] {
+  return [...(title ?? "").matchAll(/follow-up to #(\d+)/gi)].map((m) => Number(m[1]));
+}
+
+/** The first issue a title follows up, else null. */
 export function followUpOrigin(title: string): number | null {
-  const m = /follow-up to #(\d+)/i.exec(title ?? "");
-  return m ? Number(m[1]) : null;
+  return followUpTargets(title)[0] ?? null;
 }
 
 /**
@@ -334,7 +338,6 @@ export interface FreshUnrelated {
 }
 
 /** `label` with every regex metacharacter escaped. */
-const escapeRegex = (label: string) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * The epics an issue body names as `<label> #N` (config `epicRefLabel`, the
