@@ -77,7 +77,10 @@ export class CardIndex {
   /** Task id → its title, description and holders, as the last scan or write left them (`ownsCards`). */
   readonly rowContent = new Map<string, RowContent>();
   /** Every second card the last scan found, for housekeeping to retire (`ownsCards`). */
-  duplicates: Duplicate[] = [];
+  private readonly dupsByRepo = new Map<string, Duplicate[]>();
+  get duplicates(): Duplicate[] { return [...this.dupsByRepo.values()].flat(); }
+  /** Card id → the identity lines (index and uuid-cache keys) that name it, so a card's removal touches only its own entries. */
+  private readonly cardLines = new Map<string, Set<string>>();
   /** The repos a snapshot has named: the ones the Foreman serves, so the only ones housekeeping may label. */
   readonly servedRepos = new Set<string>();
   /** Repos read on a fallback key (their registry lookup failed): their cards may sit under a spelling the registry would merge. */
@@ -280,6 +283,7 @@ export class CardIndex {
     const id = made.value.id;
     this.taskUuidCache.set(key, id);
     this.index.set(key, id);
+    this.cardLines.set(id, new Set([key]));
     const repoKey = this.keyNow(item.repo);
     this.repoCards.set(repoKey, (this.repoCards.get(repoKey) ?? new Set()).add(id));
     this.rowRepo.set(id, repoKey);
@@ -365,6 +369,7 @@ export class CardIndex {
     });
     if (!read.ok) {
       // safeCall has said why (once per outage); this says which repo waits, every time.
+      this.readAt.delete(this.keyNow(repo)); // the next snapshot reads again, not the old success inside its TTL
       this.env.log("info", `Paperclip mirror: ${repo} cards not read; nothing is placed for it this pass, the next snapshot retries`);
       return false;
     }
@@ -380,22 +385,24 @@ export class CardIndex {
       for (const m of [this.rowState, this.rowRepo, this.rowNumber, this.blockAction, this.rowContent] as Array<Map<string, unknown>>) m.delete(id);
       if (!now.has(id)) { this.closedCards.delete(id); this.openConfirmed.delete(id); }
     }
-    for (const [line, id] of [...this.index]) if (old.has(id)) this.index.delete(line);
-    this.duplicates = this.duplicates.filter((d) => d.repo !== r.repoKey);
-    for (const [line, id] of r.idx) this.index.set(line, id);
+    const oldLines = new Map<string, string>(); // line → old card, for the cache re-point below
+    for (const id of old) {
+      for (const line of this.cardLines.get(id) ?? []) { this.index.delete(line); oldLines.set(line, id); }
+      this.cardLines.delete(id);
+    }
+    this.dupsByRepo.set(r.repoKey, r.duplicates);
+    for (const [line, id] of r.idx) { this.index.set(line, id); this.cardLines.set(id, new Set([line])); }
     for (const [id, v] of r.state) { this.rowState.set(id, v); this.rowRepo.set(id, r.repoKey); }
     for (const [id, v] of r.numberOf) this.rowNumber.set(id, v);
     for (const [id, v] of r.actions) this.blockAction.set(id, v);
     for (const [id, v] of r.content) this.rowContent.set(id, v);
-    this.duplicates.push(...r.duplicates);
     this.repoCards.set(r.repoKey, now);
     this.readAt.set(r.repoKey, Date.now());
     // A key whose card the read settled on differently follows it; a card that left the read went
     // terminal (or was forgotten), so a later card for that issue is a new one.
-    for (const [key, id] of this.taskUuidCache) {
-      if (!old.has(id)) continue;
-      const next = this.index.get(key);
-      if (next) this.taskUuidCache.set(key, next); else this.taskUuidCache.delete(key);
+    for (const line of oldLines.keys()) {
+      const next = this.index.get(line);
+      if (next) this.taskUuidCache.set(line, next); else this.taskUuidCache.delete(line);
     }
     return true;
   }
@@ -405,13 +412,20 @@ export class CardIndex {
    * state, so it is never looked for again. A later card for the issue is a new one.
    */
   forget(id: string): void {
+    const repoKey = this.rowRepo.get(id);
     for (const m of [this.rowState, this.rowRepo, this.rowNumber, this.blockAction, this.rowContent] as Array<Map<string, unknown>>) m.delete(id);
     this.closedCards.delete(id);
     this.openConfirmed.delete(id);
-    for (const [line, v] of [...this.index]) if (v === id) this.index.delete(line);
-    for (const [key, v] of [...this.taskUuidCache]) if (v === id) this.taskUuidCache.delete(key);
-    for (const ids of this.repoCards.values()) ids.delete(id);
-    this.duplicates = this.duplicates.filter((d) => d.id !== id);
+    for (const line of this.cardLines.get(id) ?? []) {
+      if (this.index.get(line) === id) this.index.delete(line);
+      if (this.taskUuidCache.get(line) === id) this.taskUuidCache.delete(line);
+    }
+    this.cardLines.delete(id);
+    if (repoKey) {
+      this.repoCards.get(repoKey)?.delete(id);
+      const d = this.dupsByRepo.get(repoKey);
+      if (d?.some((x) => x.id === id)) this.dupsByRepo.set(repoKey, d.filter((x) => x.id !== id));
+    }
   }
 
   /** The statuses a card in play can show: everything but done and cancelled. */
@@ -452,7 +466,7 @@ export class CardIndex {
       }, this.env.ownComment()), d.id);
       if (r.ok) this.env.log("info", `Paperclip mirror: retired a second card for ${d.key}; ${d.winner} stays`);
     }
-    this.duplicates = [];
+    this.dupsByRepo.clear();
   }
 
   /**

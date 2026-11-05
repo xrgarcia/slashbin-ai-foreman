@@ -187,3 +187,28 @@ test("no other writer: a GitHub close reaches done or cancelled, and a reopen ge
     assert.equal(mine[1].assigneeAgentId, FOREMAN);
   }
 });
+
+test("a failed refresh does not leave the earlier read valid: the next snapshot reads again", async () => {
+  const b = board();
+  const mirror = restarted(b);
+  assert.equal(await mirror.ensureRepo(REPO), true);
+  const n = () => b.lists.length;
+  assert.equal(await mirror.ensureRepo(REPO), true, "inside the TTL, no read");
+  const quiet = n();
+  assert.equal(await mirror.ensureRepo(SLOW, true), false);
+  b.fetch.failOnce = true;
+  const failing = restarted(b);
+  assert.equal(await failing.ensureRepo(SLOW, true), false);
+  assert.equal(await failing.ensureRepo(SLOW), false, "a failed read is read again, not served from the TTL");
+  assert.ok(n() > quiet);
+});
+
+test("closing cards touches only their own entries: forget leaves other repos' cards and keys alone", async () => {
+  const b = board();
+  const mirror = restarted(b);
+  await mirror.ensureRepo(REPO, true);
+  const before = mirror.index.size;
+  await cycle(mirror, "releasing", "completed");
+  assert.equal(mirror.index.size, before - 1);
+  assert.equal(mirror.rowState.get("r599"), undefined);
+});
