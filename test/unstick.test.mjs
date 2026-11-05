@@ -8,11 +8,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, referencedEmIssues, followUpOrigin, grantFingerprint,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, releaseGateCandidateReason, followUpOrigin,
 } from "../dist/unstick.js";
 import { applyOutcome } from "../dist/phases/unstick.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
-import { unstickViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS, emUnstickMaxDurationMs } from "../dist/plugins/em.js";
+import { unstickViaEm, grantStateViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS, emUnstickMaxDurationMs } from "../dist/plugins/em.js";
 import { unstickStageReady } from "../dist/config.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 
@@ -232,68 +232,49 @@ test("releaseGateReason: a new label changes the reason, so an answered release 
   assert.equal(nextStep(answered, { issue: 5, kind: "release-gate", reason: after }, 1, H), "call");
 });
 
-test("releaseGateReason: a grant on the EPIC changes the reason though the child's labels do not (PR #222 S2)", () => {
+const H0 = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+test("releaseGateReason: the EM's grant-state answer changes the reason though the child's labels do not (PR #222 S2)", () => {
   const labels = ["pr approved", "approved"];
-  const no = releaseGateReason(labels, { "xrgarcia/jerky_ops#201": false, "xrgarcia/slashbin-engineering-manager#900": false });
-  const yes = releaseGateReason(labels, { "xrgarcia/slashbin-engineering-manager#900": true, "xrgarcia/jerky_ops#201": false });
+  const no = releaseGateCandidateReason(labels, '{"granted": false, "missing": ["o/em#900 lacks `deliver-to-prod`"]}');
+  const yes = releaseGateCandidateReason(labels, '{"granted": true, "missing": []}');
   assert.notEqual(no, yes);
-  assert.match(yes, /slashbin-engineering-manager#900=yes/);
-  const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+  assert.match(yes, /\[grant: \{"granted": true/);
   const answered = { issue: 201, kind: "release-gate", reason: no, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
-  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: yes }, 1, H), "call");
-  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: no }, 1, H) === "call", false);
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: yes }, 1, H0), "call");
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: no }, 1, H0) === "call", false);
 });
 
-test("grantFingerprint: sorted, deterministic, `?` for an unreadable place, empty for none", () => {
-  assert.equal(grantFingerprint({ "b/x#2": true, "a/x#1": false, "c/x#3": null }), " [grant: a/x#1=no, b/x#2=yes, c/x#3=?]");
-  assert.equal(grantFingerprint({}), "");
-  assert.equal(grantFingerprint(undefined), "");
+test("releaseGateCandidateReason: no grant answer keeps the prior reason; with no prior it drops the grant part", () => {
+  const labels = ["pr approved"];
+  const prior = releaseGateCandidateReason(labels, '{"granted": false, "missing": []}');
+  assert.equal(releaseGateCandidateReason(labels, null, prior), prior, "a flaky read is not a new question");
+  assert.equal(releaseGateCandidateReason(labels, null), releaseGateReason(labels));
+  assert.doesNotMatch(releaseGateCandidateReason(labels, null), /grant:/);
 });
 
-const EM = "xrgarcia/slashbin-engineering-manager";
-test("referencedEmIssues: only the References section, Related lines skipped, owner defaulted", () => {
-  const body = [
-    "Intro names engineering-manager #1 (ignored: not in References).",
-    "## References",
-    "- Epic: engineering-manager #900",
-    "- Part of other/slashbin-engineering-manager#901",
-    "- Related: engineering-manager #902",
-    "- **Related:** engineering-manager #903",
-    "## Notes",
-    "engineering-manager #904",
-  ].join("\n");
-  assert.deepEqual(referencedEmIssues(body, EM, "engineering-manager"), [
-    "other/slashbin-engineering-manager#901",
-    "xrgarcia/slashbin-engineering-manager#900",
-  ]);
-  assert.deepEqual(referencedEmIssues("no section", EM, "engineering-manager"), []);
-  assert.deepEqual(referencedEmIssues("## References\n- engineering-manager #7", EM, "engineering-manager"), ["xrgarcia/slashbin-engineering-manager#7"]);
+test("grantStateViaEm: exit 0 gives the trimmed stdout; non-zero, empty, tokenless or unconfigured is null", async () => {
+  process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
+  const log = join(mkTmp("em-gs-"), "argv.json");
+  const ok = fakeEm(`import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() })); console.log('  {"granted": true, "missing": []}  ');`);
+  assert.equal(await grantStateViaEm(repo, ok, 9, logger), '{"granted": true, "missing": []}');
+  const seen = JSON.parse(readFileSync(log, "utf8"));
+  assert.deepEqual(seen.argv, ["grant-state", "--repo", "o/r", "--issue", "9"]);
+  assert.equal(seen.cwd, ok.emRepoPath);
+  assert.equal(await grantStateViaEm(repo, fakeEm('console.log("{}"); process.exit(1)'), 9, logger), null, "non-zero");
+  assert.equal(await grantStateViaEm(repo, fakeEm("process.exit(0)"), 9, logger), null, "no output");
+  assert.equal(await grantStateViaEm(repo, {}, 9, logger), null, "no emRepoPath");
+  const saved = process.env.EM_GITHUB_TOKEN;
+  delete process.env.EM_GITHUB_TOKEN;
+  try {
+    assert.equal(await grantStateViaEm(repo, ok, 9, logger), null, "no token");
+  } finally {
+    if (saved !== undefined) process.env.EM_GITHUB_TOKEN = saved;
+  }
 });
 
 test("followUpOrigin: reads the issue a title follows up", () => {
   assert.equal(followUpOrigin("Fix it — follow-up to #123"), 123);
   assert.equal(followUpOrigin("plain"), null);
-});
-
-test("readGrantState: the same child labels, the referenced EM epic no -> yes, changes the reason", async () => {
-  const { readGrantState } = await import("../dist/phases/unstick.js");
-  const cfg = { githubRepo: "o/child", repoPath: "/x", emRepo: "o/slashbin-engineering-manager", epicRefLabel: "engineering-manager" };
-  const world = (epicLabels) => ({
-    readIssueFacts: (repo, n) => {
-      if (repo === "o/child" && n === 7) return { title: "t", body: "## References\n- engineering-manager #900", state: "open", labels: ["pr approved"] };
-      if (repo === "o/slashbin-engineering-manager" && n === 900) return { title: "epic", body: "", state: "open", labels: epicLabels };
-      throw new Error("unexpected read");
-    },
-    readSubIssueParent: () => null,
-  });
-  const labels = ["pr approved"];
-  const before = readGrantState(cfg, 7, "t", labels, world(["epic"]));
-  const after = readGrantState(cfg, 7, "t", labels, world(["epic", "deliver-to-prod"]));
-  assert.equal(before["o/slashbin-engineering-manager#900"], false);
-  assert.equal(after["o/slashbin-engineering-manager#900"], true);
-  assert.notEqual(releaseGateReason(labels, before), releaseGateReason(labels, after));
-  const flaky = readGrantState(cfg, 7, "t", labels, { ...world([]), readIssueFacts: (r, n) => { if (n === 900) throw new Error("boom"); return world([]).readIssueFacts(r, n); } });
-  assert.equal(flaky["o/slashbin-engineering-manager#900"], null, "an unreadable epic is null, not a throw");
 });
 
 test("followUpTargets: every target in order; followUpsOf matches only the exact holder", async () => {
