@@ -203,3 +203,19 @@ test("a recall the EM declines as already answered keeps the handoff watched", (
   assert.equal(e.recalls, 1, "it counts as a recall");
   assert.equal(e.attempts, 2);
 });
+
+test("an invoked entry recorded before recalls existed is a standing handoff: a duplicate decline or a refusal keeps it watched", () => {
+  const t0 = Date.parse("2026-11-05T12:00:00Z");
+  const up = DEFAULT_BACKOFF.upstream;
+  const legacy = { issue: 7, kind: "release-gate", reason: "r", status: "invoked", attempts: 1, since: "t", lastCallAt: "2026-11-05T10:00:00Z" };
+  let e = applyOutcome(legacy, { kind: "declined", detail: "already answered this reason; nothing written" }, t0, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1);
+  e = applyOutcome(legacy, { kind: "refused", detail: "You've hit your limit" }, t0, up);
+  assert.equal(e.recalls, 0, "the refusal keeps the handoff marked");
+  e = applyOutcome(e, { kind: "declined", detail: "already answered" }, t0 + 1, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1);
+  e = applyOutcome(legacy, { kind: "invoked", detail: "again" }, t0, up);
+  assert.equal(e.recalls, 1, "a second handoff on a legacy entry is its first recall");
+});
