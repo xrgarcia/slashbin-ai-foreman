@@ -161,6 +161,11 @@ export interface Unsticker {
     repo: RepoConfig, config: AgentConfig, issue: number, kind: string, reason: string, logger: Logger,
     abortSignal?: AbortSignal, transcriptPath?: string,
   ): Promise<UnstickOutcome>;
+  /**
+   * The EM's own answer to "is the production grant in place for this issue?", as an opaque string the caller only
+   * compares (it is part of the release-gate reason). Null when it could not be read; never throws.
+   */
+  grantState?(repo: RepoConfig, config: AgentConfig, issue: number, logger: Logger): Promise<string | null>;
 }
 
 /** The agent roles, each named as its field on ForemanPlugin. */
