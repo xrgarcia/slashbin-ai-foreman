@@ -433,6 +433,14 @@ export class SkillSync {
     const cwd = repo.repoPath;
     const fb = repo.baseBranch;
     const target = cfg.targetDir.replace(/\/+$/, "");
+    // Every path the sync is about to change, with its bytes before (null: it did not exist),
+    // so a failure puts the working tree back exactly as found.
+    const original = new Map<string, Buffer | null>();
+    const remember = (rel: string): void => {
+      if (original.has(rel)) return;
+      const abs = join(cwd, rel);
+      original.set(rel, existsSync(abs) ? readFileSync(abs) : null);
+    };
     try {
       // A tracked change in the clone belongs to someone; checking out over it
       // or committing beside it would take it along. Untracked files stay out of
@@ -468,8 +476,10 @@ export class SkillSync {
         const base = `${target}/${skill}`;
         // A file the golden does not have is removed: the copy is the golden, byte for byte.
         const extra = [...(have.get(skill)?.keys() ?? [])].filter((p) => !want.has(p)).map((p) => `${base}/${p}`);
+        extra.forEach(remember);
         if (extra.length > 0) git(["rm", "--quiet", "--", ...extra], cwd);
         for (const [p, bytes] of want) {
+          remember(`${base}/${p}`);
           const dest = join(cwd, base, p);
           mkdirSync(dirname(dest), { recursive: true });
           writeFileSync(dest, bytes);
@@ -504,6 +514,16 @@ export class SkillSync {
       logger.warn(`Skill sync failed — implementing on the existing skill: ${error}`);
       // Leave the index as it was found, so the session does not inherit a half-staged sync.
       try { git(["reset", "--quiet"], cwd); } catch { /* the session's Phase 0 reports a broken checkout */ }
+      // And the working tree: un-staging alone left the written copies as uncommitted changes,
+      // so every later sync skipped on "the checkout has uncommitted changes" (jerky_labor_forecaster,
+      // 2026-11-04 → 11-05: the ship skill never arrived).
+      for (const [rel, bytes] of original) {
+        try {
+          const abs = join(cwd, rel);
+          if (bytes) { mkdirSync(dirname(abs), { recursive: true }); writeFileSync(abs, bytes); }
+          else rmSync(abs, { force: true });
+        } catch (e) { logger.warn(`Skill sync could not restore ${rel}: ${firstLine(e)}`); }
+      }
       return { status: "failed", error };
     }
   }
