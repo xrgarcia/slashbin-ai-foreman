@@ -468,6 +468,9 @@ export async function tryBatchImplementation(
     // from an exact ref (below), never from wherever local <base> points.
     alignLocalBase(repoConfig, repoLogger);
     if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
+    // A skip is as fail-open as a failure and was silent: the forecaster's ship skill went
+    // undelivered for a day on an unlogged "uncommitted changes" skip (EM, 2026-11-05).
+    if (skillSync?.status === "skipped") repoLogger.warn(`Skill sync skipped — implementing on the existing skill: ${skillSync.reason}`);
 
     const priorFailure = rt.memory.lastFailureReason.get(repoName) || null;
     // One branch per issue, named from the issue's title; the session cuts the one for the issue it picks.

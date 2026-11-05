@@ -250,6 +250,22 @@ test("a git failure mid-sync is a failed outcome, not a thrown one, and the inde
   assert.equal(git(repo, "diff", "--cached", "--name-only"), "");
 });
 
+test("a sync that fails after writing its copies leaves the working tree as found, so the next sync is not skipped", () => {
+  const cfg = cfgFor(makeGolden(tmp));
+  const repo = makeRepo(tmp, {
+    ".gitignore": "untracked-here/\n",
+    ".claude/skills/implement-approved-issues/SKILL.md": "implement v1\n",
+    ".claude/skills/implement-approved-issues/old-notes.md": "tracked extra\n",
+  });
+  writeFileSync(join(repo, ".git", "index.lock"), ""); // the index is locked: `git rm` / `git add` fail after the copies are written
+  const out = skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, baseBranch: "develop" }, [56], logger());
+  assert.equal(out.status, "failed");
+  rmSync(join(repo, ".git", "index.lock"));
+  assert.equal(git(repo, "status", "--porcelain", "--untracked-files=all"), "", "no modified, deleted or stray file is left behind");
+  assert.equal(readFileSync(join(repo, ".claude/skills/implement-approved-issues/SKILL.md"), "utf8"), "implement v1\n");
+  assert.equal(skillSync.syncSkillsForIssue(cfg, { name: "svc", repoPath: repo, baseBranch: "develop" }, [56], logger()).status, "synced");
+});
+
 // --- After the session ---
 
 test("a sync the session did not push is taken back off the local branch", () => {
@@ -306,6 +322,7 @@ test("the implement phase calls the sync only when enabled, before the session, 
   const settle = src.indexOf("if (skillSync) settleSkillSync(");
   assert.ok(sync > 0 && sync < session, "the copy must be fresh before the session reads it");
   assert.ok(settle > session, "settled once the session ends");
+  assert.match(src, /skillSync\?\.status === "skipped"\) repoLogger\.warn\(`Skill sync skipped/, "a skip is logged, never silent");
   const revise = readFileSync(join(root, "src/phases/revise.ts"), "utf8");
   assert.doesNotMatch(revise, /skill-sync|syncSkills/, "no sync in revise: a revision answers review on the skill it was built with");
 });
