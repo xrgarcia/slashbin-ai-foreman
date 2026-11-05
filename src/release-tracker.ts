@@ -47,10 +47,15 @@ export interface ReleaseTrackDeps {
   owned?: boolean;
 }
 
-/** Issue numbers a release PR body lists as `#N`, in order, once each. */
+/**
+ * Issue numbers a release PR body carries, in order, once each. Promote writes one
+ * `- #N: <title>` line per issue, so only a line that opens `- #N` counts: a `#N` inside a
+ * title (`follow-up to #11`, `EM#1284`, `owner/repo#12`) is a mention, not a carried
+ * issue (foreman#86).
+ */
 export function releaseIssues(body: string): number[] {
   const seen = new Set<number>();
-  for (const m of body.matchAll(/#(\d+)/g)) seen.add(Number(m[1]));
+  for (const m of body.matchAll(/^- #(\d+)\b/gm)) seen.add(Number(m[1]));
   return [...seen];
 }
 
