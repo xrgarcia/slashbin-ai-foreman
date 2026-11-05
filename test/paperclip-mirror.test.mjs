@@ -31,6 +31,8 @@ const repoConfig = { name: "r", githubRepo: "example/r" };
 
 function fakePaperclip(rows = [], projects = [], labels = []) {
   const calls = [];
+  // Every issue-list request's status filter and `q`: the plugin never lists without a status filter or reads a terminal status.
+  const lists = [];
   const comments = {};
   const agent = { id: AGENT, metadata: {} };
   // The board's agents, as `GET /companies/:id/agents` lists them; each may carry metadata.githubLogin.
@@ -47,7 +49,13 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
-      return ok(rows.slice(off, off + Number(u.searchParams.get("limit"))));
+      // The server's status filter: a terminal card is never returned to a caller that does not ask for it.
+      const want = u.searchParams.get("status")?.split(",");
+      const q = u.searchParams.get("q")?.toLowerCase();
+      lists.push({ status: want, q });
+      let hit = want ? rows.filter((r) => want.includes(r.status)) : rows;
+      if (q) hit = hit.filter((r) => `${r.title ?? ""}\n${r.description ?? ""}\n${r.identifier ?? ""}`.toLowerCase().includes(q));
+      return ok(hit.slice(off, off + Number(u.searchParams.get("limit"))));
     }
     if (method === "GET" && u.pathname === `/api/companies/${CID}/projects`) return ok(projects);
     if (method === "POST" && u.pathname === `/api/companies/${CID}/projects`) {
@@ -105,7 +113,7 @@ function fakePaperclip(rows = [], projects = [], labels = []) {
     }
     return ok({}, 404);
   };
-  return { rows, projects, labels, agent, boardAgents, credits, calls, comments, fetch };
+  return { rows, projects, labels, agent, boardAgents, credits, calls, lists, comments, fetch };
 }
 
 function logger() {
@@ -301,7 +309,7 @@ test("a skip in its back-off stays with the blocked owner, not the Foreman (EM #
   assert.equal(r.status, "blocked", "the back-off ending does not resume a card a person must clear");
 });
 
-test("a note never moves the row: blocked stays blocked, done stays done", async () => {
+test("a note never moves the row: blocked stays blocked; a done row is never read, so nothing reaches it", async () => {
   const fake = fakePaperclip([row("r7", 7), row("r8", 8, { status: "done" })]);
   const { mirror } = mirrorOn(fake, { agentStatus: false });
   await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #4" }], logger());
@@ -309,7 +317,7 @@ test("a note never moves the row: blocked stays blocked, done stays done", async
   assert.deepEqual(fake.comments.r7, ["waiting: occupied by PR #4"]);
   await mirror.onMerged({ issueNumber: 8, repo: "example/r" }, repoConfig, logger());
   assert.equal(fake.rows[1].status, "done", "the merged note reopened a done row");
-  assert.deepEqual(fake.comments.r8, ["merged"]);
+  assert.equal(fake.comments.r8, undefined, "a done card is not found, so it gets no note");
 });
 
 test("resume touches only rows this agent blocked in this repo", async () => {
@@ -403,14 +411,12 @@ test("no Unplaced project, or two: no task is created, one warn per count, and a
   assert.ok(!fake.calls.some((c) => c.method === "POST" && c.path.endsWith("/projects")));
 });
 
-test("housekeep and status moves never write projectId; housekeep cancels the old live task once", async () => {
-  const live = { id: "live", status: "in_progress", assigneeAgentId: AGENT, description: `foreman-live: ${AGENT}\n\nbody` };
-  const fake = fakePaperclip([row("r7", 7, { projectId: "p-7" }), row("q1", 1, { description: "source: example/q#1" }), live],
+test("housekeep and status moves never write projectId", async () => {
+  const fake = fakePaperclip([row("r7", 7, { projectId: "p-7" }), row("q1", 1, { description: "source: example/q#1" })],
     [{ id: "p-7", name: "seven", description: "roadmap-position: 7" }, { id: "p-q", name: "q" }, UNPLACED]);
   const { mirror } = mirrorOn(fake, { projects: true });
   await mirror.housekeep();
   await mirror.onClaim(item, repoConfig, logger());
-  assert.equal(live.status, "cancelled");
   assert.equal(fake.rows[0].projectId, "p-7", "a placed row stays where the sync put it");
   assert.ok(!fake.calls.some((c) => c.method === "PATCH" && c.body && "projectId" in c.body), "no PATCH carries projectId");
   const before = fake.calls.filter((c) => c.method !== "GET").length;
@@ -804,11 +810,10 @@ test("snapshot: a block made this run stands until the issue moves on, then is r
   assert.equal(fake.rows[0].status, "in_review");
 });
 
-test("snapshot: leaves a session-held card, a waiting hold, a cancelled card and an unlabeled issue alone", async () => {
+test("snapshot: leaves a session-held card, a waiting hold and an unlabeled issue alone", async () => {
   const fake = fakePaperclip([
     row7("todo"),
     { id: "r8", title: "t", status: "blocked", assigneeAgentId: AGENT, description: "source: example/r#8", unblockDescriptor: { action: "occupied by PR #4" } },
-    { id: "r9", title: "t", status: "cancelled", assigneeAgentId: AGENT, description: "source: example/r#9" },
     { id: "r10", title: "t", status: "todo", assigneeAgentId: AGENT, description: "source: example/r#10" },
   ]);
   const { mirror } = mirrorOn(fake);
@@ -817,7 +822,6 @@ test("snapshot: leaves a session-held card, a waiting hold, a cancelled card and
   await onSnap(mirror, "example/r", snap([
     { number: 7, labels: ["pr under review"] },
     { number: 8, labels: ["pr under review"] },
-    { number: 9, labels: ["approved", "pr under review"] },
     { number: 10, labels: ["bug"] },
   ]), logger());
   assert.equal(statusPatches(fake).length, before);
@@ -955,7 +959,7 @@ test("escalated: the EM's wake checking the card out does not release the hold",
   await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
   const r = fake.rows[0];
   r.status = "in_progress";
-  await mirror.ensureIndex(true);
+  await mirror.ensureRepo("example/r", true);
   await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
   assert.equal(r.status, "in_progress", "the snapshot moved a card the EM is working");
   assert.equal(r.assigneeAgentId, "em-agent", "the snapshot took the card off the EM");
@@ -1111,10 +1115,10 @@ test("ownsCards: an approved issue's new card is placed by the lifecycle pass in
 test("ownsCards: the issue label backfills onto cards whose content and stage did not change, once, keeping other labels", async () => {
   const fake = fakePaperclip([
     ownedRow("backlog", { labelIds: ["keep-me"] }),
-    { id: "r8", title: "r#8 issue 8", status: "done", assigneeAgentId: AGENT, description: "source: example/r#8\nGitHub: closed completed\n\nhttps://github.com/example/r/issues/8" },
+    { id: "r8", title: "r#8 issue 8", status: "todo", assigneeAgentId: AGENT, description: "source: example/r#8\nGitHub: open · stage approved\n\nhttps://github.com/example/r/issues/8" },
   ], [], [{ id: "keep-me", name: "bug" }]);
   const { mirror } = mirrorOn(fake, OWNED);
-  const cards = [card(7), card(8, { state: "completed" })];
+  const cards = [card(7), card(8, { stage: "approved" })];
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
   assert.deepEqual(fake.rows.map((r) => labelName(fake, r)), [["bug"], []]);
   assert.deepEqual(fake.rows.map((r) => hasIssue(fake, r)), [true, true]);
@@ -1126,16 +1130,16 @@ test("ownsCards: the issue label backfills onto cards whose content and stage di
 });
 
 test("ownsCards: housekeeping labels cards the snapshot no longer carries (old closed) and those past its write cap; unserved repos' cards untouched", async () => {
-  const old = { id: "old", title: "r#99 old", status: "done", assigneeAgentId: AGENT, description: "source: example/r#99\nGitHub: closed completed\n\nhttps://github.com/example/r/issues/99" };
+  const old = { id: "old", title: "r#99 old", status: "in_review", assigneeAgentId: AGENT, description: "source: example/r#99\nGitHub: open · stage inReview\n\nhttps://github.com/example/r/issues/99" };
   const other = { id: "other", title: "x#1", status: "todo", description: "source: example/other#1\n\nhttps://github.com/example/other/issues/1" };
   const fake = fakePaperclip([ownedRow("backlog"), old, other]);
   const { mirror } = mirrorOn(fake, OWNED);
   // example/r is served (a snapshot named it); example/other never is.
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [] }, logger());
   await mirror.housekeep();
-  assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "old")), true, "older closed card labelled by housekeeping");
+  assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "old")), true, "an older card the snapshot does not carry is labelled by housekeeping");
   assert.equal(hasIssue(fake, fake.rows.find((r) => r.id === "other")), false, "an unserved repo's card is not ours");
-  assert.equal(fake.rows.find((r) => r.id === "old").status, "done", "status kept");
+  assert.equal(fake.rows.find((r) => r.id === "old").status, "in_review", "status kept");
   const writes = fake.calls.filter((c) => c.method !== "GET").length;
   await mirror.housekeep();
   assert.equal(fake.calls.filter((c) => c.method !== "GET").length, writes, "once");
@@ -1173,12 +1177,13 @@ test("ownsCards: a closed issue's card is done, or cancelled when not planned, a
   assert.equal(fake.rows[1].status, "cancelled");
 });
 
-test("ownsCards: a closed issue with no card gets none; a cancelled card of an open issue is left alone", async () => {
+test("ownsCards: a closed issue with no card gets none; a cancelled card is never read, so its open issue gets a fresh one", async () => {
   const fake = fakePaperclip([{ id: "r8", title: "t", status: "cancelled", description: "source: example/r#8" }]);
   const { mirror } = mirrorOn(fake, OWNED);
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8)] }, logger());
-  assert.equal(fake.rows.length, 1);
-  assert.equal(fake.rows[0].status, "cancelled");
+  assert.equal(fake.rows.length, 2, "one fresh card, for #8; none for the closed #7");
+  assert.equal(fake.rows[0].status, "cancelled", "the cancelled card is untouched");
+  assert.match(fake.rows[1].description, /^source: example\/r#8/);
 });
 
 const HOLD = {
@@ -1234,7 +1239,7 @@ test("ownsCards: the holder's comment is credited to the agent whose githubLogin
 });
 
 test("the Foreman's own notes are credited to its agent", async () => {
-  const fake = fakePaperclip([row("r7", 7), row("r8", 8, { status: "done" })]);
+  const fake = fakePaperclip([row("r7", 7), row("r8", 8)]);
   const { mirror } = mirrorOn(fake, { agentStatus: false });
   await mirror.onWaiting("example/r", [{ item, reason: "occupied by PR #4" }], logger());
   await mirror.onMerged({ issueNumber: 8, repo: "example/r" }, repoConfig, logger());
@@ -1271,7 +1276,7 @@ test("ownsCards: housekeeping retires a second card for an issue; nothing adopts
     ownedRow("todo", { identifier: "SLA-1", createdAt: "2026-10-15T10:00:00Z" }),
     { id: "r7b", identifier: "SLA-2", title: "example/r#7", status: "in_progress", assigneeAgentId: AGENT, description: "source: example/r#7\n\nx", createdAt: "2026-10-15T10:00:03Z" },
   ]);
-  const { mirror } = mirrorOn(fake, OWNED);
+  const { mirror } = mirrorOn(fake, { ...OWNED, repos: ["example/r"] });
   await mirror.housekeep();
   const b = fake.rows[1];
   assert.equal(b.status, "cancelled");
@@ -1286,7 +1291,7 @@ test("ownsCards: housekeeping retires a second card for an issue; nothing adopts
 
 test("ownsCards off: housekeeping leaves a second card alone", async () => {
   const fake = fakePaperclip([ownedRow("todo"), { id: "r7b", title: "t", status: "in_progress", description: "source: example/r#7" }]);
-  const { mirror } = mirrorOn(fake);
+  const { mirror } = mirrorOn(fake, { repos: ["example/r"] });
   await mirror.housekeep();
   assert.equal(fake.rows[1].status, "in_progress");
 });
@@ -1471,7 +1476,9 @@ test("a closed issue's card is not put back in Blocked by the Foreman's lagging 
   // Reopened: the snapshot reads it open, and the Foreman's holds apply again.
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { stage: "approved" })] }, logger());
   await mirror.onBlocked(item, "review failed 4×", repoConfig, logger());
-  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].status, "done", "the closed card is never looked for again");
+  assert.equal(fake.rows.length, 2, "the reopened issue got a fresh card");
+  assert.equal(fake.rows[1].status, "blocked");
 });
 
 test("a Blocked card that predates this process is released once the Foreman's state holds nothing; held, it stands", async () => {
@@ -1595,8 +1602,8 @@ test("identity: two cards for one issue under different owners are one winner an
     oldCard({ identifier: "SLA-1", createdAt: "2026-10-15T10:00:00Z" }),
     { id: "r7b", identifier: "SLA-2", title: "t", status: "in_progress", assigneeAgentId: AGENT, description: "source: slashbin-io/slashbin-console#7\n\nx", createdAt: "2026-10-15T10:00:03Z" },
   ]);
-  const { mirror } = mirrorOn(fake, { ownsCards: true }, fakeIdentity());
-  await mirror.ensureIndex(true);
+  const { mirror } = mirrorOn(fake, { ownsCards: true, repos: ["xrgarcia/slashbin-console"] }, fakeIdentity());
+  await mirror.ensureRepo("xrgarcia/slashbin-console", true);
   assert.equal(mirror.index.get("source: slashbin-console#7"), "r7", "the older card wins");
   assert.deepEqual(mirror.duplicates.map((d) => [d.id, d.winner, d.repo]), [["r7b", "SLA-1", "slashbin-console"]]);
   await mirror.housekeep();
@@ -1612,7 +1619,7 @@ test("identity: jerky_*, cmneb_* and slashbin-io/jerky_rank merge with no other 
     { id: "d", title: "t", status: "todo", description: "source: JerkyDoug/cmneb_data#7\n\nx" },
   ]);
   const { mirror } = mirrorOn(fake, { ownsCards: true }, fakeIdentity());
-  await mirror.ensureIndex(true);
+  for (const r of ["xrgarcia/jerky_rank", "slashbin-io/jerky_rank", "xrgarcia/cmneb_data", "JerkyDoug/cmneb_data"]) await mirror.ensureRepo(r, true);
   assert.deepEqual([...mirror.index.values()].sort(), ["a", "b", "c", "d"]);
   assert.deepEqual(mirror.duplicates, []);
   await mirror.onClaim({ issueNumber: 7, repo: "slashbin-io/jerky_rank" }, repoConfig, logger());
@@ -1625,12 +1632,13 @@ test("identity: with the registry down the scan completes, a resolvable repo get
   const fake = fakePaperclip([oldCard()]);
   const id = fakeIdentity();
   const { mirror, log } = mirrorOn(fake, { repos: ["xrgarcia/slashbin-console", "example/r"] }, id);
-  assert.equal(await mirror.ensureIndex(true), true);
+  assert.equal(await mirror.ensureRepo("xrgarcia/slashbin-console", true), true);
   id.downRepos.add("slashbin-io/slashbin-console");
   id.downRepos.add("example/down");
   fake.rows.push({ id: "r9", title: "t", status: "todo", description: "source: example/r#9\n\nx" });
   fake.rows.push({ id: "r10", title: "t", status: "todo", description: "source: example/down#10\n\nx" });
-  assert.equal(await mirror.ensureIndex(true), true);
+  assert.equal(await mirror.ensureRepo("example/r", true), true);
+  assert.equal(await mirror.ensureRepo("example/down", true), true);
   assert.equal(mirror.index.get("source: slashbin-console#7"), "r7", "the earlier key still serves");
   assert.equal(mirror.index.get("source: example/r#9"), "r9", "a resolvable repo is indexed in the same pass");
   assert.equal(mirror.index.get("source: example/down#10"), "r10", "an unresolved repo compares as written");
@@ -1647,7 +1655,7 @@ test("identity: a mixed-owner repo whose lookup failed creates no second card, a
   const id = fakeIdentity();
   id.downRepos.add("xrgarcia/slashbin-console");
   const { mirror, log } = mirrorOn(fake, { repos: ["slashbin-io/slashbin-console", "xrgarcia/slashbin-console"] }, id);
-  await mirror.ensureIndex(true);
+  await mirror.ensureRepo("xrgarcia/slashbin-console", true);
   // R1: the existing card is indexed on its raw spelling; claiming under the other owner must not create a second card.
   await mirror.onClaim(MOVED, repoConfig, logger());
   assert.equal(fake.rows.length, 1, "no second card while the old spelling is unresolved");
@@ -1666,10 +1674,10 @@ test("identity: a failed repo costs one lookup per scan, however many rows and i
   const id = fakeIdentity();
   id.downRepos.add("example/down");
   const { mirror, log } = mirrorOn(fake, { repos: ["example/down", "example/r"] }, id);
-  await mirror.ensureIndex(true);
+  await mirror.ensureRepo("example/down", true);
   assert.equal(id.calls.filter((c) => c === "example/down").length, 1);
   assert.equal(log.lines.filter(([, m]) => m.includes("example/down") && m.includes("unavailable")).length, 1);
-  await mirror.ensureIndex(true);
+  await mirror.ensureRepo("example/down", true);
   assert.equal(id.calls.filter((c) => c === "example/down").length, 1, "a new scan asks once more (the fake forgets calls at beginScan)");
 });
 
@@ -1684,60 +1692,40 @@ test("identity: resolveAll runs at most 4 lookups at once, logs each failure by 
   assert.deepEqual(log.lines.filter(([lvl]) => lvl === "warn").map(([, m]) => /for (\S+) unavailable/.exec(m)[1]), ["example/r3"]);
 });
 
-test("scan: every scan after the first reads only the rows changed since, and says how many GETs and rows it read", async () => {
+test("scan: a repo read asks only for in-play statuses, never reads the closed cards, and says how many GETs and rows it read", async () => {
   // 3,000 closed cards and 3 open ones, as the board holds today (two thirds done or cancelled).
   const rows = Array.from({ length: 3003 }, (_, i) => ({
     id: `r${i}`, title: "t", status: i < 3000 ? (i % 2 ? "done" : "cancelled") : "todo",
-    description: `source: example/r#${i + 1}\n\nx`, updatedAt: "2026-10-01T00:00:00.000Z",
+    description: `source: example/r#${i + 1}\n\nx`,
   }));
   const fake = fakePaperclip(rows);
-  const plain = fake.fetch;
-  const asked = [];
-  // The server's updatedSince filter, as the live API honours it.
-  fake.fetch = async (url, init) => {
-    const u = new URL(url);
-    if (u.pathname.endsWith("/issues") && (init?.method ?? "GET") === "GET") {
-      asked.push(u.searchParams.get("updatedSince"));
-      const since = u.searchParams.get("updatedSince");
-      const off = Number(u.searchParams.get("offset")), lim = Number(u.searchParams.get("limit"));
-      const hit = rows.filter((r) => !since || r.updatedAt >= since);
-      return new Response(JSON.stringify(hit.slice(off, off + lim)), { status: 200 });
-    }
-    return plain(url, init);
-  };
   const { mirror, log } = mirrorOn(fake);
-  await mirror.ensureIndex(true);
-  const scanLine = () => log.lines.filter(([, m]) => m.includes("Paperclip mirror: scan")).map(([, m]) => m).at(-1);
-  assert.match(scanLine(), /scan of every row: 4 Paperclip GETs, 3003 rows read \(3003 held\)/);
-  assert.equal(asked.at(-1), null);
-
-  rows[3000].status = "in_review";
-  rows[3000].updatedAt = new Date().toISOString();
-  await mirror.ensureIndex(true);
-  assert.match(scanLine(), /scan since last read: 1 Paperclip GETs, 1 rows read \(3003 held\)/);
-  assert.ok(asked.at(-1), "the second scan sent updatedSince");
-  assert.equal(mirror.rowState.get("r3000"), "status:in_review", "the changed row is read afresh");
-  assert.equal(mirror.rowState.get("r1"), "status:done", "a closed card stays indexed");
-  assert.equal(mirror.index.size, 3003);
-  // A row another writer adds between scans arrives with the delta.
-  rows.push({ id: "new", title: "t", status: "todo", description: "source: example/r#9999\n\nx", updatedAt: new Date().toISOString() });
-  await mirror.ensureIndex(true);
-  assert.equal(mirror.index.get("source: example/r#9999"), "new");
-  // The previous change is still inside the clock-skew overlap, so it is read again with the new row.
-  assert.match(scanLine(), /1 Paperclip GETs, 2 rows read \(3004 held\)/);
+  await mirror.ensureRepo("example/r", true);
+  const line = log.lines.filter(([, m]) => m.includes("read of example/r's cards in play")).map(([, m]) => m).at(-1);
+  assert.match(line, /3 rows read/);
+  assert.match(line, /1 Paperclip GETs/);
+  assert.ok(fake.lists.length > 0);
+  for (const l of fake.lists) {
+    assert.ok(l.status, "every list request carries a status filter");
+    assert.ok(!/done|cancelled/.test(l.status), `a terminal status was requested: ${l.status}`);
+    assert.equal(l.q, "r", "and the repo name");
+  }
+  assert.equal(mirror.index.size, 3);
 });
 
-test("scan: a scan that fails part way keeps the rows and index it had", async () => {
+test("scan: a repo read that fails returns false, keeps nothing half-read, and the next read retries", async () => {
   const fake = fakePaperclip([oldCard()]);
   const plain = fake.fetch;
   let down = false;
   fake.fetch = async (url, init) => (down && new URL(url).pathname.endsWith("/issues") ? new Response("no", { status: 400 }) : plain(url, init));
   const { mirror } = mirrorOn(fake);
-  await mirror.ensureIndex(true);
+  assert.equal(await mirror.ensureRepo("example/r", true), true);
   const before = new Map(mirror.index);
   down = true;
-  assert.equal(await mirror.ensureIndex(true), true, "the previous index still serves");
-  assert.deepEqual(mirror.index, before);
+  assert.equal(await mirror.ensureRepo("example/r", true), false, "a failed read places nothing");
+  assert.deepEqual(mirror.index, before, "the rows it had stay");
+  down = false;
+  assert.equal(await mirror.ensureRepo("example/r", true), true, "the next read retries");
 });
 
 test("identity: the registry client asks once per repo per TTL window, sends the bearer, retries a transient failure and throws on an outage", async () => {
@@ -1796,11 +1784,11 @@ test("timeout scenario: a hung registry on one repo no longer costs the scan; th
   let hungRegistry = true;
   const ri = createRepoIdentity({ url: "http://registry.test/mcp", timeoutMs: 10, fetch: (u, i) => (hungRegistry ? hang(u, i) : Promise.reject(new Error("unused"))) });
   const { mirror, log } = mirrorOn(fake, { repos: ["example/other"] }, ri);
-  assert.equal(await mirror.ensureIndex(true), true, "the scan completes");
+  assert.equal(await mirror.ensureRepo("example/other", true), true, "the scan completes");
   assert.equal(mirror.index.get("source: example/other#9"), "r9", "cards are indexed on what is known");
   assert.equal(ri.requests(), 3, "one initialize tried 3 times, then the repo is not asked again this scan");
   assert.equal(log.lines.filter(([lvl, m]) => lvl === "warn" && m.includes("registry identity for example/other unavailable")).length, 1);
-  assert.ok(log.lines.some(([, m]) => /scan of every row: 1 Paperclip GETs, 1 rows read/.test(m)));
+  assert.ok(log.lines.some(([, m]) => /read of example\/other's cards in play: 1 Paperclip GETs, 1 rows read/.test(m)));
   hungRegistry = false;
 });
 

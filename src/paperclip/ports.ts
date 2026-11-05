@@ -28,7 +28,8 @@ export interface IndexPort {
   resolve(item: WorkItem, create: boolean): Promise<string | null>;
   defaultContent(item: WorkItem): CardContent;
   createTask(item: WorkItem, content: CardContent): Promise<string | null>;
-  ensureIndex(fresh?: boolean): Promise<boolean>;
+  ensureRepo(repo: string, fresh?: boolean): Promise<boolean>;
+  forget(id: string): void;
   refreshRow(id: string): Promise<void>;
   isClosedCard(id: string): boolean;
   markClosed(id: string): void;

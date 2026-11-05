@@ -98,8 +98,8 @@ A minimal block, before registration:
 
 A task is matched to its GitHub issue by the **first line of the task's description**, built
 from `identityKeyFormat` (default `source: {repo}#{N}`): `{repo}` is the issue's
-full `owner/name` and `{N}` its number. Before creating a task the Foreman scans the company's
-tasks for one whose description starts with that line, and adopts it if found — so a task
+full `owner/name` and `{N}` its number. Before creating a task the Foreman reads that repo's tasks
+in play for one whose description starts with that line, and adopts it if found — so a task
 another tool created for the same issue is reused, not duplicated, **provided both use the same
 format**. A task the Foreman creates is titled from `taskTitleFormat` (default
 `{repo}#{N}`; `{owner}` and `{name}` are the two halves of `{repo}`), its
@@ -110,6 +110,23 @@ ever written at creation, and never used to find a task, so changing the format 
 When two tasks carry the same identity line, the card is the oldest one that is not cancelled
 (else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
 another writer the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+
+### What the plugin reads
+
+The plugin reads **one repo at a time, and only cards in play**: a list request filtered to the
+statuses backlog, todo, in_progress, in_review and blocked, and to the repo's name. It **never
+reads a done or cancelled card** and never reads the whole company board; the client refuses a
+list request without a status filter. Each repo's rows replace that repo's data in full. A failed
+read (a Paperclip timeout, a registry outage) places nothing for that repo on that pass, and every
+other repo carries on; the next snapshot retries. The "Paperclip looks down" warning is logged
+once per outage, so the per-repo "cards not read" line is the signal.
+
+The plugin is the only writer of a Foreman card's status, placement and terminal state. A close
+or reopen comes only from the Foreman's own GitHub reads of the repo: a closed issue whose card is
+still in play moves to done (completed) or cancelled (not planned) on the next snapshot, and the
+card is then forgotten, so a reopened issue gets a fresh card. Nothing else is needed or assumed.
+Before this, the first company-wide read after a restart (about 3,450 rows) timed out, restarted
+at row 0, and stopped every repo; a card (SLA-3778) was never moved again (Foreman #100, 2026-11-05).
 
 ## Who writes which card
 
