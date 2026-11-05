@@ -30,12 +30,62 @@ import type { UnstickOutcome } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, RELEASE_GATE_REASON, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, GRANT_LABEL, GRANT_FOLLOW_UP_DEPTH, followUpOrigin, referencedEmIssues, releaseGateReason, type GrantState, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
+
+/**
+ * Whether each place the EM's gate looks for a grant carries `deliver-to-prod` (epic_grant.py): the issue, the EM
+ * issues its `## References` name, its GitHub sub-issue parent, and, for "— follow-up to #N", #N and what #N
+ * resolves to (depth bounded). A place that cannot be read is null; it never throws.
+ */
+export function readGrantState(repoConfig: RepoConfig, number: number, title: string, labels: readonly string[], host: CodeHost): GrantState {
+  const out: Record<string, boolean | null> = {};
+  const cwd = repoConfig.repoPath;
+  const visit = (repo: string, n: number, ttl: string, lbls: readonly string[] | null, depth: number): void => {
+    const key = `${repo}#${n}`;
+    let facts: { body: string; labels: string[] } | null = null;
+    try {
+      facts = lbls ? { body: host.readIssueFacts(repo, n, cwd).body, labels: [...lbls] } : host.readIssueFacts(repo, n, cwd);
+    } catch {
+      out[key] = null;
+      return;
+    }
+    out[key] = facts.labels.includes(GRANT_LABEL);
+    const { emRepo, epicRefLabel } = repoConfig;
+    for (const ref of emRepo && epicRefLabel ? referencedEmIssues(facts.body, emRepo, epicRefLabel) : []) {
+      const [er, en] = [ref.slice(0, ref.indexOf("#")), Number(ref.slice(ref.indexOf("#") + 1))];
+      if (out[ref] !== undefined) continue;
+      try {
+        const e = host.readIssueFacts(er, en, cwd);
+        // A closed epic is history to the gate: it is left out, so closing one changes the reason too.
+        if (e.state !== "closed") out[ref] = e.labels.includes(GRANT_LABEL);
+      } catch {
+        out[ref] = null;
+      }
+    }
+    try {
+      const p = host.readSubIssueParent(repo, n, cwd);
+      if (p) out[`${p.repo}#${p.number}`] = p.labels.includes(GRANT_LABEL);
+    } catch {
+      out[`${key}/parent`] = null;
+    }
+    const origin = followUpOrigin(ttl);
+    if (origin !== null && depth < GRANT_FOLLOW_UP_DEPTH && out[`${repo}#${origin}`] === undefined) {
+      try {
+        const o = host.readIssueFacts(repo, origin, cwd);
+        visit(repo, origin, o.title, o.labels, depth + 1);
+      } catch {
+        out[`${repo}#${origin}`] = null;
+      }
+    }
+  };
+  visit(repoConfig.githubRepo, number, title, labels, 0);
+  return out;
+}
 
 function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): string {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -146,7 +196,13 @@ export async function tryUnstick(
       const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
       for (const i of issues) {
         if (codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)) {
-          candidates.push({ issue: i.number, kind: "release-gate", reason: RELEASE_GATE_REASON });
+          const names = i.labels.map((l) => l.name);
+          const grants = readGrantState(repoConfig, i.number, i.title, names, codeHost());
+          let reason = releaseGateReason(names, grants);
+          // A place that could not be read this pass keeps the last reason, so a flaky read is not a new question.
+          const prior = loaded.records.get(i.number)?.unstick?.[unstickKey(i.number, "release-gate")];
+          if (prior && Object.values(grants).includes(null)) reason = prior.reason;
+          candidates.push({ issue: i.number, kind: "release-gate", reason });
         }
       }
     }

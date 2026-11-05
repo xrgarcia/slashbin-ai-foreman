@@ -10,6 +10,7 @@
 // Shared with the EM's escalation unblock conditions (EM#649): one parser.
 
 import type { RepoConfig } from "../config.js";
+import type { IssueFacts } from "../code-host.js";
 import { formatGhError } from "./cache.js";
 import { commentOnIssue } from "./ci-gate.js";
 import { gh } from "./gh.js";
@@ -270,4 +271,33 @@ export function announceHold(config: RepoConfig, num: number, kind: HoldKind, re
 /** The issue body, live. Throws on a gh failure. */
 export function readIssueBody(config: RepoConfig, num: number): string {
   return gh(["api", `repos/${config.githubRepo}/issues/${num}`, "--jq", ".body // \"\""], config.repoPath);
+}
+
+function factsOf(raw: string): { title: string; body: string; state: string; labels: string[] } {
+  const j = JSON.parse(raw) as { title?: string; body?: string | null; state?: string; labels?: Array<{ name?: string } | string> };
+  return {
+    title: j.title ?? "",
+    body: j.body ?? "",
+    state: String(j.state ?? "").toLowerCase(),
+    labels: (j.labels ?? []).map((l) => (typeof l === "string" ? l : l.name ?? "")).filter(Boolean),
+  };
+}
+
+/** One issue of any repo, live (title, body, state, labels): where the release gate looks for a production grant. Throws on a gh failure. */
+export function readIssueFacts(repo: string, num: number, cwd: string): IssueFacts {
+  return factsOf(gh(["api", `repos/${repo}/issues/${num}`], cwd));
+}
+
+/** The sub-issue parent of an issue; null when it has none (GitHub answers 404). Throws on any other failure. */
+export function readSubIssueParent(repo: string, num: number, cwd: string): (IssueFacts & { repo: string; number: number }) | null {
+  let raw: string;
+  try {
+    raw = gh(["api", `repos/${repo}/issues/${num}/parent`], cwd);
+  } catch (err) {
+    const e = err as { message?: string; stderr?: Buffer | string };
+    if (/\b404\b|not found/i.test(`${e.message ?? ""} ${e.stderr?.toString() ?? ""}`)) return null;
+    throw err;
+  }
+  const j = JSON.parse(raw) as { number: number; repository_url?: string };
+  return { ...factsOf(raw), number: j.number, repo: String(j.repository_url ?? "").split("/repos/")[1] || repo };
 }

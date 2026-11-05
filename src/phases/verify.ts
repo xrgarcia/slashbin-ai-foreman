@@ -11,7 +11,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { fieldTable, type VerifyHold } from "../issue-records.js";
-import { handoffSubject } from "../unstick.js";
+import { followUpTargets, handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
@@ -154,8 +154,7 @@ export function visualDecisionHolder(merged: readonly number[], held: Readonly<R
  * exported for tests.
  */
 export function followUpsOf(holder: number, batch: readonly number[], titles: ReadonlyMap<number, string>): number[] {
-  const marker = new RegExp(`follow-up to #${holder}(?!\\d)`, "i");
-  return batch.filter((n) => marker.test(titles.get(n) ?? ""));
+  return batch.filter((n) => followUpTargets(titles.get(n) ?? "").includes(holder));
 }
 
 /**
