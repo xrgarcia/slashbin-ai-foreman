@@ -421,6 +421,8 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     try {
       for (const n of named) {
         const v = codeHost().viewIssue(repoConfig, n);
+        // A closed issue already verified in production was delivered, whichever release verified it (foreman#86).
+        if (v?.state === "CLOSED" && verified[n]) continue;
         if (v?.labels.includes(repoConfig.triggerLabel)) issues.push(n);
       }
     } catch (err) {
