@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, referencedEmIssues, followUpOrigin, grantFingerprint,
 } from "../dist/unstick.js";
 import { applyOutcome } from "../dist/phases/unstick.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -218,4 +218,87 @@ test("an invoked entry recorded before recalls existed is a standing handoff: a 
   assert.equal(e.recalls, 1);
   e = applyOutcome(legacy, { kind: "invoked", detail: "again" }, t0, up);
   assert.equal(e.recalls, 1, "a second handoff on a legacy entry is its first recall");
+});
+
+// A grant landing at the gate re-calls the EM (jerky_ops#201, 2026-11-05): the reason
+// carries the labels, so an answered gate with a new label is a new question.
+test("releaseGateReason: a new label changes the reason, so an answered release gate is called again", () => {
+  const before = releaseGateReason(["pr approved", "approved"]);
+  const after = releaseGateReason(["approved", "pr approved", "deliver-to-prod"]);
+  assert.equal(before, releaseGateReason(["approved", "pr approved", "approved"]), "order and repeats do not matter");
+  assert.notEqual(before, after);
+  const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+  const answered = { issue: 5, kind: "release-gate", reason: before, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
+  assert.equal(nextStep(answered, { issue: 5, kind: "release-gate", reason: after }, 1, H), "call");
+});
+
+test("releaseGateReason: a grant on the EPIC changes the reason though the child's labels do not (PR #222 S2)", () => {
+  const labels = ["pr approved", "approved"];
+  const no = releaseGateReason(labels, { "xrgarcia/jerky_ops#201": false, "xrgarcia/slashbin-engineering-manager#900": false });
+  const yes = releaseGateReason(labels, { "xrgarcia/slashbin-engineering-manager#900": true, "xrgarcia/jerky_ops#201": false });
+  assert.notEqual(no, yes);
+  assert.match(yes, /slashbin-engineering-manager#900=yes/);
+  const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+  const answered = { issue: 201, kind: "release-gate", reason: no, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: yes }, 1, H), "call");
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: no }, 1, H) === "call", false);
+});
+
+test("grantFingerprint: sorted, deterministic, `?` for an unreadable place, empty for none", () => {
+  assert.equal(grantFingerprint({ "b/x#2": true, "a/x#1": false, "c/x#3": null }), " [grant: a/x#1=no, b/x#2=yes, c/x#3=?]");
+  assert.equal(grantFingerprint({}), "");
+  assert.equal(grantFingerprint(undefined), "");
+});
+
+const EM = "xrgarcia/slashbin-engineering-manager";
+test("referencedEmIssues: only the References section, Related lines skipped, owner defaulted", () => {
+  const body = [
+    "Intro names engineering-manager #1 (ignored: not in References).",
+    "## References",
+    "- Epic: engineering-manager #900",
+    "- Part of other/slashbin-engineering-manager#901",
+    "- Related: engineering-manager #902",
+    "- **Related:** engineering-manager #903",
+    "## Notes",
+    "engineering-manager #904",
+  ].join("\n");
+  assert.deepEqual(referencedEmIssues(body, EM, "engineering-manager"), [
+    "other/slashbin-engineering-manager#901",
+    "xrgarcia/slashbin-engineering-manager#900",
+  ]);
+  assert.deepEqual(referencedEmIssues("no section", EM, "engineering-manager"), []);
+  assert.deepEqual(referencedEmIssues("## References\n- engineering-manager #7", EM, "engineering-manager"), ["xrgarcia/slashbin-engineering-manager#7"]);
+});
+
+test("followUpOrigin: reads the issue a title follows up", () => {
+  assert.equal(followUpOrigin("Fix it — follow-up to #123"), 123);
+  assert.equal(followUpOrigin("plain"), null);
+});
+
+test("readGrantState: the same child labels, the referenced EM epic no -> yes, changes the reason", async () => {
+  const { readGrantState } = await import("../dist/phases/unstick.js");
+  const cfg = { githubRepo: "o/child", repoPath: "/x", emRepo: "o/slashbin-engineering-manager", epicRefLabel: "engineering-manager" };
+  const world = (epicLabels) => ({
+    readIssueFacts: (repo, n) => {
+      if (repo === "o/child" && n === 7) return { title: "t", body: "## References\n- engineering-manager #900", state: "open", labels: ["pr approved"] };
+      if (repo === "o/slashbin-engineering-manager" && n === 900) return { title: "epic", body: "", state: "open", labels: epicLabels };
+      throw new Error("unexpected read");
+    },
+    readSubIssueParent: () => null,
+  });
+  const labels = ["pr approved"];
+  const before = readGrantState(cfg, 7, "t", labels, world(["epic"]));
+  const after = readGrantState(cfg, 7, "t", labels, world(["epic", "deliver-to-prod"]));
+  assert.equal(before["o/slashbin-engineering-manager#900"], false);
+  assert.equal(after["o/slashbin-engineering-manager#900"], true);
+  assert.notEqual(releaseGateReason(labels, before), releaseGateReason(labels, after));
+  const flaky = readGrantState(cfg, 7, "t", labels, { ...world([]), readIssueFacts: (r, n) => { if (n === 900) throw new Error("boom"); return world([]).readIssueFacts(r, n); } });
+  assert.equal(flaky["o/slashbin-engineering-manager#900"], null, "an unreadable epic is null, not a throw");
+});
+
+test("followUpTargets: every target in order; followUpsOf matches only the exact holder", async () => {
+  const { followUpTargets } = await import("../dist/unstick.js");
+  const { followUpsOf } = await import("../dist/phases/verify.js");
+  assert.deepEqual(followUpTargets("a — follow-up to #5, follow-up to #12"), [5, 12]);
+  assert.deepEqual(followUpsOf(12, [1, 2, 3], new Map([[1, "x follow-up to #12"], [2, "x follow-up to #123"], [3, "no"]])), [1]);
 });

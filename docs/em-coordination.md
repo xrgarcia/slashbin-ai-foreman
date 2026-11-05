@@ -14,8 +14,10 @@ a PR comment opening `**EM scope ruling` · a PR comment opening `**EM QA re-run
 edit or a lifted `blocked` label · a new corrective issue. Everything else the Foreman, Tech Lead and SRE do by themselves. If the
 action you are about to take is not one of these seven, you are doing someone else's stage.
 
-`deliver-to-prod` on an epic is **not** a Foreman input: `src/` never reads it. It is the
-EM's own gate (the deliver-to-prod skill) for applying `ready for prod release`.
+`deliver-to-prod` on an epic is **not** an input the Foreman acts on: it never decides a release
+from it. The Foreman only reads it, at the `release-gate` (§3), to notice that a grant landed and
+call the EM again. The gate itself is the EM's (the deliver-to-prod skill) for applying
+`ready for prod release`.
 
 ## 1. Lifecycle stages (GitHub labels; the Paperclip card when that plugin is on)
 
@@ -119,7 +121,7 @@ except `rework-decision`: the first visual QA FAIL, or the first charged verific
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
 hold hands over to `verify-exhausted` when its retries run out. The Foreman never decides the fix itself.
-`release-gate` fires on any open `pr approved` issue without `ready for prod release`.
+`release-gate` fires on any open `pr approved` issue without `ready for prod release`. Its reason carries the issue's labels and the `deliver-to-prod` state of the issue, the epics its `## References` name, its sub-issue parent and its follow-up origin, so a grant that lands on any of them while it waits is a new question and calls the EM again at once (the Foreman does not decide the release; an unreadable place keeps the last reason); never schedule a re-check for a grant.
 `unrelated-error` fires when a dev verification, a prod verification or the first prod deploy prints `Not caused by
 this release, needs triage:` (the SRE passed the release and excluded the error). The reason carries the signature,
 the repo and PR it was first seen on, and the SRE's evidence links. It is repo-level (issue 0), once per distinct signature

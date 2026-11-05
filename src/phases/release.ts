@@ -41,6 +41,7 @@ import type { ProdRelease } from "../issue-records.js";
 import { fieldTable } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
+import { followUpOrigin } from "../unstick.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
@@ -188,8 +189,8 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
   const label = repoConfig.epicRefLabel;
   if (!label) return;
   let epics = epicRefs(codeHost().readIssueBody(repoConfig, n), label);
-  const parent = /follow-up to #(\d+)/i.exec(title);
-  if (!epics.length && parent) epics = epicRefs(codeHost().readIssueBody(repoConfig, Number(parent[1])), label);
+  const origin = followUpOrigin(title);
+  if (!epics.length && origin !== null) epics = epicRefs(codeHost().readIssueBody(repoConfig, origin), label);
   if ((await rt.handoffs.noteEpicChildClosed(repoConfig, n, epics, label)) > 0) {
     logger.info(`#${n} is closing in production; asking the EM whether ${label} ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
   }
