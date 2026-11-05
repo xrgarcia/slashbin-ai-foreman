@@ -101,7 +101,10 @@ from `identityKeyFormat` (default `source: {repo}#{N}`): `{repo}` is the issue's
 full `owner/name` and `{N}` its number. Before creating a task the Foreman scans the company's
 tasks for one whose description starts with that line, and adopts it if found — so a task
 another tool created for the same issue is reused, not duplicated, **provided both use the same
-format**. A task the Foreman creates is titled from `taskTitleFormat` (default
+format**. The first scan after a start reads every task, a page at a time; if Paperclip
+fails part way (a page timing out through its retries) the next scan resumes at that page
+instead of row 0, so a slow board still builds its index and cards are placed (Foreman #100).
+A task the Foreman creates is titled from `taskTitleFormat` (default
 `{repo}#{N}`; `{owner}` and `{name}` are the two halves of `{repo}`), its
 description is the identity line, a blank line, and the issue's GitHub URL. The title is only
 ever written at creation, and never used to find a task, so changing the format renames nothing
