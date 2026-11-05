@@ -15,8 +15,8 @@ edit or a lifted `blocked` label · a new corrective issue. Everything else the 
 action you are about to take is not one of these seven, you are doing someone else's stage.
 
 `deliver-to-prod` on an epic is **not** an input the Foreman acts on: it never decides a release
-from it. The Foreman only reads it, at the `release-gate` (§3), to notice that a grant landed and
-call the EM again. The gate itself is the EM's (the deliver-to-prod skill) for applying
+from it. The Foreman knows nothing about where a grant lives: at the `release-gate` (§3) it asks the EM
+(`em.mjs grant-state`) and carries the answer in the reason, so a grant that landed calls the EM again. The gate itself is the EM's (the deliver-to-prod skill) for applying
 `ready for prod release`.
 
 ## 1. Lifecycle stages (GitHub labels; the Paperclip card when that plugin is on)

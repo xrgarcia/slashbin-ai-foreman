@@ -66,10 +66,41 @@ export async function unstickViaEm(
   return { kind: "failed", detail: `exit ${r.code}: ${cliTail(r)}` };
 }
 
+/** How long one `em.mjs grant-state` read may run (a few gh reads). */
+export const EM_GRANT_STATE_MAX_DURATION_MS = 2 * 60_000;
+
+/**
+ * The EM's answer to where a production grant stands for `issue` (`em.mjs grant-state --repo --issue`): exit 0 and
+ * one JSON line on stdout, returned trimmed and uninterpreted. Null on any failure, timeout, or a missing
+ * `emRepoPath` / `EM_GITHUB_TOKEN`. Never throws.
+ */
+export async function grantStateViaEm(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  issue: number,
+  logger: Logger,
+): Promise<string | null> {
+  const em = agentConfig.emRepoPath;
+  if (!em || !process.env.EM_GITHUB_TOKEN) return null;
+  try {
+    const r = await runAgentCli(em, "bin/em.mjs", ["grant-state", "--repo", repoConfig.githubRepo, "--issue", String(issue)],
+      buildEmEnv(agentConfig), agentConfig, EM_GRANT_STATE_MAX_DURATION_MS);
+    const out = r.stdout.trim();
+    if (r.timedOut || r.code !== 0 || !out) {
+      logger.warn(`EM grant-state ${repoConfig.githubRepo}#${issue} unreadable (${r.timedOut ? "timed out" : `exit ${r.code}`})`);
+      return null;
+    }
+    return out;
+  } catch (err) {
+    logger.warn(`EM grant-state ${repoConfig.githubRepo}#${issue} failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 export class EmPlugin implements ForemanPlugin {
   readonly id = "em";
   readonly roles = ["unstick"] as const;
-  readonly unstick: Unsticker = { unstick: unstickViaEm };
+  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.emRepoPath);
   }
