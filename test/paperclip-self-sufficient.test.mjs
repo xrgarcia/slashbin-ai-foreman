@@ -254,13 +254,16 @@ test("#112: the closed sweep closes an open card whose issue closed while nobody
   assert.equal(fake.rows[0].status, "cancelled");
 });
 
-test("#112: a reopened issue's card follows GitHub again once it reads open live", async () => {
+test("#112: a reopened issue gets a fresh card; the done card is never read or touched", async () => {
   const fake = fakePaperclip([row7("done", { assigneeAgentId: "tl-agent" })]);
   const mirror = mirrorOn(fake);
   await snapshot(mirror, null);
+  assert.equal(fake.rows.length, 1, "a closed issue with no card in play gets none");
   await snapshot(mirror, ["approved", "pr under review"]);
-  assert.equal(fake.rows[0].status, "in_review");
-  assert.equal(fake.rows[0].assigneeAgentId, "tl-agent");
+  assert.equal(fake.rows[0].status, "done");
+  assert.equal(fake.rows[0].assigneeAgentId, "tl-agent", "the terminal card is left as it was");
+  assert.equal(fake.rows.length, 2);
+  assert.equal(fake.rows[1].status, "in_review");
 });
 
 // --- Foreman #113: a card on first sight -----------------------------------------------
@@ -459,7 +462,7 @@ const onPo = (r) => r.status === "blocked" && r.assigneeAgentId === "po-agent" &
 test("review hold R1: an escalation made after the scan survives an approved update and three reconciliations", async () => {
   const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "em-agent" })]);
   const mirror = mirrorOn(fake);
-  await mirror.ensureIndex(true);
+  await mirror.ensureRepo("example/r", true);
   escalateToPo(fake.rows[0]);
   await transition(mirror, "approved");
   assert.ok(onPo(fake.rows[0]), "the update took the card back from the PO");
@@ -512,8 +515,8 @@ test("review owner R2: ownsCards on, closure clears the EM and a late approved k
   assert.ok(unassigned(fake.rows[0]));
 });
 
-test("review owner R3: an already-Done card still held by the EM is unassigned on closure", async () => {
-  const fake = fakePaperclip([row7("done", { assigneeAgentId: "em-agent" })]);
+test("review owner R3: a card still held by the EM is unassigned on closure", async () => {
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: "em-agent" })]);
   const mirror = mirrorOn(fake);
   await closedSnap(mirror);
   assert.equal(fake.rows[0].status, "done");
