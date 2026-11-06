@@ -327,3 +327,26 @@ test("each phase returns before its retry counter when the failure was an upstre
     assert.match(before, /if \(result\.upstreamLimit \|\| isUpstreamBlocked\("github"\)\)\s*\{[\s\S]{0,500}?kind: "blocked"[\s\S]{0,200}?return\b/, fn);
   }
 });
+
+test("a slow GitHub probe does not block the event loop; the window holds until it answers (foreman#236)", () => {
+  const r = runCase(`
+    writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
+    call();
+    writeFileSync(F.err, "");
+    let answer;
+    B.setUpstreamProbe("github", () => new Promise((res) => { answer = res; }));
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 20);
+    await sleep(600);                        // window ends at ~200ms; the probe is still out
+    const duringProbe = { ticks, blocked: B.isUpstreamBlocked("github"), refused: call() };
+    answer({ clear: true });
+    await sleep(20);
+    clearInterval(timer);
+    console.log(JSON.stringify({ duringProbe, afterBlocked: B.isUpstreamBlocked("github"), work: work() }));
+  `);
+  assert.ok(r.duringProbe.ticks >= 15, `the loop kept turning while the probe was out (${r.duringProbe.ticks} ticks)`);
+  assert.equal(r.duringProbe.blocked, true, "no call slips through while the probe is unanswered");
+  assert.equal(r.duringProbe.refused, "backoff");
+  assert.equal(r.afterBlocked, false, "the probe's answer clears the window");
+  assert.equal(r.work, 1);
+});

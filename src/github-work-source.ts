@@ -18,6 +18,7 @@ import { acceptanceVerdict } from "./github/acceptance-gate.js";
 import { announceHold, parseReadiness, type HoldKind, readIssueBody, unmetReadiness } from "./github/readiness.js";
 import { CardReads, issueStates } from "./github/cards.js";
 import { GitHubRecordStore } from "./github/record-store.js";
+import { ghAsync } from "./github/gh.js";
 import { ForemanIdentity } from "./github/skip-hold.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
@@ -153,7 +154,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
 
   /** `identity` is the Foreman login, shared with the code host; a test gets its own. */
   constructor(private readonly identity: ForemanIdentity = new ForemanIdentity()) {
-    this.records = new GitHubRecordStore({ run: gh, login: (cwd) => identity.login(cwd) });
+    this.records = new GitHubRecordStore({ run: ghAsync, login: (cwd) => identity.loginAsync(cwd) });
   }
 
   loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad> {
@@ -198,7 +199,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     }
     const open = getOpenIssues(repo, repoConfig.repoPath, logger);
     const labelsOf = (i: { labels: { name: string }[] }) => i.labels.map((l) => l.name);
-    const holds = this.cardReads.holdReasons(repo, repoConfig.repoPath, blockedLabel,
+    const holds = await this.cardReads.holdReasons(repo, repoConfig.repoPath, blockedLabel,
       open.filter((i) => labelsOf(i).includes(blockedLabel)).map((i) => i.number), logger);
     const out: SnapshotCard[] = open.map((i) => {
       const hold = holds.get(i.number);
@@ -212,7 +213,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         labels: labelsOf(i),
       };
     });
-    const closed = this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger)
+    const closed = (await this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger))
       .map((c): SnapshotCard => ({ item: { issueNumber: c.number, repo }, title: c.title, url: c.url, state: c.state, stage: null }));
     return closedWins(out, closed);
   }
@@ -220,7 +221,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   /** The issues closed since the last read (github/cards.ts), for a mirror that does not own the cards. */
   async closed(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotClosed[]> {
     const repo = repoConfig.githubRepo;
-    return this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger).map((c) => ({ item: { issueNumber: c.number, repo }, state: c.state }));
+    return (await this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger)).map((c) => ({ item: { issueNumber: c.number, repo }, state: c.state }));
   }
 
   /** Each issue's state read live from GitHub, not from the open-issue view (github/cards.ts issueStates). */
