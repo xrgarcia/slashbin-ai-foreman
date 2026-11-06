@@ -31,9 +31,8 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   let stopping = false;
   let sleepResolve: (() => void) | null = null;
   let activeConfig = config;
-  // Event-loop stall detector and 5-minute delay histogram (#228). The window is overridable only
-  // so the acceptance script need not wait five minutes.
-  const loopMonitor = startEventLoopMonitor(logger, { windowMs: Number(process.env.FOREMAN_EVENT_LOOP_WINDOW_MS) || undefined });
+  // Event-loop stall detector (#228): logs any freeze over 250 ms with the lane passes in flight.
+  const loopMonitor = startEventLoopMonitor(logger);
 
   // No Discord (owner, 2026-10-11: "GitHub and Paperclip are where Foreman should be
   // posting important messages"). What needs a person is a label and comment on the
