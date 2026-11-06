@@ -4,19 +4,19 @@
 // holds the whole process: timers, sockets and HTTP callbacks wait. Nothing measured that, so
 // a Paperclip or registry call that timed out looked like an upstream fault.
 //
-// A sampler timer ticks every 10 ms. A tick that fires late is one stall event, recorded once
-// in a shared log with the gap it measured (the interval plus how late it was, the same
-// convention as Node's own event-loop histogram, so an idle loop reads about 10 ms). A pass
-// remembers where the log stood when it began and, at its end, reads only the events since:
-// no pass resets or consumes another's, and the work to report a pass is the number of stalls
-// during it, not the number of passes in flight. A stall is recorded only when the loop next
-// reaches the timer, which can be after the pass that caused it has ended, so the pass end
-// also asks, synchronously, whether the tick is overdue. That is why the first pass after
-// start is measured without warm-up and no timer or await is added at a pass end.
+// A sampler timer ticks every 10 ms. A tick that fires late is one stall event, with the gap it
+// measured (the interval plus how late it was, the same convention as Node's own event-loop
+// histogram). Stalls are folded into running totals shared by all passes: a count, a sum, a
+// fixed set of power-of-two buckets, and a monotonic stack for the largest. A pass snapshots
+// the totals when it begins and subtracts them when it ends, so reporting a pass costs a
+// constant, never the number of passes in flight and never a replay of history. A stall is
+// recorded only when the loop next reaches the timer, which can be after the pass that caused
+// it has ended, so the pass end also asks, synchronously, whether the tick is overdue. That is
+// why the first pass after start is measured without warm-up and no timer or await is added.
 //
-// Percentiles are per tick: a window of N ticks holds the recorded stalls and N minus that
-// many on-time ticks (0 ms). Like Node's histogram, one long stall is one sample, so a pass
-// also reports `blocked`, the total stalled milliseconds.
+// Percentiles are over the stalls observed in the pass (on-time ticks are not samples, and a
+// blocked loop runs no ticks to count); with none, every figure is 0. A percentile is the
+// upper bound of its bucket, capped at the pass's max. `blocked` is the total stalled ms.
 import { performance } from "node:perf_hooks";
 import type { Logger } from "./logger.js";
 
@@ -29,10 +29,16 @@ const STALL_THRESHOLD_MS = 1;
 /** The fixed, greppable prefix of the per-pass line. */
 export const EVENT_LOOP_DELAY_PREFIX = "Event-loop delay";
 
-/** One lane pass's window. */
+const BUCKETS = 24; // bucket b holds gaps up to 2^b ms; the last takes everything larger
+
+const bucketOf = (ms: number): number => Math.min(BUCKETS - 1, Math.max(0, Math.ceil(Math.log2(ms))));
+
+/** One lane pass's window: the totals when it began. */
 export interface PassWindow {
-  readonly startSeq: number;
-  readonly startMs: number;
+  readonly seq: number;
+  readonly count: number;
+  readonly sum: number;
+  readonly buckets: readonly number[];
 }
 
 export interface EventLoopDelayMonitor {
@@ -46,17 +52,14 @@ export interface EventLoopDelayMonitor {
 
 const round1 = (ms: number): number => Math.round(ms * 10) / 10;
 
-/** The p-th percentile of `ticks` samples of which `stalls` (ascending) are non-zero and the rest 0. */
-function percentile(stalls: readonly number[], ticks: number, p: number): number {
-  const zeros = Math.max(0, ticks - stalls.length);
-  const rank = Math.max(0, Math.ceil((p / 100) * (zeros + stalls.length)) - 1);
-  return rank < zeros ? 0 : stalls[rank - zeros];
-}
-
 export function startEventLoopDelayMonitor(now: () => number = () => performance.now()): EventLoopDelayMonitor {
-  const log: number[] = []; // stall gaps in ms; log[i] is event number base + i
-  let base = 0;
-  const active = new Set<PassWindow>();
+  let count = 0;
+  let sum = 0;
+  const buckets: number[] = new Array(BUCKETS).fill(0);
+  // Stalls whose value exceeds every later one, oldest first: the front entry at or after a
+  // window's start is that window's max.
+  const maxStack: Array<{ seq: number; v: number }> = [];
+  let open = 0;
   let expected = now() + EVENT_LOOP_INTERVAL_MS;
 
   /** Records the tick if it is late, and consumes it. */
@@ -64,7 +67,13 @@ export function startEventLoopDelayMonitor(now: () => number = () => performance
     const t = now();
     const late = t - expected;
     expected = t + EVENT_LOOP_INTERVAL_MS;
-    if (late >= STALL_THRESHOLD_MS && active.size > 0) log.push(late + EVENT_LOOP_INTERVAL_MS);
+    if (late < STALL_THRESHOLD_MS || open === 0) return;
+    const v = late + EVENT_LOOP_INTERVAL_MS;
+    while (maxStack.length && maxStack[maxStack.length - 1].v <= v) maxStack.pop();
+    maxStack.push({ seq: count, v });
+    count += 1;
+    sum += v;
+    buckets[bucketOf(v)] += 1;
   };
 
   const timer = setInterval(sample, EVENT_LOOP_INTERVAL_MS);
@@ -72,24 +81,40 @@ export function startEventLoopDelayMonitor(now: () => number = () => performance
 
   return {
     begin() {
-      const w: PassWindow = { startSeq: base + log.length, startMs: now() };
-      active.add(w);
-      return w;
+      open += 1;
+      return { seq: count, count, sum, buckets: buckets.slice() };
     },
     end(w, logger, repo, lane) {
       sample(); // a stall the loop has not yet reached its timer to record
-      active.delete(w);
-      const stalls = log.slice(w.startSeq - base).sort((a, b) => a - b);
-      const ticks = Math.max(1, Math.floor((now() - w.startMs) / EVENT_LOOP_INTERVAL_MS));
-      const p50 = round1(percentile(stalls, ticks, 50));
-      const p99 = round1(percentile(stalls, ticks, 99));
-      const max = round1(stalls.length ? stalls[stalls.length - 1] : 0);
-      const blocked = round1(stalls.reduce((sum, v) => sum + v, 0));
-      // Events before the oldest window still open are no one's: drop them.
-      const oldest = active.size ? Math.min(...[...active].map((a) => a.startSeq)) : base + log.length;
-      log.splice(0, oldest - base);
-      base = oldest;
-      logger.info(`${EVENT_LOOP_DELAY_PREFIX} repo=${repo} lane=${lane} p50=${p50}ms p99=${p99}ms max=${max}ms blocked=${blocked}ms`, { repo, lane, p50, p99, max, blocked });
+      open -= 1;
+      const n = count - w.count;
+      let max = 0;
+      let p50 = 0;
+      let p99 = 0;
+      if (n > 0) {
+        let lo = 0;
+        let hi = maxStack.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (maxStack[mid].seq >= w.seq) hi = mid; else lo = mid + 1;
+        }
+        max = maxStack[lo].v;
+        const at = (p: number): number => {
+          const rank = Math.ceil((p / 100) * n);
+          let seen = 0;
+          for (let b = 0; b < BUCKETS; b++) {
+            seen += buckets[b] - w.buckets[b];
+            if (seen >= rank) return Math.min(max, 2 ** b);
+          }
+          return max;
+        };
+        p50 = at(50);
+        p99 = at(99);
+      }
+      const blocked = sum - w.sum;
+      if (open === 0) maxStack.length = 0;
+      const f = { repo, lane, p50: round1(p50), p99: round1(p99), max: round1(max), blocked: round1(blocked) };
+      logger.info(`${EVENT_LOOP_DELAY_PREFIX} repo=${repo} lane=${lane} p50=${f.p50}ms p99=${f.p99}ms max=${f.max}ms blocked=${f.blocked}ms`, f);
     },
     disable() {
       clearInterval(timer);
