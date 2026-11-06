@@ -159,20 +159,21 @@ test("the landing branch name is taken from the caller, never hardcoded", () => 
 // of the label are pinned here.
 
 test("a pre-approved repo files its batch carrying the trigger label", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", "approved");
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", ["approved", "deliver-to-prod"]);
   const i = args.indexOf("--label");
   assert.ok(i >= 0, "no --label on the create call — the batch would stall unapproved");
   assert.equal(args[i + 1], "approved");
+  assert.equal(args[args.lastIndexOf("--label") + 1], "deliver-to-prod", "no production grant — the EM gate would hold the batch");
 });
 
 test("a repo that is NOT pre-approved files its batch with no label at all", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", null);
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", []);
   assert.ok(!args.includes("--label"), "a label here flies work the owner never authorized");
   assert.ok(!args.includes("approved"));
 });
 
 test("the label comes from config, never hardcoded", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", "go");
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", ["go"]);
   assert.equal(args[args.indexOf("--label") + 1], "go");
   assert.ok(!args.includes("approved"));
 });
