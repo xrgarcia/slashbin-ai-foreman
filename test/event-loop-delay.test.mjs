@@ -90,6 +90,7 @@ test("a stall of exactly 2000 ms on an injected clock reports max >= 2000 ms fro
   mon.disable();
   assert.ok(log.lines[0].d.max >= 2000, JSON.stringify(log.lines[0].d));
   assert.ok(log.lines[0].d.blocked >= 2000);
+  assert.ok(log.lines[0].d.p99 >= 1000 && log.lines[0].d.p50 >= 1000, `stall must show in percentiles: ${JSON.stringify(log.lines[0].d)}`);
 });
 
 test("reporting work follows the stalls in a pass, not the passes in flight", async () => {
