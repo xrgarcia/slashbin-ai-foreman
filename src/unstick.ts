@@ -208,6 +208,18 @@ export function derivedCandidates(
   return out;
 }
 
+/**
+ * How long after its last failed call a repo-level question whose calls were all spent is asked afresh. The unstick
+ * watch itself leaves such an entry alone for good (`nextStep`: failed at the cap waits), so a notice that never
+ * reached the EM stayed undelivered after the EM came back. 1 h keeps a still-down EM to one burst of calls an hour.
+ */
+export const SPENT_QUESTION_REARM_MS = 60 * 60_000;
+
+/** The EM never answered this question: every call failed. An accepted answer of any kind (even a decline) is not this. Pure. */
+export function deliverySpent(entry: UnstickEntry, nowMs: number, maxAttempts = UNSTICK_MAX_ATTEMPTS): boolean {
+  return entry.status === "failed" && entry.attempts >= maxAttempts && nowMs - Date.parse(entry.lastCallAt ?? entry.since) >= SPENT_QUESTION_REARM_MS;
+}
+
 /** Whether a candidate needs an EM call now, given what the table holds for it. Pure. */
 export function needsCall(entry: UnstickEntry | undefined, c: UnstickCandidate, maxAttempts = UNSTICK_MAX_ATTEMPTS): boolean {
   return nextStep(entry, c, Date.now(), { maxAttempts, handoff: NO_HANDOFF_WATCH }) === "call";
@@ -370,21 +382,28 @@ export class EmHandoffs {
   private async persist(
     repoConfig: RepoConfig,
     kind: "unrelated-error" | "epic-ready-to-close" | "dependency-batch-loop",
-    entries: readonly { tag: string; reason: string }[],
+    entries: readonly { tag: string; reason: string; rearmAt?: number }[],
   ): Promise<number> {
     if (entries.length === 0) return 0;
     const now = new Date().toISOString();
     let added = 0;
+    let rearmed = false;
     const ok = await this.records.updateRepoRecord(repoConfig, (d) => {
       const table = { ...(d.unstick ?? {}) };
       added = 0;
-      for (const { tag, reason } of entries) {
+      rearmed = false;
+      for (const { tag, reason, rearmAt } of entries) {
         const key = unstickKey(0, kind, tag);
-        if (table[key]) continue;
+        const standing = table[key];
+        if (standing) {
+          // A question whose calls were all spent without an answer is asked afresh (see `deliverySpent`).
+          if (rearmAt !== undefined && deliverySpent(standing, rearmAt)) { table[key] = { ...standing, status: "pending", attempts: 0 }; rearmed = true; }
+          continue;
+        }
         table[key] = openEntry(undefined, { issue: 0, kind, reason, tag }, now);
         added++;
       }
-      if (added > 0) d.unstick = table;
+      if (added > 0 || rearmed) d.unstick = table;
     });
     if (!ok) throw new HandoffNotSaved(kind, repoConfig.githubRepo);
     return added;
@@ -426,15 +445,22 @@ export class EmHandoffs {
    * Dependabot PR left open after its version landed, a close that fails) and clears it. Resolves true once the
    * notice is on the record (new or already there); it throws HandoffNotSaved when it cannot be saved.
    */
-  async noteDependencyBatchLoop(repoConfig: RepoConfig, batchKey: string, filings: number): Promise<boolean> {
+  async noteDependencyBatchLoop(repoConfig: RepoConfig, batchKey: string, filings: number, now: Date = new Date()): Promise<boolean> {
     const tag = createHash("sha256").update(batchKey).digest("hex").slice(0, 12);
-    const added = await this.persist(repoConfig, "dependency-batch-loop", [{
+    const key = unstickKey(0, "dependency-batch-loop", tag);
+    const record = await this.records.loadRepoRecord(repoConfig);
+    if (record === null) throw new HandoffNotSaved("dependency-batch-loop", repoConfig.githubRepo);
+    // The question's own entry is the one record of delivery: already there and not spent means nothing to do (no write per poll).
+    const standing = record.unstick?.[key];
+    if (standing && !deliverySpent(standing, now.getTime())) return true;
+    await this.persist(repoConfig, "dependency-batch-loop", [{
       tag,
+      rearmAt: now.getTime(),
       reason: `The dependency sweep filed the same batch (${batchKey}) ${filings} times in 24 hours and is now holding it: no further issue is filed for these PRs at these head commits. ` +
         "Each issue ended without a PR, so a Dependabot PR is probably still open after its version reached the base branch, and the Foreman's attempt to close it failed. " +
         "Find out why, close or fix the PR(s), and the hold ends by itself (a new Dependabot push is a new batch).",
     }]);
-    return added >= 0;
+    return true;
   }
 
   /**

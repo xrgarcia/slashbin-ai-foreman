@@ -22,7 +22,8 @@ const at = (h) => new Date(T0.getTime() + h * 3600_000);
 
 function build(host, ledger, over = {}) {
   const notices = [];
-  const notifier = { async batchLooping(_r, batch, filings) { notices.push({ key: batch.key, filings }); return true; } };
+  // Idempotent per key, like EmHandoffs.noteDependencyBatchLoop (its own tests are below): the sweep asks on every held pass.
+  const notifier = { async batchLooping(_r, batch, filings) { if (!notices.some((n) => n.key === batch.key)) notices.push({ key: batch.key, filings }); return true; } };
   const sweep = new DependencyBatchSweep({
     discovery: new DependencyDiscovery(host), security: new SecuritySelection(host), openIssue: new OpenBatchIssueProbe(host),
     ledger, policy: new DependencyBatchFilingPolicy(), composer: new BatchIssueComposer(host), filer: new BatchIssueFiler(host),
@@ -91,21 +92,20 @@ test("A3: with retirement failing, at most 3 filings in 24h, then a hold and one
   }
   assert.equal(host.filed.length, 3);
   assert.deepEqual(notices, [{ key: "627@sha627", filings: 3 }]);
-  assert.equal((await ledger.historyOf(null, batchOf(host.prs))).emNotified, true);
   // a day later the window has passed and the batch may be tried again
   assert.notEqual(await sweep.run(repoConfig(), quiet, at(40)), null);
 });
 
 test("A3b: an EM notice that cannot be recorded is retried on the next sweep", async () => {
   const host = state627(), ledger = new FakeLedger();
-  let ok = false; const calls = [];
-  const { sweep } = build(host, ledger, { notifier: { async batchLooping() { calls.push(1); if (!ok) throw new Error("board down"); return true; } } });
+  let ok = false; let recorded = 0;
+  const { sweep } = build(host, ledger, { notifier: { async batchLooping() { if (!ok) throw new Error("board down"); recorded++; return true; } } });
   for (let i = 0; i < 3; i++) { const n = await sweep.run(repoConfig(), quiet, at(i)); host.closeIssue(n); }
   await sweep.run(repoConfig(), quiet, at(3));
-  assert.equal(calls.length, 1);
+  assert.equal(recorded, 0);
   ok = true;
-  await sweep.run(repoConfig(), quiet, at(4)); await sweep.run(repoConfig(), quiet, at(5));
-  assert.equal(calls.length, 2, "told once it succeeded, then never again");
+  await sweep.run(repoConfig(), quiet, at(4));
+  assert.equal(recorded, 1, "recorded on the next sweep once the board is back");
 });
 
 test("A3c: a ledger that cannot record a filing files nothing", async () => {

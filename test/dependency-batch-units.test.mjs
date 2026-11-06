@@ -54,12 +54,11 @@ test("policy: every outcome is terminal", () => {
     assert.deepEqual(policy.decide({ history: hist({ outcome }), batchIssueOpen: false, now: T0 }), { action: "skip", reason: "terminal-outcome" });
   }
 });
-test("policy: the third filing in 24h is the last; the next holds and notifies once", () => {
+test("policy: the third filing in 24h is the last; the next holds", () => {
   const filings = [at(0), at(1), at(2)].map((d) => d.toISOString());
   assert.equal(MAX_FILINGS_PER_WINDOW, 3);
   assert.deepEqual(policy.decide({ history: hist({ filings: filings.slice(0, 2) }), batchIssueOpen: false, now: at(3) }), { action: "file" });
-  assert.deepEqual(policy.decide({ history: hist({ filings }), batchIssueOpen: false, now: at(3) }), { action: "hold", filings: 3, notifyEm: true });
-  assert.deepEqual(policy.decide({ history: hist({ filings, emNotified: true }), batchIssueOpen: false, now: at(3) }), { action: "hold", filings: 3, notifyEm: false });
+  assert.deepEqual(policy.decide({ history: hist({ filings }), batchIssueOpen: false, now: at(3) }), { action: "hold", filings: 3 });
 });
 test("policy: filings older than 24h do not count", () => {
   const filings = [at(0), at(1), at(2)].map((d) => d.toISOString());
@@ -169,7 +168,7 @@ test("landing: an unreadable ledger retires nothing", async () => {
 
 // --- RecordStoreDependencyBatchLedger (the real implementation, over the in-memory record store) ---
 
-test("record-store ledger: filings, issue, outcome and EM notice round-trip through the repo record", async () => {
+test("record-store ledger: filings, issue and outcome round-trip through the repo record", async () => {
   await startGitHubWorkSource();
   memoryRecords();
   const ledger = new RecordStoreDependencyBatchLedger(new IssueRecordStore());
@@ -184,10 +183,9 @@ test("record-store ledger: filings, issue, outcome and EM notice round-trip thro
   assert.equal(found.history.filings.length, 2);
   assert.equal(await ledger.batchOfIssue(cfg, 1), undefined);
   assert.ok(await ledger.recordOutcome(cfg, batch, "landed", at(2)));
-  assert.ok(await ledger.markEmNotified(cfg, batch));
   const h = await ledger.historyOf(cfg, batch);
   assert.equal(h.outcome, "landed");
-  assert.equal(h.emNotified, true);
+  assert.equal("emNotified" in h, false, "the ledger keeps no EM-delivery flag: the unstick entry is the one record of it");
 });
 
 test("record-store ledger: an unreadable record is null, never an empty history", async () => {
