@@ -11,7 +11,8 @@
 //    loop is free, which may be after the blocking pass has ended, so a pass end also checks
 //    the gap synchronously, while the pass is still in the set.
 // 2. Node's own event-loop-delay histogram, one for the process, logged (p50, p99, max in ms)
-//    and reset every window (5 minutes).
+//    and reset every window (5 minutes). Its max is raised to the largest gap the detector saw in
+//    the window, because the histogram cannot see a freeze that happens before its first tick.
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import type { Logger } from "./logger.js";
 
@@ -39,12 +40,16 @@ export function startEventLoopMonitor(logger: Logger, opts: EventLoopMonitorOpti
   const now = opts.now ?? (() => performance.now());
   const active = new Set<string>();
   let last = now();
+  // Largest gap the detector saw this window. Node's histogram records nothing until its own timer
+  // has ticked once, so a freeze before that tick (a daemon's first pass) would be missing from its max.
+  let windowMaxGap = 0;
 
   /** Consumes the elapsed gap; logs it when it is a stall. */
   const check = (): void => {
     const t = now();
     const gap = t - last;
     last = t;
+    if (gap > windowMaxGap) windowMaxGap = gap;
     if (gap > STALL_THRESHOLD_MS) {
       const gapMs = Math.round(gap);
       logger.info(`${EVENT_LOOP_STALL_PREFIX} ${gapMs}ms active=${[...active].join(",")}`, { gap: gapMs, active: [...active] });
@@ -59,8 +64,9 @@ export function startEventLoopMonitor(logger: Logger, opts: EventLoopMonitorOpti
   const report = setInterval(() => {
     const p50 = toMs(histogram.percentile(50));
     const p99 = toMs(histogram.percentile(99));
-    const max = toMs(histogram.max);
+    const max = Math.max(toMs(histogram.max), toMs(windowMaxGap * 1e6));
     histogram.reset();
+    windowMaxGap = 0;
     logger.info(`${EVENT_LOOP_DELAY_PREFIX} p50=${p50}ms p99=${p99}ms max=${max}ms`, { p50, p99, max });
   }, opts.windowMs ?? DELAY_WINDOW_MS);
   report.unref();
