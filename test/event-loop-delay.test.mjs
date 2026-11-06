@@ -18,9 +18,9 @@ test("a pass logs one line with the prefix, repo, lane, p50, p99 and max in ms",
   mon.disable();
   assert.equal(log.lines.length, 1);
   assert.ok(log.lines[0].m.startsWith(EVENT_LOOP_DELAY_PREFIX));
-  assert.match(log.lines[0].m, /repo=r\/x lane=build p50=[\d.]+ms p99=[\d.]+ms max=[\d.]+ms/);
+  assert.match(log.lines[0].m, /repo=r\/x lane=build p50=[\d.]+ms p99=[\d.]+ms max=[\d.]+ms blocked=[\d.]+ms/);
   const d = log.lines[0].d;
-  assert.deepEqual(Object.keys(d).sort(), ["lane", "max", "p50", "p99", "repo"]);
+  assert.deepEqual(Object.keys(d).sort(), ["blocked", "lane", "max", "p50", "p99", "repo"]);
   assert.ok(d.max < 1000, "an idle pass does not invent a stall");
 });
 
@@ -80,4 +80,28 @@ test("the wrapper adds well under 1 ms to a pass", async () => {
   const perPassMs = Number(process.hrtime.bigint() - t0) / 1e6 / N;
   mon.disable();
   assert.ok(perPassMs < 0.5, `${perPassMs} ms per pass`);
+});
+
+test("a stall of exactly 2000 ms on an injected clock reports max >= 2000 ms from the first pass", async () => {
+  let t = 0;
+  const mon = startEventLoopDelayMonitor(() => t);
+  const log = logger();
+  await withPassDelay(mon, log, "r/x", "build", async () => { t += 2000; });
+  mon.disable();
+  assert.ok(log.lines[0].d.max >= 2000, JSON.stringify(log.lines[0].d));
+  assert.ok(log.lines[0].d.blocked >= 2000);
+});
+
+test("reporting work follows the stalls in a pass, not the passes in flight", async () => {
+  let t = 0;
+  const mon = startEventLoopDelayMonitor(() => t);
+  const log = logger();
+  const n = 160;
+  const windows = Array.from({ length: n }, () => mon.begin());
+  for (const w of windows) { t += 12; mon.end(w, log, "r/x", "build"); } // each ends on its own 12 ms stall
+  mon.disable();
+  assert.equal(log.lines.length, n);
+  // every window began before the first stall, so window i saw stalls 0..i: the first one, the last all n
+  assert.equal(log.lines[0].d.max, 12);
+  assert.equal(log.lines[n - 1].d.blocked, n * 12);
 });
