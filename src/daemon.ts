@@ -13,7 +13,7 @@ import { configureRunner } from "./refusal.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
 import type { ForemanRuntime } from "./runtime.js";
-import { startEventLoopDelayMonitor, withPassDelay } from "./event-loop-delay.js";
+import { startEventLoopMonitor } from "./event-loop-delay.js";
 
 export interface DaemonOptions {
   configPath?: string;
@@ -31,8 +31,9 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   let stopping = false;
   let sleepResolve: (() => void) | null = null;
   let activeConfig = config;
-  // Process-wide event-loop delay, logged and reset as each lane pass ends (#228).
-  const loopDelay = startEventLoopDelayMonitor();
+  // Event-loop stall detector and 5-minute delay histogram (#228). The window is overridable only
+  // so the acceptance script need not wait five minutes.
+  const loopMonitor = startEventLoopMonitor(logger, { windowMs: Number(process.env.FOREMAN_EVENT_LOOP_WINDOW_MS) || undefined });
 
   // No Discord (owner, 2026-10-11: "GitHub and Paperclip are where Foreman should be
   // posting important messages"). What needs a person is a label and comment on the
@@ -242,8 +243,8 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
           // The first lane mirrors the board every pass, as the whole-repo pass
           // did; the others only after they changed something, so splitting a
           // repo into lanes does not multiply the idle snapshot rate.
-          // One event-loop-delay line per pass on every outcome: completed, thrown, or cut short.
-          const result = await withPassDelay(loopDelay, logger, repoName, laneName, () =>
+          // The pass is in the stall detector's in-flight set until it returns, throws, or is cut short.
+          const result = await loopMonitor.track(repoName, laneName, () =>
             runLanePass(rt, repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work"),
           );
           didWork = result.processed > 0;
@@ -325,7 +326,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
-    loopDelay.disable();
+    loopMonitor.disable();
 
     logger.info("Shutting down...");
     requestShutdown();
