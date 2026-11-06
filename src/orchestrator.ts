@@ -375,7 +375,7 @@ async function runStage(
     //    the queue with no human step; bare everywhere else. ---
     case "dependabot":
       if (repoConfig.baseBranch !== repoConfig.productionBranch) {
-        const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
+        const filed = await tryFileDependencyBatchIssue(rt, repoConfig, base, cycleNumber);
         if (filed) {
           events.push({
             message: repoConfig.dependencyPreApproved

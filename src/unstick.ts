@@ -45,6 +45,7 @@ export const UNSTICK_KINDS = [
   "rework-decision",
   "unrelated-error",
   "epic-ready-to-close",
+  "dependency-batch-loop",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -114,7 +115,7 @@ export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): stri
 /** The kinds only an event can report: there is no persisted condition to read them from. */
 /** Immutable constant (not state): the kinds only an event can report. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
-  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close",
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop",
 ]);
 
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
@@ -368,7 +369,7 @@ export class EmHandoffs {
    */
   private async persist(
     repoConfig: RepoConfig,
-    kind: "unrelated-error" | "epic-ready-to-close",
+    kind: "unrelated-error" | "epic-ready-to-close" | "dependency-batch-loop",
     entries: readonly { tag: string; reason: string }[],
   ): Promise<number> {
     if (entries.length === 0) return 0;
@@ -417,6 +418,23 @@ export class EmHandoffs {
   /** `settleHandoffs` with this result's reports: buffered first, then drained (see there). Returns how many were new. */
   noteUnrelated(repoConfig: RepoConfig, seen: FreshUnrelated["seen"], seenOn: string, subject: string): Promise<number> {
     return this.settleHandoffs(repoConfig, subject, { seen, seenOn });
+  }
+
+  /**
+   * foreman#230: the dependency sweep filed the same batch (same PRs, same head SHAs) as many times in 24 h as its
+   * policy allows and is holding it. Raised once per batch key; the EM decides why the batch keeps coming back (a
+   * Dependabot PR left open after its version landed, a close that fails) and clears it. Resolves true once the
+   * notice is on the record (new or already there); it throws HandoffNotSaved when it cannot be saved.
+   */
+  async noteDependencyBatchLoop(repoConfig: RepoConfig, batchKey: string, filings: number): Promise<boolean> {
+    const tag = createHash("sha256").update(batchKey).digest("hex").slice(0, 12);
+    const added = await this.persist(repoConfig, "dependency-batch-loop", [{
+      tag,
+      reason: `The dependency sweep filed the same batch (${batchKey}) ${filings} times in 24 hours and is now holding it: no further issue is filed for these PRs at these head commits. ` +
+        "Each issue ended without a PR, so a Dependabot PR is probably still open after its version reached the base branch, and the Foreman's attempt to close it failed. " +
+        "Find out why, close or fix the PR(s), and the hold ends by itself (a new Dependabot push is a new batch).",
+    }]);
+    return added >= 0;
   }
 
   /**

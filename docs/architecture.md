@@ -128,7 +128,7 @@ src/
 └── index.ts           # Public API exports
 ```
 
-Branch sync and dependency batches live in `phases/promote.ts`.
+Branch sync lives in `phases/promote.ts`. The dependency sweep is orchestration there over the collaborators in `src/dependency-batch/` (batch value object, ledger, filing policy, landing).
 
 ## Programmatic usage
 
