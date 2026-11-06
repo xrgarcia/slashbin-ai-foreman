@@ -92,7 +92,7 @@ export function tryFileDependencyBatchIssue(
     policy: new DependencyBatchFilingPolicy(),
     composer: new BatchIssueComposer(host),
     filer: new BatchIssueFiler(host),
-    notifier: { batchLooping: (repo, batch, filings) => rt.handoffs.noteDependencyBatchLoop(repo, batch.key, filings) },
+    notifier: { batchLooping: (repo, batch, filings, now) => rt.handoffs.noteDependencyBatchLoop(repo, batch.key, filings, now) },
   }).run(repoConfig, depLogger);
 }
 

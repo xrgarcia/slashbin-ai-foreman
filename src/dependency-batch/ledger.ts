@@ -29,8 +29,6 @@ export interface BatchHistory {
   outcome?: BatchOutcome;
   /** ISO time the outcome was recorded. */
   outcomeAt?: string;
-  /** The EM was told this batch is looping and the sweep is holding it. Told once. */
-  emNotified?: true;
 }
 
 /**
@@ -49,8 +47,6 @@ export interface DependencyBatchLedger {
   batchOfIssue(repo: RepoConfig, issue: number): Promise<{ batch: DependencyBatch; history: BatchHistory } | undefined | null>;
   /** Record how `batch` ended. */
   recordOutcome(repo: RepoConfig, batch: DependencyBatch, outcome: BatchOutcome, at: Date): Promise<boolean>;
-  /** Record that the EM was told `batch` is looping. */
-  markEmNotified(repo: RepoConfig, batch: DependencyBatch): Promise<boolean>;
 }
 
 /** Entries that never reached a terminal outcome and have not been filed for this long are dropped. */
@@ -104,9 +100,5 @@ export class RecordStoreDependencyBatchLedger implements DependencyBatchLedger {
 
   recordOutcome(repo: RepoConfig, batch: DependencyBatch, outcome: BatchOutcome, at: Date): Promise<boolean> {
     return this.change(repo, batch, (h) => { h.outcome = outcome; h.outcomeAt = at.toISOString(); }, at);
-  }
-
-  markEmNotified(repo: RepoConfig, batch: DependencyBatch): Promise<boolean> {
-    return this.change(repo, batch, (h) => { h.emNotified = true; }, new Date());
   }
 }

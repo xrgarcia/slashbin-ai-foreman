@@ -11,9 +11,9 @@ import {
 import type { DependencyBatchLedger } from "./ledger.js";
 import type { DependencyBatchFilingPolicy } from "./policy.js";
 
-/** How the EM is told a batch is looping. Resolves false (or throws) when the notice could not be recorded. */
+/** How the EM is told a batch is looping. Idempotent: called on every held sweep. Throws when the notice could not be recorded. */
 export interface BatchLoopNotifier {
-  batchLooping(repoConfig: RepoConfig, batch: DependencyBatch, filings: number): Promise<boolean>;
+  batchLooping(repoConfig: RepoConfig, batch: DependencyBatch, filings: number, now?: Date): Promise<boolean>;
 }
 
 export interface SweepParts {
@@ -51,8 +51,8 @@ export class DependencyBatchSweep {
       return null;
     }
     if (decision.action === "hold") {
-      logger.warn(`dependency batch ${batch.key} was filed ${decision.filings} times in 24h — holding it${decision.notifyEm ? " and telling the EM" : ""}`);
-      if (decision.notifyEm) await this.tellEm(repoConfig, batch, decision.filings, logger);
+      logger.warn(`dependency batch ${batch.key} was filed ${decision.filings} times in 24h — holding it`);
+      await this.tellEm(repoConfig, batch, decision.filings, now, logger);
       return null;
     }
 
@@ -79,11 +79,14 @@ export class DependencyBatchSweep {
     return number;
   }
 
-  private async tellEm(repoConfig: RepoConfig, batch: DependencyBatch, filings: number, logger: Logger): Promise<void> {
+  /**
+   * Every held sweep puts the notice to the EM's question table, which is idempotent: it answers true at once when
+   * the EM already holds the question and nothing failed, and re-opens it when its delivery was spent. The ledger
+   * keeps no "told" flag of its own, so there is one record of delivery, not two that can disagree.
+   */
+  private async tellEm(repoConfig: RepoConfig, batch: DependencyBatch, filings: number, now: Date, logger: Logger): Promise<void> {
     try {
-      if (await this.parts.notifier.batchLooping(repoConfig, batch, filings)) {
-        if (!(await this.parts.ledger.markEmNotified(repoConfig, batch))) logger.warn(`dependency batch ${batch.key}: EM told, but the ledger could not record it`);
-      }
+      await this.parts.notifier.batchLooping(repoConfig, batch, filings, now);
     } catch (err) {
       logger.warn(`dependency batch ${batch.key}: could not raise the EM notice — retried next sweep: ${err instanceof Error ? err.message : String(err)}`);
     }

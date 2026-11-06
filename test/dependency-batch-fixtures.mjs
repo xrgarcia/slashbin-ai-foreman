@@ -34,7 +34,6 @@ export class FakeLedger {
     return undefined;
   }
   async recordOutcome(_r, batch, outcome, at) { const h = this.#h(batch); h.outcome = outcome; h.outcomeAt = at.toISOString(); return true; }
-  async markEmNotified(_r, batch) { this.#h(batch).emNotified = true; return true; }
 }
 
 /** A fake code host with one dependency PR list, one issue list and switches for each failure. */
