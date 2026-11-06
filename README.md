@@ -332,8 +332,13 @@ For code changes, the repository checks are:
 npm install
 npm run build
 npm test
+npm run acceptance
 npm run docs:check
 ```
+
+`npm run acceptance` runs every script in `scripts/acceptance/` (built `dist/`, fake `gh`, temp
+directories; no credentials). Put the last line of both `npm test` and `npm run acceptance` in a PR's
+Run evidence.
 
 The package and CLI executable are named `slashbin-ai-agent`; this repository is
 `slashbin-ai-foreman`. Generated references are maintained through the prose templates

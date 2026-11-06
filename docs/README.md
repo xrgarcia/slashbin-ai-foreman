@@ -67,6 +67,7 @@ instructions, see [implement](../skills/implement/SKILL.md) and
 | `npm run paperclip:register` | Register Foreman and configured roles in Paperclip; write their IDs into the local config. |
 | `npm run paperclip:doctor` | Check the Paperclip integration read-only; exit nonzero on a FAIL. |
 | `npm test` | Build, then run the tests in `test/`. |
+| `npm run acceptance` | Build, then run every script in `scripts/acceptance/` (fakes and temp dirs only). Include it beside `npm test` in a PR's Run evidence. |
 | `npm run docs:generate` / `npm run docs:check` | Rebuild generated references, or check whether they are current. Build first. |
 
 CLI: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`; use `--help`
