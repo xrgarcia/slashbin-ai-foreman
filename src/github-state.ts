@@ -284,7 +284,7 @@ export class GitHubState {
         if (stale) this.lastRefreshAt = this.now();
         this.lastFailure = null;
       } catch (err) {
-        this.lastFailure = { at: t, err };
+        this.lastFailure = { at: this.now(), err };
         throw err;
       } finally {
         this.inFlight = null;
@@ -314,7 +314,7 @@ export class GitHubState {
       else this.driveSync(this.refresh([...this.dirty]));
       this.lastFailure = null;
     } catch (err) {
-      this.lastFailure = { at: t, err };
+      this.lastFailure = { at: this.now(), err };
       throw err;
     }
     const still = this.unreachable.get(repo);

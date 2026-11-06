@@ -301,6 +301,38 @@ test("a failed warm rejects, and is re-thrown, not re-run, inside the cooldown",
   assert.equal(h.queries.length, 1);
 });
 
+// Tech Lead review of PR #237: the cooldown was stamped at the refresh's start, so a
+// warm that failed after a 30 s gh timeout had already used it up, and the lane's
+// next read ran the blocking query again. It is stamped when the failure lands.
+for (const [snapshot, slowMs] of [["cold", 31_000], ["cold", 93_000], ["stale", 30_000], ["stale", 93_000]]) {
+  test(`a warm that fails after ${slowMs / 1000} s (${snapshot} snapshot): the next reads re-throw it for 15 s, with no blocking query`, async () => {
+    const answers = snapshot === "stale" ? [{ r0: { issues: conn([issue(1)]), pullRequests: conn([]) } }] : [];
+    const h = asyncHarness([...answers, new Error("TLS handshake timeout")]);
+    let syncCalls = 0;
+    s.configure({ repos: ["a/x"], refreshMs: 30_000, run: (args) => { syncCalls++; return h.run(args); }, runAsync: h.runAsync, logger, now: h.now });
+    if (snapshot === "stale") { s.openIssues("a/x"); syncCalls = 0; h.tick(31_000); }
+    const failed = assert.rejects(s.warm(), /TLS handshake timeout/);
+    h.tick(slowMs); // the hung gh call times out
+    await h.release();
+    await failed;
+    assert.throws(() => s.openIssues("a/x"), /TLS handshake timeout/);
+    h.tick(14_000);
+    assert.throws(() => s.openIssues("a/x"), /TLS handshake timeout/);
+    await assert.rejects(s.warm(), /TLS handshake timeout/);
+    assert.equal(syncCalls, 0, "no synchronous query inside the cooldown");
+  });
+}
+
+test("a slow synchronous failure is also stamped when it lands", () => {
+  const h = harness([new Error("TLS handshake timeout")]);
+  let syncCalls = 0;
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run: (args) => { syncCalls++; h.tick(31_000); return h.run(args); }, logger, now: h.now });
+  assert.throws(() => s.openIssues("a/x"), /TLS handshake timeout/);
+  h.tick(1_000);
+  assert.throws(() => s.openIssues("a/x"), /TLS handshake timeout/);
+  assert.equal(syncCalls, 1);
+});
+
 test("without runAsync, warm is a no-op and reads refresh through run", async () => {
   const h = harness([{ r0: { issues: conn([issue(4)]), pullRequests: conn([]) } }]);
   s.configure({ repos: ["a/x"], refreshMs: 30_000, run: h.run, logger, now: h.now });
