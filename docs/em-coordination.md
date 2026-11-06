@@ -143,6 +143,18 @@ as `landed`, after which the sweep never files that batch again.
 `dead-zone` is an issue in a state reconcile cannot recover; a reviewer-declared hold is
 never auto-recovered and goes to the EM as a message.
 
+**How alerts reach the EM.** Every sender (release, verify, promote, the dependency sweep) hands the
+outbox one typed `Alert` (`kind`, `subject`, `dedupeKey`, `reason`) through `EmHandoffs.raise`
+(`src/unstick.ts`); there is no per-kind write path. The unstick stage delivers it. One rule re-arms
+every kind in `nextStep`: a `failed` entry whose 3 attempts are spent is called again after an hour
+(`SPENT_QUESTION_REARM_MS`) with a fresh burst of 3. Delivered entries (`invoked`, `escalated`,
+`declined`) are never re-armed this way.
+
+**Kind contract.** At startup the Foreman runs `bin/em.mjs kinds --json` and compares it with
+`UNSTICK_KINDS`; a kind the EM does not publish is logged as an error. If the EM rejects a kind
+(`unknown kind '<kind>'; nothing written`, exit 3), the entry is recorded `failed`, not `declined`,
+so it is retried once the EM is fixed. Any other exit 3 stays `declined`.
+
 After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up comment
 @-mentioning `unstickEscalationOwner` (Ray, in the `slashbin` profile; unset, the give-up is only
 logged). **That comment means the EM failed its stage** — a give-up is never the first Ray hears

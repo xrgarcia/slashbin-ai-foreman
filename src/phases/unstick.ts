@@ -30,7 +30,7 @@ import type { UnstickOutcome } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, deliverySpent, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
@@ -79,23 +79,25 @@ export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number
   // `recalls` existed is a handoff too, with none made yet.
   const handedOff = cur.recalls ?? (cur.status === "invoked" ? 0 : undefined);
   const { waitUntil: _w, ...rest } = cur;
+  // A question whose calls were all spent and is asked afresh (`nextStep` re-arm) starts a fresh burst of attempts.
+  const spentBefore = deliverySpent(cur, nowMs) ? cur.attempts : 0;
   if (o.kind === "refused") {
     const refusals = (cur.refusals ?? 0) + 1;
     const until = o.resetAtMs !== undefined && o.resetAtMs > nowMs ? o.resetAtMs : nowMs + backoffDelay(refusals, upstream);
     // A refusal is not an answer: the prior status's recall count is kept, the attempt is not spent.
-    return { ...rest, ...(handedOff !== undefined ? { recalls: handedOff } : {}), status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
+    return { ...rest, attempts: cur.attempts - spentBefore, ...(handedOff !== undefined ? { recalls: handedOff } : {}), status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
   }
   const { refusals: _r, ...clean } = rest;
   // A recall the EM declines as already answered: the handoff stands and the watch goes on (a decline is final
   // only for a question never handed off). `recalls` is set exactly while a handoff is being watched.
   if (o.kind === "declined" && handedOff !== undefined) {
-    return { ...clean, status: "invoked", attempts: cur.attempts + 1, lastCallAt: at, recalls: handedOff + 1, ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}) };
+    return { ...clean, status: "invoked", attempts: cur.attempts - spentBefore + 1, lastCallAt: at, recalls: handedOff + 1, ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}) };
   }
   // `recalls` starts at 0 with the first handoff; every later handoff for the same reason is a recall.
   return {
     ...clean,
     status: toStatus(o),
-    attempts: cur.attempts + 1,
+    attempts: cur.attempts - spentBefore + 1,
     lastCallAt: at,
     ...(o.kind === "invoked" ? { recalls: handedOff === undefined ? 0 : handedOff + 1 } : {}),
     ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}),

@@ -13,7 +13,7 @@ import type { DependencyBatchFilingPolicy } from "./policy.js";
 
 /** How the EM is told a batch is looping. Idempotent: called on every held sweep. Throws when the notice could not be recorded. */
 export interface BatchLoopNotifier {
-  batchLooping(repoConfig: RepoConfig, batch: DependencyBatch, filings: number, now?: Date): Promise<boolean>;
+  batchLooping(repoConfig: RepoConfig, batch: DependencyBatch, filings: number): Promise<boolean>;
 }
 
 export interface SweepParts {
@@ -52,7 +52,7 @@ export class DependencyBatchSweep {
     }
     if (decision.action === "hold") {
       logger.warn(`dependency batch ${batch.key} was filed ${decision.filings} times in 24h — holding it`);
-      await this.tellEm(repoConfig, batch, decision.filings, now, logger);
+      await this.tellEm(repoConfig, batch, decision.filings, logger);
       return null;
     }
 
@@ -81,12 +81,12 @@ export class DependencyBatchSweep {
 
   /**
    * Every held sweep puts the notice to the EM's question table, which is idempotent: it answers true at once when
-   * the EM already holds the question and nothing failed, and re-opens it when its delivery was spent. The ledger
+   * the EM already holds the question. Delivery, and the re-arm of a spent one, belong to the unstick stage (`nextStep`). The ledger
    * keeps no "told" flag of its own, so there is one record of delivery, not two that can disagree.
    */
-  private async tellEm(repoConfig: RepoConfig, batch: DependencyBatch, filings: number, now: Date, logger: Logger): Promise<void> {
+  private async tellEm(repoConfig: RepoConfig, batch: DependencyBatch, filings: number, logger: Logger): Promise<void> {
     try {
-      await this.parts.notifier.batchLooping(repoConfig, batch, filings, now);
+      await this.parts.notifier.batchLooping(repoConfig, batch, filings);
     } catch (err) {
       logger.warn(`dependency batch ${batch.key}: could not raise the EM notice — retried next sweep: ${err instanceof Error ? err.message : String(err)}`);
     }

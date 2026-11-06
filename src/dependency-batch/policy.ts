@@ -10,7 +10,7 @@
 //      the EM. This is the structural backstop: a future bug in landed
 //      detection becomes one EM message, not hundreds of sessions. Whether the
 //      EM already has the notice is the EM question's own state (the unstick
-//      entry, EmHandoffs.noteDependencyBatchLoop), never a flag kept here.
+//      entry, EmHandoffs.raise), never a flag kept here.
 //   5. Otherwise file.
 
 import type { BatchHistory } from "./ledger.js";

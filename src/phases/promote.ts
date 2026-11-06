@@ -18,6 +18,7 @@ import type { ForemanRuntime } from "../runtime.js";
 import { DependencyBatchSweep } from "../dependency-batch/sweep.js";
 import { BatchIssueComposer, BatchIssueFiler, DependencyDiscovery, OpenBatchIssueProbe, SecuritySelection } from "../dependency-batch/collaborators.js";
 import { DependencyBatchFilingPolicy } from "../dependency-batch/policy.js";
+import { dependencyBatchLoopAlert } from "../unstick.js";
 
 export function trySyncDrift(
   repoConfig: RepoConfig,
@@ -92,7 +93,7 @@ export function tryFileDependencyBatchIssue(
     policy: new DependencyBatchFilingPolicy(),
     composer: new BatchIssueComposer(host),
     filer: new BatchIssueFiler(host),
-    notifier: { batchLooping: (repo, batch, filings, now) => rt.handoffs.noteDependencyBatchLoop(repo, batch.key, filings, now) },
+    notifier: { batchLooping: (repo, batch, filings) => rt.handoffs.raise(repo, dependencyBatchLoopAlert(batch.key, filings)).then(() => true) },
   }).run(repoConfig, depLogger);
 }
 
