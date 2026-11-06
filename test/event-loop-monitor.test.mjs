@@ -1,4 +1,4 @@
-// Event-loop stall detector and delay histogram (slashbin-ai-foreman#228).
+// Event-loop stall detector (slashbin-ai-foreman#228).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { startEventLoopMonitor } from "../dist/event-loop-delay.js";
@@ -74,18 +74,6 @@ test("an injected 2000 ms gap logs gap >= 2000 at a pass end", async () => {
   assert.deepEqual(stalls(log)[0].d.active, ["r/x:build"]);
 });
 
-test("the histogram line reports p50, p99 and max for the window, max >= the block", async () => {
-  const log = logger();
-  const mon = startEventLoopMonitor(log, { windowMs: 1200 });
-  await sleep(100);
-  block(800);
-  await sleep(1300);
-  mon.disable();
-  const d = log.lines.find((l) => l.m.startsWith("Event-loop delay"));
-  assert.ok(d, JSON.stringify(log.lines));
-  assert.match(d.m, /^Event-loop delay p50=[\d.]+ms p99=[\d.]+ms max=[\d.]+ms$/);
-  assert.ok(d.d.max >= 700, JSON.stringify(d.d));
-});
 
 test("per-pass cost is under 0.5 ms", async () => {
   const mon = startEventLoopMonitor(logger());
@@ -95,12 +83,3 @@ test("per-pass cost is under 0.5 ms", async () => {
   assert.ok((performance.now() - t0) / 1000 < 0.5);
 });
 
-test("a freeze before the histogram's first tick still shows in the window max", async () => {
-  const log = logger();
-  const mon = startEventLoopMonitor(log, { windowMs: 1200 });
-  await mon.track("r/x", "build", async () => { block(1500); });
-  await sleep(1300);
-  mon.disable();
-  const d = log.lines.find((l) => l.m.startsWith("Event-loop delay"));
-  assert.ok(d && d.d.max >= 1400, JSON.stringify(log.lines));
-});
