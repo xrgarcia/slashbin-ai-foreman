@@ -160,7 +160,7 @@ After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up commen
 logged). **That comment means the EM failed its stage** — a give-up is never the first Ray hears
 of a stuck card.
 
-**An `invoked` answer is a handoff, not a resolution.** If the question still stands, the Foreman
+**An `invoked` answer on an issue is a handoff, not a resolution** (a repo-level alert, issue 0, has no issue to watch: once the EM took it, it is delivered and never recalled). If the question still stands, the Foreman
 calls `unstick` again after `backoff.handoff` (10 min, 30 min, 90 min), then posts a second kind of
 give-up — "the EM took this hold but nothing moved" — @ the same owner, about 7 h after the first
 call. So on a re-call, check whether the seat you handed to is still alive before handing again: a

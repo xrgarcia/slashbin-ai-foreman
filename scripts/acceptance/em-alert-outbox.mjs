@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Acceptance for foreman#232 (A1-A3 and A5; A4 is `npm test` plus dependency-batch-landed.mjs, run beside this one):
+// Acceptance for foreman#232 (A1-A3, A5 and A6; A4 is `npm test` plus dependency-batch-landed.mjs, run beside this one):
 // one raise API, one delivery policy owned by the outbox, one kind contract published by the receiver.
 //
 //   npm run build && node scripts/acceptance/em-alert-outbox.mjs
@@ -213,6 +213,29 @@ assert.ok(gaps.every((g, i) => g >= Math.min(2 ** i, 24) - 0.01), "each wait is 
 assert.ok(callHours.filter((h) => h <= 24).length - UNSTICK_MAX_ATTEMPTS <= Math.ceil(Math.log2(24))); ok("at most ceil(log2 24) re-arm calls in the first 24 hours");
 assert.equal(sessions("unrelated-error"), callHours.length); ok("the fixture EM saw exactly those sessions");
 assert.equal(logs.filter(([, m]) => /EM unreachable after/.test(m)).length, 1); ok("exactly one give-up notice for it");
+
+// === A6 ======================================================================================================================
+scenario("A6  three repo-level kinds the EM takes on the first call: 5- and 10-minute polls past the handoff window, with a restart, exactly one call each");
+reset();
+emUp(true);
+rt = boot();
+await rt.handoffs.settleHandoffs(repo, "o/svc#5", { seen: unrelated, seenOn: "o/svc PR #5 (dev)" });
+await rt.handoffs.raiseAll(repo, [epicChildClosedAlert("o/svc", 5, 880, "engineering-manager")]);
+await rt.handoffs.raise(repo, dependencyBatchLoopAlert("627@sha627", 3));
+assert.equal(await pass(rt), 3); ok("each of the three is delivered by one call");
+for (let i = 0; i < 12; i++) { // 5-minute polls for an hour, the senders raising again, a restart at 10 and 30 minutes
+  advance(5 * MIN);
+  if (i === 1 || i === 5) rt = boot();
+  await rt.handoffs.raiseAll(repo, [epicChildClosedAlert("o/svc", 5, 880, "engineering-manager")]);
+  assert.equal(await pass(rt), 0, `no call at +${(i + 1) * 5} min`);
+}
+for (const k of ["unrelated-error", "epic-ready-to-close", "dependency-batch-loop"]) assert.deepEqual([sessions(k), (await entry(rt, k)).status], [1, "invoked"]);
+ok("past the 10-minute handoff window, across restarts: still one call per kind, all `invoked`");
+reset(); emUp(true); rt = boot();
+await rt.handoffs.noteStuck(repo, 7, "needs-ruling", "the ruling is needed");
+assert.equal(await pass(rt), 1);
+advance(11 * MIN);
+assert.equal(await pass(rt), 1); ok("an issue-level handoff keeps its watch: it is recalled past the window");
 
 console.log(`\nPASS: ${checks} checks`);
 mock.timers.reset();
