@@ -119,7 +119,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
     issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes
     are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked`, 2
     `escalated` (no retry until the reason changes), 3 `declined`, anything else
-    `failed` (retried to 3 attempts). The Foreman never clears a block on exit 0 and
+    `failed` (retried to 3 attempts, then re-armed on a 1 h to 24 h back-off, one call each; an exit 3 `unknown kind` rejection is `failed`, not `declined`). The Foreman never clears a block on exit 0 and
     never writes Paperclip; the EM releases the hold on GitHub and the unblock checks
     see it. A comment opening `**EM unstick` does not count as the issue changing.
 
