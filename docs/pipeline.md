@@ -100,7 +100,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    PRs are left alone — not batched, merged or closed. If the alerts API cannot be read (404 when
    alerts are disabled, a network error) the cycle batches nothing. `dependabot.securityOnly: false`
    restores batching every Dependabot PR. It is
-   filed with the trigger label when the repo sets `dependencyPreApproved` (opt-in per repo, default off, so a newly onboarded repo needs a deliberate edit). Renovate
+   filed with the trigger label and the production grant label `deliver-to-prod` (`PROD_GRANT_LABEL`; owner decision 2026-11-06) when the repo sets `dependencyPreApproved` (opt-in per repo, default off, so a newly onboarded repo needs a deliberate edit). Renovate
    instead of Dependabot: `github.dependencyBranchPrefixes: ["renovate/"]`.
    **A batch is its PRs at their head commits, and the repo record remembers what became of it** (`dependencyBatches`,
    `src/dependency-batch/`; foreman#230). A batch that ended is never filed again; a new Dependabot push is a new batch and is

@@ -323,21 +323,21 @@ export async function findOpenDependencyBatchIssue(
  * on it is the whole behaviour, in both directions: drop it on a pre-approved
  * repo and that repo's batches stall unapproved again (as every repo's did from
  * 2026-09-07 to 2026-09-29); add it on a repo the owner never pre-approved and
- * the Foreman flies work nobody authorized. `label` is null for the latter.
+ * the Foreman flies work nobody authorized. `labels` is empty for the latter.
  */
 export function dependencyBatchIssueCreateArgs(
   repo: string,
   title: string,
   body: string,
-  label: string | null,
+  labels: string[],
 ): string[] {
   const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];
-  return label ? [...args, "--label", label] : args;
+  return [...args, ...labels.flatMap((l) => ["--label", l])];
 }
 
 /**
- * File one dependency-batch issue — carrying `label` when the repo is
- * pre-approved, bare otherwise. Returns its number, or null if `gh` refused.
+ * File one dependency-batch issue — carrying `labels` (the trigger and the
+ * production grant) when the repo is pre-approved, bare otherwise. Returns its number, or null if `gh` refused.
  *
  * **Pre-authorized (owner decision, 2026-09-29).** From 2026-09-07 these were
  * filed WITHOUT the trigger label so the owner would approve each batch by hand.
@@ -357,17 +357,27 @@ export function dependencyBatchIssueCreateArgs(
  * slashbin.io repos only; a customer's repo is the customer's call. It is an
  * opt-in `dependencyPreApproved` flag on the repo's config, default off, so a
  * newly onboarded repo can never inherit it by omission.
+ *
+ * **Production grant (owner decision, 2026-11-06).** Ray, in session: "Dependency
+ * upgrades and security patches probably should just get created with approved and
+ * delivered to prod labels." A pre-approved repo's batch is therefore filed with
+ * BOTH the trigger label and `deliver-to-prod` (`PROD_GRANT_LABEL`); before this the
+ * EM's release gate held every batch, because a standalone issue needs the grant on
+ * itself. Safe because nothing is skipped: the SRE checks logs and health on dev and
+ * again on prod, the EM still signs `ready for prod release` per issue, and production
+ * verification plus soak follow the deploy. The Foreman still never decides a release;
+ * it only files with the label, and the EM's gate is what reads it.
  */
 export async function createDependencyBatchIssue(
   repo: string,
   cwd: string,
   title: string,
   body: string,
-  label: string | null,
+  labels: string[],
   logger?: Logger,
 ): Promise<number | null> {
   try {
-    const out = await ghAsync(dependencyBatchIssueCreateArgs(repo, title, body, label), cwd);
+    const out = await ghAsync(dependencyBatchIssueCreateArgs(repo, title, body, labels), cwd);
     const m = /\/issues\/(\d+)/.exec(out);
     return m ? parseInt(m[1], 10) : null;
   } catch (err) {

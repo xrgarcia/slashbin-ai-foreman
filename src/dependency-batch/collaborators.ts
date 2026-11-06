@@ -2,7 +2,7 @@
 // function (phases/promote.ts) only wires them in order; each is unit-tested on
 // its own against a fake `DependencyHostPort`.
 
-import type { RepoConfig } from "../config.js";
+import { PROD_GRANT_LABEL, type RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { DependencyChange, PrSnapshot } from "../code-host.js";
 import type { GithubConventions } from "../config-schema/github.js";
@@ -18,7 +18,7 @@ export interface DependencyHostPort {
   findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): Promise<{ number: number } | undefined>;
   describeDependencyPR(number: number, title: string): DependencyChange;
   buildDependencyBatchIssue(landingBranch: string, changes: readonly DependencyChange[], conventions?: GithubConventions, baseBranch?: string): { title: string; body: string };
-  createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): Promise<number | null>;
+  createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, labels: string[], logger?: Logger): Promise<number | null>;
 }
 
 /** What the sweep found open. */
@@ -97,9 +97,17 @@ export class BatchIssueComposer {
 }
 
 /**
- * Step 4: the write. Carries the trigger label only on a pre-approved repo
- * (`dependencyPreApproved`, owner decision 2026-09-29), bare otherwise; the
- * label is the whole authorization, in both directions. The issue always lands
+ * The labels a batch issue is filed with: the trigger label AND the production grant
+ * on a pre-approved repo (owner decisions 2026-09-29 and 2026-11-06), none otherwise.
+ */
+export function batchIssueLabels(repoConfig: Pick<RepoConfig, "dependencyPreApproved" | "triggerLabel">): string[] {
+  return repoConfig.dependencyPreApproved ? [repoConfig.triggerLabel, PROD_GRANT_LABEL] : [];
+}
+
+/**
+ * Step 4: the write. Carries the trigger and production-grant labels only on a pre-approved
+ * repo (`dependencyPreApproved`), bare otherwise; the labels are the whole authorization,
+ * in both directions. The issue always lands
  * on the repo's base branch, never production.
  */
 export class BatchIssueFiler {
@@ -108,7 +116,7 @@ export class BatchIssueFiler {
   async file(repoConfig: RepoConfig, issue: ComposedIssue, logger: Logger): Promise<number | null> {
     return await this.host.createDependencyBatchIssue(
       repoConfig.githubRepo, repoConfig.repoPath, issue.title, issue.body,
-      repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, logger,
+      batchIssueLabels(repoConfig), logger,
     );
   }
 }

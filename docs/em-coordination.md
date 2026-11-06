@@ -14,6 +14,12 @@ a PR comment opening `**EM scope ruling` · a PR comment opening `**EM QA re-run
 edit or a lifted `blocked` label · a new corrective issue. Everything else the Foreman, Tech Lead and SRE do by themselves. If the
 action you are about to take is not one of these seven, you are doing someone else's stage.
 
+Dependency-batch issues (Dependabot version and security updates) on a `dependencyPreApproved` repo are **filed by the Foreman
+with both `approved` and `deliver-to-prod`** (Ray, 2026-11-06: standing production grant for dependency upgrades and security
+patches). The release gate therefore finds the grant on the issue itself (check 0 passes); you still run checks 1-6 and sign
+`ready for prod release` per issue, and the SRE verifies dev and prod. A batch on a repo that is not pre-approved is filed bare.
+The Foreman only files with the label; it never decides a release.
+
 `deliver-to-prod` on an epic is **not** an input the Foreman acts on: it never decides a release
 from it. The Foreman knows nothing about where a grant lives: at the `release-gate` (§3) it asks the EM
 (`em.mjs grant-state`) and carries the answer in the reason, so a grant that landed calls the EM again. The gate itself is the EM's (the deliver-to-prod skill) for applying

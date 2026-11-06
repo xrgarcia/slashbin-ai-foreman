@@ -107,12 +107,12 @@ test("composer: title and body name every PR; the batch keys on head SHAs", () =
   assert.match(issue.body, /\| #627 \| @hono\/node-server \|/);
   assert.equal(batchOf(host.prs).key, "627@sha1");
 });
-test("filer: pre-approved repos file with the trigger label, others bare", async () => {
+test("filer: pre-approved repos file with the trigger label and the production grant, others bare", async () => {
   const host = new FakeHost();
   const issue = { title: "t", body: "b", changes: [] };
   await new BatchIssueFiler(host).file(repoConfig(), issue, quiet);
   await new BatchIssueFiler(host).file(repoConfig({ dependencyPreApproved: false }), issue, quiet);
-  assert.deepEqual(host.filed.map((f) => f.label), ["approved", null]);
+  assert.deepEqual(host.filed.map((f) => f.labels), [["approved", "deliver-to-prod"], []]);
 });
 test("probe: sees an open batch issue and ignores a closed one", async () => {
   const host = new FakeHost();
