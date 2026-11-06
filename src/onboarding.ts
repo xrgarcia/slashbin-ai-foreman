@@ -51,7 +51,7 @@ export class Onboarding {
     if (entry) return entry.inFlight;
 
     const log = logger.child({ repo: repo.name, phase: "onboard" });
-    const attempt = Promise.resolve().then(() => installLabels(repo, log));
+    const attempt = Promise.resolve().then(async () => await installLabels(repo, log));
     this.onboarded.set(key, { done: false, inFlight: attempt });
     const ok = await attempt;
     if (ok) this.onboarded.set(key, { done: true });
@@ -65,11 +65,11 @@ function firstLine(err: unknown): string {
   return (stderr || message).split("\n")[0];
 }
 
-function installLabels(repo: RepoConfig, log: Logger): boolean {
+async function installLabels(repo: RepoConfig, log: Logger): Promise<boolean> {
   const wanted = labelsFor(repo);
   let existing: Set<string>;
   try {
-    existing = new Set(codeHost().labelNames(repo));
+    existing = new Set(await codeHost().labelNames(repo));
   } catch (err) {
     log.warn(`Onboarding: could not read ${repo.githubRepo}'s labels — no work starts on this repo until it can (${firstLine(err)})`);
     return false;
@@ -84,7 +84,7 @@ function installLabels(repo: RepoConfig, log: Logger): boolean {
   const failed: string[] = [];
   for (const name of missing) {
     try {
-      codeHost().createLabel(repo, name, COLOR);
+      await codeHost().createLabel(repo, name, COLOR);
     } catch (err) {
       // Created by someone else between the read and this write: present, so fine.
       const { message, stderr } = codeHost().formatGhError(err);

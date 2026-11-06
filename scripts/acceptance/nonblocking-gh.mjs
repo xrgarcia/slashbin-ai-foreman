@@ -14,13 +14,17 @@
 //   S2 loadRecord — the record store's login read and comment read
 //   S3 probe      — the GitHub back-off probe at a window's end
 //   S4 control    — a deliberate execFileSync of the same stub: the check must fail here
+//   S5 commentRead — the comment read behind the CodeHost (commentBodies)
+//   S6 releaseReads — viewReleasePr, findOpenPromotionPR and productionHead
+//   S7 lanePass   — a whole release-lane pass (runLanePass) on two repos with every gh read hung; a write fails the run
+//   S8 static     — no execFileSync/sleepSync/spawnSync in the GitHub layer; every Promise-returning CodeHost call is awaited
 // In each, while the gh call hangs, an observer event is emitted; it must be
 // delivered within 2 s (OBSERVER_TIMEOUT_MS is 30 s), and a 100 ms timer must show
 // no gap over 1 s. The stub's log must show the hung read was really in flight,
 // and no write ever reached it. Exit 0 when every check holds.
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -112,6 +116,38 @@ const scenarios = {
     // The window ends at 100 ms; its probe spawns the stub, which hangs.
     await measure(() => { B.signalUpstreamLimit("github", "acceptance: simulated limit", { resource: "core" }); return new Promise(() => {}); });
   `,
+  S5_commentRead: `
+    const { registerPlugin, startPlugins, codeHost } = await import(${JSON.stringify(dist("plugins/registry.js"))});
+    const { GitHubPlugin } = await import(${JSON.stringify(dist("plugins/github.js"))});
+    registerPlugin(new GitHubPlugin());
+    await startPlugins({ paperclip: { enabled: false } }, { logger: quiet, configText: () => null });
+    await measure(() => codeHost().commentBodies({ repoPath: ${JSON.stringify(tmp)}, githubRepo: "example/acceptance", name: "acceptance" }, 7));
+  `,
+  S6_releaseReads: `
+    const { registerPlugin, startPlugins, codeHost } = await import(${JSON.stringify(dist("plugins/registry.js"))});
+    const { GitHubPlugin } = await import(${JSON.stringify(dist("plugins/github.js"))});
+    registerPlugin(new GitHubPlugin());
+    await startPlugins({ paperclip: { enabled: false } }, { logger: quiet, configText: () => null });
+    const cfg = { repoPath: ${JSON.stringify(tmp)}, githubRepo: "example/acceptance", name: "acceptance" };
+    // One call at a time, as a release pass makes them; the first hangs, so all three are exercised as a chain.
+    await measure(async () => { await codeHost().viewReleasePr(cfg, 9); await codeHost().findOpenPromotionPR("example/acceptance", "main", "develop", ${JSON.stringify(tmp)}, quiet); await codeHost().productionHead(cfg); });
+  `,
+  S7_lanePass: `
+    const { registerPlugin, startPlugins } = await import(${JSON.stringify(dist("plugins/registry.js"))});
+    const { GitHubPlugin } = await import(${JSON.stringify(dist("plugins/github.js"))});
+    registerPlugin(new GitHubPlugin());
+    await startPlugins({ paperclip: { enabled: false } }, { logger: quiet, configText: () => null });
+    const { loadConfig } = await import(${JSON.stringify(dist("config.js"))});
+    const { lanesFor } = await import(${JSON.stringify(dist("lanes.js"))});
+    const { runLanePass } = await import(${JSON.stringify(dist("orchestrator.js"))});
+    const { ForemanRuntime } = await import(${JSON.stringify(dist("runtime.js"))});
+    const cfgPath = ${JSON.stringify(join(tmp, "lane-config.json"))};
+    (await import("node:fs")).writeFileSync(cfgPath, JSON.stringify({ repos: [{ name: "acceptance-read", repoPath: ${JSON.stringify(tmp)}, githubRepo: "example/acceptance-read" }, { name: "acceptance-write", repoPath: ${JSON.stringify(tmp)}, githubRepo: "example/acceptance-write" }] }));
+    const config = loadConfig(cfgPath);
+    const lane = lanesFor(config.stages).find((l) => l.name === "release");
+    const rt = new ForemanRuntime();
+    await measure(() => Promise.all(config.repos.map((r) => runLanePass(rt, r, config, lane, quiet, "never"))));
+  `,
   S4_control: `
     const { execFileSync } = await import("node:child_process");
     // A deliberately synchronous call of the same stub, cut at 5 s: the shape of the pre-fix runGh.
@@ -134,7 +170,7 @@ for (const [name, body] of Object.entries(scenarios)) {
 const checks = [];
 const check = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
 
-for (const [name, want] of [["S1_warmState", /^api graphql/], ["S2_loadRecord", /^api (user|--paginate)/], ["S3_probe", /^api rate_limit/]]) {
+for (const [name, want] of [["S1_warmState", /^api graphql/], ["S2_loadRecord", /^api (user|--paginate)/], ["S3_probe", /^api rate_limit/], ["S5_commentRead", /^(api|pr|issue)\b/], ["S6_releaseReads", /^(api|pr)\b/], ["S7_lanePass", /^(api|pr|issue)\b/]]) {
   const r = results[name];
   check(`${name}: the hung gh read was in flight`, !r.error && r.callStillHanging && r.stubReads.some((a) => want.test(a)), JSON.stringify({ error: r.error, hanging: r.callStillHanging, reads: r.stubReads }));
   check(`${name}: observer event delivered within ${DELIVERY_MAX_MS} ms`, !r.error && r.deliveryMs !== null && r.deliveryMs <= DELIVERY_MAX_MS, `deliveryMs=${r.deliveryMs}`);
@@ -142,6 +178,45 @@ for (const [name, want] of [["S1_warmState", /^api graphql/], ["S2_loadRecord", 
 }
 const c = results.S4_control;
 check("S4_control: a synchronous gh call fails both checks (the check can fail)", !c.error && c.deliveryMs > DELIVERY_MAX_MS && c.maxGapMs > GAP_MAX_MS, `deliveryMs=${c.deliveryMs} maxGapMs=${c.maxGapMs}`);
+// S8: no synchronous process call anywhere in the GitHub layer, so a new one cannot slip back in.
+{
+  const files = [];
+  const walk = (d) => { for (const f of readdirSync(d)) { const q = join(d, f); statSync(q).isDirectory() ? walk(q) : files.push(q); } };
+  walk(join(root, "src", "github"));
+  files.push(join(root, "src", "github-work-source.ts"));
+  const hits = [];
+  for (const f of files) {
+    readFileSync(f, "utf8").split("\n").forEach((l, i) => {
+      if (/^\s*(\/\/|\*|\/\*)/.test(l)) return;
+      if (/execFileSync|spawnSync|execSync|sleepSync|Atomics\.wait/.test(l)) hits.push(`${f.slice(root.length + 1)}:${i + 1}`);
+    });
+  }
+  check(`S8_static: no execFileSync/sleepSync/spawnSync in src/github/ or src/github-work-source.ts (${files.length} files)`, hits.length === 0, hits.join(", ") || "none");
+}
+// S8 (second half): every call to a Promise-returning CodeHost method, through `codeHost().x(` or a
+// `host.x(` alias, outside the GitHub plugin and layer, is awaited, returned, or handed to Promise.all / .then / .catch.
+{
+  const asyncMethods = [...readFileSync(join(root, "src", "code-host.ts"), "utf8").matchAll(/^  (\w+)(?:<[^>(]*>)?\([^\n]*\):\s*Promise</gm)].map((m) => m[1]);
+  const files = [];
+  const walk = (d) => { for (const f of readdirSync(d)) { const q = join(d, f); if (statSync(q).isDirectory()) walk(q); else if (q.endsWith(".ts")) files.push(q); } };
+  walk(join(root, "src"));
+  const callRe = new RegExp(`(?:codeHost\\(\\)|\\bhost)\\s*\\.(${asyncMethods.join("|")})\\(`, "g");
+  const bad = [];
+  let seen = 0;
+  for (const f of files) {
+    const rel = f.slice(root.length + 1);
+    if (rel === "src/plugins/github.ts" || rel.startsWith("src/github/")) continue;
+    const text = readFileSync(f, "utf8");
+    for (const m of text.matchAll(callRe)) {
+      seen++;
+      const before = text.slice(Math.max(0, m.index - 80), m.index).replace(/\s+$/, "").replace(/\bthis\.$/, "").replace(/\s+$/, "");
+      const ok = /(await|return|=>|Promise\.all\(\[?|\[)$/.test(before) && !/(^|[^\w])(const|let)\s+\w+\s*=\s*$/.test(before);
+      const line = text.slice(0, m.index).split("\n").length;
+      if (!ok) bad.push(`${rel}:${line} ${m[1]}`);
+    }
+  }
+  check(`S8_static: every Promise-returning CodeHost call is awaited or returned (${seen} calls, ${asyncMethods.length} methods)`, bad.length === 0 && seen > 0, bad.join(", ") || "none");
+}
 const writes = stubCalls().filter((x) => x.write);
 check("no write reached the stub gh", writes.length === 0, writes.map((w) => w.args.join(" ")).join("; ") || "none");
 

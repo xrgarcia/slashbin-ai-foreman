@@ -74,43 +74,43 @@ test("two blocks are invalid", () => {
 const err = (stderr) => Object.assign(new Error("Command failed"), { stderr });
 const P = (line) => parseReadiness(block(line));
 
-test("file_at_ref: 200 is met, 404 is unmet, any other error is unreadable and holds", () => {
+test("file_at_ref: 200 is met, 404 is unmet, any other error is unreadable and holds", async () => {
   const line = "file_at_ref: o/m a/b.md main";
-  assert.deepEqual(unmetReadiness(P(line), () => "abc123"), []);
-  const missing = unmetReadiness(P(line), () => { throw err("gh: Not Found (HTTP 404)"); });
+  assert.deepEqual(await unmetReadiness(P(line), () => "abc123"), []);
+  const missing = await unmetReadiness(P(line), () => { throw err("gh: Not Found (HTTP 404)"); });
   assert.deepEqual(missing, [line]);
-  const down = unmetReadiness(P(line), () => { throw err("gh: Server Error (HTTP 500)"); });
+  const down = await unmetReadiness(P(line), () => { throw err("gh: Server Error (HTTP 500)"); });
   assert.equal(down.length, 1);
   assert.match(down[0], /unreadable/);
   assert.ok(down[0].startsWith(line));
 });
 
-test("file_at_ref reads the path at the ref", () => {
+test("file_at_ref reads the path at the ref", async () => {
   const calls = [];
-  unmetReadiness(P("file_at_ref: o/m dir/a+b.md release/1"), (a) => { calls.push(a[1]); return "x"; });
+  await unmetReadiness(P("file_at_ref: o/m dir/a+b.md release/1"), (a) => { calls.push(a[1]); return "x"; });
   assert.deepEqual(calls, ["repos/o/m/contents/dir/a%2Bb.md?ref=release%2F1"]);
 });
 
-test("pr_merged needs merged AND the named base", () => {
+test("pr_merged needs merged AND the named base", async () => {
   const line = "pr_merged: o/s#5 base=main";
   const pr = (merged, base) => () => JSON.stringify({ merged, base });
-  assert.deepEqual(unmetReadiness(P(line), pr(true, "main")), []);
-  assert.deepEqual(unmetReadiness(P(line), pr(true, "develop")), [line], "merged to develop is not merged to main");
-  assert.deepEqual(unmetReadiness(P(line), pr(false, "main")), [line]);
+  assert.deepEqual(await unmetReadiness(P(line), pr(true, "main")), []);
+  assert.deepEqual(await unmetReadiness(P(line), pr(true, "develop")), [line], "merged to develop is not merged to main");
+  assert.deepEqual(await unmetReadiness(P(line), pr(false, "main")), [line]);
 });
 
-test("issue_closed needs a closed issue; a closed issue does not satisfy a file_at_ref", () => {
+test("issue_closed needs a closed issue; a closed issue does not satisfy a file_at_ref", async () => {
   const closed = () => "closed";
-  assert.deepEqual(unmetReadiness(P("issue_closed: o/s#5"), closed), []);
-  assert.deepEqual(unmetReadiness(P("issue_closed: o/s#5"), () => "open"), ["issue_closed: o/s#5"]);
+  assert.deepEqual(await unmetReadiness(P("issue_closed: o/s#5"), closed), []);
+  assert.deepEqual(await unmetReadiness(P("issue_closed: o/s#5"), () => "open"), ["issue_closed: o/s#5"]);
   const line = "file_at_ref: o/m a.md main";
   const asIssue = (a) => { if (a[1].includes("/contents/")) throw err("gh: Not Found (HTTP 404)"); return "closed"; };
-  assert.deepEqual(unmetReadiness(P(line), asIssue), [line]);
+  assert.deepEqual(await unmetReadiness(P(line), asIssue), [line]);
 });
 
-test("every unmet predicate and every invalid line is named", () => {
+test("every unmet predicate and every invalid line is named", async () => {
   const r = parseReadiness(block("issue_closed: o/s#1", "issue_closed: o/s#2", "oops"));
-  assert.deepEqual(unmetReadiness(r, () => "open"), ["invalid readiness line: oops", "issue_closed: o/s#1", "issue_closed: o/s#2"]);
+  assert.deepEqual(await unmetReadiness(r, () => "open"), ["invalid readiness line: oops", "issue_closed: o/s#1", "issue_closed: o/s#2"]);
 });
 
 // ---- eligibility and the hold comment, through the built connector ----

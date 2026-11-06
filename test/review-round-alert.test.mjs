@@ -59,6 +59,6 @@ test("the escalation is made once per newest review, so a new round re-escalates
 
 test("the round count and ruling are read from GitHub, not kept locally", () => {
   const gh = githubSource();
-  assert.match(gh, /export function readRulingState[\s\S]{0,400}pulls\/\$\{pr\}\/reviews/);
+  assert.match(gh, /export async function readRulingState[\s\S]{0,400}pulls\/\$\{pr\}\/reviews/);
   assert.match(gh, /issues\/\$\{pr\}\/comments/);
 });

@@ -67,7 +67,7 @@ function runCase(body, { baseMs = 200, capMs = 1600 } = {}) {
     const notes = [];
     const B = await import(${JSON.stringify(url("upstream-backoff.js"))});
     const G = await import(${JSON.stringify(url("github.js"))});
-    const call = () => { try { G.gh(["issue", "list", "--repo", "example/test"], ${JSON.stringify(dir)}); return "ok"; }
+    const call = async () => { try { await G.ghAsync(["issue", "list", "--repo", "example/test"], ${JSON.stringify(dir)}); return "ok"; }
       catch (e) { return e instanceof B.UpstreamBackoffError ? "backoff" : "error"; } };
     const BO = await import(${JSON.stringify(url("backoff.js"))});
     BO.configureBackoff({ ...BO.DEFAULT_BACKOFF, upstream: { baseMs: ${baseMs}, capMs: ${capMs}, factor: 2 } });
@@ -98,8 +98,8 @@ test("a GitHub rate limit enters the back-off once and stops every later gh spaw
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(0, nowSec() + 3600);
-    const first = call();
-    const refused = [call(), call(), call()];
+    const first = await call();
+    const refused = [await call(), await call(), await call()];
     console.log(JSON.stringify({ first, refused, work: work(), notes, blocked: B.isUpstreamBlocked("github") }));
   `);
   assert.equal(r.first, "error");
@@ -114,7 +114,7 @@ test("a GitHub rate limit enters the back-off once and stops every later gh spaw
 test("the entry window renders as 2 minutes at the default base", () => {
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
-    call();
+    await call();
     console.log(JSON.stringify({ notes }));
   `, { baseMs: 120_000, capMs: 3_600_000 });
   assert.match(r.notes[0].t, /^Foreman backing off GitHub for 2 minutes — /);
@@ -124,14 +124,14 @@ test("a failed probe extends with a doubled window; a passing probe clears and r
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(5000, nowSec(), 0);                // graphql exhausted, reset already past
-    call();
+    await call();
     writeFileSync(F.err, "");
     await sleep(300);                       // probe at ~200ms → still limited
     const afterFirstProbe = notes.length;
     rate(5000, nowSec() + 3600);
     await sleep(600);                       // probe at ~200+400ms → clear
     const resolved = await Promise.race([B.whenUpstreamClear("github").then(() => true), sleep(50).then(() => false)]);
-    console.log(JSON.stringify({ afterFirstProbe, notes, probes: probes(), resumed: call(), work: work(), resolved }));
+    console.log(JSON.stringify({ afterFirstProbe, notes, probes: probes(), resumed: await call(), work: work(), resolved }));
   `);
   assert.equal(r.afterFirstProbe, 2);
   assert.match(r.notes[1].t, /^Foreman still limited by GitHub — backing off .+ \(until \d\d:\d\d\)$/);
@@ -149,7 +149,7 @@ test("a stated GitHub reset later than the doubled window is honoured", () => {
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     const resetSec = nowSec() + 2;
     rate(0, resetSec);
-    call();
+    await call();
     await sleep(300);
     rate(5000, nowSec() + 3600);
     await sleep(2300);
@@ -163,7 +163,7 @@ test("the window doubles up to the cap and never past it", () => {
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(0, nowSec());
-    call();
+    await call();
     await sleep(100 + 200 + 400 + 400 + 400 + 150);
     const p = probes();
     console.log(JSON.stringify({ gaps: p.slice(1).map((t, i) => t - p[i]) }));
@@ -180,7 +180,7 @@ test("HTTP 429 enters the back-off; HTTP 404 does not", () => {
   ]) {
     const r = runCase(`
       writeFileSync(F.err, ${JSON.stringify(text)});
-      call();
+      await call();
       console.log(JSON.stringify({ blocked: B.isUpstreamBlocked("github") }));
     `);
     assert.equal(r.blocked, expect, text);
@@ -193,10 +193,10 @@ test("a re-entry soon after a clear continues the doubling; a later one starts a
   const reentry = (gapMs) => runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(5000, nowSec() + 3600);
-    call();                                  // enter at the base, 1000ms
+    await call();                                  // enter at the base, 1000ms
     await sleep(1050);                       // the probe clears
     await sleep(${gapMs});
-    call();
+    await call();
     console.log(JSON.stringify({ notes: notes.map((n) => n.t) }));
   `, { baseMs: 1000, capMs: 8000 });
   const soon = reentry(0);
@@ -331,14 +331,14 @@ test("each phase returns before its retry counter when the failure was an upstre
 test("a slow GitHub probe does not block the event loop; the window holds until it answers (foreman#236)", () => {
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
-    call();
+    await call();
     writeFileSync(F.err, "");
     let answer;
     B.setUpstreamProbe("github", () => new Promise((res) => { answer = res; }));
     let ticks = 0;
     const timer = setInterval(() => ticks++, 20);
     await sleep(600);                        // window ends at ~200ms; the probe is still out
-    const duringProbe = { ticks, blocked: B.isUpstreamBlocked("github"), refused: call() };
+    const duringProbe = { ticks, blocked: B.isUpstreamBlocked("github"), refused: await call() };
     answer({ clear: true });
     await sleep(20);
     clearInterval(timer);

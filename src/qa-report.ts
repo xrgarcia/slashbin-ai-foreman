@@ -138,7 +138,7 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
     hasReport: (pr) => codeHost().hasCommentStartingWith(repoConfig, pr, QA_HEADING),
     post: (pr, body) => codeHost().commentOnPr(repoConfig, pr, body),
     comments: (pr) => codeHost().commentsWithTimes(repoConfig, pr),
-    changedFiles: async (pr) => codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
+    changedFiles: async (pr) => await codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
     async run({ repo, pr, out }) {
       const qa = qaFor(repoConfig, agentConfig);
       if (!qa) return { kind: "errored", detail: `no enabled QA plugin covers ${repo}` };

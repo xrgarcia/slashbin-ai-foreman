@@ -19,7 +19,7 @@ import type { DependencyBatchLedger } from "./ledger.js";
 
 /** The one code-host call landing needs. */
 export interface PrRetirer {
-  retireDependencyPR(config: RepoConfig, number: number, reason: string): void;
+  retireDependencyPR(config: RepoConfig, number: number, reason: string): Promise<void>;
 }
 
 export type LandingResult =
@@ -42,7 +42,7 @@ export class DependencyBatchLanding {
     if (found === undefined) return { kind: "not-a-batch" };
     const { batch } = found;
 
-    const open = new Map(this.discovery.openPrs(repoConfig, logger).map((p) => [p.number, p]));
+    const open = new Map((await this.discovery.openPrs(repoConfig, logger)).map((p) => [p.number, p]));
     const comment = `Superseded by #${issue}: the Foreman's build found this update already on \`${repoConfig.baseBranch}\`.\n\n${reason}\n\n` +
       "Closing as superseded. Dependabot reopens or rebases it on its own if the update is still needed.";
     const retired: number[] = [];
@@ -54,7 +54,7 @@ export class DependencyBatchLanding {
       // Dependabot pushed since the batch was filed: that is different work, with its own key. Leave it.
       if (current?.headRefOid && pr.headSha !== "unknown" && current.headRefOid !== pr.headSha) { newerHead.push(pr.number); continue; }
       try {
-        this.host.retireDependencyPR(repoConfig, pr.number, comment);
+        await this.host.retireDependencyPR(repoConfig, pr.number, comment);
         (current ? retired : alreadyGone).push(pr.number);
       } catch (err) {
         failed.push({ number: pr.number, error: err instanceof Error ? err.message : String(err) });
