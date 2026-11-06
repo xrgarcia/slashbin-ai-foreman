@@ -104,8 +104,10 @@ export interface UnstickEntry {
   refusals?: number;
   /** ISO time before which a `refused` entry is not called again. */
   waitUntil?: string;
-  /** ISO time the handoff watch gave up with nobody to tell: it does not give up again. */
+  /** ISO time the give-up notice for a spent question (or a handoff watch) was made: it is never made twice. */
   gaveUpAt?: string;
+  /** Calls made on a spent `failed` question after its first burst of attempts: they lengthen the wait to the next one. */
+  rearms?: number;
 }
 
 /** Something stuck right now, as read this pass. */
@@ -215,15 +217,22 @@ export function derivedCandidates(
 }
 
 /**
- * How long after its last failed call a question whose calls were all spent is asked afresh (`nextStep`, for every
- * kind). Without it a notice that never reached the EM stayed undelivered after the EM came back. 1 h keeps a
- * still-down EM to one burst of calls an hour.
+ * How a question whose calls were all spent is asked again (`nextStep`, for every kind): ONE call per window, the window
+ * growing 1 h, 2 h, 4 h ... up to a day. Without it a notice that never reached the EM stayed undelivered after the EM
+ * came back; unbounded, a permanently failing one would cost an EM session an hour for ever. The window is the same
+ * `BackoffWindow` the other waits use, counted by `UnstickEntry.rearms`.
  */
-export const SPENT_QUESTION_REARM_MS = 60 * 60_000;
+export const SPENT_QUESTION_REARM: BackoffWindow = Object.freeze({ baseMs: 60 * 60_000, capMs: 24 * 60 * 60_000, factor: 2 });
+/** The first re-arm wait: how long a spent question stays quiet before its first re-arm call. */
+export const SPENT_QUESTION_REARM_MS = SPENT_QUESTION_REARM.baseMs;
 
-/** The EM never answered this question: every call failed. An accepted answer of any kind (even a decline) is not this. Pure. */
+/**
+ * The EM never answered this question: every call failed, and the wait since the last one (`SPENT_QUESTION_REARM`,
+ * by calls made past the first burst) has passed. An accepted answer of any kind (even a decline) is not this. Pure.
+ */
 export function deliverySpent(entry: UnstickEntry, nowMs: number, maxAttempts = UNSTICK_MAX_ATTEMPTS): boolean {
-  return entry.status === "failed" && entry.attempts >= maxAttempts && nowMs - Date.parse(entry.lastCallAt ?? entry.since) >= SPENT_QUESTION_REARM_MS;
+  return entry.status === "failed" && entry.attempts >= maxAttempts
+    && nowMs - Date.parse(entry.lastCallAt ?? entry.since) >= backoffDelay((entry.rearms ?? 0) + 1, SPENT_QUESTION_REARM);
 }
 
 /** Whether a candidate needs an EM call now, given what the table holds for it. Pure. */
@@ -242,7 +251,7 @@ const NO_HANDOFF_WATCH: UnstickPolicy["handoff"] = Object.freeze({ baseMs: 0, ca
 /**
  * What the unstick stage does with a standing question this pass. Pure apart from `now` (epoch ms).
  *
- *  - `call`: ask the agent (again), including a question whose calls were all spent, once `SPENT_QUESTION_REARM_MS` passed.
+ *  - `call`: ask the agent (again), including a question whose calls were all spent, one call at a time on the `SPENT_QUESTION_REARM` back-off.
  *  - `give-up`: a handoff was made `maxRecalls + 1` times and the issue never
  *    moved; tell the escalation owner, once.
  *  - `wait`: nothing to do yet.
