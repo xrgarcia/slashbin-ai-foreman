@@ -3,7 +3,7 @@
 import type { Logger } from "../logger.js";
 import { IssueSnapshot, PrSnapshot, forgetOpenPrs, formatGhError, getOpenIssues, getOpenPrs } from "./cache.js";
 import type { RepoConfig } from "../config.js";
-import { gh, isBackoffRefusal } from "./gh.js";
+import { ghAsync, isBackoffRefusal } from "./gh.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./conventions.js";
 import type { DependencyChange } from "../code-host.js";
 export type { DependencyChange } from "../code-host.js";
@@ -69,17 +69,17 @@ export function dependencyBatchBases(
     .filter((b): b is string => !!b && b !== productionBranch);
 }
 
-export function findDependencyPRs(
+export async function findDependencyPRs(
   repo: string,
   cwd: string,
   bases: readonly string[],
   logger?: Logger,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
-): PrSnapshot[] {
+): Promise<PrSnapshot[]> {
   const allowed = new Set(bases);
   const prefixes = conventions.dependencyBranchPrefixes;
   try {
-    return getOpenPrs(repo, cwd).filter(
+    return (await getOpenPrs(repo, cwd)).filter(
       (p) => allowed.has(p.baseRefName) && prefixes.some((x) => p.headRefName.startsWith(x)),
     );
   } catch (err) {
@@ -104,8 +104,8 @@ export function findDependencyPRs(
  * an unreadable alert list must never degrade to "everything is a security
  * update", which is the behaviour this exists to remove.
  */
-export function fetchOpenAlertPackages(repo: string, cwd: string): Set<string> {
-  const out = gh([
+export async function fetchOpenAlertPackages(repo: string, cwd: string): Promise<Set<string>> {
+  const out = await ghAsync([
     "api", "--paginate", `repos/${repo}/dependabot/alerts?state=open&per_page=100`,
     "--jq", ".[].dependency.package.name",
   ], cwd);
@@ -308,13 +308,13 @@ export function buildDependencyBatchIssue(
  * Reads the per-cycle open-issue snapshot rather than issuing its own query, so
  * this costs nothing on the twenty-repo sweep.
  */
-export function findOpenDependencyBatchIssue(
+export async function findOpenDependencyBatchIssue(
   repo: string,
   cwd: string,
   logger: Logger,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
-): IssueSnapshot | undefined {
-  return getOpenIssues(repo, cwd, logger)
+): Promise<IssueSnapshot | undefined> {
+  return (await getOpenIssues(repo, cwd, logger))
     .find((i) => i.title.startsWith(conventions.dependencyBatchTitlePrefix));
 }
 
@@ -358,16 +358,16 @@ export function dependencyBatchIssueCreateArgs(
  * opt-in `dependencyPreApproved` flag on the repo's config, default off, so a
  * newly onboarded repo can never inherit it by omission.
  */
-export function createDependencyBatchIssue(
+export async function createDependencyBatchIssue(
   repo: string,
   cwd: string,
   title: string,
   body: string,
   label: string | null,
   logger?: Logger,
-): number | null {
+): Promise<number | null> {
   try {
-    const out = gh(dependencyBatchIssueCreateArgs(repo, title, body, label), cwd);
+    const out = await ghAsync(dependencyBatchIssueCreateArgs(repo, title, body, label), cwd);
     const m = /\/issues\/(\d+)/.exec(out);
     return m ? parseInt(m[1], 10) : null;
   } catch (err) {
@@ -383,10 +383,10 @@ export function createDependencyBatchIssue(
  * resolved. Closing a superseded Dependabot PR is what Dependabot itself
  * expects; it reopens or rebases on its own if the update is still needed.
  */
-export function retireDependencyPR(config: RepoConfig, number: number, reason: string): void {
-  const state = gh(["pr", "view", String(number), "--repo", config.githubRepo, "--json", "state", "--jq", ".state"], config.repoPath).trim();
+export async function retireDependencyPR(config: RepoConfig, number: number, reason: string): Promise<void> {
+  const state = (await ghAsync(["pr", "view", String(number), "--repo", config.githubRepo, "--json", "state", "--jq", ".state"], config.repoPath)).trim();
   if (state !== "OPEN") return;
-  gh(["pr", "close", String(number), "--repo", config.githubRepo, "--comment", reason], config.repoPath);
+  await ghAsync(["pr", "close", String(number), "--repo", config.githubRepo, "--comment", reason], config.repoPath);
   forgetOpenPrs(config.githubRepo);
 }
 

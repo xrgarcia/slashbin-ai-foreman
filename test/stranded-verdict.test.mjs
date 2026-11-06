@@ -21,8 +21,8 @@ const fn = github.slice(github.indexOf("function currentVerdictRequestsChanges")
 const body = fn.slice(0, fn.indexOf("\n}\n"));
 
 test("a current verdict is checked for CHANGES_REQUESTED before the PR is skipped", () => {
-  const find = github.slice(github.indexOf("export function findPRsNeedingReview"));
-  const guard = find.slice(find.indexOf("if (hasFreshReview("), find.indexOf("needs review (issues"));
+  const find = github.slice(github.indexOf("export async function findPRsNeedingReview"));
+  const guard = find.slice(find.indexOf("if (await hasFreshReview("), find.indexOf("needs review (issues"));
   const check = guard.indexOf("currentVerdictRequestsChanges(");
   assert.ok(check > 0, "without it a review that died after its verdict parks the PR forever");
   assert.ok(check > guard.indexOf("returnedToReviewSinceVerdict("), "a return to review still wins: that is a re-review");

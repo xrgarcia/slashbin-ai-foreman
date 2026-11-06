@@ -26,7 +26,7 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { formatGhError, getOpenIssues, hasLabel } from "./cache.js";
 import { commentOnIssue } from "./ci-gate.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import { hasCommentContaining } from "./pr-comments.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import type { PromotionIssue } from "./promotion.js";
@@ -57,11 +57,11 @@ export function mergedPrNumber(headline: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-function readPr(prViews: PrViews, repo: string, pr: number, cwd: string): PrView {
+async function readPr(prViews: PrViews, repo: string, pr: number, cwd: string): Promise<PrView> {
   const key = `${repo}#${pr}`;
   const known = prViews.get(key);
   if (known) return known;
-  const out = gh(["pr", "view", String(pr), "--repo", repo, "--json", "state,title,body,headRefName,commits"], cwd);
+  const out = await ghAsync(["pr", "view", String(pr), "--repo", repo, "--json", "state,title,body,headRefName,commits"], cwd);
   const v = JSON.parse(out || "{}") as Partial<PrView>;
   const view: PrView = {
     state: v.state ?? "",
@@ -79,11 +79,11 @@ function readPr(prViews: PrViews, repo: string, pr: number, cwd: string): PrView
  * issues it implements. Null when GitHub could not be read: the release then
  * proceeds with the authorized issues only, as it did before this read existed.
  */
-export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unresolved?: number[]): CarriedMerge[] | null {
+export async function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unresolved?: number[]): Promise<CarriedMerge[] | null> {
   const { githubRepo: repo, productionBranch, baseBranch, repoPath: cwd } = repoConfig;
   const prViews: PrViews = new Map();
   try {
-    const out = gh([
+    const out = await ghAsync([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}?per_page=100`, "--paginate",
       "--jq", '.commits[] | {sha: .sha, headline: (.commit.message | split("\\n")[0])} | @json',
     ], cwd);
@@ -100,7 +100,7 @@ export function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unreso
       // A `(#N)` suffix on a commit inside a merge is usually an ISSUE number, so
       // the number may not be a PR at all: skip it, never abandon the inventory.
       let view: PrView;
-      try { view = readPr(prViews, repo, pr, cwd); } catch (err) {
+      try { view = await readPr(prViews, repo, pr, cwd); } catch (err) {
         // Not-a-PR is the normal case for an issue number; any other failure leaves a merge
         // unread, so the caller that must be sure of the inventory is told which one.
         const f = formatGhError(err);
@@ -163,10 +163,10 @@ export function planCarry(
  * status, until the EM signs each one; then the ordinary promote path moves it
  * to `release pending`.
  */
-export function adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): ReleaseCarry {
-  const merges = listCarriedMerges(repoConfig, logger);
+export async function adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry> {
+  const merges = await listCarriedMerges(repoConfig, logger);
   if (merges === null) return NO_CARRY;
-  const open = new Map(getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger).map((i) => [i.number, i]));
+  const open = new Map((await getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)).map((i) => [i.number, i]));
   const plan = planCarry(merges, authorized, (n) => open.get(n)?.title ?? null);
   const { readyForProd } = repoConfig.lifecycleLabels;
   const adopted: PromotionIssue[] = [];
@@ -205,7 +205,7 @@ export async function noteCarried(
       if (await hasCommentContaining(repoConfig, i.number, mark)) continue;
       const prs = carry.prsByIssue.get(i.number) ?? [];
       const alongside = authorized.length > 0 ? ` alongside ${authorized.map((n) => `#${n}`).join(", ")}` : "";
-      commentOnIssue(repoConfig, i.number, [
+      await commentOnIssue(repoConfig, i.number, [
         mark,
         `**Carried to production in release PR #${releasePr}${alongside}, awaiting the EM's sign-off.** Its merge (PR ${prs.map((p) => `#${p}`).join(", ")}) is on ` +
         `\`${repoConfig.baseBranch}\`, and a release promotes all of \`${repoConfig.baseBranch}\`, so this issue is listed in the release. ` +

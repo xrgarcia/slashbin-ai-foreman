@@ -11,14 +11,14 @@ import { DependencyBatch } from "./batch.js";
 /** The slice of the code host the sweep uses. `CodeHost` satisfies it. */
 export interface DependencyHostPort {
   dependencyBatchBases(baseBranch: string | undefined, productionBranch: string, legacyFeatureBranch?: string): string[];
-  findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): PrSnapshot[];
-  fetchOpenAlertPackages(repo: string, cwd: string): Set<string>;
+  findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): Promise<PrSnapshot[]>;
+  fetchOpenAlertPackages(repo: string, cwd: string): Promise<Set<string>>;
   selectSecurityPRs<T extends Pick<PrSnapshot, "title" | "body">>(prs: readonly T[], alertPackages: ReadonlySet<string>): T[];
   formatGhError(err: unknown): { message: string; stderr: string; status: number | null };
-  findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): { number: number } | undefined;
+  findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): Promise<{ number: number } | undefined>;
   describeDependencyPR(number: number, title: string): DependencyChange;
   buildDependencyBatchIssue(landingBranch: string, changes: readonly DependencyChange[], conventions?: GithubConventions, baseBranch?: string): { title: string; body: string };
-  createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): number | null;
+  createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): Promise<number | null>;
 }
 
 /** What the sweep found open. */
@@ -31,16 +31,16 @@ export interface DiscoveredDependencies {
 export class DependencyDiscovery {
   constructor(private readonly host: Pick<DependencyHostPort, "dependencyBatchBases" | "findDependencyPRs">) {}
 
-  discover(repoConfig: RepoConfig, logger: Logger): DiscoveredDependencies | null {
+  async discover(repoConfig: RepoConfig, logger: Logger): Promise<DiscoveredDependencies | null> {
     const bases = this.host.dependencyBatchBases(repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.featureBranch);
     if (bases.length === 0) return null;
-    const prs = this.host.findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, logger, repoConfig.github);
+    const prs = await this.host.findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, logger, repoConfig.github);
     return prs.length === 0 ? null : { bases, prs };
   }
 
   /** The open Dependabot PRs on the repo's dependency bases; empty when there are none or the list cannot be read. */
-  openPrs(repoConfig: RepoConfig, logger: Logger): PrSnapshot[] {
-    return this.discover(repoConfig, logger)?.prs ?? [];
+  async openPrs(repoConfig: RepoConfig, logger: Logger): Promise<PrSnapshot[]> {
+    return (await this.discover(repoConfig, logger))?.prs ?? [];
   }
 }
 
@@ -52,11 +52,11 @@ export class DependencyDiscovery {
 export class SecuritySelection {
   constructor(private readonly host: Pick<DependencyHostPort, "fetchOpenAlertPackages" | "selectSecurityPRs" | "formatGhError">) {}
 
-  select(repoConfig: RepoConfig, prs: PrSnapshot[], logger: Logger): PrSnapshot[] {
+  async select(repoConfig: RepoConfig, prs: PrSnapshot[], logger: Logger): Promise<PrSnapshot[]> {
     if (!repoConfig.dependabot.securityOnly) return prs;
     let alerts: Set<string>;
     try {
-      alerts = this.host.fetchOpenAlertPackages(repoConfig.githubRepo, repoConfig.repoPath);
+      alerts = await this.host.fetchOpenAlertPackages(repoConfig.githubRepo, repoConfig.repoPath);
     } catch (err) {
       logger.warn("dependabot: could not read open Dependabot alerts — batching nothing this cycle", {
         ...this.host.formatGhError(err), repo: repoConfig.githubRepo, dependencyPRs: prs.length,
@@ -105,8 +105,8 @@ export class BatchIssueComposer {
 export class BatchIssueFiler {
   constructor(private readonly host: Pick<DependencyHostPort, "createDependencyBatchIssue">) {}
 
-  file(repoConfig: RepoConfig, issue: ComposedIssue, logger: Logger): number | null {
-    return this.host.createDependencyBatchIssue(
+  async file(repoConfig: RepoConfig, issue: ComposedIssue, logger: Logger): Promise<number | null> {
+    return await this.host.createDependencyBatchIssue(
       repoConfig.githubRepo, repoConfig.repoPath, issue.title, issue.body,
       repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, logger,
     );
@@ -117,7 +117,7 @@ export class BatchIssueFiler {
 export class OpenBatchIssueProbe {
   constructor(private readonly host: Pick<DependencyHostPort, "findOpenDependencyBatchIssue">) {}
 
-  isOpen(repoConfig: RepoConfig, logger: Logger): boolean {
-    return this.host.findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, logger, repoConfig.github) !== undefined;
+  async isOpen(repoConfig: RepoConfig, logger: Logger): Promise<boolean> {
+    return await this.host.findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, logger, repoConfig.github) !== undefined;
   }
 }

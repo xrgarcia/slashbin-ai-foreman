@@ -20,7 +20,7 @@
 import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { getOpenIssues, hasLabel, type IssueSnapshot } from "./cache.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import { hasCommentContaining } from "./pr-comments.js";
 import { CARRIED_MARK, listCarriedMerges } from "./release-carry.js";
 
@@ -34,19 +34,22 @@ export interface SignoffGate {
 
 /**
  * The listed open issues that carry no sign-off label, ascending, plus any that
- * carry one the Foreman wrote itself (`foremanSigned`). Pure, exported for tests.
+ * carry one the Foreman wrote itself (`foremanSigned`, which may read GitHub). Exported for tests.
  */
-export function unsignedIssues(
+export async function unsignedIssues(
   open: readonly IssueSnapshot[],
   listed: ReadonlySet<number>,
   labels: LifecycleLabels,
-  foremanSigned: (issue: number) => boolean = () => false,
-): number[] {
+  foremanSigned: (issue: number) => boolean | Promise<boolean> = () => false,
+): Promise<number[]> {
   const signedLabels = [labels.readyForProd, labels.releasePending, labels.prodVerifyHeld, labels.readyToClose];
-  return open
-    .filter((i) => listed.has(i.number) && (!signedLabels.some((l) => hasLabel(i, l)) || foremanSigned(i.number)))
-    .map((i) => i.number)
-    .sort((a, b) => a - b);
+  const out: number[] = [];
+  // In order, one at a time: `foremanSigned` reads GitHub, and only for an issue that carries a sign-off label.
+  for (const i of open) {
+    if (!listed.has(i.number)) continue;
+    if (!signedLabels.some((l) => hasLabel(i, l)) || await foremanSigned(i.number)) out.push(i.number);
+  }
+  return out.sort((a, b) => a - b);
 }
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -72,29 +75,29 @@ export class ReleaseSignoff {
    * adopted. Reads GitHub only for issues carrying the comment; a human sign-off
    * is remembered. Throws on a failed read (the caller holds the release).
    */
-  foremanApplied(config: RepoConfig, n: number): boolean {
+  async foremanApplied(config: RepoConfig, n: number): Promise<boolean> {
     const key = `${config.githubRepo}#${n}`;
     if (this.humanSigned.has(key)) return false;
-    const rows = gh([
+    const rows = (await ghAsync([
       "api", `repos/${config.githubRepo}/issues/${n}/comments?per_page=100`, "--paginate",
       "--jq", ".[] | {body: .body, by: .user.login} | @json",
-    ], config.repoPath).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { body?: string; by?: string });
+    ], config.repoPath)).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { body?: string; by?: string });
     const adopted = rows.find((r) => (r.body ?? "").includes(CARRIED_MARK));
     if (!adopted?.by) return false;
-    const events = gh([
+    const events = (await ghAsync([
       "api", `repos/${config.githubRepo}/issues/${n}/events?per_page=100`, "--paginate",
       "--jq", '.[] | select(.event=="labeled") | {label: .label.name, by: .actor.login} | @json',
-    ], config.repoPath).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { label?: string; by?: string });
+    ], config.repoPath)).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { label?: string; by?: string });
     const byEm = events.some((e) => e.label === config.lifecycleLabels.readyForProd && e.by !== adopted.by);
     if (byEm) this.humanSigned.add(key);
     return !byEm;
   }
 
   /** `foremanApplied` for the gate: a failed read counts as Foreman-applied, so the release holds. */
-  foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: number) => boolean {
-    return (n) => {
+  foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: number) => Promise<boolean> {
+    return async (n) => {
       try {
-        return this.foremanApplied(config, n);
+        return await this.foremanApplied(config, n);
       } catch (err) {
         logger.warn(`Could not tell who signed off #${n}: ${errText(err)}`);
         return true;
@@ -108,12 +111,12 @@ export class ReleaseSignoff {
    * when the merges cannot be read. The release PR's body is a snapshot: an issue
    * that merged after it was written is in the head all the same.
    */
-  unsignedInHead(config: RepoConfig, logger: Logger): { unsigned: number[]; unresolved: number[] } | null {
+  async unsignedInHead(config: RepoConfig, logger: Logger): Promise<{ unsigned: number[]; unresolved: number[] } | null> {
     const unresolved: number[] = [];
-    const merges = listCarriedMerges(config, logger, unresolved);
+    const merges = await listCarriedMerges(config, logger, unresolved);
     if (merges === null) return null;
     const carried = new Set(merges.filter((m) => !m.exempt).flatMap((m) => m.issues));
-    const unsigned = unsignedIssues(getOpenIssues(config.githubRepo, config.repoPath, logger), carried, config.lifecycleLabels, this.foremanAppliedOrHold(config, logger));
+    const unsigned = await unsignedIssues(await getOpenIssues(config.githubRepo, config.repoPath, logger), carried, config.lifecycleLabels, this.foremanAppliedOrHold(config, logger));
     return { unsigned, unresolved };
   }
 
@@ -135,14 +138,14 @@ export class ReleaseSignoff {
         ? `Awaiting EM sign-off (ready for prod release): ${list(unsigned)}`
         : `Cannot read merged PR ${list(unresolved)}; sign-off unknown`).slice(0, 140);
     try {
-      gh([
+      await ghAsync([
         "api", "--method", "POST", `repos/${config.githubRepo}/statuses/${headSha}`,
         "-f", `state=${held ? "failure" : "success"}`, "-f", `context=${ctx}`, "-f", `description=${description}`, "--silent",
       ], config.repoPath);
       if (held) {
         const mark = `${SIGNOFF_MARK} ${unsigned.join(",")}${unresolved.length ? `;unread ${unresolved.join(",")}` : ""} -->`;
         if (!(await hasCommentContaining(config, pr, mark))) {
-          gh([
+          await ghAsync([
             "api", "--method", "POST", `repos/${config.githubRepo}/issues/${pr}/comments`,
             "-f", `body=${[
               mark,

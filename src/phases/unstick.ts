@@ -122,10 +122,10 @@ export async function tryUnstick(
   try {
     // The issues this pass looks at: the repo's open ones. When GitHub cannot be read there are none, and the
     // pass keeps to what is held in state (the questions about no issue) and prunes nothing it cannot see.
-    let issues: ReturnType<CodeHost["getOpenIssues"]> | null = null;
+    let issues: Awaited<ReturnType<CodeHost["getOpenIssues"]>> | null = null;
     if (!isUpstreamBlocked("github")) {
       try {
-        issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
+        issues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
       } catch (err) {
         log.warn(`Could not read open issues for the unstick pass: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -247,7 +247,7 @@ export async function tryUnstick(
           await markNoticed();
         } else {
           try {
-            (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
+            await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
             await mutate(rt, repoConfig, c.issue, (table) => {
               const cur = table[key];
               if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
@@ -288,7 +288,7 @@ async function giveUpHandoff(
     return;
   }
   try {
-    (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, handoffGiveUpComment(owner, entry));
+    await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, handoffGiveUpComment(owner, entry));
     await mark({ status: "escalated" });
     log.warn(`${what} — escalated to @${owner}`);
   } catch (err) {

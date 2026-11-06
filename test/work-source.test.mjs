@@ -113,7 +113,7 @@ test("the GitHub connector offers every eligible issue, uncapped, in gh order", 
   const config = load({});
   const items = await new GitHubIssueConnector().selectWork(config.repos[0], config, logger);
   assert.deepEqual(items.map((w) => w.issueNumber), [5, 4, 3, 2, 1]);
-  assert.deepEqual(discoveryBatch(config.repos[0], [5, 4, 3, 2, 1], logger), [1, 2, 3],
+  assert.deepEqual(await discoveryBatch(config.repos[0], [5, 4, 3, 2, 1], logger), [1, 2, 3],
     "unranked, the batch is oldest first, capped at the size asked for");
 });
 
@@ -139,9 +139,9 @@ test("4 approved → 1 claimed + 3 left todo: the highest tier, else the oldest"
   // example/ordered offers 5, 4, 2, 1 (#3 waits on its blocker); #5 is the S1.
   assert.ok(prompt?.includes("no others: #5."), prompt?.slice(0, 300));
   assert.deepEqual(numbersOf("claim", evs), [5]);
-  const unranked = discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, () => []);
+  const unranked = await discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, () => []);
   assert.deepEqual(unranked, [1], "with no priority labels, the oldest is built");
-  const ranked = discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, (n) => (n === 7 ? ["bug"] : []));
+  const ranked = await discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, (n) => (n === 7 ? ["bug"] : []));
   assert.deepEqual(ranked, [7], "a higher tier goes before an older issue");
 });
 

@@ -85,13 +85,11 @@ export interface GitHubStateOptions {
   issueLimit?: number;
   /** Where the state is persisted; omit to keep it in memory only. */
   persistPath?: string;
-  /** Run `gh` with the Foreman token. Injected so this module has no gh of its own. */
-  run: (args: string[]) => string;
   /**
-   * The same runner without blocking the event loop. With it, `warm` refreshes off
-   * the loop; without it, `warm` is a no-op and reads refresh through `run`.
+   * Run `gh` with the Foreman token, without blocking the event loop. Injected so this
+   * module has no gh of its own.
    */
-  runAsync?: (args: string[]) => Promise<string>;
+  runAsync: (args: string[]) => Promise<string>;
   logger: Logger;
   now?: () => number;
 }
@@ -199,20 +197,20 @@ export class GitHubState {
   }
 
   /** Every open issue in `repo`, refreshing first if stale. */
-  openIssues(repo: string): StateIssue[] {
-    this.ensureFresh(repo);
+  async openIssues(repo: string): Promise<StateIssue[]> {
+    await this.ensureFresh(repo);
     return this.views.get(repo)?.issues ?? [];
   }
 
   /** Every open PR in `repo`, refreshing first if stale. */
-  openPrs(repo: string): StatePr[] {
-    this.ensureFresh(repo);
+  async openPrs(repo: string): Promise<StatePr[]> {
+    await this.ensureFresh(repo);
     return this.views.get(repo)?.prs ?? [];
   }
 
   /** Changes whenever a PR in `repo` was seen merged or closed — a cache key for merged/closed PR reads. */
-  closedVersion(repo: string): number {
-    this.ensureFresh(repo);
+  async closedVersion(repo: string): Promise<number> {
+    await this.ensureFresh(repo);
     return this.views.get(repo)?.closedVersion ?? 0;
   }
 
@@ -254,9 +252,9 @@ export class GitHubState {
   }
 
   /** Refresh every configured repo in one pass. */
-  refreshAll(): void {
+  async refreshAll(): Promise<void> {
     if (!this.opts) return;
-    this.driveSync(this.refresh(this.opts.repos));
+    await this.driveAsync(this.refresh(this.opts.repos), this.opts.runAsync);
     this.lastRefreshAt = this.now();
   }
 
@@ -272,7 +270,7 @@ export class GitHubState {
    */
   warm(): Promise<void> {
     const o = this.opts;
-    if (!o?.runAsync) return Promise.resolve();
+    if (!o) return Promise.resolve();
     if (this.inFlight) return this.inFlight;
     const t = this.now();
     const stale = t - this.lastRefreshAt >= o.refreshMs || o.repos.some((r) => !this.views.has(r));
@@ -280,7 +278,7 @@ export class GitHubState {
     if (this.lastFailure && t - this.lastFailure.at < FAILURE_COOLDOWN_MS) return Promise.reject(this.lastFailure.err);
     const run = (async () => {
       try {
-        await this.driveAsync(this.refresh(stale ? o.repos : [...this.dirty]), o.runAsync!);
+        await this.driveAsync(this.refresh(stale ? o.repos : [...this.dirty]), o.runAsync);
         if (stale) this.lastRefreshAt = this.now();
         this.lastFailure = null;
       } catch (err) {
@@ -294,7 +292,13 @@ export class GitHubState {
     return run;
   }
 
-  private ensureFresh(repo: string): void {
+  /**
+   * Bring `repo`'s view up to date before a read, through the async runner: the event
+   * loop keeps turning while GitHub answers (or does not). A merely stale view is
+   * served as it is while a refresh is already in flight; a repo this process wrote
+   * to waits for it (read your writes).
+   */
+  private async ensureFresh(repo: string): Promise<void> {
     if (!this.opts || !this.opts.repos.includes(repo)) return;
     const t = this.now();
     // A repo GitHub cannot resolve fails its own reads only, and is not re-queried until its retry time.
@@ -303,38 +307,19 @@ export class GitHubState {
     const stale = t - this.lastRefreshAt >= this.opts.refreshMs || !this.views.has(repo);
     if (!stale && !this.dirty.has(repo)) return;
     // An async refresh is already bringing the view up to date: a merely stale
-    // view is served as it is rather than blocking every lane on a second,
-    // synchronous query. A write this repo saw still refreshes (read your writes).
+    // view is served as it is rather than waiting on a second query. A write this
+    // repo saw still refreshes (read your writes).
     if (this.inFlight && this.views.has(repo) && !this.dirty.has(repo)) return;
     // A failed bulk query fails every repo's read at once. Without this, each of
     // the 20 repo loops would re-run the whole fleet query to fail again.
     if (this.lastFailure && t - this.lastFailure.at < FAILURE_COOLDOWN_MS) throw this.lastFailure.err;
-    try {
-      if (stale) this.refreshAll();
-      else this.driveSync(this.refresh([...this.dirty]));
-      this.lastFailure = null;
-    } catch (err) {
-      this.lastFailure = { at: this.now(), err };
-      throw err;
-    }
+    // `warm` shares the refresh in flight and records a failure for the cooldown above.
+    // An in-flight refresh may have started before the write that dirtied this repo
+    // (its answer is then not applied), so a still-dirty repo gets one more pass.
+    await this.warm();
+    if (this.dirty.has(repo)) await this.warm();
     const still = this.unreachable.get(repo);
     if (still) throw unreachableError(repo, still);
-  }
-
-  /** Run a refresh's queries through the synchronous runner (the fallback). */
-  private driveSync(steps: RefreshSteps): void {
-    let r = steps.next();
-    while (!r.done) {
-      const query = r.value;
-      let out: string;
-      try {
-        out = graphqlBody(() => this.opts!.run(graphqlArgs(query)));
-      } catch (err) {
-        r = steps.throw(err);
-        continue;
-      }
-      r = steps.next(out);
-    }
   }
 
   /** Run a refresh's queries through the async runner: the event loop keeps turning. */
@@ -551,10 +536,6 @@ function bodyFromFailure(err: unknown): string {
   try { usable = !!(JSON.parse(out) as { data?: unknown }).data; } catch { /* not JSON */ }
   if (!usable) throw err;
   return out;
-}
-
-function graphqlBody(run: () => string): string {
-  try { return run(); } catch (err) { return bodyFromFailure(err); }
 }
 
 async function graphqlBodyAsync(run: () => Promise<string>): Promise<string> {

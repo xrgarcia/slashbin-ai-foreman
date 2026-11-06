@@ -20,7 +20,7 @@ import { BackoffTracker } from "../backoff.js";
 import * as reviewFreshness from "../github/review-freshness.js";
 import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
-import { gh, ghAsync } from "../github/gh.js";
+import { ghAsync } from "../github/gh.js";
 import { fleetState } from "../github-state.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import type { ForemanPlugin, PluginRole } from "./contract.js";
@@ -46,7 +46,6 @@ export function githubCodeHost(
     // The fleet state reads with the Foreman token from the daemon's cwd, as before.
     configureState: (opts) => fleetState.configure({
       ...opts,
-      run: (args) => gh(args, process.cwd()),
       runAsync: (args) => ghAsync(args, process.cwd()),
     }),
     setStateRepos: (repos) => fleetState.setRepos(repos),
@@ -128,7 +127,7 @@ export function githubCodeHost(
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),
     syncSignoff: (config, pr, headSha, unsigned, logger, unresolved) => signoff.syncSignoff(config, pr, headSha, unsigned, logger, unresolved),
-    unsignedInHead: (config, logger) => signoff.unsignedInHead(config, logger),
+    unsignedInHead: async (config, logger) => await signoff.unsignedInHead(config, logger),
     unsignedIssues: releaseSignoff.unsignedIssues,
     RELEASE_STOP_MARK: release.RELEASE_STOP_MARK,
     addBlockedLabel: release.addBlockedLabel,
@@ -148,15 +147,15 @@ export function githubCodeHost(
     readLatestReviewBody: reports.readLatestReviewBody,
     readPrDigest: reports.readPrDigest,
     readRulingState: reports.readRulingState,
-    findPRsNeedingReview: (config, reviewerLogin, logger) => reviewQueue.findPRsNeedingReview(config, reviewerLogin, logger, approvedUnmerged, isBuildInFlight),
+    findPRsNeedingReview: async (config, reviewerLogin, logger) => await reviewQueue.findPRsNeedingReview(config, reviewerLogin, logger, approvedUnmerged, isBuildInFlight),
     findPendingRevisions: reviewQueue.findPendingRevisions,
-    findQaPendingPr: (config, reviewerLogin, logger) => reviewQueue.findQaPendingPr(config, reviewerLogin, logger, isBuildInFlight),
+    findQaPendingPr: async (config, reviewerLogin, logger) => await reviewQueue.findQaPendingPr(config, reviewerLogin, logger, isBuildInFlight),
     blockedAmong: reviewQueue.blockedAmong,
     readPrHeadSha: reviewFreshness.readPrHeadSha,
     readPrState: reviewFreshness.readPrState,
     hasPendingRevisions: reviewQueue.hasPendingRevisions,
     escalatedReason: skipHold.escalatedReason,
-    foremanLogin: (cwd) => identity.login(cwd),
+    foremanLogin: async (cwd) => await identity.login(cwd),
     heldReason: skipHold.heldReason,
     issueActivitySince: skipHold.issueActivitySince,
     parseWaitingOn: skipHold.parseWaitingOn,
