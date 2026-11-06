@@ -94,3 +94,13 @@ test("per-pass cost is under 0.5 ms", async () => {
   mon.disable();
   assert.ok((performance.now() - t0) / 1000 < 0.5);
 });
+
+test("a freeze before the histogram's first tick still shows in the window max", async () => {
+  const log = logger();
+  const mon = startEventLoopMonitor(log, { windowMs: 1200 });
+  await mon.track("r/x", "build", async () => { block(1500); });
+  await sleep(1300);
+  mon.disable();
+  const d = log.lines.find((l) => l.m.startsWith("Event-loop delay"));
+  assert.ok(d && d.d.max >= 1500, JSON.stringify(log.lines));
+});
