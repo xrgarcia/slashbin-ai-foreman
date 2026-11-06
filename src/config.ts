@@ -26,6 +26,15 @@ import { applyProfile, profileNamed } from "./profiles/index.js";
 // reads what implement wrote, revise reads what review wrote — so two repos with
 // different names would be one fleet speaking two protocols. `triggerLabel` stays
 // separate for the opposite reason: it selects work, and it does cascade per repo.
+/**
+ * The production grant label, `deliver-to-prod`: the EM's release gate reads it on a standalone
+ * issue as the owner's authorization to ship that issue to production. Deliberately NOT in
+ * `lifecycleLabels` (those are stripped as an issue moves through the pipeline; a grant must stay),
+ * and the Foreman never acts on it: it only files dependency batches carrying it on a
+ * `dependencyPreApproved` repo (owner decision 2026-11-06).
+ */
+export const PROD_GRANT_LABEL = "deliver-to-prod";
+
 const lifecycleLabelsSchema = z.object({
   // Implement/revise opened or updated a PR; the review phase picks it up.
   prUnderReview: z.string().min(1).default("pr under review"),
@@ -627,8 +636,11 @@ function inferGithubRepo(repoPath: string): string | undefined {
  * label. The one selection rule — onboarding, `npm run labels:install` and
  * `npm run doctor` all read it from here.
  */
-export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github">): string[] {
-  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
+export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github"> & { dependencyPreApproved?: boolean }): string[] {
+  // The production grant label is not a lifecycle label (lifecycle labels get stripped as an issue moves);
+  // a pre-approved repo files its dependency batches carrying it, and gh refuses a label that does not exist.
+  const grant = repo.dependencyPreApproved ? [PROD_GRANT_LABEL] : [];
+  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel, ...grant])];
 }
 
 /** True when the unstick stage can run: an enabled unstick plugin (the EM: `emRepoPath`). Independent of `paperclip.enabled`. */

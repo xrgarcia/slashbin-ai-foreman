@@ -152,13 +152,13 @@ test("A5: a normal batch with real changes still files, labelled to build", asyn
   host.addPr(1, "a", "chore(deps): bump vite from 1.0.0 to 1.1.0"); host.addPr(2, "b", "chore(deps): bump zod from 3.0.0 to 4.0.0");
   const { sweep } = build(host, new FakeLedger());
   assert.equal(await sweep.run(repoConfig(), quiet, at(0)), 100);
-  assert.equal(host.filed[0].label, "approved");
+  assert.deepEqual(host.filed[0].labels, ["approved", "deliver-to-prod"]);
   assert.match(host.filed[0].title, /2 dependency updates.*\(1 major\)/);
   // without pre-approval it is filed bare, and an open batch issue blocks a second
   const bare = new FakeHost(); bare.addPr(1, "a");
   const b = build(bare, new FakeLedger());
   assert.equal(await b.sweep.run(repoConfig({ dependencyPreApproved: false }), quiet, at(0)), 100);
-  assert.equal(bare.filed[0].label, null);
+  assert.deepEqual(bare.filed[0].labels, []);
   assert.equal(await b.sweep.run(repoConfig({ dependencyPreApproved: false }), quiet, at(1)), null);
 });
 

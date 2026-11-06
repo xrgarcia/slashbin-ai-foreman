@@ -379,7 +379,7 @@ async function runStage(
         if (filed) {
           events.push({
             message: repoConfig.dependencyPreApproved
-              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved with the production grant — queued to build and deliver to prod`
               : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
             level: "info",
           });
