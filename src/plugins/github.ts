@@ -20,7 +20,7 @@ import { BackoffTracker } from "../backoff.js";
 import * as reviewFreshness from "../github/review-freshness.js";
 import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
-import { gh } from "../github/gh.js";
+import { gh, ghAsync } from "../github/gh.js";
 import { fleetState } from "../github-state.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import type { ForemanPlugin, PluginRole } from "./contract.js";
@@ -44,8 +44,13 @@ export function githubCodeHost(
   return {
     configureIssueCache: cache.configureIssueCache,
     // The fleet state reads with the Foreman token from the daemon's cwd, as before.
-    configureState: (opts) => fleetState.configure({ ...opts, run: (args) => gh(args, process.cwd()) }),
+    configureState: (opts) => fleetState.configure({
+      ...opts,
+      run: (args) => gh(args, process.cwd()),
+      runAsync: (args) => ghAsync(args, process.cwd()),
+    }),
     setStateRepos: (repos) => fleetState.setRepos(repos),
+    warmState: () => fleetState.warm(),
     takeStateUsage: () => fleetState.takeUsage(),
     recordActivity: (repo, issueNumber, step, prUrl) => fleetState.recordActivity(repo, issueNumber, step, prUrl),
     clearActivity: (repo, issueNumber) => fleetState.clearActivity(repo, issueNumber),

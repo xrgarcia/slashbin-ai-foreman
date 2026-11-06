@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { codeHost } from "./plugins/registry.js";
@@ -48,6 +48,29 @@ export function git(args: string[], cwd: string): string {
     stdio: ["pipe", "pipe", "pipe"],
     timeout: GIT_TIMEOUT_MS,
   }).trim();
+}
+
+/**
+ * `git` without blocking the event loop, for the network call: `git fetch` against a
+ * remote that is not answering waits out the whole timeout, and a synchronous one
+ * froze every lane and observer for it (2026-11-06, `spawnSync git ETIMEDOUT`).
+ *
+ * The async `execFile` reports its own timeout as a kill (`killed`, SIGTERM, no
+ * code), which `formatGitError` would read as a shutdown; it is given the code
+ * `execFileSync` reports, `ETIMEDOUT`. A SIGTERM from systemd is not Node's kill,
+ * so `killed` stays false and it still reads as cancelled.
+ */
+export function gitAsync(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", args, { cwd, encoding: "utf-8", timeout: GIT_TIMEOUT_MS }, (err, stdout, stderr) => {
+      if (!err) return resolve(stdout.trim());
+      const e = err as Error & { killed?: boolean; code?: unknown; stderr?: string; stdout?: string };
+      if (e.killed) e.code = "ETIMEDOUT";
+      e.stderr = stderr;
+      e.stdout = stdout;
+      reject(e);
+    });
+  });
 }
 
 /**
@@ -257,13 +280,13 @@ ${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``
   }
 }
 
-export function reconcileRepo(
+export async function reconcileRepo(
   config: RepoConfig,
   logger: Logger,
-): ReconciliationResult {
+): Promise<ReconciliationResult> {
   // Fetch all refs first. --prune drops remote-tracking refs of branches deleted after their merge.
   try {
-    git(["fetch", "origin", "--prune"], config.repoPath);
+    await gitAsync(["fetch", "origin", "--prune"], config.repoPath);
   } catch (err) {
     const failure = formatGitError(err);
     if (failure.timedOut) {
