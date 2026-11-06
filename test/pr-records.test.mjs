@@ -186,7 +186,7 @@ test("discovery lists every release PR, with no window: a stored release behind 
   releasePrs = Array.from({ length: 400 }, (_, k) => 102 + k).concat([101]);
   assert.deepEqual((await rt.releases.loadReleases(repo, quiet)).releases.map((r) => r.pr), [101]);
   const host = readFileSync(join(srcDir, "github", "core-reads.ts"), "utf8");
-  const fn = host.slice(host.indexOf("export function allPrsForBranch"));
+  const fn = host.slice(host.indexOf("export async function allPrsForBranch"));
   assert.match(fn.slice(0, 700), /"--state", "all"/, "closed, merged and open alike");
   assert.doesNotMatch(fn.slice(0, 700), /--search|merged:>=|"--limit", "20"/, "no date window and no 20-record cut");
   assert.match(fn.slice(0, 900), /prs\.length >= ALL_PRS_LIMIT\) throw/, "a listing that may have been cut short fails instead of passing as complete");

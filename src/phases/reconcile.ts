@@ -49,7 +49,7 @@ export async function reconcileReviewOutcomeLabels(
   events?: CycleEvent[],
   verifyStage = false,
 ): Promise<number[]> {
-  const merged = codeHost().findIssuesMergedToBase(repoConfig, stuck, logger);
+  const merged = await codeHost().findIssuesMergedToBase(repoConfig, stuck, logger);
   const byIssue = new Map(merged.map((m) => [m.issueNumber, m]));
   const unresolved: number[] = [];
   let held: { issue: number; reason: string; pr: number }[] = [];
@@ -204,7 +204,7 @@ export async function resumeHumanMerges(
   if (roleFor("reviewer", config)) return [];
   const l = repoConfig.lifecycleLabels;
   const later = [l.readyForProd, l.releasePending, l.prodVerifyHeld, l.readyToClose, repoConfig.github.blockedLabel];
-  const open = (deps.openIssues ?? codeHost().getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger)
+  const open = (await (deps.openIssues ?? codeHost().getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger))
     .filter((i) => !later.some((x) => codeHost().hasLabel(i, x)));
   const atMerged = roleFor("verifier", config) ? [] : open.filter((i) => codeHost().hasLabel(i, l.prMerged)).map((i) => i.number);
   const atApproved = !roleFor("verifier", config) && nothingReleases(repoConfig, config)
@@ -215,7 +215,7 @@ export async function resumeHumanMerges(
     .map((i) => i.number);
   if (atMerged.length + atApproved.length + inReview.length === 0) return [];
   const out: { issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[] = [];
-  for (const m of (deps.mergedToBase ?? codeHost().findIssuesMergedToBase)(repoConfig, [...inReview, ...atMerged, ...atApproved], logger)) {
+  for (const m of await (deps.mergedToBase ?? codeHost().findIssuesMergedToBase)(repoConfig, [...inReview, ...atMerged, ...atApproved], logger)) {
     const from = inReview.includes(m.issueNumber) ? "start" : atMerged.includes(m.issueNumber) ? "merged" : "approved";
     if (from === "start") await notifyOnce(rt, "merged", repoConfig, [m.issueNumber], logger);
     const settled = await settleHumanMerge(rt, repoConfig, config, m, logger, deps, from);
@@ -314,7 +314,7 @@ export async function runReconcileStage(
   // messages"). The warning fires on transition INTO the dead-zone; the entry
   // clears when the issue leaves it, so a genuine re-entry alerts again.
   try {
-    const stuck = codeHost().findStuckMergedIssues(repoConfig, reconLogger);
+    const stuck = await codeHost().findStuckMergedIssues(repoConfig, reconLogger);
     const seen = rt.memory.deadZoneAlerted.get(repoConfig.name) ?? new Set<number>();
     const tried = rt.memory.deadZoneRecoveryAttempted.get(repoConfig.name) ?? new Set<number>();
     const current = new Set(stuck.map((s) => s.issueNumber));
@@ -421,7 +421,7 @@ export async function runReconcileStage(
     // Recovery is the inverse of the merged case: nothing exists to verify, so
     // return it to the queue. Safe precisely BECAUSE nothing merged —
     // re-implementing cannot duplicate work that was never done.
-    for (const num of codeHost().findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
+    for (const num of await codeHost().findOrphanedLifecycleIssues(repoConfig, reconLogger)) {
       if (await advance(rt, itemOf(repoConfig, num), "release", repoConfig, reconLogger)) {
         events.push({
           message: `${repoConfig.githubRepo} #${num} released back to the implement queue — it carried a lifecycle label but no PR covers it and nothing merged, so the work never landed.`,

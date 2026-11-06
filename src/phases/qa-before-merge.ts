@@ -45,11 +45,11 @@ export async function tryQaBeforeMerge(
   const repoName = repoConfig.name;
   const qlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "qa" });
 
-  const target = codeHost().findQaPendingPr(repoConfig, repoConfig.reviewerLogin, qlog);
+  const target = await codeHost().findQaPendingPr(repoConfig, repoConfig.reviewerLogin, qlog);
   if (!target) return "none";
   const { prNumber, issueNumbers, headSha } = target;
   // The EM's `blocked` label on the PR's issue pauses QA, and the Tech Lead is not offered the PR either.
-  if (pausedByBlockedLabel(rt, repoConfig, "QA before the merge", prNumber, issueNumbers, qlog)) return "waiting";
+  if (await pausedByBlockedLabel(rt, repoConfig, "QA before the merge", prNumber, issueNumbers, qlog)) return "waiting";
   const { repoFailure, agentUnavailable, maxCiBounces } = config.backoff;
 
   if (rt.memory.qaDefer.waiting(repoName)) return "waiting";
@@ -61,18 +61,18 @@ export async function tryQaBeforeMerge(
   }
 
   // Never boot a PR its own CI already rejects: CI red goes back to the builder like a review would.
-  const checks = codeHost().getPRCheckVerdict(repoConfig, prNumber, qlog);
+  const checks = await codeHost().getPRCheckVerdict(repoConfig, prNumber, qlog);
   if (checks.state === "pending") {
     qlog.info(`PR #${prNumber} CI still running (${checks.pending.join(", ")}) — QA waits for it`);
     return "waiting";
   }
   if (checks.state === "failing") {
-    const bounces = codeHost().countCiBouncesSinceReview(repoConfig, prNumber, repoConfig.reviewerLogin, qlog);
+    const bounces = await codeHost().countCiBouncesSinceReview(repoConfig, prNumber, repoConfig.reviewerLogin, qlog);
     if (bounces >= maxCiBounces) {
       qlog.warn(`PR #${prNumber} CI still red after ${bounces} bounce(s) — QA does not run on a red head`);
       return "waiting";
     }
-    codeHost().bounceForRedCI(repoConfig, prNumber, checks);
+    await codeHost().bounceForRedCI(repoConfig, prNumber, checks);
     for (const n of issueNumbers) await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
     events?.push({ message: `${repoConfig.githubRepo} PR #${prNumber}: CI red after approval — sent back to the builder before QA`, level: "info" });
     return "handled";

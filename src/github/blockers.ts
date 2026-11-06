@@ -9,7 +9,7 @@
 // ("blocked by"), a structured link, read here — never parsed out of prose.
 
 import type { LifecycleLabels } from "../config.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 
 /** A blocking issue, as `GET /repos/{o}/{r}/issues/{n}/dependencies/blocked_by` returns it. */
 export interface Blocker {
@@ -37,6 +37,6 @@ export function blockerRef(b: Blocker, repo: string): string {
 }
 
 /** Every issue recorded as blocking `issue`. Throws on a gh failure. */
-export function blockersOf(repo: string, issue: number, cwd: string): Blocker[] {
-  return JSON.parse(gh(["api", `repos/${repo}/issues/${issue}/dependencies/blocked_by`], cwd) || "[]");
+export async function blockersOf(repo: string, issue: number, cwd: string): Promise<Blocker[]> {
+  return JSON.parse(await ghAsync(["api", `repos/${repo}/issues/${issue}/dependencies/blocked_by`], cwd) || "[]");
 }

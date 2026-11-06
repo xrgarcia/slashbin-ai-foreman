@@ -128,27 +128,27 @@ beforeEach(() => arrange([]));
 
 // --- finding the Foreman's PRs ------------------------------------------------------------------
 
-test("the Foreman finds per-issue and legacy PRs into the base, never a human's", () => {
+test("the Foreman finds per-issue and legacy PRs into the base, never a human's", async () => {
   arrange([pr(1, "ray/fix-x"), pr(2, "foreman/2-thing"), pr(3, "features"), pr(4, "foreman/4-other", "main"), pr(5, "dependabot/npm/x")]);
-  assert.deepEqual(findOpenForemanPrs(repo()).map((p) => p.number), [2, 3]);
+  assert.deepEqual((await findOpenForemanPrs(repo())).map((p) => p.number), [2, 3]);
 });
 
-test("a legacy features -> develop PR is still found (head and issues), so review, revise and verify still see it", () => {
+test("a legacy features -> develop PR is still found (head and issues), so review, revise and verify still see it", async () => {
   arrange([pr(9, "features")]);
-  const found = findOpenFeaturePR(repo());
+  const found = await findOpenFeaturePR(repo());
   assert.equal(found?.number, 9);
   assert.equal(found?.headBranch, "features");
 });
 
-test("a per-issue PR is found with its own head branch", () => {
+test("a per-issue PR is found with its own head branch", async () => {
   arrange([pr(12, "foreman/12-slug")]);
-  const found = findOpenFeaturePR(repo());
+  const found = await findOpenFeaturePR(repo());
   assert.equal(found?.headBranch, "foreman/12-slug");
 });
 
-test("a human-named PR alone is no Foreman PR: nothing to review, revise or hold the repo", () => {
+test("a human-named PR alone is no Foreman PR: nothing to review, revise or hold the repo", async () => {
   arrange([pr(1, "ray/fix-x")]);
-  assert.equal(findOpenFeaturePR(repo()), null);
+  assert.equal(await findOpenFeaturePR(repo()), null);
 });
 
 // --- revise: only the PR's own Foreman-owned head ------------------------------------------------
@@ -164,17 +164,17 @@ test("revise refuses a head the Foreman does not own, and pushes only to the PR'
 
 // --- deleting merged branches --------------------------------------------------------------------
 
-test("deleteMergedBranch refuses a human head, the legacy shared head, the base and production: no API call", () => {
+test("deleteMergedBranch refuses a human head, the legacy shared head, the base and production: no API call", async () => {
   arrange([]);
   for (const head of ["ray/fix-x", "features", "develop", "main", "feature/foreman/1"]) {
-    assert.equal(deleteMergedBranch(repo(), head), false, head);
+    assert.equal(await deleteMergedBranch(repo(), head), false, head);
   }
   assert.deepEqual(deletes(), []);
 });
 
-test("deleteMergedBranch deletes a Foreman per-issue branch (and treats already-gone as done)", () => {
+test("deleteMergedBranch deletes a Foreman per-issue branch (and treats already-gone as done)", async () => {
   arrange([]);
-  assert.equal(deleteMergedBranch(repo(), "foreman/5-x"), true);
+  assert.equal(await deleteMergedBranch(repo(), "foreman/5-x"), true);
   assert.equal(deletes().length, 1);
   assert.ok(deletes()[0].some((x) => x.endsWith("git/refs/heads/foreman/5-x")));
 });
@@ -202,7 +202,7 @@ function remote(names) {
   return { dir, clone, shas };
 }
 
-test("pruneMergedBranches deletes only a per-issue branch still at the head a merged PR delivered", () => {
+test("pruneMergedBranches deletes only a per-issue branch still at the head a merged PR delivered", async () => {
   const r = remote(["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "ray/fix-x", "features"]);
   try {
     const merged = (sha) => [{ number: 1, url: "u", mergedAt: "2026-11-02T00:00:00Z", headRefOid: sha, closedAt: "2026-11-02T00:00:00Z" }];
@@ -213,7 +213,7 @@ test("pruneMergedBranches deletes only a per-issue branch still at the head a me
       "ray/fix-x": merged(r.shas["ray/fix-x"]),
       features: merged(r.shas.features),
     });
-    const out = pruneMergedBranches({ ...repo(), repoPath: r.clone }, logger, ["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "ray/fix-x", "features"]);
+    const out = await pruneMergedBranches({ ...repo(), repoPath: r.clone }, logger, ["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "ray/fix-x", "features"]);
     assert.deepEqual(out, ["foreman/1-merged"], "delivered and untouched since: deleted; moved on, open, rejected: kept");
     assert.equal(deletes().length, 1);
     assert.ok(deletes()[0].some((x) => x.endsWith("heads/foreman/1-merged")));
@@ -223,12 +223,12 @@ test("pruneMergedBranches deletes only a per-issue branch still at the head a me
   }
 });
 
-test("pruneMergedBranches deletes nothing when the PR lookup fails (unknown is not merged)", () => {
+test("pruneMergedBranches deletes nothing when the PR lookup fails (unknown is not merged)", async () => {
   const r = remote(["foreman/1-merged"]);
   try {
     writeFileSync(F.log, "");
     writeFileSync(F.state, "not json");
-    const out = pruneMergedBranches({ ...repo(), repoPath: r.clone }, logger, ["foreman/1-merged"]);
+    const out = await pruneMergedBranches({ ...repo(), repoPath: r.clone }, logger, ["foreman/1-merged"]);
     assert.deepEqual(out, []);
     assert.deepEqual(deletes(), []);
   } finally {

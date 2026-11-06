@@ -34,15 +34,15 @@ export class DependencyBatchSweep {
   async run(repoConfig: RepoConfig, logger: Logger, now: Date = new Date()): Promise<number | null> {
     const { discovery, security, openIssue, ledger, policy, composer, filer, notifier } = this.parts;
 
-    const found = discovery.discover(repoConfig, logger);
+    const found = await discovery.discover(repoConfig, logger);
     if (!found) return null;
-    const prs = security.select(repoConfig, found.prs, logger);
+    const prs = await security.select(repoConfig, found.prs, logger);
     if (prs.length === 0) return null;
 
     const batch = batchOf(prs);
     const decision = policy.decide({
       history: await ledger.historyOf(repoConfig, batch),
-      batchIssueOpen: openIssue.isOpen(repoConfig, logger),
+      batchIssueOpen: await openIssue.isOpen(repoConfig, logger),
       now,
     });
 
@@ -62,7 +62,7 @@ export class DependencyBatchSweep {
       return null;
     }
     const issue = composer.compose(repoConfig, prs);
-    const number = filer.file(repoConfig, issue, logger);
+    const number = await filer.file(repoConfig, issue, logger);
     if (number === null) return null;
     if (!(await ledger.attachIssue(repoConfig, batch, number))) {
       logger.warn(`dependency batch ${batch.key}: could not record issue #${number} in the ledger; a landed result on it will not retire the PRs`);

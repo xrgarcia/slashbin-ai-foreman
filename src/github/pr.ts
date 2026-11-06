@@ -11,15 +11,15 @@ export type { FailedReviewPlan } from "../code-host.js";
 
 // --- PR Verification ---
 
-export function verifyPRExists(
+export async function verifyPRExists(
   repo: string,
   headBranch: string,
   baseBranch: string,
   cwd: string,
   logger?: Logger,
-): boolean {
+): Promise<boolean> {
   // A failed read throws (EM#1244 f5): "could not look" is never "there is no PR".
-  return findOpenPrs(repo, cwd, { head: headBranch, base: baseBranch, limit: 1 }).length > 0;
+  return (await findOpenPrs(repo, cwd, { head: headBranch, base: baseBranch, limit: 1 })).length > 0;
 }
 
 /**
@@ -36,16 +36,16 @@ export function verifyPRExists(
  * PR. A failed lookup throws (EM#1244 f5): it is never "no PR" and never a
  * licence to label the whole batch.
  */
-export function getReferencedIssuesFromOpenPR(
+export async function getReferencedIssuesFromOpenPR(
   repo: string,
   headBranch: string,
   baseBranch: string,
   cwd: string,
   logger?: Logger,
-): number[] | null {
+): Promise<number[] | null> {
   // A new commit moves the head and an edited title/body bumps updatedAt, so
   // the PR's version from the fleet state is a safe key for what it implements.
-  const json = ghKeyed(`refs:${repo}:${headBranch}:${baseBranch}`, () => openPrVersion(repo, headBranch, baseBranch), [
+  const json = await ghKeyed(`refs:${repo}:${headBranch}:${baseBranch}`, async () => await openPrVersion(repo, headBranch, baseBranch), [
     "pr", "list",
     "--repo", repo,
     "--head", headBranch,
@@ -81,18 +81,18 @@ export function getReferencedIssuesFromOpenPR(
  * lookup itself fails — a stage that gates must not read "could not look" as "nothing to
  * check". A human-named head is never returned (foreman-branch.ts).
  */
-export function findOpenFeaturePR(
+export async function findOpenFeaturePR(
   config: RepoConfig,
   prefer?: readonly string[],
-): { number: number; headSha: string; headBranch: string; issueNumbers: number[] } | null {
+): Promise<{ number: number; headSha: string; headBranch: string; issueNumbers: number[] } | null> {
   // Fleet state on: no open Foreman PR in it means nothing to check — at most
   // one refresh late, which only defers a stage, never skips one for good.
   // A thrown refresh propagates: the caller holds the later stages on it.
-  if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo) && !knownOpenForemanPr(config)) return null;
-  const owned = findOpenForemanPrs(config);
+  if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo) && !await knownOpenForemanPr(config)) return null;
+  const owned = await findOpenForemanPrs(config);
   const mine = owned.find((p) => prefer?.includes(p.headRefName)) ?? owned[0];
   if (!mine) return null;
-  const json = ghKeyed(`feature:${config.githubRepo}:${mine.headRefName}`, () => openPrVersion(config.githubRepo, mine.headRefName, config.baseBranch), [
+  const json = await ghKeyed(`feature:${config.githubRepo}:${mine.headRefName}`, async () => await openPrVersion(config.githubRepo, mine.headRefName, config.baseBranch), [
     "pr", "view", String(mine.number),
     "--repo", config.githubRepo,
     "--json", "number,title,body,commits,headRefOid,headRefName",

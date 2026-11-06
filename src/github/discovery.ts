@@ -2,7 +2,7 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 
 
 /** discoveryBatch's size when the caller names none (the config's buildBatchSize decides it for a build). */
@@ -130,13 +130,13 @@ export function issuesImplementedByCommits(commits: PrCommit[], strict = false):
  * session every offered item and claiming three left the two it did not build
  * claimed, then Blocked, on the board (jerky_service #131-#133, 2026-10-14).
  */
-export function discoveryBatch(
+export async function discoveryBatch(
   config: RepoConfig,
   offered: number[],
   logger: Logger,
   size: number = MAX_BATCH_SIZE,
   labelsOf: (n: number) => readonly string[] = () => [],
-): number[] {
+): Promise<number[]> {
   if (offered.length === 0) return [];
   // Highest priority tier first (the order the skill picks by), then oldest:
   // lower numbers are usually the dependencies.
@@ -148,7 +148,7 @@ export function discoveryBatch(
   let effectiveBatchSize = size;
   if (size > 1) {
     try {
-      const fileCount = gh(["ls-files", "--cached"], config.repoPath).split("\n").filter(Boolean).length;
+      const fileCount = (await ghAsync(["ls-files", "--cached"], config.repoPath)).split("\n").filter(Boolean).length;
       if (fileCount < 10) {
         effectiveBatchSize = 1;
         logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);

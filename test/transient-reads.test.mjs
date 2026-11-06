@@ -77,40 +77,40 @@ const reads = {
 
 for (const [name, read] of Object.entries(reads)) {
   for (const fail of ["network", "5xx"]) {
-    test(`${name}: a ${fail} failure that outlasts the plugin's retry throws, never an empty answer`, () => {
+    test(`${name}: a ${fail} failure that outlasts the plugin's retry throws, never an empty answer`, async () => {
       setFail(fail);
-      assert.throws(read);
+      await assert.rejects(read());
     });
   }
 }
 
-test("the same reads answer when GitHub does (the throw is the failure, not the shape)", () => {
+test("the same reads answer when GitHub does (the throw is the failure, not the shape)", async () => {
   setFail(null);
-  assert.equal(reads.verifyPRExists(), false);
-  assert.equal(reads.getReferencedIssuesFromOpenPR(), null);
-  assert.equal(reads.getRemoteBranchSha(), "a".repeat(40));
-  assert.equal(reads.findOpenPromotionPR(), null);
-  assert.equal(reads.findOpenSyncPR(), null);
-  assert.deepEqual(reads.prChangedFiles(), ["client/a.tsx"]);
-  assert.equal(reads.readPrState(), "OPEN");
-  assert.equal(reads.readPrHeadSha(), "b".repeat(40));
-  assert.equal(reads.readFreshReview(), true);
+  assert.equal(await reads.verifyPRExists(), false);
+  assert.equal(await reads.getReferencedIssuesFromOpenPR(), null);
+  assert.equal(await reads.getRemoteBranchSha(), "a".repeat(40));
+  assert.equal(await reads.findOpenPromotionPR(), null);
+  assert.equal(await reads.findOpenSyncPR(), null);
+  assert.deepEqual(await reads.prChangedFiles(), ["client/a.tsx"]);
+  assert.equal(await reads.readPrState(), "OPEN");
+  assert.equal(await reads.readPrHeadSha(), "b".repeat(40));
+  assert.equal(await reads.readFreshReview(), true);
 });
 
-test("a branch that does not exist is null (a 404), not a failure and not a sha", () => {
+test("a branch that does not exist is null (a 404), not a failure and not a sha", async () => {
   setFail("404");
-  assert.equal(reads.getRemoteBranchSha(), null);
+  assert.equal(await reads.getRemoteBranchSha(), null);
 });
 
-test("only the response's own 404 is absence: a branch named fix-404 whose read fails still throws (EM#1244 f5 review R1)", () => {
+test("only the response's own 404 is absence: a branch named fix-404 whose read fails still throws (EM#1244 f5 review R1)", async () => {
   for (const fail of ["network", "5xx"]) {
     setFail(fail);
-    assert.throws(() => branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), `${fail} on fix-404`);
+    await assert.rejects(branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), undefined, `${fail} on fix-404`);
   }
   setFail("404");
-  assert.equal(branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), null, "a real 404 on fix-404 is absence");
+  assert.equal(await branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), null, "a real 404 on fix-404 is absence");
   setFail(null);
-  assert.equal(branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), "a".repeat(40));
+  assert.equal(await branch.getRemoteBranchSha(REPO, "fix-404", tmpdir(), logger), "a".repeat(40));
 });
 
 test("the core keeps no transient classifier, no retry and no sleep: gh() and the plugins own them", () => {

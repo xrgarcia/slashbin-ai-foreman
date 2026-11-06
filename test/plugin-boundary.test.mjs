@@ -34,7 +34,7 @@ test("the ratchet is empty: no core file imports plugin code (EM#1150 f5)", () =
 
 test("no core file runs gh; only src/github* and the GitHub plugin may (EM#1150 f5)", () => {
   const sources = Object.fromEntries(srcFiles().map((rel) => [rel, readFileSync(join(src, rel), "utf8")]));
-  assert.match(sources["github/gh.ts"], /execFileSync\("gh"/, "the walk sees the GitHub code that does run gh");
+  assert.match(sources["github/gh.ts"], /execFileAsync\("gh"/, "the walk sees the GitHub code that does run gh");
   assert.deepEqual(ghSpawnProblems(sources), []);
 });
 

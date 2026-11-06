@@ -22,7 +22,7 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
  * This module is the ONLY owner of that state — one entry per upstream, shared
  * by every repo loop. Nothing else stores a limit, a window or a probe result.
  *
- *  - github: `runGh` refuses to spawn while blocked; at each window end the
+ *  - github: `runGhAsync` refuses to spawn while blocked; at each window end the
  *    module itself probes the bucket that tripped, with the token that tripped
  *    it, and either clears or extends. A GraphQL trip is probed on the GraphQL
  *    endpoint itself: `/rate_limit` reports a different bucket (2026-10-02:
@@ -45,7 +45,7 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
 /** `"github"`, or a runner's configured name. */
 export type Upstream = string;
 
-/** Thrown by `runGh` while GitHub is backing off — no `gh` process was spawned. */
+/** Thrown by `runGhAsync` while GitHub is backing off — no `gh` process was spawned. */
 export class UpstreamBackoffError extends Error {
   constructor(message: string) {
     super(message);

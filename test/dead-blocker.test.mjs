@@ -54,9 +54,9 @@ const reset = (deps) => { writeFileSync(calls, ""); writeFileSync(dependents, JS
 const dep = (number, state = "open", repo = "o/gw", ...labels) =>
   ({ number, state, labels: labels.map((name) => ({ name })), repository_url: `https://api.github.com/repos/${repo}` });
 
-test("every open dependent is commented on and labelled blocked, naming the dead blocker", () => {
+test("every open dependent is commented on and labelled blocked, naming the dead blocker", async () => {
   reset([dep(227), dep(300, "closed"), dep(9, "open", "o/other")]);
-  const r = announceDeadBlocker(cfg, 222, "all 11 PRs fail npm ci");
+  const r = await announceDeadBlocker(cfg, 222, "all 11 PRs fail npm ci");
   assert.deepEqual(r.told.map((t) => t.ref), ["#227", "o/other#9"]);
   assert.deepEqual(r.open.map((o) => o.ref), ["#227", "o/other#9"]);
   const c = made().filter((x) => x[0] === "issue");
@@ -69,16 +69,16 @@ test("every open dependent is commented on and labelled blocked, naming the dead
   assert.ok(!c.some((x) => x[2] === "300"), "a closed dependent must be left alone");
 });
 
-test("a dependent already told is not told again; one already blocked is not relabelled", () => {
+test("a dependent already told is not told again; one already blocked is not relabelled", async () => {
   reset([dep(227), dep(228, "open", "o/gw", "blocked")]);
-  const r = announceDeadBlocker(cfg, 222, "x", ["#227"]);
+  const r = await announceDeadBlocker(cfg, 222, "x", ["#227"]);
   assert.deepEqual(r.told.map((t) => t.ref), ["#228"]);
   const c = made().filter((x) => x[0] === "issue");
   assert.ok(!c.some((x) => x[2] === "227"));
   assert.ok(!c.some((x) => x[1] === "edit"), "label already present");
 });
 
-test("one dependent failing does not stop the next, and the failure is returned", () => {
+test("one dependent failing does not stop the next, and the failure is returned", async () => {
   reset([dep(1), dep(2)]);
   writeFileSync(join(tmp, "bin", "gh"), `#!/usr/bin/env node
 import fs from "node:fs";
@@ -87,15 +87,15 @@ fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");
 if (a[0] === "api") process.stdout.write(fs.readFileSync(${JSON.stringify(dependents)}, "utf8"));
 else if (a[2] === "1") { process.stderr.write("boom"); process.exit(1); }
 `);
-  const r = announceDeadBlocker(cfg, 222, "x");
+  const r = await announceDeadBlocker(cfg, 222, "x");
   assert.deepEqual(r.told.map((t) => t.number), [2]);
   assert.equal(r.failed.length, 1);
   assert.equal(r.failed[0].ref, "#1");
 });
 
-test("closing an already-landed issue comments the evidence, then closes as completed", () => {
+test("closing an already-landed issue comments the evidence, then closes as completed", async () => {
   writeFileSync(calls, "");
-  closeAlreadyLanded(cfg, 478, "all 16 PRs already on develop");
+  await closeAlreadyLanded(cfg, 478, "all 16 PRs already on develop");
   const c = made();
   assert.equal(c[0][1], "comment");
   assert.match(c[0][c[0].indexOf("--body") + 1], /present on `develop`/);
@@ -125,7 +125,7 @@ test("the landed trailer needs its issue, starts a line, and the last one wins",
   assert.equal(detectDeclaredLanded('FOREMAN_RESULT: landed issue=1 reason="a"\nFOREMAN_RESULT: landed issue=2 reason="b"').issue, 2);
 });
 
-test("wiring: landed is checked before PR attribution and behind the SHA guard; skips tell dependents", () => {
+test("wiring: landed is checked before PR attribution and behind the SHA guard; skips tell dependents", async () => {
   const fn = between(agentSource(), "export async function implementApprovedIssues", "export async function revisePRFeedback");
   const landedAt = fn.indexOf("detectDeclaredLanded(result.stdout)");
   assert.ok(landedAt > 0, "the landed check is gone from implementApprovedIssues");
@@ -172,7 +172,7 @@ test("a dependent told but not yet escalated is retried; --repo keeps the full r
   assert.match(cli, /repos: \[match\], allRepos: config\.repos/);
 });
 
-test("pending EM handoffs are delivered before the eligibility gate; a daemon reload keeps allRepos", () => {
+test("pending EM handoffs are delivered before the eligibility gate; a daemon reload keeps allRepos", async () => {
   const impl = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src/phases/implement.ts"), "utf8");
   const gate = impl.slice(impl.indexOf("export async function tryBatchImplementation"));
   assert.ok(gate.indexOf("await deliverPendingHandoffs(") > 0, "pass is called");

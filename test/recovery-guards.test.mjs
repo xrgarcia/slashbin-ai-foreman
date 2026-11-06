@@ -37,7 +37,7 @@ test("a build in flight is counted per repo and cleared only when every build en
 
 test("the review stage does not adopt an unlabeled PR while that repo is building", () => {
   const q = src("src/github/review-queue.ts");
-  const fn = q.slice(q.indexOf("export function adoptOrphanedReviewCandidate"));
+  const fn = q.slice(q.indexOf("export async function adoptOrphanedReviewCandidate"));
   assert.ok(fn.indexOf("isBuildInFlight(config.name)") > -1);
   assert.ok(fn.indexOf("isBuildInFlight(config.name)") < fn.indexOf("adopted.push"));
   for (const p of ["src/phases/implement.ts", "src/phases/revise.ts"]) {

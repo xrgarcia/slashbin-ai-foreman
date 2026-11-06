@@ -32,7 +32,7 @@ export interface PrSnapshot {
 
 /**
  * Extract the actionable bits of a thrown gh CLI error so callers can log
- * something useful instead of swallowing the failure. execFileSync attaches
+ * something useful instead of swallowing the failure. execFile attaches
  * `stderr` (Buffer) and `status` (exit code) to the Error it throws.
  */
 export interface GhFailure {
@@ -248,9 +248,9 @@ export interface IssueActivity {
 /** The reads a hold decision makes, injectable so the decision is testable without GitHub. */
 export interface HoldReads {
   /** The waited-on reference's state. Throws when GitHub cannot say. */
-  refState(ref: WaitingOn): RefState;
+  refState(ref: WaitingOn): Promise<RefState>;
   /** The issue's changes after `since`. Throws when GitHub cannot say. */
-  activitySince(since: string): IssueActivity[];
+  activitySince(since: string): Promise<IssueActivity[]>;
   /** The Foreman's own login; its writes never release a hold. */
   self: string | undefined;
   /** Other agents' logins (`backoff.skip.agentLogins`); their comments never release an escalated hold. */
@@ -377,72 +377,72 @@ export interface CodeHost {
 
   // Reads and writes the core used to run the host's CLI for directly.
   /** An issue's `lastEditedAt`: undefined when absent, null when never edited. Throws on a failed read. */
-  issueLastEditedAt(repoConfig: RepoConfig, n: number): string | null | undefined;
+  issueLastEditedAt(repoConfig: RepoConfig, n: number): Promise<string | null | undefined>;
   /** Every comment on issue `n`. Throws on a failed read. */
-  issueCommentRows(repo: string, n: number, cwd: string): IssueTextRow[];
+  issueCommentRows(repo: string, n: number, cwd: string): Promise<IssueTextRow[]>;
   /** Every open issue (not PR) `creator` opened. Throws on a failed read. */
-  openIssueRowsBy(repo: string, creator: string, cwd: string): IssueTextRow[];
+  openIssueRowsBy(repo: string, creator: string, cwd: string): Promise<IssueTextRow[]>;
   /** The open PR `head → base`, live (at most one). Throws on a failed read. */
-  openPrsForBranch(repo: string, head: string, base: string, cwd: string): { number: number; url: string }[];
+  openPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{ number: number; url: string }[]>;
   /** The last 20 closed PRs `head → base`. Throws on a failed read. */
-  closedPrsForBranch(repo: string, head: string, base: string, cwd: string): {
+  closedPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{
     number: number; url: string; mergedAt: string | null; headRefOid: string; closedAt: string | null;
-  }[];
+  }[]>;
   /** Every PR `head → base` in any state, no date window; throws on a failed read or a listing that may be cut short. */
-  allPrsForBranch(repo: string, head: string, base: string, cwd: string): { number: number; state: string }[];
+  allPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{ number: number; state: string }[]>;
   /** Open a PR; the host's output, which names its URL. Throws on failure. */
-  createPr(config: RepoConfig, pr: { base: string; head: string; title: string; body: string }): string;
+  createPr(config: RepoConfig, pr: { base: string; head: string; title: string; body: string }): Promise<string>;
   /** Every label name on the repo. Throws on a failed read. */
-  labelNames(repo: RepoConfig): string[];
+  labelNames(repo: RepoConfig): Promise<string[]>;
   /** Create one label. Throws on failure, an existing label included. */
-  createLabel(repo: RepoConfig, name: string, color: string): void;
+  createLabel(repo: RepoConfig, name: string, color: string): Promise<void>;
   /** The open Foreman-owned PR's URL (one of `branches` first), asked directly (outside the back-off; the caller checks it). */
-  featurePrUrlFallback(config: RepoConfig, branches?: readonly string[]): string | undefined;
+  featurePrUrlFallback(config: RepoConfig, branches?: readonly string[]): Promise<string | undefined>;
   /** Delete a merged Foreman PR's head branch. Refuses a head that is not Foreman-owned, and the legacy featureBranch. Throws on failure. */
-  deleteMergedBranch(config: RepoConfig, head: string): boolean;
+  deleteMergedBranch(config: RepoConfig, head: string): Promise<boolean>;
 
   // Branches: compare, drift, sync PRs.
-  checkBranchDrift(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger: Logger): BranchDrift | null;
-  checkPRHasChanges(repo: string, headBranch: string, baseBranch: string, cwd: string, logger: Logger): number;
-  createSyncPR(repo: string, productionBranch: string, baseBranch: string, behindBy: number, cwd: string, logger?: Logger, conventions?: GithubConventions): string | null;
-  findOpenSyncPR(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger?: Logger): OpenPromotionPR | null;
-  getRemoteBranchSha(repo: string, branch: string, cwd: string, logger: Logger): string | null;
+  checkBranchDrift(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger: Logger): Promise<BranchDrift | null>;
+  checkPRHasChanges(repo: string, headBranch: string, baseBranch: string, cwd: string, logger: Logger): Promise<number>;
+  createSyncPR(repo: string, productionBranch: string, baseBranch: string, behindBy: number, cwd: string, logger?: Logger, conventions?: GithubConventions): Promise<string | null>;
+  findOpenSyncPR(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger?: Logger): Promise<OpenPromotionPR | null>;
+  getRemoteBranchSha(repo: string, branch: string, cwd: string, logger: Logger): Promise<string | null>;
   productionDriftFiles(drift: BranchDrift): number;
-  tryMergeSyncPR(repo: string, prNumber: number, cwd: string, logger?: Logger, productionBranch?: string): boolean;
+  tryMergeSyncPR(repo: string, prNumber: number, cwd: string, logger?: Logger, productionBranch?: string): Promise<boolean>;
 
   // Open issues and PRs, labels, errors.
   forgetOpenPrs(repo: string): void;
   formatGhError(err: unknown): GhFailure;
-  getOpenIssues(repo: string, cwd: string, logger: Logger): IssueSnapshot[];
+  getOpenIssues(repo: string, cwd: string, logger: Logger): Promise<IssueSnapshot[]>;
   hasLabel(issue: IssueSnapshot, name: string): boolean;
-  isPrOpen(repo: string, prNumber: number, cwd: string): boolean | null;
-  knownOpenPr(repo: string, head: string, base: string): {
+  isPrOpen(repo: string, prNumber: number, cwd: string): Promise<boolean | null>;
+  knownOpenPr(repo: string, head: string, base: string): Promise<{
     number: number;
     url: string;
     headRefOid: string;
-} | undefined;
-  openIssueLabels(config: RepoConfig, logger: Logger): Array<{
+} | undefined>;
+  openIssueLabels(config: RepoConfig, logger: Logger): Promise<Array<{
     number: number;
     labels: string[];
-}>;
+}>>;
 
   // CI checks; issue comments.
-  bounceForRedCI(config: RepoConfig, prNumber: number, verdict: CheckVerdict): void;
-  commentOnIssue(config: RepoConfig, issueNumber: number, body: string): void;
-  countCiBouncesSinceReview(config: RepoConfig, prNumber: number, reviewerLogin: string | undefined, logger: Logger): number;
-  getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): CheckVerdict;
+  bounceForRedCI(config: RepoConfig, prNumber: number, verdict: CheckVerdict): Promise<void>;
+  commentOnIssue(config: RepoConfig, issueNumber: number, body: string): Promise<void>;
+  countCiBouncesSinceReview(config: RepoConfig, prNumber: number, reviewerLogin: string | undefined, logger: Logger): Promise<number>;
+  getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): Promise<CheckVerdict>;
 
   // Dead blockers.
-  announceDeadBlocker(config: RepoConfig, blocker: number, reason: string, already?: readonly string[]): {
+  announceDeadBlocker(config: RepoConfig, blocker: number, reason: string, already?: readonly string[]): Promise<{
     told: Announced[];
     failed: {
         ref: string;
         error: string;
     }[];
     open: Announced[];
-};
-  closeAlreadyLanded(config: RepoConfig, num: number, reason: string): void;
-  holdBlocker(config: RepoConfig, num: number): void;
+}>;
+  closeAlreadyLanded(config: RepoConfig, num: number, reason: string): Promise<void>;
+  holdBlocker(config: RepoConfig, num: number): Promise<void>;
   isDeadBlockerReason(reason: string): boolean;
 
   // Dependency PRs and their batch issue.
@@ -450,28 +450,28 @@ export interface CodeHost {
     title: string;
     body: string;
 };
-  createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): number | null;
+  createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, label: string | null, logger?: Logger): Promise<number | null>;
   dependencyBatchBases(baseBranch: string | undefined, productionBranch: string, legacyFeatureBranch?: string): string[];
   describeDependencyPR(number: number, title: string): DependencyChange;
-  fetchOpenAlertPackages(repo: string, cwd: string): Set<string>;
-  findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): PrSnapshot[];
-  findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): IssueSnapshot | undefined;
+  fetchOpenAlertPackages(repo: string, cwd: string): Promise<Set<string>>;
+  findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): Promise<PrSnapshot[]>;
+  findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): Promise<IssueSnapshot | undefined>;
   selectSecurityPRs<T extends Pick<PrSnapshot, "title" | "body">>(prs: readonly T[], alertPackages: ReadonlySet<string>): T[];
   /** Close a superseded Dependabot PR with `reason` as its comment. No-op when it is not open; throws when the close fails. */
-  retireDependencyPR(config: RepoConfig, number: number, reason: string): void;
+  retireDependencyPR(config: RepoConfig, number: number, reason: string): Promise<void>;
 
   // Discovery.
-  discoveryBatch(config: RepoConfig, offered: number[], logger: Logger, size?: number, labelsOf?: (n: number) => readonly string[]): number[];
+  discoveryBatch(config: RepoConfig, offered: number[], logger: Logger, size?: number, labelsOf?: (n: number) => readonly string[]): Promise<number[]>;
 
   // Merged-to-base and lifecycle scans.
-  findIssuesAwaitingVerify(config: RepoConfig, logger: Logger): number[];
-  findIssuesMergedToBase(config: RepoConfig, candidates: number[], logger: Logger): MergedIssueRef[];
-  findIssuesStillUnderReview(config: RepoConfig, issueNumbers: number[], logger: Logger): number[];
-  findOrphanedLifecycleIssues(config: RepoConfig, logger: Logger): number[];
-  findRevokedEmGates(config: RepoConfig, issueNumbers: number[], sinceIso: string, logger: Logger): number[];
-  findStuckMergedIssues(config: RepoConfig, logger: Logger): StuckMergedIssue[];
-  readReviewOutcomes(config: RepoConfig, issueNumbers: number[], logger: Logger): Map<number, ReviewOutcome>;
-  restoreEmGate(config: RepoConfig, hadGate: number[], logger: Logger): number[];
+  findIssuesAwaitingVerify(config: RepoConfig, logger: Logger): Promise<number[]>;
+  findIssuesMergedToBase(config: RepoConfig, candidates: number[], logger: Logger): Promise<MergedIssueRef[]>;
+  findIssuesStillUnderReview(config: RepoConfig, issueNumbers: number[], logger: Logger): Promise<number[]>;
+  findOrphanedLifecycleIssues(config: RepoConfig, logger: Logger): Promise<number[]>;
+  findRevokedEmGates(config: RepoConfig, issueNumbers: number[], sinceIso: string, logger: Logger): Promise<number[]>;
+  findStuckMergedIssues(config: RepoConfig, logger: Logger): Promise<StuckMergedIssue[]>;
+  readReviewOutcomes(config: RepoConfig, issueNumbers: number[], logger: Logger): Promise<Map<number, ReviewOutcome>>;
+  restoreEmGate(config: RepoConfig, hadGate: number[], logger: Logger): Promise<number[]>;
 
   // Issue and PR comments.
   commentBodies(config: RepoConfig, num: number): Promise<string[]>;
@@ -484,113 +484,113 @@ export interface CodeHost {
   hasCommentStartingWith(config: RepoConfig, num: number, heading: string): Promise<boolean>;
 
   // Feature PRs.
-  findOpenFeaturePR(config: RepoConfig, prefer?: readonly string[]): {
+  findOpenFeaturePR(config: RepoConfig, prefer?: readonly string[]): Promise<{
     number: number;
     headSha: string;
     headBranch: string;
     issueNumbers: number[];
-} | null;
-  getReferencedIssuesFromOpenPR(repo: string, headBranch: string, baseBranch: string, cwd: string, logger?: Logger): number[] | null;
+} | null>;
+  getReferencedIssuesFromOpenPR(repo: string, headBranch: string, baseBranch: string, cwd: string, logger?: Logger): Promise<number[] | null>;
   planFailedReviewOutcome(mergedRefs: {
     issueNumber: number;
     prNumber: number;
 }[], stillUnderReview: number[]): FailedReviewPlan;
-  verifyPRExists(repo: string, headBranch: string, baseBranch: string, cwd: string, logger?: Logger): boolean;
+  verifyPRExists(repo: string, headBranch: string, baseBranch: string, cwd: string, logger?: Logger): Promise<boolean>;
 
   // Promotion PRs and the ready-for-prod set.
-  countBranchDiffFiles(repo: string, base: string, head: string, cwd: string, logger: Logger): number;
-  createPromotionPR(repo: string, productionBranch: string, baseBranch: string, issues: PromotionIssue[], cwd: string, logger?: Logger, conventions?: GithubConventions, unlinked?: ReleaseCarry["unlinked"]): string | null;
-  findOpenPromotionPR(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger?: Logger): OpenPromotionPR | null;
-  findReadyForProdIssues(repo: string, cwd: string, labels: LifecycleLabels, logger: Logger): PromotionIssue[];
-  getPrState(repo: string, prNumber: number, cwd: string, logger?: Logger): "OPEN" | "MERGED" | "CLOSED" | null;
-  stripReadyForProdLabel(repo: string, issueNumbers: number[], cwd: string, labels: LifecycleLabels, logger: Logger): void;
-  updatePromotionPR(repo: string, prNumber: number, issues: PromotionIssue[], cwd: string, conventions?: GithubConventions, unlinked?: ReleaseCarry["unlinked"]): boolean;
+  countBranchDiffFiles(repo: string, base: string, head: string, cwd: string, logger: Logger): Promise<number>;
+  createPromotionPR(repo: string, productionBranch: string, baseBranch: string, issues: PromotionIssue[], cwd: string, logger?: Logger, conventions?: GithubConventions, unlinked?: ReleaseCarry["unlinked"]): Promise<string | null>;
+  findOpenPromotionPR(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger?: Logger): Promise<OpenPromotionPR | null>;
+  findReadyForProdIssues(repo: string, cwd: string, labels: LifecycleLabels, logger: Logger): Promise<PromotionIssue[]>;
+  getPrState(repo: string, prNumber: number, cwd: string, logger?: Logger): Promise<"OPEN" | "MERGED" | "CLOSED" | null>;
+  stripReadyForProdLabel(repo: string, issueNumbers: number[], cwd: string, labels: LifecycleLabels, logger: Logger): Promise<void>;
+  updatePromotionPR(repo: string, prNumber: number, issues: PromotionIssue[], cwd: string, conventions?: GithubConventions, unlinked?: ReleaseCarry["unlinked"]): Promise<boolean>;
 
   // Issue bodies.
-  readIssueBody(config: RepoConfig, num: number): string;
+  readIssueBody(config: RepoConfig, num: number): Promise<string>;
 
   // Release carry.
-  adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): ReleaseCarry;
+  adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;
   noteCarried(repoConfig: RepoConfig, carry: ReleaseCarry, releasePr: number, authorized: number[], logger: Logger): Promise<void>;
 
   // Release sign-off.
-  foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: number) => boolean;
+  foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: number) => Promise<boolean>;
   syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved?: number[]): Promise<void>;
-  unsignedInHead(config: RepoConfig, logger: Logger): {
+  unsignedInHead(config: RepoConfig, logger: Logger): Promise<{
     unsigned: number[];
     unresolved: number[];
-} | null;
-  unsignedIssues(open: readonly IssueSnapshot[], listed: ReadonlySet<number>, labels: LifecycleLabels, foremanSigned?: (issue: number) => boolean): number[];
+} | null>;
+  unsignedIssues(open: readonly IssueSnapshot[], listed: ReadonlySet<number>, labels: LifecycleLabels, foremanSigned?: (issue: number) => boolean | Promise<boolean>): Promise<number[]>;
 
   // Release PRs, tags and holds.
   /** The heading of the comment the release stage leaves when it stops for a person. */
   readonly RELEASE_STOP_MARK: string;
-  addBlockedLabel(config: RepoConfig, num: number): void;
+  addBlockedLabel(config: RepoConfig, num: number): Promise<void>;
   addReleasePrIssues(config: RepoConfig, pr: ReleasePrView, issues: {
     number: number;
     title: string;
-}[]): void;
-  ensureReleaseTag(config: RepoConfig, sha: string, name: string, message: string): {
+}[]): Promise<void>;
+  ensureReleaseTag(config: RepoConfig, sha: string, name: string, message: string): Promise<{
     tag: string;
     created: boolean;
-};
-  findPvComment(config: RepoConfig, pr: number): {
+}>;
+  findPvComment(config: RepoConfig, pr: number): Promise<{
     url: string;
     body: string;
-} | null;
-  findReleaseStop(config: RepoConfig, num: number): {
+} | null>;
+  findReleaseStop(config: RepoConfig, num: number): Promise<{
     pr: number | null;
     hold: string;
-} | null;
-  findSreSweepHold(config: RepoConfig, num: number): {
+} | null>;
+  findSreSweepHold(config: RepoConfig, num: number): Promise<{
     pr: number;
     url: string;
-} | null;
-  productionHead(config: RepoConfig): string;
+} | null>;
+  productionHead(config: RepoConfig): Promise<string>;
   readPvResult(body: string): {
     pass: true;
 } | {
     pass: false;
     hold: string;
 } | null;
-  recentMergedReleasePrs(config: RepoConfig, sinceIso?: string, limit?: number): ReleasePrView[];
-  removeBlockedLabel(config: RepoConfig, num: number): void;
-  viewIssue(config: RepoConfig, num: number): IssueView | null;
-  viewReleasePr(config: RepoConfig, pr: number): ReleasePrView;
+  recentMergedReleasePrs(config: RepoConfig, sinceIso?: string, limit?: number): Promise<ReleasePrView[]>;
+  removeBlockedLabel(config: RepoConfig, num: number): Promise<void>;
+  viewIssue(config: RepoConfig, num: number): Promise<IssueView | null>;
+  viewReleasePr(config: RepoConfig, pr: number): Promise<ReleasePrView>;
 
   // PR reads: digest, files, reviews, rulings.
-  issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, logger: Logger): Record<number, string>;
-  prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): string[];
-  readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): string | null;
-  readPrDigest(repo: string, pr: string | number, cwd: string, logger: Logger): {
+  issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, logger: Logger): Promise<Record<number, string>>;
+  prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): Promise<string[]>;
+  readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): Promise<string | null>;
+  readPrDigest(repo: string, pr: string | number, cwd: string, logger: Logger): Promise<{
     number: number;
     url: string;
     title: string;
     additions: number;
     deletions: number;
     changedFiles: number;
-} | null;
-  readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState;
+} | null>;
+  readRulingState(repo: string, pr: number, cwd: string, logger: Logger): Promise<RulingState>;
 
   // Review and revision queues.
-  findPRsNeedingReview(config: RepoConfig, reviewerLogin: string | undefined, logger: Logger): ReviewCandidate | null;
-  findPendingRevisions(config: RepoConfig, logger: Logger): PendingRevisionInfo | null;
-  findQaPendingPr(config: RepoConfig, reviewerLogin: string | undefined, logger: Logger): QaPendingPr | null;
+  findPRsNeedingReview(config: RepoConfig, reviewerLogin: string | undefined, logger: Logger): Promise<ReviewCandidate | null>;
+  findPendingRevisions(config: RepoConfig, logger: Logger): Promise<PendingRevisionInfo | null>;
+  findQaPendingPr(config: RepoConfig, reviewerLogin: string | undefined, logger: Logger): Promise<QaPendingPr | null>;
   /** The issues among `issueNumbers` that carry `github.blockedLabel` (the EM's hold). */
-  blockedAmong(config: RepoConfig, issueNumbers: ReadonlyArray<number>, logger: Logger): number[];
+  blockedAmong(config: RepoConfig, issueNumbers: ReadonlyArray<number>, logger: Logger): Promise<number[]>;
   /** The PR's current head SHA. Throws when it cannot be read (EM#1244 f5). */
-  readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string;
+  readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): Promise<string>;
   /** The PR's state read live. Throws when GitHub cannot say (EM#1244 f5). */
-  readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED";
-  hasPendingRevisions(config: RepoConfig, logger: Logger): boolean;
+  readPrState(config: RepoConfig, prNumber: number, logger: Logger): Promise<"OPEN" | "MERGED" | "CLOSED">;
+  hasPendingRevisions(config: RepoConfig, logger: Logger): Promise<boolean>;
 
   // Skip holds.
   escalatedReason(reason: string, attempts: number): string;
-  foremanLogin(cwd: string): string | undefined;
+  foremanLogin(cwd: string): Promise<string | undefined>;
   heldReason(reason: string, repo: string, ref?: WaitingOn, refIsPr?: boolean): string;
-  issueActivitySince(repo: string, issue: number, since: string, cwd: string): IssueActivity[];
+  issueActivitySince(repo: string, issue: number, since: string, cwd: string): Promise<IssueActivity[]>;
   parseWaitingOn(raw: string | undefined, repo: string): WaitingOn | undefined;
-  refState(ref: WaitingOn, cwd: string): RefState;
-  skipGate(entry: HeldEntry, repo: string, maxAttempts: number, reads: HoldReads, transientCleared: () => boolean, onError?: (what: string, err: unknown) => void): SkipGate;
+  refState(ref: WaitingOn, cwd: string): Promise<RefState>;
+  skipGate(entry: HeldEntry, repo: string, maxAttempts: number, reads: HoldReads, transientCleared: () => boolean | Promise<boolean>, onError?: (what: string, err: unknown) => void): Promise<SkipGate>;
   waitingOnLabel(ref: WaitingOn, repo: string): string;
 }

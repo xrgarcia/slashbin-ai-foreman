@@ -7,7 +7,7 @@
 // and every expiry bought a full session to rediscover the same answer. A held
 // issue runs again only when something it waits on actually moves.
 
-import { gh, ghAsync } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import type { WaitingOn, RefState, IssueActivity, HoldReads, HeldEntry, SkipGate } from "../code-host.js";
 export type { WaitingOn, RefState, IssueActivity, HoldReads, HeldEntry, SkipGate } from "../code-host.js";
 
@@ -41,8 +41,8 @@ export function heldReason(reason: string, repo: string, ref?: WaitingOn, refIsP
 }
 
 /** The reference's state: one read. Throws on a gh failure. */
-export function refState(ref: WaitingOn, cwd: string): RefState {
-  const raw = gh(["api", `repos/${ref.repo}/issues/${ref.number}`, "--jq", "{state, pr: (.pull_request != null), merged: (.pull_request.merged_at != null)}"], cwd);
+export async function refState(ref: WaitingOn, cwd: string): Promise<RefState> {
+  const raw = await ghAsync(["api", `repos/${ref.repo}/issues/${ref.number}`, "--jq", "{state, pr: (.pull_request != null), merged: (.pull_request.merged_at != null)}"], cwd);
   const s = JSON.parse(raw) as { state: string; pr: boolean; merged: boolean };
   return { open: s.state !== "closed", isPr: s.pr, merged: s.merged };
 }
@@ -107,11 +107,11 @@ type Node = { body?: string; createdAt?: string; editedAt?: string; author?: { l
  * The issue's recent changes, newest window only. One read, plus none at all
  * when the issue has not been touched since `since`. Throws on a gh failure.
  */
-export function issueActivitySince(repo: string, issue: number, since: string, cwd: string): IssueActivity[] {
-  const updated = gh(["api", `repos/${repo}/issues/${issue}`, "--jq", ".updated_at"], cwd);
+export async function issueActivitySince(repo: string, issue: number, since: string, cwd: string): Promise<IssueActivity[]> {
+  const updated = await ghAsync(["api", `repos/${repo}/issues/${issue}`, "--jq", ".updated_at"], cwd);
   if (new Date(updated).getTime() <= new Date(since).getTime()) return [];
   const [o, r] = repo.split("/");
-  const raw = gh(["api", "graphql", "-f", `query=${ACTIVITY_QUERY}`, "-F", `o=${o}`, "-F", `r=${r}`, "-F", `n=${issue}`], cwd);
+  const raw = await ghAsync(["api", "graphql", "-f", `query=${ACTIVITY_QUERY}`, "-F", `o=${o}`, "-F", `r=${r}`, "-F", `n=${issue}`], cwd);
   const i = JSON.parse(raw)?.data?.repository?.issue;
   if (!i) return [];
   const nodes = (x: { nodes?: Node[] } | undefined) => x?.nodes ?? [];
@@ -130,10 +130,10 @@ export class ForemanIdentity {
   private known: string | undefined;
 
   /** The login, or undefined when the read fails (it is tried again next call). */
-  login(cwd: string): string | undefined {
+  async login(cwd: string): Promise<string | undefined> {
     if (this.known) return this.known;
     try {
-      this.known = gh(["api", "user", "--jq", ".login"], cwd) || undefined;
+      this.known = await ghAsync(["api", "user", "--jq", ".login"], cwd) || undefined;
     } catch {
       return undefined;
     }
@@ -163,17 +163,17 @@ export type HoldStatus =
  * A read that fails keeps the hold — unknown never releases — and is passed to
  * `onError` for the log.
  */
-export function holdStatus(
+export async function holdStatus(
   entry: { lastSkippedAt: string; waitingOn?: string },
   repo: string,
   reads: HoldReads,
   onError: (what: string, err: unknown) => void = () => {},
-): HoldStatus {
+): Promise<HoldStatus> {
   const ref = parseWaitingOn(entry.waitingOn, repo);
   let refIsPr: boolean | undefined;
   if (ref) {
     try {
-      const s = reads.refState(ref);
+      const s = await reads.refState(ref);
       if (!s.open) return { held: false, releasedBy: "waitedOnDone", ref };
       refIsPr = s.isPr;
     } catch (err) {
@@ -181,7 +181,7 @@ export function holdStatus(
     }
   }
   try {
-    if (changedSince(reads.activitySince(entry.lastSkippedAt), entry.lastSkippedAt, reads.self)) {
+    if (changedSince(await reads.activitySince(entry.lastSkippedAt), entry.lastSkippedAt, reads.self)) {
       return { held: false, releasedBy: "issueChanged", ref };
     }
   } catch (err) {
@@ -207,19 +207,19 @@ export function escalatedReason(reason: string, attempts: number): string {
  * again; an agent's comment releases nothing. The transient and reference
  * checks no longer run.
  */
-export function skipGate(
+export async function skipGate(
   entry: HeldEntry,
   repo: string,
   maxAttempts: number,
   reads: HoldReads,
-  transientCleared: () => boolean,
+  transientCleared: () => boolean | Promise<boolean>,
   onError: (what: string, err: unknown) => void = () => {},
-): SkipGate {
+): Promise<SkipGate> {
   const attempts = entry.skipCount ?? 0;
   if (entry.escalatedAt || attempts >= maxAttempts) {
     let by: "person" | "agent" | undefined;
     try {
-      by = escalatedChangeBy(reads.activitySince(entry.lastSkippedAt), entry.lastSkippedAt, reads.self, reads.agents);
+      by = escalatedChangeBy(await reads.activitySince(entry.lastSkippedAt), entry.lastSkippedAt, reads.self, reads.agents);
     } catch (err) {
       onError("issue activity", err);
     }
@@ -227,8 +227,8 @@ export function skipGate(
     return { run: false, reason: escalatedReason(entry.reason, attempts), escalate: !entry.escalatedAt };
   }
   if (entry.releasedAt) return { run: true, reset: false };
-  if (transientCleared()) return { run: true, by: "transientCauseGone", reset: false };
-  const status = holdStatus(entry, repo, reads, onError);
+  if (await transientCleared()) return { run: true, by: "transientCauseGone", reset: false };
+  const status = await holdStatus(entry, repo, reads, onError);
   if (!status.held) return { run: true, by: status.releasedBy, reset: false };
   return { run: false, reason: heldReason(entry.reason, repo, status.ref, status.refIsPr), escalate: false };
 }

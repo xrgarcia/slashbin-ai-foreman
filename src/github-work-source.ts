@@ -5,7 +5,7 @@
 import type { ItemRecord, ItemState, RecordKey, RecordLoad, SnapshotCard, WaitingItem, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import {
-  closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, gh, ghKeyed, hasLabel,
+  closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, ghKeyed, hasLabel,
   isBackoffRefusal, openIssueLabels, type ReviewOutcome,
 } from "./github.js";
 import type { Move, StageOrDone } from "./lifecycle.js";
@@ -55,7 +55,7 @@ export function issueStage(
   return null;
 }
 
-type LabelWrite = (c: GitHubIssueConnector, config: RepoConfig, n: number, logger: Logger) => boolean;
+type LabelWrite = (c: GitHubIssueConnector, config: RepoConfig, n: number, logger: Logger) => boolean | Promise<boolean>;
 
 /**
  * The label write each lifecycle move makes. A move added to the lifecycle
@@ -65,28 +65,28 @@ type LabelWrite = (c: GitHubIssueConnector, config: RepoConfig, n: number, logge
  */
 const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
   queue: () => false,
-  implemented: (c, cfg, n, log) => c.implementationDone(cfg, n, log),
-  alreadyApproved: (c, cfg, n, log) => c.alreadyMerged(cfg, n, "prApproved", log),
-  alreadyMerged: (c, cfg, n, log) => c.alreadyMerged(cfg, n, "prMerged", log),
-  reviewApproved: (c, cfg, n, log) => c.reviewOutcome(cfg, n, "prApproved", log),
-  reviewMerged: (c, cfg, n, log) => c.reviewOutcome(cfg, n, "prMerged", log),
-  changesRequested: (c, cfg, n, log) => c.reviewOutcome(cfg, n, "prPendingActions", log),
-  revised: (c, cfg, n, log) => c.revisionDone(cfg, n, log),
-  verifyPassed: (c, cfg, n, log) => c.verifyPassed(cfg, n, log),
-  qaRerun: (c, cfg, n, log) => c.qaRerun(cfg, n, log),
-  recoverPassed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "pass", log),
-  recoverFailed: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "fail", log),
-  recoverMerged: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "merged", log),
-  humanMerged: (c, cfg, n, log) => c.deadZoneResolve(cfg, n, "merged", log),
-  humanMergedApproved: (c, cfg, n, log) => c.verifyPassed(cfg, n, log),
-  closedNoRelease: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
-  release: (c, cfg, n, log) => c.orphanRelease(cfg, n, log),
-  releaseQueued: (c, cfg, n, log) => c.releaseQueued(cfg, n, log),
-  alreadyReleased: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
-  prodVerified: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
-  prodHeld: (c, cfg, n, log) => c.prodHeld(cfg, n, log),
-  prodReverified: (c, cfg, n, log) => c.closeReleased(cfg, n, log),
-  soakHeld: (c, cfg, n, log) => c.prodHeld(cfg, n, log),
+  implemented: async (c, cfg, n, log) => await c.implementationDone(cfg, n, log),
+  alreadyApproved: async (c, cfg, n, log) => await c.alreadyMerged(cfg, n, "prApproved", log),
+  alreadyMerged: async (c, cfg, n, log) => await c.alreadyMerged(cfg, n, "prMerged", log),
+  reviewApproved: async (c, cfg, n, log) => await c.reviewOutcome(cfg, n, "prApproved", log),
+  reviewMerged: async (c, cfg, n, log) => await c.reviewOutcome(cfg, n, "prMerged", log),
+  changesRequested: async (c, cfg, n, log) => await c.reviewOutcome(cfg, n, "prPendingActions", log),
+  revised: async (c, cfg, n, log) => await c.revisionDone(cfg, n, log),
+  verifyPassed: async (c, cfg, n, log) => await c.verifyPassed(cfg, n, log),
+  qaRerun: async (c, cfg, n, log) => await c.qaRerun(cfg, n, log),
+  recoverPassed: async (c, cfg, n, log) => await c.deadZoneResolve(cfg, n, "pass", log),
+  recoverFailed: async (c, cfg, n, log) => await c.deadZoneResolve(cfg, n, "fail", log),
+  recoverMerged: async (c, cfg, n, log) => await c.deadZoneResolve(cfg, n, "merged", log),
+  humanMerged: async (c, cfg, n, log) => await c.deadZoneResolve(cfg, n, "merged", log),
+  humanMergedApproved: async (c, cfg, n, log) => await c.verifyPassed(cfg, n, log),
+  closedNoRelease: async (c, cfg, n, log) => await c.closeReleased(cfg, n, log),
+  release: async (c, cfg, n, log) => await c.orphanRelease(cfg, n, log),
+  releaseQueued: async (c, cfg, n, log) => await c.releaseQueued(cfg, n, log),
+  alreadyReleased: async (c, cfg, n, log) => await c.closeReleased(cfg, n, log),
+  prodVerified: async (c, cfg, n, log) => await c.closeReleased(cfg, n, log),
+  prodHeld: async (c, cfg, n, log) => await c.prodHeld(cfg, n, log),
+  prodReverified: async (c, cfg, n, log) => await c.closeReleased(cfg, n, log),
+  soakHeld: async (c, cfg, n, log) => await c.prodHeld(cfg, n, log),
 });
 
 /**
@@ -166,7 +166,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   }
 
   async selectWork(repoConfig: RepoConfig, _config: AgentConfig, logger: Logger): Promise<WorkItem[]> {
-    return this.selectUncovered(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
+    return (await this.selectUncovered(repoConfig, logger)).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
   }
 
   heldWork(repoConfig: RepoConfig): ReadonlyArray<WaitingItem> {
@@ -191,13 +191,13 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     const blockedLabel = repoConfig.github.blockedLabel;
     let release = new Set<number>();
     try {
-      release = new Set(getOpenPrs(repo, repoConfig.repoPath)
+      release = new Set((await getOpenPrs(repo, repoConfig.repoPath))
         .filter((p) => p.baseRefName === repoConfig.productionBranch)
         .flatMap((p) => [...String(p.body ?? "").matchAll(/#(\d+)\b/g)].map((m) => Number(m[1]))));
     } catch (err) {
       logger.debug(`cards: ${repo} release PRs not read: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const open = getOpenIssues(repo, repoConfig.repoPath, logger);
+    const open = await getOpenIssues(repo, repoConfig.repoPath, logger);
     const labelsOf = (i: { labels: { name: string }[] }) => i.labels.map((l) => l.name);
     const holds = await this.cardReads.holdReasons(repo, repoConfig.repoPath, blockedLabel,
       open.filter((i) => labelsOf(i).includes(blockedLabel)).map((i) => i.number), logger);
@@ -232,7 +232,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
 
   async snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]> {
     const out: SnapshotItem[] = [];
-    for (const { number, labels } of openIssueLabels(repoConfig, logger)) {
+    for (const { number, labels } of await openIssueLabels(repoConfig, logger)) {
       const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel, repoConfig.github.blockedLabel);
       if (stage === null) continue;
       out.push({ item: { issueNumber: number, repo: repoConfig.githubRepo }, stage, detail: labels.join(", ") || "none" });
@@ -246,10 +246,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  implementationDone(config: RepoConfig, num: number, logger: Logger): boolean {
+  async implementationDone(config: RepoConfig, num: number, logger: Logger): Promise<boolean> {
     const labels = config.lifecycleLabels;
     try {
-      gh([
+      await ghAsync([
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
         "--add-label", labels.prUnderReview,
@@ -263,10 +263,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   }
 
   /** After a successful revision: remove `prPendingActions`, add `prUnderReview`. @internal */
-  revisionDone(config: RepoConfig, num: number, logger: Logger): boolean {
+  async revisionDone(config: RepoConfig, num: number, logger: Logger): Promise<boolean> {
     const labels = config.lifecycleLabels;
     try {
-      gh([
+      await ghAsync([
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
         "--remove-label", labels.prPendingActions,
@@ -301,11 +301,11 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  reviewOutcome(config: RepoConfig, issueNumber: number, outcome: ReviewOutcome, logger: Logger): boolean {
+  async reviewOutcome(config: RepoConfig, issueNumber: number, outcome: ReviewOutcome, logger: Logger): Promise<boolean> {
     const { prUnderReview } = config.lifecycleLabels;
     const nextLabel = config.lifecycleLabels[outcome];
     try {
-      gh([
+      await ghAsync([
         "issue", "edit", String(issueNumber),
         "--repo", config.githubRepo,
         "--remove-label", prUnderReview,
@@ -327,10 +327,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  qaRerun(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+  async qaRerun(config: RepoConfig, issueNumber: number, logger: Logger): Promise<boolean> {
     const { prMerged, prApproved } = config.lifecycleLabels;
     try {
-      gh(["issue", "edit", String(issueNumber), "--repo", config.githubRepo, "--remove-label", prApproved, "--add-label", prMerged], config.repoPath);
+      await ghAsync(["issue", "edit", String(issueNumber), "--repo", config.githubRepo, "--remove-label", prApproved, "--add-label", prMerged], config.repoPath);
       logger.info(`Transitioned issue #${issueNumber} labels: "${prApproved}" → "${prMerged}" (EM QA re-run)`);
       return true;
     } catch (err) {
@@ -345,10 +345,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  verifyPassed(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+  async verifyPassed(config: RepoConfig, issueNumber: number, logger: Logger): Promise<boolean> {
     const { prMerged, prApproved } = config.lifecycleLabels;
     try {
-      gh([
+      await ghAsync([
         "issue", "edit", String(issueNumber),
         "--repo", config.githubRepo,
         "--remove-label", prMerged,
@@ -379,10 +379,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  alreadyMerged(config: RepoConfig, num: number, outcome: "prApproved" | "prMerged", logger: Logger): boolean {
+  async alreadyMerged(config: RepoConfig, num: number, outcome: "prApproved" | "prMerged", logger: Logger): Promise<boolean> {
     const next = config.lifecycleLabels[outcome];
     try {
-      gh([
+      await ghAsync([
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
         "--remove-label", config.triggerLabel,
@@ -409,7 +409,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  deadZoneResolve(config: RepoConfig, issueNumber: number, verdict: "pass" | "fail" | "merged", logger: Logger): boolean {
+  async deadZoneResolve(config: RepoConfig, issueNumber: number, verdict: "pass" | "fail" | "merged", logger: Logger): Promise<boolean> {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
     // "merged": no verdict here — hand the issue to the verify stage (EM#441).
     const nextLabel = config.lifecycleLabels[verdict === "pass" ? "prApproved" : verdict === "merged" ? "prMerged" : "prPendingActions"];
@@ -419,7 +419,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       // `pr under review`, a hard `--remove-label` of `prUnderReview` would throw
       // on exactly the issues the widened detector catches.
       dropIssueSnapshot(config.githubRepo);
-      const issue = getOpenIssues(config.githubRepo, config.repoPath, logger)
+      const issue = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
         .find((i) => i.number === issueNumber);
       if (!issue) {
         logger.debug(`Dead-zone resolve skipped for #${issueNumber} — no longer open`);
@@ -456,7 +456,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
         return false;
       }
 
-      gh(args, config.repoPath);
+      await ghAsync(args, config.repoPath);
       logger.info(
         `Dead-zone resolved on #${issueNumber}: removed ${stripped.map((s) => `"${s}"`).join(", ") || "(nothing)"}, ` +
         `added "${nextLabel}" (re-verification ${verdict.toUpperCase()})`,
@@ -477,10 +477,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  orphanRelease(config: RepoConfig, issueNumber: number, logger: Logger): boolean {
+  async orphanRelease(config: RepoConfig, issueNumber: number, logger: Logger): Promise<boolean> {
     try {
       dropIssueSnapshot(config.githubRepo);
-      const issue = getOpenIssues(config.githubRepo, config.repoPath, logger)
+      const issue = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
         .find((i) => i.number === issueNumber);
       if (!issue) return false;
 
@@ -491,7 +491,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       }
       if (args.length === 5) return false; // nothing to strip — state changed under us
 
-      gh(args, config.repoPath);
+      await ghAsync(args, config.repoPath);
       logger.warn(
         `Released orphaned issue #${issueNumber} back to the implement queue — it carried a lifecycle label ` +
         `but no open PR covers it and nothing merged, so the work never landed.`,
@@ -513,10 +513,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  releaseQueued(config: RepoConfig, num: number, logger: Logger): boolean {
+  async releaseQueued(config: RepoConfig, num: number, logger: Logger): Promise<boolean> {
     const { readyForProd, prApproved, releasePending } = config.lifecycleLabels;
     try {
-      const issue = viewIssue(config, num);
+      const issue = await viewIssue(config, num);
       if (!issue) return false;
       const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
       // `pr approved` goes too: on its own it means "waiting on the EM", and the EM
@@ -524,7 +524,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       for (const l of [readyForProd, prApproved]) if (issue.labels.includes(l)) args.push("--remove-label", l);
       if (!issue.labels.includes(releasePending)) args.push("--add-label", releasePending);
       if (args.length === 5) return false;
-      gh(args, config.repoPath);
+      await ghAsync(args, config.repoPath);
       logger.info(`Transitioned issue #${num} labels: "${readyForProd}" → "${releasePending}" (in the release PR)`);
       return true;
     } catch (err) {
@@ -541,18 +541,18 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  closeReleased(config: RepoConfig, num: number, logger: Logger): boolean {
+  async closeReleased(config: RepoConfig, num: number, logger: Logger): Promise<boolean> {
     try {
-      const issue = viewIssue(config, num);
+      const issue = await viewIssue(config, num);
       if (!issue) return false;
       const strip = Object.values(config.lifecycleLabels).filter((l) => issue.labels.includes(l));
       if (strip.length > 0) {
         const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
         for (const l of strip) args.push("--remove-label", l);
-        gh(args, config.repoPath);
+        await ghAsync(args, config.repoPath);
       }
       if (issue.state === "OPEN") {
-        gh(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
+        await ghAsync(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
       }
       logger.info(`Closed issue #${num} after prod verification (removed ${strip.map((l) => `"${l}"`).join(", ") || "no labels"})`);
       return strip.length > 0 || issue.state === "OPEN";
@@ -570,14 +570,14 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    *
    * @internal
    */
-  prodHeld(config: RepoConfig, num: number, logger: Logger): boolean {
+  async prodHeld(config: RepoConfig, num: number, logger: Logger): Promise<boolean> {
     const { prodVerifyHeld } = config.lifecycleLabels;
     try {
-      const issue = viewIssue(config, num);
+      const issue = await viewIssue(config, num);
       if (!issue) return false;
       let wrote = false;
       if (issue.state !== "OPEN") {
-        gh(["issue", "reopen", String(num), "--repo", config.githubRepo], config.repoPath);
+        await ghAsync(["issue", "reopen", String(num), "--repo", config.githubRepo], config.repoPath);
         wrote = true;
       }
       const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
@@ -588,7 +588,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       }
       if (!issue.labels.includes(prodVerifyHeld)) args.push("--add-label", prodVerifyHeld);
       if (args.length > 5) {
-        gh(args, config.repoPath);
+        await ghAsync(args, config.repoPath);
         wrote = true;
       }
       if (wrote) logger.info(`Transitioned issue #${num} → "${prodVerifyHeld}" (prod verification held)`);
@@ -622,7 +622,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    */
   async selectEligible(repoConfig: RepoConfig, logger: Logger): Promise<WorkItem[]> {
     try {
-      return this.eligible(repoConfig, logger).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
+      return (await this.eligible(repoConfig, logger)).map((n) => ({ issueNumber: n, repo: repoConfig.githubRepo }));
     } catch (err) {
       logger.warn("selectEligible failed; returning [] (labeling will fall back to discovery batch)", {
         error: err instanceof Error ? err.message : String(err),
@@ -632,8 +632,8 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   }
 
   /** Trigger-labelled, not `blocked`, no lifecycle label. Throws on gh failure. */
-  private eligible(config: RepoConfig, logger: Logger): number[] {
-    const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
+  private async eligible(config: RepoConfig, logger: Logger): Promise<number[]> {
+    const issues = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) => hasLabel(i, config.triggerLabel));
 
     const lifecycleLabelValues = Object.values(config.lifecycleLabels);
@@ -644,7 +644,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       const labels = issue.labels.map((l) => l.name);
       if (labels.includes(config.github.blockedLabel)) continue;
       if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
-      if (this.waitsOnBlocker(config, issue.number, logger, held)) continue;
+      if (await this.waitsOnBlocker(config, issue.number, logger, held)) continue;
       actionable.push(issue.number);
     }
     this.acceptanceHeld.set(config.githubRepo, held);
@@ -656,20 +656,20 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * branch (dependencies.ts). An unreadable dependency list holds the issue too:
    * a stall is logged and visible, a build out of order is neither.
    */
-  private waitsOnBlocker(config: RepoConfig, num: number, logger: Logger, held: WaitingItem[] = []): boolean {
+  private async waitsOnBlocker(config: RepoConfig, num: number, logger: Logger, held: WaitingItem[] = []): Promise<boolean> {
     const key = `${config.githubRepo}#${num}`;
     let hold: string | null;
     let announce: { kind: HoldKind; reasons: string[] } | null = null;
     try {
-      const unmet = unmetBlockers(blockersOf(config.githubRepo, num, config.repoPath), config.lifecycleLabels);
+      const unmet = unmetBlockers(await blockersOf(config.githubRepo, num, config.repoPath), config.lifecycleLabels);
       hold = unmet.length ? `blocked by ${unmet.map((b) => blockerRef(b, config.githubRepo)).join(", ")} until it merges` : null;
     } catch (err) {
       hold = `its blockers could not be read (${err instanceof Error ? err.message : String(err)})`;
     }
     if (hold === null) {
       try {
-        const body = readIssueBody(config, num);
-        const readinessUnmet = unmetReadiness(parseReadiness(body), (args) => gh(args, config.repoPath));
+        const body = await readIssueBody(config, num);
+        const readinessUnmet = await unmetReadiness(parseReadiness(body), async (args) => await ghAsync(args, config.repoPath));
         if (readinessUnmet.length) {
           hold = `Pre-Flight readiness not met: ${readinessUnmet.join("; ")}`;
           announce = { kind: "readiness", reasons: readinessUnmet };
@@ -693,7 +693,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     if (announce?.kind === "acceptance") held.push({ item: { issueNumber: num, repo: config.githubRepo }, reason: hold });
     if (announce) {
       const memo = `${key}|${announce.kind}`;
-      if (this.holdCommented.get(memo) !== hold && announceHold(config, num, announce.kind, announce.reasons, this.identity.login(config.repoPath))) {
+      if (this.holdCommented.get(memo) !== hold && await announceHold(config, num, announce.kind, announce.reasons, await this.identity.login(config.repoPath))) {
         this.holdCommented.set(memo, hold);
       }
     }
@@ -709,11 +709,11 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * uncovered issue number, in the order `gh issue list` returned them (the
    * order a self-selecting skill saw), or [] if none or on any failure.
    */
-  private selectUncovered(config: RepoConfig, logger: Logger): number[] {
+  private async selectUncovered(config: RepoConfig, logger: Logger): Promise<number[]> {
     const repo = config.githubRepo;
 
     try {
-      const actionable = this.eligible(config, logger);
+      const actionable = await this.eligible(config, logger);
 
       if (actionable.length === 0) return [];
 
@@ -721,9 +721,9 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       // that references them. If so, skip — the Foreman already did the work.
       // Check both open and merged PRs to catch issues where the PR was already merged
       // but the issue label wasn't updated.
-      const openPrs = findOpenPrs(repo, config.repoPath, { base: config.baseBranch, limit: 50 });
+      const openPrs = await findOpenPrs(repo, config.repoPath, { base: config.baseBranch, limit: 50 });
 
-      const mergedPrJson = ghKeyed(`merged20:${repo}:${config.baseBranch}`, () => closedPrVersion(repo), [
+      const mergedPrJson = await ghKeyed(`merged20:${repo}:${config.baseBranch}`, async () => await closedPrVersion(repo), [
         "pr", "list",
         "--repo", repo,
         "--state", "merged",

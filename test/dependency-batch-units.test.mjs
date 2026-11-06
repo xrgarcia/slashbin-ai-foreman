@@ -67,35 +67,35 @@ test("policy: filings older than 24h do not count", () => {
 
 // --- DependencyDiscovery / SecuritySelection ---------------------------------------------------
 
-test("discovery: finds PRs on the working branches, never on production", () => {
+test("discovery: finds PRs on the working branches, never on production", async () => {
   const host = new FakeHost();
   host.addPr(1, "a"); host.addPr(2, "b", undefined, "main");
-  const found = new DependencyDiscovery(host).discover(repoConfig(), quiet);
+  const found = await new DependencyDiscovery(host).discover(repoConfig(), quiet);
   assert.deepEqual(found.bases, ["develop", "features"]);
   assert.deepEqual(found.prs.map((p) => p.number), [1]);
 });
-test("discovery: nothing open -> null", () => {
-  assert.equal(new DependencyDiscovery(new FakeHost()).discover(repoConfig(), quiet), null);
+test("discovery: nothing open -> null", async () => {
+  assert.equal(await new DependencyDiscovery(new FakeHost()).discover(repoConfig(), quiet), null);
 });
-test("discovery: a repo whose only base is production has no bases", () => {
+test("discovery: a repo whose only base is production has no bases", async () => {
   const host = new FakeHost(); host.addPr(1, "a");
-  assert.equal(new DependencyDiscovery(host).discover(repoConfig({ baseBranch: "main", featureBranch: undefined }), quiet), null);
+  assert.equal(await new DependencyDiscovery(host).discover(repoConfig({ baseBranch: "main", featureBranch: undefined }), quiet), null);
 });
 
-test("security selection: keeps only PRs with an open alert on their package", () => {
+test("security selection: keeps only PRs with an open alert on their package", async () => {
   const host = new FakeHost();
   host.addPr(1, "a", "chore(deps): bump vite from 1.0.0 to 2.0.0"); host.addPr(2, "b", "chore(deps): bump lodash from 1.0.0 to 1.0.1");
   host.alerts = new Set(["lodash"]);
-  const sel = new SecuritySelection(host).select(repoConfig({ dependabot: { securityOnly: true } }), host.prs, quiet);
+  const sel = await new SecuritySelection(host).select(repoConfig({ dependabot: { securityOnly: true } }), host.prs, quiet);
   assert.deepEqual(sel.map((p) => p.number), [2]);
 });
-test("security selection: an unreadable alert list batches nothing", () => {
+test("security selection: an unreadable alert list batches nothing", async () => {
   const host = new FakeHost(); host.addPr(1, "a"); host.alertsFail = true;
-  assert.deepEqual(new SecuritySelection(host).select(repoConfig({ dependabot: { securityOnly: true } }), host.prs, quiet), []);
+  assert.deepEqual(await new SecuritySelection(host).select(repoConfig({ dependabot: { securityOnly: true } }), host.prs, quiet), []);
 });
-test("security selection: securityOnly off passes everything through", () => {
+test("security selection: securityOnly off passes everything through", async () => {
   const host = new FakeHost(); host.addPr(1, "a"); host.alertsFail = true;
-  assert.equal(new SecuritySelection(host).select(repoConfig(), host.prs, quiet).length, 1);
+  assert.equal((await new SecuritySelection(host).select(repoConfig(), host.prs, quiet)).length, 1);
 });
 
 // --- composer / filer / probe ------------------------------------------------------------------
@@ -107,19 +107,19 @@ test("composer: title and body name every PR; the batch keys on head SHAs", () =
   assert.match(issue.body, /\| #627 \| @hono\/node-server \|/);
   assert.equal(batchOf(host.prs).key, "627@sha1");
 });
-test("filer: pre-approved repos file with the trigger label, others bare", () => {
+test("filer: pre-approved repos file with the trigger label, others bare", async () => {
   const host = new FakeHost();
   const issue = { title: "t", body: "b", changes: [] };
-  new BatchIssueFiler(host).file(repoConfig(), issue, quiet);
-  new BatchIssueFiler(host).file(repoConfig({ dependencyPreApproved: false }), issue, quiet);
+  await new BatchIssueFiler(host).file(repoConfig(), issue, quiet);
+  await new BatchIssueFiler(host).file(repoConfig({ dependencyPreApproved: false }), issue, quiet);
   assert.deepEqual(host.filed.map((f) => f.label), ["approved", null]);
 });
-test("probe: sees an open batch issue and ignores a closed one", () => {
+test("probe: sees an open batch issue and ignores a closed one", async () => {
   const host = new FakeHost();
   host.issues.push({ number: 1, open: false });
-  assert.equal(new OpenBatchIssueProbe(host).isOpen(repoConfig(), quiet), false);
+  assert.equal(await new OpenBatchIssueProbe(host).isOpen(repoConfig(), quiet), false);
   host.issues.push({ number: 2, open: true });
-  assert.equal(new OpenBatchIssueProbe(host).isOpen(repoConfig(), quiet), true);
+  assert.equal(await new OpenBatchIssueProbe(host).isOpen(repoConfig(), quiet), true);
 });
 
 // --- DependencyBatchLanding --------------------------------------------------------------------
