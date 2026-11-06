@@ -1,7 +1,10 @@
 // foreman#232: the alert outbox's contract with the EM, and the delivery policy `nextStep` owns for every kind.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM_MS, missingKinds, nextStep, epicChildClosedAlert, unrelatedErrorAlert } from "../dist/unstick.js";
 import { checkKindContract } from "../dist/unstick-contract.js";
 import { rejectedAsUnknownKind } from "../dist/plugins/em.js";
@@ -11,9 +14,25 @@ const HOUR = 3600_000;
 const T0 = Date.parse("2026-11-06T00:00:00Z");
 const policy = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 0, capMs: 0, factor: 1, maxRecalls: 0 } };
 
-// The contract: the EM's `kinds --json` output (captured from bin/em.mjs) lists every kind the Foreman sends.
-test("contract: every UNSTICK_KINDS member is in the EM's published kinds (fixture = bin/em.mjs kinds --json)", () => {
-  const published = JSON.parse(readFileSync(new URL("./fixtures/em-kinds.json", import.meta.url), "utf8"));
+// The contract: the EM's `kinds --json` output lists every kind the Foreman sends. The test asks the real receiver
+// (bin/em.mjs in $EM_REPO_PATH or the sibling checkout) when it is there, and falls back to a captured fixture only
+// when it is not.
+function receiverKinds() {
+  for (const dir of [process.env.EM_REPO_PATH, fileURLToPath(new URL("../../slashbin-engineering-manager", import.meta.url))]) {
+    if (!dir || !existsSync(join(dir, "bin", "em.mjs"))) continue;
+    const r = spawnSync(process.execPath, [join(dir, "bin", "em.mjs"), "kinds", "--json"], { encoding: "utf8", timeout: 30_000 });
+    if (r.status === 0) {
+      try { return { from: dir, kinds: JSON.parse(r.stdout) }; } catch { /* a receiver that predates the subcommand: use the fixture */ }
+    }
+  }
+  return null;
+}
+
+test("contract: every UNSTICK_KINDS member is in the EM's published kinds (the real receiver, else the fixture)", (t) => {
+  const real = receiverKinds();
+  if (!real) console.log("# contract: no receiver with `kinds --json` found (EM_REPO_PATH or ../slashbin-engineering-manager): using test/fixtures/em-kinds.json");
+  else console.log(`# contract: read the real receiver at ${real.from}`);
+  const published = real ? real.kinds : JSON.parse(readFileSync(new URL("./fixtures/em-kinds.json", import.meta.url), "utf8"));
   assert.deepEqual(missingKinds(published), []);
 });
 
@@ -70,6 +89,19 @@ test("nextStep: a delivered entry (invoked, escalated, declined) is never re-arm
   }
   const inv = entry({ status: "invoked" });
   assert.equal(nextStep(inv, cand(inv), T0 + 99 * HOUR, policy), "wait", "invoked with no handoff watch");
+});
+
+// The handoff watch as the daemon configures it (backoff.handoff defaults: 10 min, 3 recalls).
+const watch = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 10 * 60_000, capMs: 90 * 60_000, factor: 3, maxRecalls: 3 } };
+
+test("nextStep (R1): a repo-level alert the EM took is terminal; an issue handoff keeps its watch", () => {
+  for (const kind of ["unrelated-error", "epic-ready-to-close", "dependency-batch-loop"]) {
+    const e = entry({ kind, status: "invoked", attempts: 1, recalls: 0 });
+    for (const min of [5, 10, 15, 60, 24 * 60]) assert.equal(nextStep(e, cand(e), T0 + min * 60_000, watch), "wait", `${kind} at ${min} min`);
+  }
+  const issue = entry({ issue: 12, kind: "needs-ruling", status: "invoked", attempts: 1, recalls: 0 });
+  assert.equal(nextStep(issue, cand(issue), T0 + 5 * 60_000, watch), "wait", "inside the window");
+  assert.equal(nextStep(issue, cand(issue), T0 + 10 * 60_000, watch), "call", "an issue handoff is recalled past the window");
 });
 
 test("nextStep: calls left still call at once; a changed reason is a new question", () => {

@@ -256,7 +256,8 @@ const NO_HANDOFF_WATCH: UnstickPolicy["handoff"] = Object.freeze({ baseMs: 0, ca
  *    moved; tell the escalation owner, once.
  *  - `wait`: nothing to do yet.
  *
- * An `invoked` answer is a handoff, not a resolution: the seat that took it can
+ * An `invoked` answer on an issue is a handoff, not a resolution (a repo-level entry, issue 0, has no issue to watch
+ * and is terminal once taken): the seat that took it can
  * die (out of tokens, crashed) and leave the issue where it was. While the
  * question still stands, it is called again after `handoff` window n since the
  * last call. A refusal waits for its `waitUntil` and costs nothing.
@@ -271,7 +272,9 @@ export function nextStep(entry: UnstickEntry | undefined, c: UnstickCandidate, n
     case "refused": return !entry.waitUntil || now >= Date.parse(entry.waitUntil) ? "call" : "wait";
     case "invoked": {
       const h = policy.handoff;
-      if (h.maxRecalls <= 0 || entry.gaveUpAt || !entry.lastCallAt) return "wait";
+      // The watch re-asks when an ISSUE is still stuck after a handoff. A repo-level entry (issue 0) is an event with no
+      // issue to watch: once the EM took it, it is delivered and terminal.
+      if (entry.issue <= 0 || h.maxRecalls <= 0 || entry.gaveUpAt || !entry.lastCallAt) return "wait";
       const recalls = entry.recalls ?? 0;
       if (now < Date.parse(entry.lastCallAt) + backoffDelay(recalls + 1, h)) return "wait";
       return recalls < h.maxRecalls ? "call" : "give-up";
