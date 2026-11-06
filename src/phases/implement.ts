@@ -38,14 +38,14 @@ import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
  * stay caught by the default `return false` — those don't go away on retry.
  * Unknown stays deny: a PR the snapshot cannot vouch for keeps the back-off.
  */
-export function isResolvedTransientSkip(
+export async function isResolvedTransientSkip(
   reason: string,
   repoConfig: RepoConfig,
   logger: Logger,
-): boolean {
+): Promise<boolean> {
   const prNumber = prBlockingSkip(reason);
   if (prNumber !== null) {
-    return codeHost().isPrOpen(repoConfig.githubRepo, prNumber, repoConfig.repoPath) === false;
+    return await codeHost().isPrOpen(repoConfig.githubRepo, prNumber, repoConfig.repoPath) === false;
   }
   return false;
 }
@@ -108,11 +108,11 @@ async function tellDependents(rt: ForemanRuntime, issues: number[], reason: stri
         continue;
       }
       const entry = record.skipped;
-      const { told, failed, open } = codeHost().announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
+      const { told, failed, open } = await codeHost().announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
       // The stopped issue is held visibly whether or not anything waits on it: with no
       // dependents it was held only by the Foreman's state, `approved` and unlabelled, and
       // showed Blocked on the board alone (jerky_data_receiver#553, 2026-10-26).
-      codeHost().holdBlocker(repoConfig, n);
+      await codeHost().holdBlocker(repoConfig, n);
       if (open.length === 0) continue;
       for (const f of failed) repoLogger.warn(`Could not tell dependent ${f.ref} that #${n} is dead: ${f.error}`);
       // "Told" (comment + label) and "escalated" (an EM handoff on record) are kept
@@ -160,7 +160,7 @@ export async function deliverPendingHandoffs(rt: ForemanRuntime, repoConfig: Rep
   const managed = config.allRepos ?? config.repos;
   try {
     // The issues the repo has open: a held blocker keeps its blocked label and is among them.
-    const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger).map((i) => i.number);
+    const open = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger)).map((i) => i.number);
     const skipped = fieldTable(await rt.records.loadIssueRecords(repoConfig, open), "skipped");
     for (const [key, entry] of Object.entries(skipped)) {
       const pending = (entry.deadBlockerTold ?? []).filter((ref) => {
@@ -270,9 +270,9 @@ export async function tryBatchImplementation(
   // the issue and clear the stale skip entry, rather than pinning it a whole window.
   // The open Foreman-owned PR, if any (findOpenFeaturePR: per-issue branch or legacy head). Unknown (lookup threw) reads as none: the
   // session still refuses to bundle, so the old path is the fallback.
-  let featurePr: ReturnType<CodeHost["findOpenFeaturePR"]> = null;
+  let featurePr: Awaited<ReturnType<CodeHost["findOpenFeaturePR"]>> = null;
   try {
-    featurePr = codeHost().findOpenFeaturePR(repoConfig);
+    featurePr = await codeHost().findOpenFeaturePR(repoConfig);
   } catch (err) {
     repoLogger.debug(`Open feature PR lookup failed — not queueing on it this cycle: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -283,36 +283,40 @@ export async function tryBatchImplementation(
   const resolvedTransient: { n: number; reason: string }[] = [];
   const released: { n: number; by: Exclude<Extract<SkipGate, { run: true }>["by"], undefined>; reset: boolean }[] = [];
   const escalating: { n: number; reason: string }[] = [];
-  handOff = handOff.filter((n) => {
+  // A loop, not `.filter`: each gate reads GitHub, and an async predicate would keep every issue.
+  const admitted: number[] = [];
+  for (const n of handOff) {
     const entry = skippedMap[n];
-    if (!entry) return true;
+    if (!entry) { admitted.push(n); continue; }
     // A skip on the open feature PR is the queue gate's to hold, not a skip's.
-    const transientCleared = () =>
-      (featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number) || isResolvedTransientSkip(entry.reason, repoConfig, repoLogger);
+    const transientCleared = async () =>
+      (featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number) || await isResolvedTransientSkip(entry.reason, repoConfig, repoLogger);
     if (skip.hold) {
-      const gate = codeHost().skipGate(entry, repoConfig.githubRepo, skip.maxAttempts, {
-        refState: (ref) => codeHost().refState(ref, repoConfig.repoPath),
-        activitySince: (since) => codeHost().issueActivitySince(repoConfig.githubRepo, n, since, repoConfig.repoPath),
-        self: codeHost().foremanLogin(repoConfig.repoPath),
+      const gate = await codeHost().skipGate(entry, repoConfig.githubRepo, skip.maxAttempts, {
+        refState: async (ref) => await codeHost().refState(ref, repoConfig.repoPath),
+        activitySince: async (since) => await codeHost().issueActivitySince(repoConfig.githubRepo, n, since, repoConfig.repoPath),
+        self: await codeHost().foremanLogin(repoConfig.repoPath),
         agents: skip.agentLogins,
       }, transientCleared, (what, err) => repoLogger.debug(`Hold on #${n}: could not read ${what} — still held: ${err instanceof Error ? err.message : String(err)}`));
       if (gate.run) {
         if (gate.by) released.push({ n, by: gate.by, reset: gate.reset });
-        return true;
+        admitted.push(n);
+        continue;
       }
       if (gate.escalate) escalating.push({ n, reason: gate.reason });
       stillBackedOff.push({ n, reason: gate.reason });
-      return false;
+      continue;
     }
     const age = now - new Date(entry.lastSkippedAt).getTime();
-    if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) return true;
-    if (transientCleared()) {
+    if (Number.isNaN(age) || age >= backoffDelay(entry.skipCount, skip)) { admitted.push(n); continue; }
+    if (await transientCleared()) {
       resolvedTransient.push({ n, reason: entry.reason });
-      return true;
+      admitted.push(n);
+      continue;
     }
     stillBackedOff.push({ n, reason: entry.reason });
-    return false;
-  });
+  }
+  handOff = admitted;
   // A release buys one session: the entry stays, marked, so the next skip adds
   // to its count. A person's change to an escalated issue clears it instead.
   if (released.length > 0) {
@@ -357,13 +361,13 @@ export async function tryBatchImplementation(
   let labels = new Map<number, string[]>();
   let titles = new Map<number, string>();
   try {
-    const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger);
+    const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, repoLogger);
     labels = new Map(open.map((i) => [i.number, i.labels.map((l) => l.name)]));
     titles = new Map(open.map((i) => [i.number, i.title]));
   } catch (err) {
     repoLogger.debug(`Issue labels unreadable — ranking the build by age only: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const actionableIssues = codeHost().discoveryBatch(repoConfig, handOff, repoLogger, config.buildBatchSize, (n) => labels.get(n) ?? []);
+  const actionableIssues = await codeHost().discoveryBatch(repoConfig, handOff, repoLogger, config.buildBatchSize, (n) => labels.get(n) ?? []);
   if (actionableIssues.length === 0) {
     if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
@@ -372,7 +376,7 @@ export async function tryBatchImplementation(
   // Gate: if there's a PR awaiting revision (`pr pending actions`), skip implementation.
   // The revision phase (Phase 1) handles these — running implementation would just
   // re-detect the same committed issues and loop without making progress.
-  if (codeHost().hasPendingRevisions(repoConfig, repoLogger)) {
+  if (await codeHost().hasPendingRevisions(repoConfig, repoLogger)) {
     repoLogger.debug(`Skipping ${repoName} implementation — PR awaiting revision`);
     return null;
   }
@@ -460,7 +464,7 @@ export async function tryBatchImplementation(
   try {
     // Tell the source the Foreman is starting on its batch, before the session.
     for (const n of actionableIssues) await emit(rt, { kind: "claim", item: itemOf(repoConfig, n) }, repoConfig, repoLogger);
-    const goals = startReport(repoConfig, actionableIssues, repoLogger);
+    const goals = await startReport(repoConfig, actionableIssues, repoLogger);
     await emit(rt, { kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
 
     // A stale skill copy is brought to the golden in a commit the session
@@ -492,7 +496,7 @@ export async function tryBatchImplementation(
         : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (wantsSessionReports()) {
       // Commits on the open PR leave no URL: its head branch names the PR.
-      const pr = result.success ? prReport(repoConfig, result.prUrl ?? codeHost().findOpenFeaturePR(repoConfig)?.headBranch ?? repoConfig.baseBranch, repoLogger) : undefined;
+      const pr = result.success ? await prReport(repoConfig, result.prUrl ?? (await codeHost().findOpenFeaturePR(repoConfig))?.headBranch ?? repoConfig.baseBranch, repoLogger) : undefined;
       report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
     }
 
@@ -526,7 +530,7 @@ export async function tryBatchImplementation(
       // Widening to allActionable (vs just actionableIssues) is the
       // slashbin-ai-foreman#18 fix: if the skill picked an out-of-batch
       // approved issue, the resulting PR still gets correctly labeled.
-      const referencedAll = codeHost().findOpenFeaturePR(repoConfig)?.issueNumbers ?? null;
+      const referencedAll = (await codeHost().findOpenFeaturePR(repoConfig))?.issueNumbers ?? null;
       const allActionable = (await workSourceFor(repoConfig).selectEligible?.(repoConfig, repoLogger) ?? []).map((w) => w.issueNumber);
       const labelingCandidates = Array.from(new Set([...actionableIssues, ...allActionable]));
       const matched = referencedAll
@@ -593,7 +597,7 @@ export async function tryBatchImplementation(
         // A dependency-batch issue is more than the issue: its Dependabot PRs are retired and the batch's outcome
         // recorded, or the sweep files the same batch again. Generic close below stays generic (foreman#230).
         await resolveLandedDependencyBatch(rt, repoConfig, n, reason, repoLogger);
-        codeHost().closeAlreadyLanded(repoConfig, n, reason);
+        await codeHost().closeAlreadyLanded(repoConfig, n, reason);
         await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
         rt.memory.failureCount.set(repoName, 0);
         rt.memory.lastFailureReason.delete(repoName);
@@ -632,7 +636,7 @@ export async function tryBatchImplementation(
       // Safe because findIssuesMergedToBase() uses the STRICT predicate: only a
       // merged PR that says it CLOSED the issue counts (never a "related to #N").
       // On any lookup failure it advances nothing — we under-advance by design.
-      const alreadyMerged = codeHost().findIssuesMergedToBase(repoConfig, skippedSet, repoLogger);
+      const alreadyMerged = await codeHost().findIssuesMergedToBase(repoConfig, skippedSet, repoLogger);
       const hasVerifier = roleFor("verifier", config) !== undefined;
       if (alreadyMerged.length > 0) {
         const mergedNums = alreadyMerged.map((m) => m.issueNumber);
@@ -662,7 +666,7 @@ export async function tryBatchImplementation(
       let waitingOnIsPr: boolean | undefined;
       if (waitingOn && skip.hold) {
         try {
-          waitingOnIsPr = codeHost().refState(waitingOn, repoConfig.repoPath).isPr;
+          waitingOnIsPr = (await codeHost().refState(waitingOn, repoConfig.repoPath)).isPr;
         } catch (err) {
           repoLogger.debug(`Could not read ${codeHost().waitingOnLabel(waitingOn, repoConfig.githubRepo)}: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -726,7 +730,7 @@ export async function tryBatchImplementation(
       rt.memory.failureCount.set(repoName, newCount);
       // The run failed after its work landed in a PR: the PR names the issue
       // it was on, and only that issue is told it failed.
-      const onPr = (codeHost().findOpenFeaturePR(repoConfig)?.issueNumbers ?? null)?.filter((n) => actionableIssues.includes(n));
+      const onPr = ((await codeHost().findOpenFeaturePR(repoConfig))?.issueNumbers ?? null)?.filter((n) => actionableIssues.includes(n));
       if (onPr && onPr.length > 0) worked = onPr;
       const failedOn = worked ?? actionableIssues;
       if (newCount < repoFailure.maxFailures) {

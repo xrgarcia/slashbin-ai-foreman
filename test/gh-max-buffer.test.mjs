@@ -10,9 +10,9 @@ import { GH_MAX_BUFFER } from "../dist/github/gh.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("runGh raises the output limit well past the 1 MiB default", () => {
+test("runGhAsync raises the output limit well past the 1 MiB default", () => {
   assert.ok(GH_MAX_BUFFER >= 32 * 1024 * 1024);
   const src = readFileSync(join(root, "src/github/gh.ts"), "utf-8");
-  const spawn = src.slice(src.indexOf('execFileSync("gh", args'), src.indexOf("}).trim();"));
+  const spawn = src.slice(src.indexOf('execFileAsync("gh", args'), src.indexOf("return stdout.trim();"));
   assert.match(spawn, /maxBuffer: GH_MAX_BUFFER/);
 });

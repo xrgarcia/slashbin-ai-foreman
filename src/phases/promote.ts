@@ -20,14 +20,14 @@ import { BatchIssueComposer, BatchIssueFiler, DependencyDiscovery, OpenBatchIssu
 import { DependencyBatchFilingPolicy } from "../dependency-batch/policy.js";
 import { dependencyBatchLoopAlert } from "../unstick.js";
 
-export function trySyncDrift(
+export async function trySyncDrift(
   repoConfig: RepoConfig,
   logger: Logger,
   cycleNumber: number
-): boolean {
+): Promise<boolean> {
   const syncLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "sync" });
 
-  const drift = codeHost().checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
+  const drift = await codeHost().checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
   if (!drift || drift.developBehindMain === 0) return false;
 
   // An already-open sync PR is a RETRY, not a no-op. The merge attempted at
@@ -36,9 +36,9 @@ export function trySyncDrift(
   // here meant it was never merged at all. `develop` then stays behind `main`,
   // the next promotion PR goes BEHIND, and branch protection refuses it.
   // (Slashbin-console#779: open 2h48m over ~140 no-op cycles, blocking #782.)
-  const existing = codeHost().findOpenSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
+  const existing = await codeHost().findOpenSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
   if (existing) {
-    if (codeHost().tryMergeSyncPR(repoConfig.githubRepo, existing.number, repoConfig.repoPath, syncLogger, repoConfig.productionBranch)) {
+    if (await codeHost().tryMergeSyncPR(repoConfig.githubRepo, existing.number, repoConfig.repoPath, syncLogger, repoConfig.productionBranch)) {
       syncLogger.info(`Sync PR merged on retry — #${existing.number}: ${existing.url}`);
       return true;
     }
@@ -47,7 +47,7 @@ export function trySyncDrift(
   }
 
   syncLogger.info(`${repoConfig.baseBranch} is ${drift.developBehindMain} commit(s) behind ${repoConfig.productionBranch} — creating sync PR`);
-  const syncUrl = codeHost().createSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, drift.developBehindMain, repoConfig.repoPath, syncLogger, repoConfig.github);
+  const syncUrl = await codeHost().createSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, drift.developBehindMain, repoConfig.repoPath, syncLogger, repoConfig.github);
   if (syncUrl) {
     // Say what actually happened. This line used to assert "created and
     // auto-merged" unconditionally, which was false whenever branch protection
@@ -120,7 +120,7 @@ const STALL_MARK = "<!-- foreman:promotion-stall -->";
  */
 async function noteStall(rt: ForemanRuntime, repoConfig: RepoConfig, files: number, logger: Logger, held: number[] = []): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
-  const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const waiting = open
     .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel))
     .map((i) => i.number);
@@ -137,7 +137,7 @@ async function noteStall(rt: ForemanRuntime, repoConfig: RepoConfig, files: numb
   }
   for (const n of fresh) {
     try {
-      codeHost().commentOnIssue(repoConfig, n, [
+      await codeHost().commentOnIssue(repoConfig, n, [
         STALL_MARK,
         `**Waiting on EM verification.** This issue passed dev verification (\`${prApproved}\`), and \`${repoConfig.baseBranch}\` ` +
         `carries ${files} changed file(s) that are not on \`${repoConfig.productionBranch}\`, but no issue carries \`${readyForProd}\`, ` +
@@ -167,19 +167,19 @@ async function noteStall(rt: ForemanRuntime, repoConfig: RepoConfig, files: numb
  * `blocked` (a predeploy-stop, a Tech Lead refusal, an SRE sweep hold). Their
  * work is what `develop` carries, so the drift is theirs, not unnamed.
  */
-function heldReleaseIssues(repoConfig: RepoConfig, logger: Logger): number[] {
+async function heldReleaseIssues(repoConfig: RepoConfig, logger: Logger): Promise<number[]> {
   const { releasePending } = repoConfig.lifecycleLabels;
-  return codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+  return (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
     .filter((i) => codeHost().hasLabel(i, releasePending) && codeHost().hasLabel(i, repoConfig.github.blockedLabel))
     .map((i) => i.number)
     .sort((a, b) => a - b);
 }
 
 /** One held issue, worded for the log: whose release, which hold, on which PR. */
-function describeHeld(repoConfig: RepoConfig, n: number, fallbackPr: number | null, logger: Logger): string {
+async function describeHeld(repoConfig: RepoConfig, n: number, fallbackPr: number | null, logger: Logger): Promise<string> {
   let stop: { pr: number | null; hold: string } | null = null;
   try {
-    stop = codeHost().findReleaseStop(repoConfig, n);
+    stop = await codeHost().findReleaseStop(repoConfig, n);
   } catch (err) {
     logger.debug(`Could not read the release stop on #${n}: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -188,7 +188,7 @@ function describeHeld(repoConfig: RepoConfig, n: number, fallbackPr: number | nu
     `${pr ? ` on PR #${pr}` : ""} — waiting on a person`;
 }
 
-function noteHeldRelease(rt: ForemanRuntime, repoConfig: RepoConfig, held: number[], files: number, logger: Logger): string {
+async function noteHeldRelease(rt: ForemanRuntime, repoConfig: RepoConfig, held: number[], files: number, logger: Logger): Promise<string> {
   const key = held.join(",");
   const prefix = `${repoConfig.baseBranch} carries ${files} changed file(s) not on ${repoConfig.productionBranch}: `;
   if (rt.memory.heldNoted.get(repoConfig.name) === key) {
@@ -196,9 +196,11 @@ function noteHeldRelease(rt: ForemanRuntime, repoConfig: RepoConfig, held: numbe
     logger.debug(`${prefix}${line} — unchanged since last noted`);
     return line;
   }
-  const open = codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
+  const open = await codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   const listed = open ? new Set(releaseIssues(open.body)) : new Set<number>();
-  const line = held.map((n) => describeHeld(repoConfig, n, open && listed.has(n) ? open.number : null, logger)).join("; ");
+  const described: string[] = [];
+  for (const n of held) described.push(await describeHeld(repoConfig, n, open && listed.has(n) ? open.number : null, logger));
+  const line = described.join("; ");
   logger.warn(`${prefix}${line}.`);
   rt.memory.heldNoted.set(repoConfig.name, key);
   return line;
@@ -224,7 +226,7 @@ async function carriedIssues(rt: ForemanRuntime, repoConfig: RepoConfig, logger:
   for (const r of loaded.releases) {
     if (r.phase !== "deploying") for (const n of r.issues) merged.add(n);
   }
-  return codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+  return (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
     .filter((i) => codeHost().hasLabel(i, releasePending) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel) && !merged.has(i.number))
     .map((i) => ({ number: i.number, title: i.title }));
 }
@@ -265,7 +267,7 @@ export async function tryPromotion(
   // its issues have lost that label.
   await followRelease(rt, repoConfig, promoLogger, releaseActive);
 
-  let issues = codeHost().findReadyForProdIssues(
+  let issues = await codeHost().findReadyForProdIssues(
     repoConfig.githubRepo, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger,
   );
   const carried = releaseActive ? await carriedIssues(rt, repoConfig, promoLogger) : [];
@@ -290,7 +292,7 @@ export async function tryPromotion(
     const last = rt.memory.lastStallCheckCycle.get(repoName) ?? -Infinity;
     if (cycleNumber - last >= STALL_CHECK_CYCLE_INTERVAL) {
       rt.memory.lastStallCheckCycle.set(repoName, cycleNumber);
-      const drift = codeHost().checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
+      const drift = await codeHost().checkBranchDrift(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
       // Gate on CHANGED FILES, never on commit count. Every repo sits 1 commit
       // ahead in the steady state — the main -> develop sync PR's merge commit,
       // which carries no file change. Warning on `ahead > 0` fires on every repo
@@ -300,10 +302,10 @@ export async function tryPromotion(
       // `.claude/` (skill syncs) rides the next real release and is not a stall.
       const files = drift ? codeHost().productionDriftFiles(drift) : 0;
       if (drift && files > 0) {
-        const held = heldReleaseIssues(repoConfig, promoLogger);
+        const held = await heldReleaseIssues(repoConfig, promoLogger);
         let detail: string;
         if (held.length > 0) {
-          detail = noteHeldRelease(rt, repoConfig, held, files, promoLogger);
+          detail = await noteHeldRelease(rt, repoConfig, held, files, promoLogger);
         } else {
           clearHeldNote(rt, repoConfig);
           promoLogger.info(
@@ -337,28 +339,28 @@ export async function tryPromotion(
   if (issues.length > 0) promoLogger.info(`Found ${issues.length} issue(s) ready for prod release`);
 
   // Check if a promotion PR already exists
-  const existingPR = codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
+  const existingPR = await codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
   if (existingPR) {
     const listed = releaseIssues(existingPR.body);
     const listedSet = new Set(listed);
     // Everything the PR must list: the newly authorized, the carried, and,
     // with the release stage on, whatever it already lists that is still
     // open, so a rewrite never drops an issue out of its own release.
-    const open = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, promoLogger);
+    const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, promoLogger);
     const stillListed = releaseActive
       ? open.filter((i) => listedSet.has(i.number)).map((i) => ({ number: i.number, title: i.title }))
       : [];
     // The PR promotes all of `develop`: adopt every issue whose merge it
     // carries that is not already authorized or listed (foreman#90).
     const authorized = new Set([...listedSet, ...issues.map((i) => i.number), ...carried.map((i) => i.number), ...stillListed.map((i) => i.number)]);
-    const carry = codeHost().adoptCarried(repoConfig, authorized, promoLogger);
+    const carry = await codeHost().adoptCarried(repoConfig, authorized, promoLogger);
     // Adopted issues are listed, not signed: only `issues` (the EM's) move to release pending.
     const wanted = releaseActive ? union(union(stillListed, carried), union(issues, carry.adopted)) : union(issues, carry.adopted);
     const missing = wanted.filter((i) => !listedSet.has(i.number));
     const unlistedPrs = carry.unlinked.filter((u) => !existingPR.body.includes(`PR ${u.pr}:`));
 
     if (missing.length > 0 || unlistedPrs.length > 0) {
-      const updated = codeHost().updatePromotionPR(
+      const updated = await codeHost().updatePromotionPR(
         repoConfig.githubRepo, existingPR.number, wanted, repoConfig.repoPath, repoConfig.github, carry.unlinked,
       );
       if (updated) {
@@ -390,7 +392,7 @@ export async function tryPromotion(
   // In that case an issue still labeled `ready for prod release` (because the
   // EM verification script hasn't stripped it yet) would trigger a phantom
   // no-op promotion PR — the ping-pong bug.
-  const diffFiles = codeHost().countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
+  const diffFiles = await codeHost().countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, promoLogger);
   if (diffFiles === 0) {
     // TERMINAL EXIT for the promote lifecycle (slashbin-ai-foreman#32, promote variant).
     //
@@ -416,7 +418,7 @@ export async function tryPromotion(
       // Everything else goes to `release pending`, where the release stage
       // adopts the merged release that carried it and verifies it.
       let head: string | null = null;
-      try { head = codeHost().productionHead(repoConfig); } catch (err) {
+      try { head = await codeHost().productionHead(repoConfig); } catch (err) {
         promoLogger.warn(`Could not read ${repoConfig.productionBranch}'s head: ${err instanceof Error ? err.message : String(err)}`);
       }
       const verified = fieldTable(recorded, "prodVerified");
@@ -444,7 +446,7 @@ export async function tryPromotion(
       `so their work is already in ${repoConfig.productionBranch}: ${nums.map((n) => `#${n}`).join(", ")}. ` +
       `Stripping the label (nothing left to promote). They remain open for EM outcome-verification + close.`,
     );
-    codeHost().stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
+    await codeHost().stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
     // Confirmed in main: the promotion these issues were waiting for happened.
     await notifyOnce(rt, "promoted", repoConfig, nums, promoLogger);
     await emit(rt, { kind: "release", release: {
@@ -462,10 +464,10 @@ export async function tryPromotion(
   // The PR promotes all of `develop`: adopt every issue whose merge it carries
   // that is not already authorized (foreman#90), so the PR lists them all.
   const authorizedNums = toList.map((i) => i.number);
-  const carry: ReleaseCarry = codeHost().adoptCarried(repoConfig, new Set(authorizedNums), promoLogger);
+  const carry: ReleaseCarry = await codeHost().adoptCarried(repoConfig, new Set(authorizedNums), promoLogger);
   toList = union(toList, carry.adopted);
 
-  const prUrl = codeHost().createPromotionPR(
+  const prUrl = await codeHost().createPromotionPR(
     repoConfig.githubRepo,
     repoConfig.productionBranch,
     repoConfig.baseBranch,
@@ -489,7 +491,7 @@ export async function tryPromotion(
     } else {
       // Strip the `ready for prod release` label now that the promotion PR
       // owns these issues, so the next cycle does not promote them again.
-      codeHost().stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
+      await codeHost().stripReadyForProdLabel(repoConfig.githubRepo, nums, repoConfig.repoPath, repoConfig.lifecycleLabels, promoLogger);
     }
     await notifyOnce(rt, "promoted", repoConfig, nums, promoLogger);
     return "promoted";

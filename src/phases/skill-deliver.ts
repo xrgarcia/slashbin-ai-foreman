@@ -29,8 +29,8 @@ export async function trySkillDeliver(
   if (!repoConfig.syncOnly || !config.skillSync?.enabled) return 0;
   let delivered = 0;
   try {
-    const issues = codeHost()
-      .getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    const issues = (await codeHost()
+      .getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
       .filter((i) => codeHost().hasLabel(i, HUMAN_LANE_LABEL))
       .sort((a, b) => a.number - b.number);
     for (const issue of issues) {

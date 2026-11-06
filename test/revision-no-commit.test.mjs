@@ -99,7 +99,7 @@ test("an escalated stalemate stops launching revision sessions until the head mo
 
 test("a marker that cannot be saved admits no paid session; a round counts only after the session and a successful read (EM#1244 f5)", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  const read = fn.indexOf("const beforeSha = codeHost().getRemoteBranchSha(");
+  const read = fn.indexOf("const beforeSha = await codeHost().getRemoteBranchSha(");
   const admit = fn.indexOf("await rt.streaks.admitRevision(");
   assert.ok(read > 0 && read < admit, "the branch sha is read BEFORE anything is written: a failed read leaves nothing to take back");
   assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "the marker is saved before the paid session");

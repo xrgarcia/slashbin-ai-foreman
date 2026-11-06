@@ -39,7 +39,7 @@ export interface ReleaseTrackDeps {
   /** The open base → production PR, or null when there is none. */
   findOpenRelease: () => { number: number; url: string; body: string } | null;
   /** The PR's state on GitHub; null when it could not be read. */
-  releaseState: (pr: number) => "OPEN" | "MERGED" | "CLOSED" | null;
+  releaseState: (pr: number) => Promise<"OPEN" | "MERGED" | "CLOSED" | null>;
   /** Record the mark for PR `pr` (null clears it); resolves false when it could not be saved, and nothing is announced. */
   save: (pr: number, v: SavedRelease | null) => Promise<boolean>;
   emit: (event: ReleaseEvent) => Promise<void>;
@@ -83,7 +83,7 @@ export async function trackRelease(d: ReleaseTrackDeps): Promise<void> {
 
 /** Announce how a saved release PR that left the open set ended, and clear it. */
 async function settle(saved: SavedRelease, d: ReleaseTrackDeps, items: (ns: number[]) => WorkItem[]): Promise<void> {
-  const state = d.releaseState(saved.pr);
+  const state = await d.releaseState(saved.pr);
   if (state === null || state === "OPEN") return;
   if (!(await d.save(saved.pr, null))) return;
   await d.emit({
@@ -145,7 +145,7 @@ export class ReleaseTracker {
           // Every release PR there has ever been (open, merged, closed), in one complete listing that throws when it
           // fails or may be cut short: a stored release or pointer can sit on any of them, however old, and a swallowed
           // failure would read as "none". Each PR's record is then read once.
-          for (const p of codeHost().allPrsForBranch(id, repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.repoPath)) numbers.add(p.number);
+          for (const p of await codeHost().allPrsForBranch(id, repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.repoPath)) numbers.add(p.number);
         } catch (err) {
           logger.debug(`Could not list ${id}'s release PRs: ${err instanceof Error ? err.message : String(err)}`);
           return null;
@@ -217,7 +217,7 @@ export class ReleaseTracker {
     const sweep = await this.swept(repoConfig, logger);
     if (!sweep) return;
     const id = repoConfig.githubRepo;
-    const open = codeHost().findOpenPromotionPR(id, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
+    const open = await codeHost().findOpenPromotionPR(id, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
     const save = async (pr: number, v: SavedRelease | null): Promise<boolean> => {
       const ok = await this.records.updatePrRecord(repoConfig, pr, (d) => { if (v) d.tracked = v; else delete d.tracked; });
       if (ok) { if (v) sweep.tracked.add(pr); else sweep.tracked.delete(pr); }
@@ -226,7 +226,7 @@ export class ReleaseTracker {
     const common = {
       repo: id,
       productionBranch: repoConfig.productionBranch,
-      releaseState: (pr: number) => codeHost().getPrState(id, pr, repoConfig.repoPath, logger),
+      releaseState: async (pr: number) => await codeHost().getPrState(id, pr, repoConfig.repoPath, logger),
       save,
       emit,
       owned,

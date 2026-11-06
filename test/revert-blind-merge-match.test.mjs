@@ -73,7 +73,7 @@ process.stdout.write(a[0] === "pr" && a[1] === "list" ? ${JSON.stringify(JSON.st
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
-  // runGh refuses without a Foreman token; the fake gh never reads it.
+  // runGhAsync refuses without a Foreman token; the fake gh never reads it.
   savedToken = process.env.FOREMAN_GITHUB_TOKEN;
   process.env.FOREMAN_GITHUB_TOKEN = "test-token";
 });
@@ -83,11 +83,11 @@ after(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("findIssuesMergedToBase does not read the reverted #1164 as merged", () => {
+test("findIssuesMergedToBase does not read the reverted #1164 as merged", async () => {
   const p = join(tmp, "cfg.json");
   writeFileSync(p, JSON.stringify({ repos: [{ name: "console", repoPath: tmp, githubRepo: "example/console" }] }));
   const cfg = loadConfig(p).repos[0];
-  assert.deepEqual(findIssuesMergedToBase(cfg, [1163, 1164], logger).map((m) => m.issueNumber), [1163]);
+  assert.deepEqual((await findIssuesMergedToBase(cfg, [1163, 1164], logger)).map((m) => m.issueNumber), [1163]);
 });
 
 test("jerky_service PR #112: a prose mention of the next issue is not a reference", () => {
