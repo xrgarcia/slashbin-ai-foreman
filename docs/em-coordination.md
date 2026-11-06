@@ -116,7 +116,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -133,6 +133,13 @@ names an epic (`<epicRefLabel> #N` in its body, `engineering-manager #N` in the 
 It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
+`dependency-batch-loop` fires when the dependency sweep has filed the same batch (the same Dependabot PRs at the same head
+commits) 3 times in 24 hours. The sweep then **holds that batch**: it files nothing more for those PRs and raises this kind once,
+repo-level (issue 0). Each of those issues ended with no PR of its own (`landed`), so a Dependabot PR is almost certainly open
+after its version reached the base branch and the Foreman's close of it failed (foreman#230: jerky-mcp-services #627, 397
+sessions). The EM finds out why, closes or fixes the PR(s); a new Dependabot push is a new batch and is filed once. Never
+file the batch by hand. A `landed` batch issue closes its Dependabot PRs itself (a comment naming why) and records the batch
+as `landed`, after which the sweep never files that batch again.
 `dead-zone` is an issue in a state reconcile cannot recover; a reviewer-declared hold is
 never auto-recovered and goes to the EM as a message.
 

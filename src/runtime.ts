@@ -21,6 +21,7 @@
 
 import { BuildsInFlight } from "./build-in-flight.js";
 import { ClaudeTrust } from "./claude-trust.js";
+import { RecordStoreDependencyBatchLedger } from "./dependency-batch/ledger.js";
 import { IssueRecordStore } from "./issue-records.js";
 import { LegacyImport } from "./legacy-records.js";
 import { NoCommitStreaks } from "./no-commit-streak.js";
@@ -36,6 +37,8 @@ export class ForemanRuntime {
   readonly releases = new ReleaseTracker(this.records);
   readonly streaks = new NoCommitStreaks(this.records);
   readonly handoffs = new EmHandoffs(this.records);
+  /** What became of each dependency batch: durable on the repo record, never in memory (foreman#230). */
+  readonly dependencyBatches = new RecordStoreDependencyBatchLedger(this.records);
   readonly legacy = new LegacyImport(this.records, this.releases, this.streaks);
   readonly onboarding = new Onboarding();
   readonly trust = new ClaudeTrust();

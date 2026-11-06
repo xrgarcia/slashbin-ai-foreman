@@ -1,7 +1,8 @@
 // Dependency (Dependabot) PRs and the one batch issue that carries them.
 
 import type { Logger } from "../logger.js";
-import { IssueSnapshot, PrSnapshot, formatGhError, getOpenIssues, getOpenPrs } from "./cache.js";
+import { IssueSnapshot, PrSnapshot, forgetOpenPrs, formatGhError, getOpenIssues, getOpenPrs } from "./cache.js";
+import type { RepoConfig } from "../config.js";
 import { gh, isBackoffRefusal } from "./gh.js";
 import { DEFAULT_GITHUB_CONVENTIONS, type GithubConventions } from "./conventions.js";
 import type { DependencyChange } from "../code-host.js";
@@ -373,6 +374,20 @@ export function createDependencyBatchIssue(
     logger?.warn("createDependencyBatchIssue: gh issue create failed", { ...formatGhError(err), repo });
     return null;
   }
+}
+
+/**
+ * Close a superseded Dependabot PR, commenting `reason` first (one `gh` call).
+ * Idempotent: a PR that is not open is left as it is. Throws when the state
+ * cannot be read or the close is refused, so the caller knows the batch is not
+ * resolved. Closing a superseded Dependabot PR is what Dependabot itself
+ * expects; it reopens or rebases on its own if the update is still needed.
+ */
+export function retireDependencyPR(config: RepoConfig, number: number, reason: string): void {
+  const state = gh(["pr", "view", String(number), "--repo", config.githubRepo, "--json", "state", "--jq", ".state"], config.repoPath).trim();
+  if (state !== "OPEN") return;
+  gh(["pr", "close", String(number), "--repo", config.githubRepo, "--comment", reason], config.repoPath);
+  forgetOpenPrs(config.githubRepo);
 }
 
 /*

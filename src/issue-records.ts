@@ -14,6 +14,7 @@ import { canonicalJson } from "./record-store.js";
 import { activeWorkSource } from "./plugins/registry.js";
 import type { UnstickEntry } from "./unstick.js";
 import type { SavedRelease } from "./release-tracker.js";
+import type { BatchHistory } from "./dependency-batch/ledger.js";
 
 /**
  * A release the release stage is carrying (EM#578), keyed by release PR. Kept
@@ -254,10 +255,12 @@ export interface RepoRecord {
   divergenceRuled?: string[];
   /** The Paperclip card blocks of this repo's cards, by card id (was `cardBlocks`). */
   cardBlocks?: Record<string, CardBlockRecord>;
+  /** What became of each dependency batch, by batch key (PRs + head SHAs): the dependency sweep's durable memory (foreman#230). */
+  dependencyBatches?: Record<string, BatchHistory>;
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

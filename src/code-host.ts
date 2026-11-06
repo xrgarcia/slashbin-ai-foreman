@@ -26,6 +26,8 @@ export interface PrSnapshot {
   body: string;
   headRefName: string;
   baseRefName: string;
+  /** The PR's head commit; identifies a dependency batch. */
+  headRefOid?: string;
 }
 
 /**
@@ -449,6 +451,8 @@ export interface CodeHost {
   findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): PrSnapshot[];
   findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): IssueSnapshot | undefined;
   selectSecurityPRs<T extends Pick<PrSnapshot, "title" | "body">>(prs: readonly T[], alertPackages: ReadonlySet<string>): T[];
+  /** Close a superseded Dependabot PR with `reason` as its comment. No-op when it is not open; throws when the close fails. */
+  retireDependencyPR(config: RepoConfig, number: number, reason: string): void;
 
   // Discovery.
   discoveryBatch(config: RepoConfig, offered: number[], logger: Logger, size?: number, labelsOf?: (n: number) => readonly string[]): number[];
