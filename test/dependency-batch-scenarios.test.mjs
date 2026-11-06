@@ -12,7 +12,7 @@ import {
 import { DependencyBatchLanding } from "../dist/dependency-batch/landing.js";
 import { RecordStoreDependencyBatchLedger } from "../dist/dependency-batch/ledger.js";
 import { IssueRecordStore } from "../dist/issue-records.js";
-import { EmHandoffs } from "../dist/unstick.js";
+import { EmHandoffs, dependencyBatchLoopAlert } from "../dist/unstick.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
 import { memoryRecords, repoRecordOf } from "./issue-records.mjs";
 import { FakeHost, FakeLedger, repoConfig, quiet } from "./dependency-batch-fixtures.mjs";
@@ -22,7 +22,7 @@ const at = (h) => new Date(T0.getTime() + h * 3600_000);
 
 function build(host, ledger, over = {}) {
   const notices = [];
-  // Idempotent per key, like EmHandoffs.noteDependencyBatchLoop (its own tests are below): the sweep asks on every held pass.
+  // Idempotent per key, like EmHandoffs.raise (its own tests are below): the sweep asks on every held pass.
   const notifier = { async batchLooping(_r, batch, filings) { if (!notices.some((n) => n.key === batch.key)) notices.push({ key: batch.key, filings }); return true; } };
   const sweep = new DependencyBatchSweep({
     discovery: new DependencyDiscovery(host), security: new SecuritySelection(host), openIssue: new OpenBatchIssueProbe(host),
@@ -178,8 +178,8 @@ test("the EM notice is a repo-level unstick entry, once per batch key", async ()
   memoryRecords();
   const rt = { records: new IssueRecordStore() };
   const handoffs = new EmHandoffs(rt.records);
-  assert.equal(await handoffs.noteDependencyBatchLoop(repoConfig(), "627@sha627", 3), true);
-  await handoffs.noteDependencyBatchLoop(repoConfig(), "627@sha627", 3);
+  assert.equal(await handoffs.raise(repoConfig(), dependencyBatchLoopAlert("627@sha627", 3)).then(() => true), true);
+  await handoffs.raise(repoConfig(), dependencyBatchLoopAlert("627@sha627", 3)).then(() => true);
   const rec = await repoRecordOf(rt, repoConfig());
   const entries = JSON.stringify(rec);
   assert.match(entries, /dependency-batch-loop/);

@@ -143,12 +143,24 @@ as `landed`, after which the sweep never files that batch again.
 `dead-zone` is an issue in a state reconcile cannot recover; a reviewer-declared hold is
 never auto-recovered and goes to the EM as a message.
 
+**How alerts reach the EM.** Every sender (release, verify, promote, the dependency sweep) hands the
+outbox one typed `Alert` (`kind`, `subject`, `dedupeKey`, `reason`) through `EmHandoffs.raise`
+(`src/unstick.ts`); there is no per-kind write path. The unstick stage delivers it. One rule re-arms
+every kind in `nextStep`: a `failed` entry whose 3 attempts are spent is called again after an hour
+(`SPENT_QUESTION_REARM_MS`) one call each time, the wait doubling (1 h, 2 h, 4 h, up to 24 h; `SPENT_QUESTION_REARM`), never a fresh burst of 3; the first burst running out gives one give-up notice. Delivered entries (`invoked`, `escalated`,
+`declined`) are never re-armed this way.
+
+**Kind contract.** At startup the Foreman runs `bin/em.mjs kinds --json` and compares it with
+`UNSTICK_KINDS`; a kind the EM does not publish is logged as an error. If the EM rejects a kind
+(`unknown kind '<kind>'; nothing written`, exit 3), the entry is recorded `failed`, not `declined`,
+so it is retried once the EM is fixed. Any other exit 3 stays `declined`.
+
 After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up comment
 @-mentioning `unstickEscalationOwner` (Ray, in the `slashbin` profile; unset, the give-up is only
 logged). **That comment means the EM failed its stage** — a give-up is never the first Ray hears
 of a stuck card.
 
-**An `invoked` answer is a handoff, not a resolution.** If the question still stands, the Foreman
+**An `invoked` answer on an issue is a handoff, not a resolution** (a repo-level alert, issue 0, has no issue to watch: once the EM took it, it is delivered and never recalled). If the question still stands, the Foreman
 calls `unstick` again after `backoff.handoff` (10 min, 30 min, 90 min), then posts a second kind of
 give-up — "the EM took this hold but nothing moved" — @ the same owner, about 7 h after the first
 call. So on a re-call, check whether the seat you handed to is still alive before handing again: a

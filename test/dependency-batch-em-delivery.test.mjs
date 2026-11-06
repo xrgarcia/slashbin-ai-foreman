@@ -2,16 +2,17 @@
 //
 // R2: the queued notice meets three failed EM calls, then the EM recovers and the Foreman restarts. The unstick watch
 // leaves a spent (failed at the cap) entry alone for good, and the ledger used to hold its own "told" flag, so the
-// notice was lost silently. The unstick entry is now the one record of delivery; a spent one is asked afresh.
+// notice was lost silently. The unstick entry is now the one record of delivery, and `nextStep` asks a spent one afresh
+// (foreman#232: for every kind, so the sender no longer re-opens it).
 // R3: an accepted notice is never asked again by the held sweep, across polls and restarts.
-import test from "node:test";
+import test, { mock } from "node:test";
 import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { tryUnstick } from "../dist/phases/unstick.js";
-import { UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM_MS, deliverySpent } from "../dist/unstick.js";
+import { UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM_MS, deliverySpent, dependencyBatchLoopAlert } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, repoRecordOf } from "./issue-records.mjs";
 import { ForemanRuntime } from "../dist/runtime.js";
@@ -46,13 +47,14 @@ function setup() {
     entry: async (rt) => Object.values((await repoRecordOf(rt, repo)).unstick ?? {}).find((e) => e.kind === "dependency-batch-loop"),
   };
 }
+mock.timers.enable({ apis: ["Date"], now: Date.now() });
+const raise = (rt, s) => rt.handoffs.raise(s.repo, dependencyBatchLoopAlert(KEY, 3));
 const pass = (rt, s, n) => tryUnstick(rt, s.repo, s.config, logger, n);
 
 test("R2: three failed EM calls, the EM recovers, the Foreman restarts: the notice is re-opened and delivered", async () => {
   const s = setup();
   let rt = new ForemanRuntime();
-  const t0 = new Date();
-  assert.equal(await rt.handoffs.noteDependencyBatchLoop(s.repo, KEY, 3, t0), true);
+  assert.equal(await raise(rt, s), true);
   for (let i = 1; i <= UNSTICK_MAX_ATTEMPTS; i++) assert.equal(await pass(rt, s, i), 1);
   let e = await s.entry(rt);
   assert.deepEqual([e.status, e.attempts], ["failed", UNSTICK_MAX_ATTEMPTS], "spent: the watch alone never asks again");
@@ -61,10 +63,12 @@ test("R2: three failed EM calls, the EM recovers, the Foreman restarts: the noti
   s.recover();
   rt = new ForemanRuntime(); // restart: new runtime objects over the same record backend
   // An immediate sweep does not hammer a spent notice: it waits out the re-arm window.
-  await rt.handoffs.noteDependencyBatchLoop(s.repo, KEY, 3, new Date(t0.getTime() + 60_000));
+  mock.timers.tick(60_000);
+  assert.equal(await raise(rt, s), false, "the held sweep adds nothing: the entry stands");
   assert.equal(await pass(rt, s, 10), 0);
-  // After the window the held sweep re-opens it, and the next unstick pass delivers it.
-  assert.equal(await rt.handoffs.noteDependencyBatchLoop(s.repo, KEY, 3, new Date(Date.now() + SPENT_QUESTION_REARM_MS + 1000)), true);
+  // After the window the unstick stage itself asks it afresh and delivers it; the sweep does nothing.
+  mock.timers.tick(SPENT_QUESTION_REARM_MS);
+  assert.equal(await raise(rt, s), false);
   assert.equal(await pass(rt, s, 11), 1);
   e = await s.entry(rt);
   assert.equal(e.status, "invoked", "an accepted EM answer");
@@ -76,14 +80,14 @@ test("R3: a delivered notice is not re-asked by later held sweeps, polls or rest
   const s = setup();
   s.recover();
   let rt = new ForemanRuntime();
-  const t0 = Date.now();
-  await rt.handoffs.noteDependencyBatchLoop(s.repo, KEY, 3, new Date(t0));
+  await raise(rt, s);
   assert.equal(await pass(rt, s, 1), 1);
   const delivered = await s.entry(rt);
   assert.equal(delivered.status, "invoked");
   for (let k = 0; k < 4; k++) {
     rt = new ForemanRuntime(); // each poll after a restart
-    assert.equal(await rt.handoffs.noteDependencyBatchLoop(s.repo, KEY, 3, new Date(t0 + (k + 1) * 10 * HOUR)), true);
+    mock.timers.tick(10 * HOUR);
+    assert.equal(await raise(rt, s), false);
     assert.deepEqual(await s.entry(rt), delivered, "the entry is untouched");
   }
   assert.equal(Object.keys((await repoRecordOf(rt, s.repo)).unstick).length, 1, "one question, never a second");
