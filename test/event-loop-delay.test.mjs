@@ -8,28 +8,53 @@ const logger = () => {
   const lines = [];
   return { lines, info: (m, d) => lines.push({ m, d }), warn() {}, error() {}, debug() {}, child() { return this; } };
 };
-const fakeHistogram = (ns) => {
-  const h = { count: ns.length, enabled: false, resets: 0, enable() { h.enabled = true; }, disable() { h.enabled = false; }, reset() { h.resets++; h.count = 0; },
-    percentile: (p) => ns[Math.min(ns.length - 1, Math.floor((p / 100) * ns.length))], get max() { return Math.max(...ns); } };
-  return h;
-};
+const block = (ms) => { const end = Date.now() + ms; while (Date.now() < end) { /* hold the loop */ } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test("a pass logs one line with repo, lane, p50, p99 and max in ms, then resets", async () => {
-  const h = fakeHistogram([10e6, 11e6, 12e6, 2500e6]);
-  const mon = startEventLoopDelayMonitor(h);
+test("a pass logs one line with the prefix, repo, lane, p50, p99 and max in ms", async () => {
+  const mon = startEventLoopDelayMonitor();
   const log = logger();
-  assert.equal(await withPassDelay(mon, log, "r/x", "build", async () => 7), 7);
+  assert.equal(await withPassDelay(mon, log, "r/x", "build", async () => { await sleep(50); return 7; }), 7);
+  mon.disable();
   assert.equal(log.lines.length, 1);
   assert.ok(log.lines[0].m.startsWith(EVENT_LOOP_DELAY_PREFIX));
-  assert.match(log.lines[0].m, /repo=r\/x lane=build p50=12ms p99=2500ms max=2500ms/);
-  assert.deepEqual(log.lines[0].d, { repo: "r/x", lane: "build", p50: 12, p99: 2500, max: 2500 });
-  assert.equal(h.resets, 1);
+  assert.match(log.lines[0].m, /repo=r\/x lane=build p50=[\d.]+ms p99=[\d.]+ms max=[\d.]+ms/);
+  const d = log.lines[0].d;
+  assert.deepEqual(Object.keys(d).sort(), ["lane", "max", "p50", "p99", "repo"]);
+  assert.ok(d.max < 1000, "an idle pass does not invent a stall");
+});
+
+test("the first pass after start, with no warm-up, sees a synchronous block it ends on", async () => {
+  const mon = startEventLoopDelayMonitor();
+  const log = logger();
+  await withPassDelay(mon, log, "r/x", "build", async () => { block(400); });
   mon.disable();
-  assert.equal(h.enabled, false);
+  assert.ok(log.lines[0].d.max >= 380, JSON.stringify(log.lines[0].d));
+});
+
+test("a stall mid-pass is charged to that pass and does not leak into the next", async () => {
+  const mon = startEventLoopDelayMonitor();
+  const log = logger();
+  await withPassDelay(mon, log, "r/x", "build", async () => { await sleep(30); block(300); await sleep(30); });
+  await withPassDelay(mon, log, "r/x", "build", async () => { await sleep(50); });
+  mon.disable();
+  assert.ok(log.lines[0].d.max >= 280, JSON.stringify(log.lines[0].d));
+  assert.ok(log.lines[1].d.max < 100, JSON.stringify(log.lines[1].d));
+});
+
+test("overlapping passes: a pass finishing first does not take the stall from the one still running", async () => {
+  const mon = startEventLoopDelayMonitor();
+  const logA = logger(); const logB = logger();
+  const b = withPassDelay(mon, logB, "r/x", "slow", async () => { await sleep(20); block(300); await sleep(150); });
+  const a = withPassDelay(mon, logA, "r/x", "fast", async () => { await sleep(60); });
+  await Promise.all([a, b]);
+  mon.disable();
+  assert.ok(logB.lines[0].d.max >= 280, "the blocking pass reports the stall: " + JSON.stringify(logB.lines[0].d));
+  assert.ok(logA.lines[0].d.max >= 280, "so does the pass it held up: " + JSON.stringify(logA.lines[0].d));
 });
 
 test("a pass that throws, and one cut short by the back-off, each emit exactly one line and rethrow", async () => {
-  const mon = startEventLoopDelayMonitor(fakeHistogram([10e6]));
+  const mon = startEventLoopDelayMonitor();
   for (const err of [new Error("boom"), new UpstreamBackoffError("backing off")]) {
     const log = logger();
     await assert.rejects(withPassDelay(mon, log, "r/x", "build", async () => { throw err; }), (e) => e === err);
@@ -38,33 +63,21 @@ test("a pass that throws, and one cut short by the back-off, each emit exactly o
   mon.disable();
 });
 
-test("an empty window reports zeros, not NaN", async () => {
-  const mon = startEventLoopDelayMonitor(fakeHistogram([]));
+test("a pass shorter than one tick reports zeros, not NaN", async () => {
+  const mon = startEventLoopDelayMonitor();
   const log = logger();
   await withPassDelay(mon, log, "r/x", "build", async () => {});
-  assert.deepEqual(log.lines[0].d, { repo: "r/x", lane: "build", p50: 0, p99: 0, max: 0 });
   mon.disable();
+  assert.deepEqual(Object.values(log.lines[0].d).filter((v) => typeof v === "number" && !Number.isFinite(v)), []);
+  assert.ok(log.lines[0].d.max < 5);
 });
 
-test("the real histogram sees a synchronous block", async () => {
+test("the wrapper adds well under 1 ms to a pass", async () => {
   const mon = startEventLoopDelayMonitor();
-  const log = logger();
-  await withPassDelay(mon, log, "r/x", "build", async () => {
-    await new Promise((r) => setTimeout(r, 30));
-    const end = Date.now() + 300; while (Date.now() < end) { /* hold the loop */ }
-    await new Promise((r) => setTimeout(r, 30));
-  });
+  const log = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
+  const N = 2000; const t0 = process.hrtime.bigint();
+  for (let i = 0; i < N; i++) await withPassDelay(mon, log, "r/x", "build", async () => {});
+  const perPassMs = Number(process.hrtime.bigint() - t0) / 1e6 / N;
   mon.disable();
-  assert.ok(log.lines[0].d.max >= 250, JSON.stringify(log.lines[0].d));
-});
-
-test("a stall in the pass's last synchronous call is charged to that pass, not the next", async () => {
-  const mon = startEventLoopDelayMonitor();
-  const log = logger();
-  await new Promise((r) => setTimeout(r, 30)); // let sampling settle
-  await withPassDelay(mon, log, "r/x", "build", async () => {
-    const end = Date.now() + 300; while (Date.now() < end) { /* the pass ends straight after the block */ }
-  });
-  mon.disable();
-  assert.ok(log.lines[0].d.max >= 250, JSON.stringify(log.lines[0].d));
+  assert.ok(perPassMs < 0.5, `${perPassMs} ms per pass`);
 });
