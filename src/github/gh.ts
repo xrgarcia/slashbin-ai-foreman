@@ -220,17 +220,20 @@ const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining reset
  * No stored token (ambient gh auth): probe with the ambient auth.
  * A probe that itself fails never clears; it extends on the computed window.
  */
-export function probeGitHub(trip: { token?: string; resource?: GhResource }): UpstreamProbeResult {
+export async function probeGitHub(trip: { token?: string; resource?: GhResource }): Promise<UpstreamProbeResult> {
   const env = trip.token ? { ...process.env, GH_TOKEN: trip.token } : { ...process.env };
-  const opts = { encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"], timeout: 30_000, env };
+  // execFile, not execFileSync: a probe against a GitHub that is not answering
+  // (2026-11-06, TLS handshake timeouts) must not freeze every lane and observer.
+  const opts = { encoding: "utf-8" as const, timeout: 30_000, env };
+  const run = async (args: string[]) => (await execFileAsync("gh", args, opts)).stdout;
   try {
     if (trip.resource === "graphql") {
-      const rl = JSON.parse(execFileSync("gh", PROBE_GRAPHQL, opts))?.data?.rateLimit;
+      const rl = JSON.parse(await run(PROBE_GRAPHQL))?.data?.rateLimit;
       if (typeof rl?.remaining === "number" && rl.remaining > 0) return { clear: true };
       const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
       return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
     }
-    const core = JSON.parse(execFileSync("gh", ["api", "rate_limit"], opts))?.resources?.core as RateResource | undefined;
+    const core = JSON.parse(await run(["api", "rate_limit"]))?.resources?.core as RateResource | undefined;
     if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
     return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
   } catch (err) {

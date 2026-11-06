@@ -239,7 +239,7 @@ export async function runReconcileStage(
   let processed = 0;
   const reconLogger = base.child({ phase: "reconcile" });
   try {
-    const result = reconcileRepo(repoConfig, reconLogger);
+    const result = await reconcileRepo(repoConfig, reconLogger);
     if (result.reconciled) {
       // reconcileRepo opened a PR for orphaned commits; report its linked items
       // as in review so the Review phase's gate sees it. Immediately after the

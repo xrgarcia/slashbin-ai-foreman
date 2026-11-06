@@ -364,6 +364,12 @@ export interface CodeHost {
   configureIssueCache(opts: { ttlMs?: number; snapshotLimit?: number }): void;
   configureState(opts: CodeHostStateOptions): void;
   setStateRepos(repos: string[]): void;
+  /**
+   * Bring the fleet state up to date without blocking the event loop, so the
+   * synchronous reads that follow find it fresh. The daemon awaits it before each
+   * lane pass; concurrent calls share one refresh. Rejects with the refresh error.
+   */
+  warmState(): Promise<void>;
   /** The fleet state's query cost since the last call, for the hourly usage line. */
   takeStateUsage(): { stateQueries: number; statePoints: number };
   recordActivity(repo: string, issueNumber: number, step: string, prUrl?: string): void;
