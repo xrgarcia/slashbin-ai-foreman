@@ -79,12 +79,34 @@ test("nextStep: calls left still call at once; a changed reason is a new questio
   assert.equal(nextStep(spent, { ...cand(spent), reason: "new" }, T0, policy), "call");
 });
 
-test("applyOutcome: a re-armed question starts a fresh burst, a normal failure counts on", () => {
+test("applyOutcome: a re-arm is ONE call: attempts never reset, each failed re-arm is counted", () => {
   const upstream = { baseMs: 1000, capMs: 10000, factor: 2 };
   const spent = entry({});
-  assert.equal(applyOutcome(spent, { kind: "failed", detail: "x" }, T0 + SPENT_QUESTION_REARM_MS, upstream).attempts, 1);
-  assert.equal(applyOutcome(spent, { kind: "invoked", detail: "x" }, T0 + SPENT_QUESTION_REARM_MS, upstream).attempts, 1);
+  const r1 = applyOutcome(spent, { kind: "failed", detail: "x" }, T0 + SPENT_QUESTION_REARM_MS, upstream);
+  assert.deepEqual([r1.attempts, r1.rearms, r1.status], [UNSTICK_MAX_ATTEMPTS + 1, 1, "failed"]);
+  const r2 = applyOutcome(r1, { kind: "failed", detail: "x" }, T0 + 9 * HOUR, upstream);
+  assert.deepEqual([r2.attempts, r2.rearms], [UNSTICK_MAX_ATTEMPTS + 2, 2]);
+  const ok = applyOutcome(spent, { kind: "invoked", detail: "x" }, T0 + SPENT_QUESTION_REARM_MS, upstream);
+  assert.equal(ok.status, "invoked");
   assert.equal(applyOutcome(entry({ attempts: 1 }), { kind: "failed", detail: "x" }, T0, upstream).attempts, 2);
+  assert.equal(applyOutcome(entry({ attempts: 1 }), { kind: "failed", detail: "x" }, T0, upstream).rearms, undefined, "inside the first burst: not a re-arm");
+  const refused = applyOutcome(r1, { kind: "refused", detail: "limit" }, T0 + 9 * HOUR, upstream);
+  assert.deepEqual([refused.attempts, refused.rearms], [r1.attempts, 1], "a refusal spends nothing and keeps the back-off");
+});
+
+test("a question failing for ever: 3 calls, then re-arms on a 1h,2h,4h...24h back-off, one call each", () => {
+  const upstream = { baseMs: 1000, capMs: 10000, factor: 2 };
+  let e = { issue: 0, kind: "unrelated-error", reason: "r", status: "pending", attempts: 0, since: new Date(T0).toISOString() };
+  const calls = [];
+  for (let t = T0; t <= T0 + 72 * HOUR; t += 5 * 60_000) {
+    if (nextStep(e, cand(e), t, policy) === "call") { calls.push((t - T0) / HOUR); e = applyOutcome(e, { kind: "failed", detail: "down" }, t, upstream); }
+  }
+  const within24 = calls.filter((h) => h <= 24).length;
+  const rearmsIn24 = within24 - UNSTICK_MAX_ATTEMPTS;
+  assert.ok(rearmsIn24 <= Math.ceil(Math.log2(24)), `re-arm calls in 24h: ${rearmsIn24}`);
+  assert.equal(calls.length, 3 + 6, "3, then re-arms after waits of 1,2,4,8,16,24h");
+  console.log(`# failing for ever, 72 simulated hours: ${calls.length} calls (${within24} in the first 24h), at hours ${calls.map((h) => h.toFixed(2)).join(", ")}`);
+  assert.ok(calls.length <= 3 + 6, "bounded over 72h");
 });
 
 test("alerts: builders give a stable key and one subject per kind", () => {

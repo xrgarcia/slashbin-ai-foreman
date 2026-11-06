@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Acceptance for foreman#232 (A1-A3; A4 is `npm test` plus dependency-batch-landed.mjs, run beside this one):
+// Acceptance for foreman#232 (A1-A3 and A5; A4 is `npm test` plus dependency-batch-landed.mjs, run beside this one):
 // one raise API, one delivery policy owned by the outbox, one kind contract published by the receiver.
 //
 //   npm run build && node scripts/acceptance/em-alert-outbox.mjs
@@ -190,6 +190,29 @@ await raiseAllKinds(rt);
 assert.equal(await pass(rt), 0);
 assert.deepEqual(await entries(rt), delivered); ok("3 polls (the senders raise again each time), a restart and one more: the entries are untouched");
 assert.equal(sessions(), 4); ok("exactly 4 EM sessions in total");
+
+// === A5 ======================================================================================================================
+scenario("A5  an alert the EM can never take: 3 calls, then ONE call per back-off window (1h doubling to 24h), one give-up notice, over 72 hours");
+reset(); // the EM stays down the whole time
+rt = boot();
+await rt.handoffs.settleHandoffs(repo, "o/svc#5", { seen: unrelated, seenOn: "o/svc PR #5 (dev)" });
+const callHours = [];
+for (let t = 0; t <= 72 * 60; t += 5) {
+  if (t % 360 === 0) rt = boot(); // a restart every 6 hours
+  const made = await pass(rt);
+  assert.ok(made <= 1, "never more than one call in a pass for one alert");
+  for (let i = 0; i < made; i++) callHours.push(t / 60);
+  advance(5 * MIN);
+}
+const early = callHours.filter((h) => h < 1);
+assert.equal(early.length, UNSTICK_MAX_ATTEMPTS); ok(`the first burst is ${UNSTICK_MAX_ATTEMPTS} calls (never a fresh burst after it)`);
+const rearmCalls = callHours.slice(UNSTICK_MAX_ATTEMPTS);
+const gaps = rearmCalls.map((h, i) => h - (i === 0 ? early[early.length - 1] : rearmCalls[i - 1]));
+console.log(`      72 simulated hours: ${callHours.length} EM calls in all, at hours ${callHours.map((h) => h.toFixed(2)).join(", ")}`);
+assert.ok(gaps.every((g, i) => g >= Math.min(2 ** i, 24) - 0.01), "each wait is at least double the last, capped at 24h"); ok(`re-arm waits ${gaps.map((g) => g.toFixed(1) + "h").join(", ")}: doubling to the 24h cap`);
+assert.ok(callHours.filter((h) => h <= 24).length - UNSTICK_MAX_ATTEMPTS <= Math.ceil(Math.log2(24))); ok("at most ceil(log2 24) re-arm calls in the first 24 hours");
+assert.equal(sessions("unrelated-error"), callHours.length); ok("the fixture EM saw exactly those sessions");
+assert.equal(logs.filter(([, m]) => /EM unreachable after/.test(m)).length, 1); ok("exactly one give-up notice for it");
 
 console.log(`\nPASS: ${checks} checks`);
 mock.timers.reset();

@@ -147,7 +147,7 @@ never auto-recovered and goes to the EM as a message.
 outbox one typed `Alert` (`kind`, `subject`, `dedupeKey`, `reason`) through `EmHandoffs.raise`
 (`src/unstick.ts`); there is no per-kind write path. The unstick stage delivers it. One rule re-arms
 every kind in `nextStep`: a `failed` entry whose 3 attempts are spent is called again after an hour
-(`SPENT_QUESTION_REARM_MS`) with a fresh burst of 3. Delivered entries (`invoked`, `escalated`,
+(`SPENT_QUESTION_REARM_MS`) one call each time, the wait doubling (1 h, 2 h, 4 h, up to 24 h; `SPENT_QUESTION_REARM`), never a fresh burst of 3; the first burst running out gives one give-up notice. Delivered entries (`invoked`, `escalated`,
 `declined`) are never re-armed this way.
 
 **Kind contract.** At startup the Foreman runs `bin/em.mjs kinds --json` and compares it with
