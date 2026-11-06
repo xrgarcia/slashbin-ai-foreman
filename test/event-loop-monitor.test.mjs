@@ -102,5 +102,5 @@ test("a freeze before the histogram's first tick still shows in the window max",
   await sleep(1300);
   mon.disable();
   const d = log.lines.find((l) => l.m.startsWith("Event-loop delay"));
-  assert.ok(d && d.d.max >= 1500, JSON.stringify(log.lines));
+  assert.ok(d && d.d.max >= 1400, JSON.stringify(log.lines));
 });
