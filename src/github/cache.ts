@@ -231,7 +231,7 @@ export function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
     "pr", "list",
     "--repo", repo,
     "--state", "open",
-    "--json", "number,url,title,body,headRefName,baseRefName",
+    "--json", "number,url,title,body,headRefName,baseRefName,headRefOid",
     "--limit", "100",
   ], cwd);
   const prs: PrSnapshot[] = JSON.parse(json || "[]");

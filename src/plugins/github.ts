@@ -90,6 +90,7 @@ export function githubCodeHost(
     describeDependencyPR: dependencies.describeDependencyPR,
     fetchOpenAlertPackages: dependencies.fetchOpenAlertPackages,
     findDependencyPRs: dependencies.findDependencyPRs,
+    retireDependencyPR: dependencies.retireDependencyPR,
     findOpenDependencyBatchIssue: dependencies.findOpenDependencyBatchIssue,
     selectSecurityPRs: dependencies.selectSecurityPRs,
     discoveryBatch: discovery.discoveryBatch,

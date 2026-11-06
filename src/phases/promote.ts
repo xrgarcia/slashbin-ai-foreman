@@ -15,6 +15,9 @@ import { STALL_CHECK_CYCLE_INTERVAL, itemOf, notifyOnce } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { PromotionIssue, ReleaseCarry } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
+import { DependencyBatchSweep } from "../dependency-batch/sweep.js";
+import { BatchIssueComposer, BatchIssueFiler, DependencyDiscovery, OpenBatchIssueProbe, SecuritySelection } from "../dependency-batch/collaborators.js";
+import { DependencyBatchFilingPolicy } from "../dependency-batch/policy.js";
 
 export function trySyncDrift(
   repoConfig: RepoConfig,
@@ -56,81 +59,41 @@ export function trySyncDrift(
 }
 
 /**
- * File ONE issue covering every open Dependabot PR on either working branch.
+ * File ONE issue covering the open Dependabot PRs on either working branch.
  *
- * **Idempotent by construction: at most one open batch issue per repo.** Not by
- * remembering what was filed — this runs every cycle across twenty repos and any
- * state it kept in memory would be lost on the next restart, which is how a
- * filing loop becomes twenty issues an hour. The check is a title-prefix match
- * against the open-issue snapshot the cycle already fetched, so it is correct
- * after a restart, correct if someone closes the issue by hand, and free.
+ * Orchestration only (foreman#230). The decision to file is the filing policy's
+ * (`src/dependency-batch/policy.ts`), made against the durable batch ledger:
+ * a batch (its PRs at their head commits) that already ended is not filed
+ * again, a new Dependabot push is a new batch, and the same batch filed three
+ * times in 24 h is held and put to the EM. Nothing is kept in memory, so a
+ * restart cannot reopen a loop (jerky-mcp-services #690-#1081, 2026-11-05).
+ * The steps (discovery, security selection, issue composer, filer) are
+ * collaborators in `src/dependency-batch/`.
  *
  * A PR that appears while a batch issue is open is not filed separately; it is
- * picked up by the next batch once the current one closes. Bounded noise beats
- * complete coverage here — the alternative is editing an issue body an agent may
- * already be working from, which the issue-authoring rules forbid outright.
+ * picked up once the current issue closes. Bounded noise beats complete
+ * coverage: editing an issue body an agent may be working from is forbidden.
  *
  * Returns the new issue number, or null when there was nothing to file.
  */
 export function tryFileDependencyBatchIssue(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   logger: Logger,
   cycleNumber: number,
-): number | null {
+): Promise<number | null> {
   const depLogger = logger.child({ cycle: cycleNumber, repo: repoConfig.name, phase: "dependencies" });
-  const bases = codeHost().dependencyBatchBases(repoConfig.baseBranch, repoConfig.productionBranch, repoConfig.featureBranch);
-  if (bases.length === 0) return null;
-
-  let prs = codeHost().findDependencyPRs(repoConfig.githubRepo, repoConfig.repoPath, bases, depLogger, repoConfig.github);
-  if (prs.length === 0) return null;
-
-  // Security updates only (dependabot.securityOnly, default on; Ray, 2026-10-26).
-  // A version-update PR is left alone: not batched, merged or closed. If the alert
-  // list cannot be read the cycle batches NOTHING — never everything.
-  if (repoConfig.dependabot.securityOnly) {
-    let alerts: Set<string>;
-    try {
-      alerts = codeHost().fetchOpenAlertPackages(repoConfig.githubRepo, repoConfig.repoPath);
-    } catch (err) {
-      depLogger.warn("dependabot: could not read open Dependabot alerts — batching nothing this cycle", {
-        ...codeHost().formatGhError(err), repo: repoConfig.githubRepo, dependencyPRs: prs.length,
-      });
-      return null;
-    }
-    const before = prs.length;
-    prs = codeHost().selectSecurityPRs(prs, alerts);
-    if (prs.length === 0) {
-      depLogger.debug(`${before} dependency PR(s) open, none a security update (${alerts.size} open alert package(s)); left alone`);
-      return null;
-    }
-    if (prs.length < before) depLogger.info(`${before - prs.length} of ${before} dependency PR(s) are not security updates; left alone`);
-  }
-
-  const existing = codeHost().findOpenDependencyBatchIssue(repoConfig.githubRepo, repoConfig.repoPath, depLogger, repoConfig.github);
-  if (existing) {
-    depLogger.debug(
-      `${prs.length} dependency PR(s) on ${bases.join("/")}; batch issue #${existing.number} is already open`,
-    );
-    return null;
-  }
-
-  const changes = prs.map((p) => codeHost().describeDependencyPR(p.number, p.title));
-  const { title, body } = codeHost().buildDependencyBatchIssue(repoConfig.baseBranch, changes, repoConfig.github, repoConfig.baseBranch);
-  const number = codeHost().createDependencyBatchIssue(
-    repoConfig.githubRepo, repoConfig.repoPath, title, body,
-    repoConfig.dependencyPreApproved ? repoConfig.triggerLabel : null, depLogger,
-  );
-  if (number === null) return null;
-
-  const majors = changes.filter((c) => c.major).length;
-  depLogger.info(
-    `Filed dependency batch issue #${number} for ${prs.length} PR(s) on ${bases.join("/")}` +
-    (majors > 0 ? ` — ${majors} major` : "") +
-    (repoConfig.dependencyPreApproved
-      ? ` — filed with "${repoConfig.triggerLabel}", queued to build`
-      : ` — awaiting "${repoConfig.triggerLabel}"`),
-  );
-  return number;
+  const host = codeHost();
+  return new DependencyBatchSweep({
+    discovery: new DependencyDiscovery(host),
+    security: new SecuritySelection(host),
+    openIssue: new OpenBatchIssueProbe(host),
+    ledger: rt.dependencyBatches,
+    policy: new DependencyBatchFilingPolicy(),
+    composer: new BatchIssueComposer(host),
+    filer: new BatchIssueFiler(host),
+    notifier: { batchLooping: (repo, batch, filings) => rt.handoffs.noteDependencyBatchLoop(repo, batch.key, filings) },
+  }).run(repoConfig, depLogger);
 }
 
 /**

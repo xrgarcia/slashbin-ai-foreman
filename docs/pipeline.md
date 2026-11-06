@@ -102,12 +102,18 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    restores batching every Dependabot PR. It is
    filed with the trigger label when the repo sets `dependencyPreApproved` (opt-in per repo, default off, so a newly onboarded repo needs a deliberate edit). Renovate
    instead of Dependabot: `github.dependencyBranchPrefixes: ["renovate/"]`.
+   **A batch is its PRs at their head commits, and the repo record remembers what became of it** (`dependencyBatches`,
+   `src/dependency-batch/`; foreman#230). A batch that ended is never filed again; a new Dependabot push is a new batch and is
+   filed once; the same batch filed 3 times in 24 h is held and raised to the EM as `dependency-batch-loop`. When the implement
+   session answers `landed` for a batch issue, the Foreman closes each Dependabot PR in the batch (`CodeHost.retireDependencyPR`,
+   a comment naming why) and records the batch as `landed`; if a close fails the batch is not recorded, and the 3-in-24 h cap is
+   the backstop.
 10. **Unstick** *(on when `emRepoPath` is set; independent of `paperclip.enabled`)* — no
     Claude session. For each stuck issue the EM plugin (`src/plugins/em.ts`) runs `node <emRepoPath>/bin/em.mjs unstick
     --repo <owner/name> --issue <N> --kind <kind> --reason <text>` (cwd `emRepoPath`,
     `EM_GITHUB_TOKEN`, killed after 20 minutes, 40 for `rework-decision`). Kinds: skip, divergence, verify-held,
     verify-exhausted, verify-no-pr, revision-exhausted, revision-stalemate,
-    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision, unrelated-error,
+    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision, unrelated-error, dependency-batch-loop,
     epic-ready-to-close (`UNSTICK_KINDS`, `src/unstick.ts`). A hold with
     retries left is not called for. Divergence is repo-level, so it is called once per
     issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes

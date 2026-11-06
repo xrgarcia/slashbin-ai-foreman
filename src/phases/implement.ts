@@ -19,6 +19,7 @@ import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
+import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
 
 /**
  * Classify a recorded skip reason as transient + currently-resolved. Returns
@@ -589,6 +590,9 @@ export async function tryBatchImplementation(
       worked = [n];
       const reason = result.landedReason ?? "no evidence given";
       try {
+        // A dependency-batch issue is more than the issue: its Dependabot PRs are retired and the batch's outcome
+        // recorded, or the sweep files the same batch again. Generic close below stays generic (foreman#230).
+        await resolveLandedDependencyBatch(rt, repoConfig, n, reason, repoLogger);
         codeHost().closeAlreadyLanded(repoConfig, n, reason);
         await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.skipped; });
         rt.memory.failureCount.set(repoName, 0);

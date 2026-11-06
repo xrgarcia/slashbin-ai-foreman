@@ -110,7 +110,7 @@ There is no `.agent-state.json`; `src/legacy-records.ts` moves a leftover one in
   `backoff.skip`), `held`, `verifyHeld` (re-verified per `backoff.verifyRetry`), `unstick`,
   `prodVerified`, `promotionStallNoted`, `divergenceTold`.
 - PR record: release stage, no-commit streak, rejected head.
-- Repo record: `unstick` questions naming no issue, `divergenceRuled`, `cardBlocks`.
+- Repo record: `unstick` questions naming no issue, `divergenceRuled`, `cardBlocks`, `dependencyBatches` (the outcome of each dependency batch by PRs + head SHAs).
 - Derived, never stored: `implemented` (labels and `selectWork`), the branch block (`readDivergence`).
 
 In-memory only: the `implementing` mutex, the repo-failure and agent-unavailable waits, the

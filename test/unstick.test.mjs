@@ -29,6 +29,7 @@ test("the kinds are the EM contract, verbatim", () => {
     "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate", "rework-decision",
     "unrelated-error",
     "epic-ready-to-close",
+    "dependency-batch-loop",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
   assert.equal(emUnstickMaxDurationMs("skip"), 20 * 60_000);
