@@ -240,6 +240,16 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
 
         let didWork = false;
         try {
+          // The fleet state refreshes here, off the event loop, so the pass's
+          // reads find it fresh instead of each running the bulk query
+          // synchronously and freezing every lane and observer with it. A failed
+          // warm is not the pass's failure: its own reads report the error.
+          await host.warmState().catch((err: unknown) => {
+            if (err instanceof UpstreamBackoffError) return;
+            repoLogger.debug("Fleet state warm failed — the pass reads report it", {
+              error: err instanceof Error ? err.message.split("\n")[0] : String(err),
+            });
+          });
           // The first lane mirrors the board every pass, as the whole-repo pass
           // did; the others only after they changed something, so splitting a
           // repo into lanes does not multiply the idle snapshot rate.

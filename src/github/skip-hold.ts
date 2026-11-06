@@ -7,7 +7,7 @@
 // and every expiry bought a full session to rediscover the same answer. A held
 // issue runs again only when something it waits on actually moves.
 
-import { gh } from "./gh.js";
+import { gh, ghAsync } from "./gh.js";
 import type { WaitingOn, RefState, IssueActivity, HoldReads, HeldEntry, SkipGate } from "../code-host.js";
 export type { WaitingOn, RefState, IssueActivity, HoldReads, HeldEntry, SkipGate } from "../code-host.js";
 
@@ -134,6 +134,17 @@ export class ForemanIdentity {
     if (this.known) return this.known;
     try {
       this.known = gh(["api", "user", "--jq", ".login"], cwd) || undefined;
+    } catch {
+      return undefined;
+    }
+    return this.known;
+  }
+
+  /** `login` without blocking the event loop; shares the remembered value. */
+  async loginAsync(cwd: string): Promise<string | undefined> {
+    if (this.known) return this.known;
+    try {
+      this.known = (await ghAsync(["api", "user", "--jq", ".login"], cwd)) || undefined;
     } catch {
       return undefined;
     }

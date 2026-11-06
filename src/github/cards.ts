@@ -17,7 +17,7 @@
 
 import type { ItemState, SnapshotHold } from "../adapters.js";
 import type { Logger } from "../logger.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 
 /** How often each repo's closed issues are read. */
 export const CLOSED_READ_MS = 10 * 60_000;
@@ -92,8 +92,10 @@ export function holdReason(label: string, events: readonly LabelEvent[], comment
   };
 }
 
-function graphql(query: string, cwd: string): Record<string, unknown> {
-  const out = gh(["api", "graphql", "-f", `query=${query}`], cwd);
+// Async: these reads run inside the board snapshot, and a synchronous one against a
+// GitHub that is not answering froze every lane and observer (2026-11-06).
+async function graphql(query: string, cwd: string): Promise<Record<string, unknown>> {
+  const out = await ghAsync(["api", "graphql", "-f", `query=${query}`], cwd);
   const parsed = JSON.parse(out || "{}") as { data?: Record<string, unknown> | null; errors?: Array<{ message?: string }> };
   if (!parsed.data) throw new Error(`GitHub query failed: ${(parsed.errors ?? []).map((e) => e.message).join("; ") || "no data"}`);
   return parsed.data;
@@ -122,7 +124,7 @@ export class CardReads {
    * when no read is due yet. A failed read is logged and gives []; the watermark
    * stays, so the next read covers the gap.
    */
-  recentlyClosed(repo: string, cwd: string, logger: Logger, now = Date.now()): ClosedIssue[] {
+  async recentlyClosed(repo: string, cwd: string, logger: Logger, now = Date.now()): Promise<ClosedIssue[]> {
     if (now < (this.closedDueAt.get(repo) ?? 0)) return [];
     this.closedDueAt.set(repo, now + CLOSED_READ_MS);
     const last = this.closedReadAt.get(repo);
@@ -131,7 +133,7 @@ export class CardReads {
     try {
       let after: string | null = null;
       for (let page = 0; page < CLOSED_MAX_PAGES; page++) {
-        const d = graphql(`query { repository(${repoArgs(repo)}) {
+        const d = await graphql(`query { repository(${repoArgs(repo)}) {
     issues(states: CLOSED, filterBy: { since: ${JSON.stringify(since)} }, first: ${CLOSED_PAGE_SIZE}, orderBy: { field: UPDATED_AT, direction: DESC }${after ? `, after: ${JSON.stringify(after)}` : ""}) {
       pageInfo { hasNextPage endCursor } nodes { number title url stateReason } } } }`, cwd);
         const conn = (d.repository as { issues?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ number: number; title: string; url: string; stateReason?: string | null }> } } | null)?.issues;
@@ -159,7 +161,7 @@ export class CardReads {
    * HOLD_TTL_MS is reused. One that cannot be read is left out: the card keeps
    * what it says. Never throws.
    */
-  holdReasons(repo: string, cwd: string, label: string, numbers: readonly number[], logger: Logger, now = Date.now()): Map<number, SnapshotHold> {
+  async holdReasons(repo: string, cwd: string, label: string, numbers: readonly number[], logger: Logger, now = Date.now()): Promise<Map<number, SnapshotHold>> {
     const out = new Map<number, SnapshotHold>();
     const due: number[] = [];
     for (const n of numbers) {
@@ -170,7 +172,7 @@ export class CardReads {
     for (let i = 0; i < due.length; i += HOLDS_PER_REQUEST) {
       const batch = due.slice(i, i + HOLDS_PER_REQUEST);
       try {
-        const d = graphql(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `h${j}: issue(number: ${n}) {
+        const d = await graphql(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `h${j}: issue(number: ${n}) {
     timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent { createdAt actor { login } label { name } } } }
     comments(last: 50) { nodes { url createdAt author { login } body } } }`).join("\n")} } }`, cwd);
         const r = d.repository as Record<string, { timelineItems?: { nodes?: LabelEvent[] }; comments?: { nodes?: IssueComment[] } } | null> | null;
@@ -200,14 +202,14 @@ export class CardReads {
  * the numbers that still throw are left out. A healthy batch stays one request.
  * Never throws. `query` is the GraphQL call (tests inject one).
  */
-export function issueStates(
+export async function issueStates(
   repo: string, cwd: string, numbers: readonly number[], logger: Logger,
-  query: (q: string, cwd: string) => Record<string, unknown> = graphql,
-): Map<number, ItemState> {
+  query: (q: string, cwd: string) => Promise<Record<string, unknown>> | Record<string, unknown> = graphql,
+): Promise<Map<number, ItemState>> {
   const out = new Map<number, ItemState>();
   const want = [...new Set(numbers)].filter((n) => Number.isInteger(n) && n > 0);
-  const read = (batch: readonly number[]): void => {
-    const d = query(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `s${j}: issue(number: ${n}) { state stateReason }`).join(" ")} } }`, cwd);
+  const read = async (batch: readonly number[]): Promise<void> => {
+    const d = await query(`query { repository(${repoArgs(repo)}) { ${batch.map((n, j) => `s${j}: issue(number: ${n}) { state stateReason }`).join(" ")} } }`, cwd);
     const r = d.repository as Record<string, { state?: string; stateReason?: string | null } | null> | null;
     batch.forEach((n, j) => {
       const st = r?.[`s${j}`]?.state;
@@ -219,12 +221,12 @@ export function issueStates(
   for (let i = 0; i < want.length; i += STATES_PER_REQUEST) {
     const batch = want.slice(i, i + STATES_PER_REQUEST);
     try {
-      read(batch);
+      await read(batch);
     } catch (err) {
       logger.warn(`cards: ${repo} issue states not read: ${message(err)}`);
       for (const n of batch) {
         try {
-          read([n]);
+          await read([n]);
         } catch (e) {
           logger.warn(`cards: ${repo} issue state #${n} not read: ${message(e)}`);
         }

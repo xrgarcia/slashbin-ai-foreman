@@ -219,3 +219,92 @@ test("a gh failure with no data in its body is still a whole-query failure", () 
   s.configure({ repos: ["a/x"], refreshMs: 30_000, run: h.run, logger, now: h.now });
   assert.throws(() => s.openIssues("a/x"), /HTTP 401/);
 });
+
+// foreman#236: the async warm. A deferred runAsync lets a test hold a refresh open
+// and act while it is in flight, as a lane or an observer would.
+function asyncHarness(responses) {
+  const h = harness(responses);
+  const pending = [];
+  const runAsync = (args) => new Promise((resolve, reject) => {
+    pending.push(() => { try { resolve(h.run(args)); } catch (e) { reject(e); } });
+  });
+  const release = async () => { while (pending.length) pending.shift()(); await new Promise((r) => setImmediate(r)); };
+  return { ...h, runAsync, pending, release };
+}
+
+test("warm refreshes off the loop; concurrent warms share one query; the reads that follow cost nothing", async () => {
+  const h = asyncHarness([{ r0: { issues: conn([issue(3)]), pullRequests: conn([]) } }]);
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run: () => { throw new Error("sync run used"); }, runAsync: h.runAsync, logger, now: h.now });
+  const a = s.warm();
+  const b = s.warm();
+  assert.equal(a, b, "a second warm joins the one in flight");
+  assert.equal(h.pending.length, 1);
+  await h.release();
+  await a;
+  assert.deepEqual(s.openIssues("a/x").map((i) => i.number), [3], "the read is served by the warm, never the sync runner");
+  assert.equal(h.queries.length, 1);
+  assert.equal(await s.warm(), undefined, "fresh and clean: nothing to do");
+  assert.equal(h.queries.length, 1);
+});
+
+test("while a warm is in flight a merely stale view is served as is, not refreshed synchronously", async () => {
+  const h = asyncHarness([
+    { r0: { issues: conn([issue(1)]), pullRequests: conn([]) } },
+    { r0: { issues: conn([issue(1, ["approved"], "OPEN", iso(T0 + 31_000))]), pullRequests: conn([]) } },
+  ]);
+  let syncCalls = 0;
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run: (args) => { syncCalls++; return h.run(args); }, runAsync: h.runAsync, logger, now: h.now });
+  s.openIssues("a/x");
+  assert.equal(syncCalls, 1);
+  h.tick(31_000);
+  const w = s.warm();
+  assert.deepEqual(s.openIssues("a/x").map((i) => i.labels.length), [0], "served from the view during the warm");
+  assert.equal(syncCalls, 1, "no second, blocking query");
+  await h.release();
+  await w;
+  assert.deepEqual(s.openIssues("a/x").map((i) => i.labels.map((l) => l.name)), [["approved"]]);
+});
+
+test("a write during an async refresh is not overwritten by the older answer; the repo stays dirty", async () => {
+  const h = asyncHarness([
+    { r0: { issues: conn([issue(1)]), pullRequests: conn([]) } },
+    // The warm's answer, read before the write: issue 1 without its new label.
+    { r0: { issues: conn([issue(1, [], "OPEN", iso(T0 + 31_000))]), pullRequests: conn([]) } },
+  ]);
+  const syncAnswers = [
+    { r0: { issues: conn([issue(1, ["approved"], "OPEN", iso(T0 + 32_000))]), pullRequests: conn([]) } },
+    { r0: { issues: conn([issue(1, ["approved"], "OPEN", iso(T0 + 32_000))]), pullRequests: conn([]) } },
+  ];
+  let first = true;
+  const run = (args) => {
+    if (first) { first = false; return h.run(args); }
+    return JSON.stringify({ data: syncAnswers.shift() });
+  };
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run, runAsync: h.runAsync, logger, now: h.now });
+  s.openIssues("a/x");
+  h.tick(31_000);
+  const w = s.warm();
+  s.markRepoDirty("a/x"); // the Foreman labels issue 1 while the warm's query is out
+  assert.deepEqual(s.openIssues("a/x")[0].labels.map((l) => l.name), ["approved"], "a dirty repo still reads its write");
+  await h.release();
+  await w;
+  assert.deepEqual(s.openIssues("a/x")[0].labels.map((l) => l.name), ["approved"], "the warm's pre-write answer was not applied");
+});
+
+test("a failed warm rejects, and is re-thrown, not re-run, inside the cooldown", async () => {
+  const h = asyncHarness([new Error("TLS handshake timeout")]);
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run: () => { throw new Error("sync run used"); }, runAsync: h.runAsync, logger, now: h.now });
+  const failed = assert.rejects(s.warm(), /TLS handshake timeout/);
+  await h.release();
+  await failed;
+  await assert.rejects(s.warm(), /TLS handshake timeout/);
+  assert.equal(h.queries.length, 1);
+});
+
+test("without runAsync, warm is a no-op and reads refresh through run", async () => {
+  const h = harness([{ r0: { issues: conn([issue(4)]), pullRequests: conn([]) } }]);
+  s.configure({ repos: ["a/x"], refreshMs: 30_000, run: h.run, logger, now: h.now });
+  await s.warm();
+  assert.equal(h.queries.length, 0);
+  assert.deepEqual(s.openIssues("a/x").map((i) => i.number), [4]);
+});
