@@ -43,7 +43,7 @@ if (S.fail === "404") { process.stdout.write("HTTP/2.0 404 Not Found\\n\\n"); pr
 const a = process.argv.slice(2).join(" ");
 if (a.includes("branches/")) process.stdout.write("a".repeat(40));
 else if (a.includes("--json state")) process.stdout.write(JSON.stringify({ state: "OPEN" }));
-else if (a.includes("headRefOid")) process.stdout.write(JSON.stringify({ headRefOid: "b".repeat(40) }));
+else if (a.includes("--json headRefOid")) process.stdout.write(JSON.stringify({ headRefOid: "b".repeat(40) }));
 else if (a.includes("--json files")) process.stdout.write(JSON.stringify({ files: [{ path: "client/a.tsx" }] }));
 else if (a.includes("--json reviews,commits")) process.stdout.write(JSON.stringify({ commits: [{ committedDate: "2026-01-01T00:00:00Z" }], reviews: [{ author: { login: "tl" }, state: "APPROVED", submittedAt: "2026-01-02T00:00:00Z" }] }));
 else if (a.includes("--json reviews")) process.stdout.write(JSON.stringify({ reviews: [{ author: { login: "tl" }, state: "APPROVED", submittedAt: "2026-01-02T00:00:00Z" }] }));

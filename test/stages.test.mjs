@@ -18,6 +18,7 @@ import { configureIssueCache } from "../dist/github.js";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { memoryRecords } from "./issue-records.mjs";
 import { ForemanRuntime } from "../dist/runtime.js";
 let rt = new ForemanRuntime();
 
@@ -29,6 +30,7 @@ let tmp, F, saved;
 
 before(async () => {
   await startGitHubWorkSource();
+  memoryRecords(); // the dependency ledger (foreman#230) lives in the record store; the fake gh has no comment endpoint
   tmp = mkdtempSync(join(tmpdir(), "foreman-stages-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);
