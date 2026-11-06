@@ -49,6 +49,12 @@ export const UNSTICK_KINDS = [
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
+/** The kinds the Foreman sends that the receiver does not list. Pure: the whole of the contract check. */
+export function missingKinds(published: readonly string[], ours: readonly string[] = UNSTICK_KINDS): string[] {
+  const have = new Set(published);
+  return ours.filter((k) => !have.has(k));
+}
+
 /**
  * `pending` not yet called · `invoked` EM exit 0 · `escalated` exit 2 · `declined` exit 3 ·
  * `refused` the EM's runner refused the work (a limit; no attempt spent) · `failed` anything else.
@@ -209,9 +215,9 @@ export function derivedCandidates(
 }
 
 /**
- * How long after its last failed call a repo-level question whose calls were all spent is asked afresh. The unstick
- * watch itself leaves such an entry alone for good (`nextStep`: failed at the cap waits), so a notice that never
- * reached the EM stayed undelivered after the EM came back. 1 h keeps a still-down EM to one burst of calls an hour.
+ * How long after its last failed call a question whose calls were all spent is asked afresh (`nextStep`, for every
+ * kind). Without it a notice that never reached the EM stayed undelivered after the EM came back. 1 h keeps a
+ * still-down EM to one burst of calls an hour.
  */
 export const SPENT_QUESTION_REARM_MS = 60 * 60_000;
 
@@ -236,7 +242,7 @@ const NO_HANDOFF_WATCH: UnstickPolicy["handoff"] = Object.freeze({ baseMs: 0, ca
 /**
  * What the unstick stage does with a standing question this pass. Pure apart from `now` (epoch ms).
  *
- *  - `call`: ask the agent (again).
+ *  - `call`: ask the agent (again), including a question whose calls were all spent, once `SPENT_QUESTION_REARM_MS` passed.
  *  - `give-up`: a handoff was made `maxRecalls + 1` times and the issue never
  *    moved; tell the escalation owner, once.
  *  - `wait`: nothing to do yet.
@@ -250,7 +256,9 @@ export function nextStep(entry: UnstickEntry | undefined, c: UnstickCandidate, n
   if (!entry || entry.reason !== c.reason) return "call";
   switch (entry.status) {
     case "pending": return "call";
-    case "failed": return entry.attempts < policy.maxAttempts ? "call" : "wait";
+    // Failed at the cap: no answer ever came, so it is asked afresh once the re-arm window has passed (every kind).
+    // An answer of any kind (invoked, escalated, declined) is delivered and is never re-armed.
+    case "failed": return entry.attempts < policy.maxAttempts || deliverySpent(entry, now, policy.maxAttempts) ? "call" : "wait";
     case "refused": return !entry.waitUntil || now >= Date.parse(entry.waitUntil) ? "call" : "wait";
     case "invoked": {
       const h = policy.handoff;
@@ -286,6 +294,25 @@ export function openEntry(prior: UnstickEntry | undefined, c: UnstickCandidate, 
   if (prior && prior.reason === c.reason) return prior;
   return { issue: c.issue, kind: c.kind, reason: c.reason, status: "pending", attempts: 0, since: now, ...(c.tag ? { tag: c.tag } : {}) };
 }
+
+/**
+ * One alert to the EM, the only shape `EmHandoffs.raise` takes. The outbox owns what happens to it after that
+ * (delivery, retry, re-arm, give-up: `nextStep`), so a sender states WHAT is wrong and never HOW it is delivered.
+ */
+export interface Alert {
+  kind: UnstickKind;
+  /** The issue the alert is about; 0 for a repo-level alert that belongs to no issue. */
+  subject: number;
+  /**
+   * Names the question when its text is not its identity: one entry per (subject, kind, dedupeKey), kept as it is
+   * whatever a later raise says (the text may carry a count that moves). "" = the reason is the identity, and a
+   * different reason replaces the entry (a new question).
+   */
+  dedupeKey: string;
+  reason: string;
+}
+
+const hash12 = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 12);
 
 /**
  * An error the SRE saw during a verification and excluded as not caused by the
@@ -329,84 +356,112 @@ export function epicRefs(body: string, label: string | undefined): number[] {
   return [...new Set([...body.matchAll(pattern)].map((m) => Number(m[1])))];
 }
 
+/** The alert for one error the SRE excluded as not caused by the release it verified. Pure, exported for tests. */
+export function unrelatedErrorAlert(error: string, seenOn: string, evidence: readonly string[]): Alert {
+  const shown = evidence.length ? ` Evidence: ${evidence.slice(0, 4).join(" ")}` : "";
+  return {
+    kind: "unrelated-error", subject: 0, dedupeKey: hash12(unrelatedSignature(error)),
+    reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${shown}`,
+  };
+}
+
 /**
- * What the Foreman asks the EM, written to the work source's records: the questions events raise (`noteStuck`)
- * and the repo-level hand-offs (unrelated errors, epics ready to close).
+ * foreman#230: the dependency sweep filed the same batch (same PRs, same head SHAs) as many times in 24 h as its
+ * policy allows and is holding it. One alert per batch key; the EM decides why the batch keeps coming back (a
+ * Dependabot PR left open after its version landed, a close that fails) and clears it.
+ */
+export function dependencyBatchLoopAlert(batchKey: string, filings: number): Alert {
+  return {
+    kind: "dependency-batch-loop", subject: 0, dedupeKey: hash12(batchKey),
+    reason: `The dependency sweep filed the same batch (${batchKey}) ${filings} times in 24 hours and is now holding it: no further issue is filed for these PRs at these head commits. ` +
+      "Each issue ended without a PR, so a Dependabot PR is probably still open after its version reached the base branch, and the Foreman's attempt to close it failed. " +
+      "Find out why, close or fix the PR(s), and the hold ends by itself (a new Dependabot push is a new batch).",
+  };
+}
+
+/**
+ * foreman#151: a child closed in production may have been its epic's last, and closing a delivered epic is the EM's
+ * hand-off to the PO that nothing else makes. One alert per epic and closed issue; the EM's READY TO CLOSE check
+ * decides whether it was the last.
+ */
+export function epicChildClosedAlert(githubRepo: string, issue: number, epic: number, label: string): Alert {
+  return {
+    kind: "epic-ready-to-close", subject: 0, dedupeKey: `${epic}-${issue}`,
+    reason: `${githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`,
+  };
+}
+
+/**
+ * The outbox of what the Foreman tells the EM, written to the work source's records. `raise` is the one way an
+ * alert enters it; the unstick stage reads the entries back and delivers them, and `nextStep` owns the delivery
+ * policy for every kind.
  */
 export class EmHandoffs {
   /**
-   * Unrelated-error hand-offs the record has not taken yet, by subject (`owner/repo#PR`) and signature tag. IN MEMORY
+   * Unrelated-error alerts the record has not taken yet, by subject (`owner/repo#PR`) and signature. IN MEMORY
    * ONLY, like the in-memory notes elsewhere: a durable fact persists through the work-source plugin, never a core state file
    * (EM#1244 decision 4). The SRE's report has no re-readable source, and a re-verification that comes back clean
    * would not repeat it, so the payload is held here until the record holds it.
    */
-  private readonly pending = new Map<string, Map<string, { tag: string; reason: string }>>();
+  private readonly pending = new Map<string, Map<string, Alert>>();
 
   constructor(private readonly records: IssueRecordStore) {}
 
+  /**
+   * Put `alert` in the outbox. Resolves true when it was new (or replaced a different question) and false when it
+   * was already standing, so a sender may raise on every poll at no cost. Throws HandoffNotSaved when the record
+   * cannot take it: the caller's pass fails closed with its trigger intact, and the next healthy pass raises it again.
+   */
+  raise(repoConfig: RepoConfig, alert: Alert): Promise<boolean> {
+    return this.raiseAll(repoConfig, [alert]).then((n) => n > 0);
+  }
+
+  /** `raise` for alerts produced together: one record write per subject, all or none. Resolves how many were new. */
+  async raiseAll(repoConfig: RepoConfig, alerts: readonly Alert[]): Promise<number> {
+    const bySubject = new Map<number, Alert[]>();
+    for (const a of alerts) (bySubject.get(a.subject) ?? bySubject.set(a.subject, []).get(a.subject)!).push(a);
+    const now = new Date().toISOString();
+    let added = 0;
+    for (const [subject, group] of bySubject) {
+      let fresh = 0;
+      const change = (d: { unstick?: Record<string, UnstickEntry> }): void => {
+        const table = { ...(d.unstick ?? {}) };
+        fresh = 0;
+        for (const a of group) {
+          const key = unstickKey(subject, a.kind, a.dedupeKey || undefined);
+          const standing = table[key];
+          if (standing && a.dedupeKey) continue; // named question: kept as it is
+          const next = openEntry(standing, { issue: subject, kind: a.kind, reason: a.reason, ...(a.dedupeKey ? { tag: a.dedupeKey } : {}) }, now);
+          if (next === standing) continue;
+          table[key] = next;
+          fresh++;
+        }
+        if (fresh > 0) d.unstick = table;
+      };
+      const ok = subject <= 0
+        ? await this.records.updateRepoRecord(repoConfig, change)
+        : await this.records.updateIssueRecord(repoConfig, subject, change);
+      if (!ok) throw new HandoffNotSaved(group[0]!.kind, repoConfig.githubRepo);
+      added += fresh;
+    }
+    return added;
+  }
+
   /** An event reported work stuck: remember it for the stage's next pass. Resolves false when it could not be recorded. */
   async noteStuck(repoConfig: RepoConfig, issue: number, kind: UnstickKind, reason: string): Promise<boolean> {
-    const key = unstickKey(issue, kind);
-    const now = new Date().toISOString();
-    if (issue <= 0) {
-      return this.records.updateRepoRecord(repoConfig, (d) => {
-        const table = { ...(d.unstick ?? {}) };
-        const next = openEntry(table[key], { issue, kind, reason }, now);
-        if (next === table[key]) return;
-        table[key] = next;
-        d.unstick = table;
-      });
+    try {
+      await this.raise(repoConfig, { kind, subject: issue, dedupeKey: "", reason });
+      return true;
+    } catch (err) {
+      if (err instanceof HandoffNotSaved) return false;
+      throw err;
     }
-    return this.records.updateIssueRecord(repoConfig, issue, (d) => {
-      const table = { ...(d.unstick ?? {}) };
-      const next = openEntry(table[key], { issue, kind, reason }, now);
-      if (next === table[key]) return;
-      table[key] = next;
-      d.unstick = table;
-    });
   }
 
   /** The block on `issue` was released (`unblocked`): its questions are over. */
   async clearUnstick(repoConfig: RepoConfig, issue: number): Promise<boolean> {
     if (issue <= 0) return true;
     return this.records.updateIssueRecord(repoConfig, issue, (d) => { delete d.unstick; });
-  }
-
-  /**
-   * The one way a repo-level hand-off to the EM is raised (unrelated-error, epic-ready-to-close): written to the
-   * repo record, and only then may the event that raised it be acknowledged. `entries` are the hand-offs the event
-   * produced; one already in the record is kept as it is. Resolves how many were new, and throws HandoffNotSaved
-   * when the record is unavailable or the save fails, so the caller's pass fails closed with its trigger (the
-   * verdict still to be acted on, the issue still open) intact and the next healthy pass raises it again.
-   */
-  private async persist(
-    repoConfig: RepoConfig,
-    kind: "unrelated-error" | "epic-ready-to-close" | "dependency-batch-loop",
-    entries: readonly { tag: string; reason: string; rearmAt?: number }[],
-  ): Promise<number> {
-    if (entries.length === 0) return 0;
-    const now = new Date().toISOString();
-    let added = 0;
-    let rearmed = false;
-    const ok = await this.records.updateRepoRecord(repoConfig, (d) => {
-      const table = { ...(d.unstick ?? {}) };
-      added = 0;
-      rearmed = false;
-      for (const { tag, reason, rearmAt } of entries) {
-        const key = unstickKey(0, kind, tag);
-        const standing = table[key];
-        if (standing) {
-          // A question whose calls were all spent without an answer is asked afresh (see `deliverySpent`).
-          if (rearmAt !== undefined && deliverySpent(standing, rearmAt)) { table[key] = { ...standing, status: "pending", attempts: 0 }; rearmed = true; }
-          continue;
-        }
-        table[key] = openEntry(undefined, { issue: 0, kind, reason, tag }, now);
-        added++;
-      }
-      if (added > 0 || rearmed) d.unstick = table;
-    });
-    if (!ok) throw new HandoffNotSaved(kind, repoConfig.githubRepo);
-    return added;
   }
 
   /**
@@ -420,59 +475,16 @@ export class EmHandoffs {
    */
   async settleHandoffs(repoConfig: RepoConfig, subject: string, fresh?: FreshUnrelated): Promise<number> {
     if (fresh) {
-      const evidence = fresh.seen.evidence.length ? ` Evidence: ${fresh.seen.evidence.slice(0, 4).join(" ")}` : "";
       const held = this.pending.get(subject) ?? this.pending.set(subject, new Map()).get(subject)!;
       for (const error of fresh.seen.errors) {
-        const tag = createHash("sha256").update(unrelatedSignature(error)).digest("hex").slice(0, 12);
-        if (!held.has(tag)) held.set(tag, { tag, reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${fresh.seenOn}): ${error.trim().slice(0, 600)}.${evidence}` });
+        const alert = unrelatedErrorAlert(error, fresh.seenOn, fresh.seen.evidence);
+        if (!held.has(alert.dedupeKey)) held.set(alert.dedupeKey, alert);
       }
     }
     const held = this.pending.get(subject);
     if (!held || held.size === 0) return 0;
-    const added = await this.persist(repoConfig, "unrelated-error", [...held.values()]);
+    const added = await this.raiseAll(repoConfig, [...held.values()]);
     this.pending.delete(subject);
     return added;
-  }
-
-  /** `settleHandoffs` with this result's reports: buffered first, then drained (see there). Returns how many were new. */
-  noteUnrelated(repoConfig: RepoConfig, seen: FreshUnrelated["seen"], seenOn: string, subject: string): Promise<number> {
-    return this.settleHandoffs(repoConfig, subject, { seen, seenOn });
-  }
-
-  /**
-   * foreman#230: the dependency sweep filed the same batch (same PRs, same head SHAs) as many times in 24 h as its
-   * policy allows and is holding it. Raised once per batch key; the EM decides why the batch keeps coming back (a
-   * Dependabot PR left open after its version landed, a close that fails) and clears it. Resolves true once the
-   * notice is on the record (new or already there); it throws HandoffNotSaved when it cannot be saved.
-   */
-  async noteDependencyBatchLoop(repoConfig: RepoConfig, batchKey: string, filings: number, now: Date = new Date()): Promise<boolean> {
-    const tag = createHash("sha256").update(batchKey).digest("hex").slice(0, 12);
-    const key = unstickKey(0, "dependency-batch-loop", tag);
-    const record = await this.records.loadRepoRecord(repoConfig);
-    if (record === null) throw new HandoffNotSaved("dependency-batch-loop", repoConfig.githubRepo);
-    // The question's own entry is the one record of delivery: already there and not spent means nothing to do (no write per poll).
-    const standing = record.unstick?.[key];
-    if (standing && !deliverySpent(standing, now.getTime())) return true;
-    await this.persist(repoConfig, "dependency-batch-loop", [{
-      tag,
-      rearmAt: now.getTime(),
-      reason: `The dependency sweep filed the same batch (${batchKey}) ${filings} times in 24 hours and is now holding it: no further issue is filed for these PRs at these head commits. ` +
-        "Each issue ended without a PR, so a Dependabot PR is probably still open after its version reached the base branch, and the Foreman's attempt to close it failed. " +
-        "Find out why, close or fix the PR(s), and the hold ends by itself (a new Dependabot push is a new batch).",
-    }]);
-    return true;
-  }
-
-  /**
-   * foreman#151: a child closed in production may have been its epic's last, and
-   * closing a delivered epic is the EM's hand-off to the PO that nothing else makes.
-   * Raise `epic-ready-to-close` once per epic and closed issue; the EM's READY TO
-   * CLOSE check decides whether it was the last. Returns the entries added.
-   */
-  async noteEpicChildClosed(repoConfig: RepoConfig, issue: number, epics: readonly number[], label: string): Promise<number> {
-    return this.persist(repoConfig, "epic-ready-to-close", epics.map((epic) => ({
-      tag: `${epic}-${issue}`,
-      reason: `${repoConfig.githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`,
-    })));
   }
 }

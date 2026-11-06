@@ -359,8 +359,8 @@ export async function tryVerify(
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
     // Held in memory until the record has them; the gate runs on EVERY result, so a clean re-verification cannot advance past an unsaved report.
     const subject = handoffSubject(repoConfig.githubRepo, target.prNumber);
-    if (sre.kind === "verdict" && sre.unrelated) await rt.handoffs.noteUnrelated(repoConfig, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`, subject);
-    else await rt.handoffs.settleHandoffs(repoConfig, subject);
+    await rt.handoffs.settleHandoffs(repoConfig, subject,
+      sre.kind === "verdict" && sre.unrelated ? { seen: sre.unrelated, seenOn: `${repoConfig.githubRepo} PR #${target.prNumber} (dev)` } : undefined);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.

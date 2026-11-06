@@ -41,7 +41,7 @@ import type { ProdRelease } from "../issue-records.js";
 import { fieldTable } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
-import { followUpOrigin } from "../unstick.js";
+import { epicChildClosedAlert, followUpOrigin } from "../unstick.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
@@ -95,7 +95,7 @@ function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): string
 async function fromVerifyResult(rt: ForemanRuntime, r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger): Promise<Verdict> {
   if (r.kind === "error") return { kind: "defer", reason: r.error };
   // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
-  if (r.unrelated) await rt.handoffs.noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr} (prod)`, handoffSubject(repoConfig.githubRepo, pr));
+  if (r.unrelated) await rt.handoffs.settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, pr), { seen: r.unrelated, seenOn: `${repoConfig.githubRepo} PR #${pr} (prod)` });
   const evidence = evidenceFor(repoConfig, pr, logger);
   if (r.pass) return { kind: "pass", ...(evidence ? { evidence } : {}) };
   return holdVerdict(r.reason ?? "prod-verify-held", evidence);
@@ -191,7 +191,7 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
   let epics = epicRefs(codeHost().readIssueBody(repoConfig, n), label);
   const origin = followUpOrigin(title);
   if (!epics.length && origin !== null) epics = epicRefs(codeHost().readIssueBody(repoConfig, origin), label);
-  if ((await rt.handoffs.noteEpicChildClosed(repoConfig, n, epics, label)) > 0) {
+  if ((await rt.handoffs.raiseAll(repoConfig, epics.map((epic) => epicChildClosedAlert(repoConfig.githubRepo, n, epic, label)))) > 0) {
     logger.info(`#${n} is closing in production; asking the EM whether ${label} ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
   }
 }
@@ -761,7 +761,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
     try { mergeSha = codeHost().viewReleasePr(repoConfig, pr.number).mergeSha; } catch { /* read again next pass */ }
   }
   const merged: ProdRelease = { ...rel, phase: "merged", mergedAt: iso(now()), ...(mergeSha ? { mergeSha } : {}) };
-  if (r.unrelated) await rt.handoffs.noteUnrelated(repoConfig, r.unrelated, `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)`, handoffSubject(repoConfig.githubRepo, pr.number));
+  if (r.unrelated) await rt.handoffs.settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, pr.number), { seen: r.unrelated, seenOn: `${repoConfig.githubRepo} PR #${pr.number} (prod deploy)` });
   logger.info(`Release PR #${pr.number} merged by the SRE as ${short(mergeSha ?? undefined)} (verify=${tr.verify}${tr.hold ? `, hold=${tr.hold}` : ""})`);
   // The PR is merged. If "merged" cannot be recorded the "deploying" record stands: the next pass reads the PR as
   // MERGED, moves it to merged and verifies it, so the release is neither deployed again nor skipped.

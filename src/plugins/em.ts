@@ -1,7 +1,7 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
-import { cliTail, lastLine, runAgentCli } from "./agent-cli.js";
+import { cliTail, lastLine, runAgentCli, type CliRun } from "./agent-cli.js";
 import { detectRefusal } from "../refusal.js";
 import type { ForemanPlugin, Unsticker, UnstickOutcome } from "./contract.js";
 
@@ -33,6 +33,16 @@ export function emUnstickMaxDurationMs(kind: string): number {
 }
 
 /**
+ * Whether an exit-3 run is the EM refusing the KIND (bin/em.mjs, before any session: `unknown kind '<kind>'; nothing
+ * written`) rather than ruling out of scope. The line must be exactly that, for the kind this call sent, so a
+ * session's own prose can never pass for it.
+ */
+export function rejectedAsUnknownKind(r: Pick<CliRun, "stdout" | "stderr">, kind: string): boolean {
+  const line = `unknown kind '${kind}'; nothing written`;
+  return !r.stdout.trim() && r.stderr.split("\n").some((l) => l.trim() === line);
+}
+
+/**
  * Ask the EM to unstick `issue` (`em.mjs unstick --repo --issue --kind --reason`),
  * cwd the EM checkout. Exit 2 escalated, 3 declined; otherwise a run whose
  * output ends in the runner's refusal (out of tokens, rate-limited) is `refused`
@@ -58,7 +68,13 @@ export async function unstickViaEm(
     buildEmEnv(agentConfig), agentConfig, emUnstickMaxDurationMs(kind), abortSignal, transcriptPath);
   const last = lastLine(r);
   if (!r.timedOut && r.code === 2) return { kind: "escalated", detail: last };
-  if (!r.timedOut && r.code === 3) return { kind: "declined", detail: last };
+  if (!r.timedOut && r.code === 3) {
+    // Exit 3 is also what the EM says for an unknown kind. That is a contract break, not a decision: failed, so it is
+    // retried and re-armed until the EM knows the kind (foreman#232). A genuine decline stays final.
+    return rejectedAsUnknownKind(r, kind)
+      ? { kind: "failed", detail: `the EM rejected the kind as unknown (the Foreman and the EM disagree on the kind list): ${last}` }
+      : { kind: "declined", detail: last };
+  }
   const refusal = detectRefusal({ stdout: r.stdout, stderr: r.stderr, exitCode: r.code });
   if (refusal) return { kind: "refused", detail: refusal.reason, ...(refusal.resetAtMs !== undefined ? { resetAtMs: refusal.resetAtMs } : {}) };
   if (r.timedOut) return { kind: "failed", detail: "EM unstick timed out" };
@@ -97,10 +113,31 @@ export async function grantStateViaEm(
   }
 }
 
+/** How long `em.mjs kinds --json` may run (it reads a constant). */
+export const EM_KINDS_MAX_DURATION_MS = 30_000;
+
+/**
+ * The kinds the EM says it accepts (`em.mjs kinds --json`: a JSON array of strings). Null on any failure, a missing
+ * `emRepoPath`, or an EM too old to have the subcommand. Never throws.
+ */
+export async function publishedKindsViaEm(agentConfig: AgentConfig, logger: Logger): Promise<readonly string[] | null> {
+  const em = agentConfig.emRepoPath;
+  if (!em) return null;
+  try {
+    const r = await runAgentCli(em, "bin/em.mjs", ["kinds", "--json"], buildEmEnv(agentConfig), agentConfig, EM_KINDS_MAX_DURATION_MS);
+    const kinds: unknown = r.timedOut || r.code !== 0 ? null : JSON.parse(r.stdout);
+    if (Array.isArray(kinds) && kinds.every((k) => typeof k === "string")) return kinds;
+    logger.warn(`EM kinds --json unreadable (${r.timedOut ? "timed out" : r.code !== 0 ? `exit ${r.code}` : "not a JSON array of strings"})`);
+  } catch (err) {
+    logger.warn(`EM kinds --json failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return null;
+}
+
 export class EmPlugin implements ForemanPlugin {
   readonly id = "em";
   readonly roles = ["unstick"] as const;
-  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm };
+  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm, publishedKinds: publishedKindsViaEm };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.emRepoPath);
   }

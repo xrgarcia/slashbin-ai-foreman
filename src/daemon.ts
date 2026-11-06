@@ -13,6 +13,7 @@ import { configureRunner } from "./refusal.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
 import type { ForemanRuntime } from "./runtime.js";
+import { checkKindContract } from "./unstick-contract.js";
 
 export interface DaemonOptions {
   configPath?: string;
@@ -108,6 +109,9 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   if (releaseWarning) logger.warn(releaseWarning);
   const retired = concurrencyWarning(config);
   if (retired) logger.warn(retired);
+
+  // The EM publishes the alert kinds it accepts; a kind the Foreman sends that it lacks is an alert nobody receives.
+  void checkKindContract(config, logger);
 
   logger.info(config.profile ? `Config profile: ${config.profile}` : "Config profile: none (neutral defaults)");
 
