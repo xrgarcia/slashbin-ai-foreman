@@ -97,6 +97,9 @@ test("registry-unavailable and a timeout are unknown: never covered, never a mer
   assert.ok(Date.now() - t0 < 5000, "killed at pollIntervalMs");
   assert.equal(isToolingHold("qa-coverage-unknown"), true);
   assert.equal(verifyHoldPlan("qa-coverage-unknown").kind, "defer");
+  // QA's HELD registry-unavailable (slashbin_ai_qa#32) reaches the gate as qa-held-<hold>: deferred, not charged.
+  assert.equal(isToolingHold("qa-held-registry-unavailable"), true);
+  assert.equal(verifyHoldPlan("qa-held-registry-unavailable").kind, "defer");
 });
 
 test("a second ask within the TTL spawns zero times; concurrent asks share one spawn", async () => {
