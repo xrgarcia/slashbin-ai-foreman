@@ -119,12 +119,12 @@ if (config.srePath) {
   if (process.env.SRE_GITHUB_KEY) line("PASS", "SRE_GITHUB_KEY", "set");
   else line("FAIL", "SRE_GITHUB_KEY", "unset, and srePath is set — the verify stage refuses to run without it.");
 }
-// QA report (report-only): needs the QA checkout and the EM checkout's qaSecretsRunner, which supplies its one secret.
+// QA report (report-only): needs the QA checkout and the EM checkout's qaSecretsRunner, which supplies its secrets (the mint key and the registry bearer).
 if (config.qaPath) {
   const qaOk = existsSync(join(config.qaPath, "bin/qa.mjs"));
   const runner = config.qaSecretsRunner;
   const runnerOk = Boolean(runner && config.emRepoPath && existsSync(join(config.emRepoPath, runner)));
-  const runnerWhy = !runner ? "qaSecretsRunner is not set (it supplies DEV_SESSION_MINT_KEY). " : `emRepoPath has no ${runner} (it supplies DEV_SESSION_MINT_KEY). `;
+  const runnerWhy = !runner ? "qaSecretsRunner is not set (it supplies DEV_SESSION_MINT_KEY and the registry bearer EM_SLASHBIN_MCP_ROUTER_BEARER / SLASHBIN_MCP_ROUTER_BEARER). " : `emRepoPath has no ${runner} (it supplies DEV_SESSION_MINT_KEY and the registry bearer EM_SLASHBIN_MCP_ROUTER_BEARER / SLASHBIN_MCP_ROUTER_BEARER). `;
   if (qaOk && runnerOk) line("PASS", "QA report", `on for ${config.qaRepos.join(", ")}`);
   else line("FAIL", "QA report", `${!qaOk ? "qaPath has no bin/qa.mjs. " : ""}${!runnerOk ? runnerWhy : ""}QA reports will post as errored.`.trim());
 }
