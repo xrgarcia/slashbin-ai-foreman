@@ -75,6 +75,8 @@ export const FOREMAN_TOOLING_HOLDS: readonly string[] = [
   "qa-held-review-unavailable",
   "qa-held-pr-unreadable",
   "qa-held-baseline-unreadable",
+  // QA's own registry read failed (slashbin_ai_qa#32: hold `registry-unavailable`, derived as `qa-held-<hold>`).
+  "qa-held-registry-unavailable",
   // QA before the merge (`check --local`): QA's own boot failed, the Console's seed is missing, or the
   // data QA reads was unreachable. None is a verdict on the PR (qa-local-seed-missing is the Console's to fix).
   "qa-held-qa-local-boot-failed",
