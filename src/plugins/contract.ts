@@ -129,8 +129,11 @@ export interface Deployer {
 }
 
 export interface QaRunner {
-  /** Whether QA checks this repo. */
-  covers(repo: RepoConfig, config: AgentConfig): boolean;
+  /**
+   * Whether QA checks this repo. `"unknown"` = QA could not say (its registry was unavailable, or the
+   * question timed out): the caller holds without charging and never advances on it. Never rejects.
+   */
+  covers(repo: RepoConfig, config: AgentConfig): Promise<boolean | "unknown">;
   /**
    * Check PR `pr`, writing its manifest under `out`: on dev (`local` false), or
    * booted locally from the PR (`local` true, before the merge).

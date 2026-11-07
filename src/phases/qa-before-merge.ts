@@ -40,7 +40,7 @@ export async function tryQaBeforeMerge(
   events?: CycleEvent[],
   deps?: QaDeps,
 ): Promise<QaPhaseResult> {
-  if (!repoConfig.reviewEnabled || !qaBeforeMergeApplies(repoConfig, config)) return "none";
+  if (!repoConfig.reviewEnabled || (await qaBeforeMergeApplies(repoConfig, config)) !== true) return "none";
   if (isUpstreamBlocked("github")) return "none";
   const repoName = repoConfig.name;
   const qlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "qa" });

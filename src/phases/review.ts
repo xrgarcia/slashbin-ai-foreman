@@ -30,7 +30,14 @@ export async function tryReview(
   // QA before the merge (config.qaBeforeMerge): the Tech Lead approves without merging, QA runs on the
   // approved head, and only a PASS merges. An approved PR waiting on QA is QA's, never offered to the
   // Tech Lead again; and the QA that follows an approval runs in the same pass.
-  const qaFirst = qaBeforeMergeApplies(repoConfig, config) && repoConfig.reviewEnabled && !rt.memory.reviewDefer.waiting(repoConfig.name);
+  const qaPre = repoConfig.reviewEnabled ? await qaBeforeMergeApplies(repoConfig, config) : false;
+  if (qaPre === "unknown") {
+    // QA could not say whether it covers this repo (its registry is unavailable): reviewing could merge a PR
+    // QA must check first, so nothing is reviewed or merged until it answers. Nothing is charged.
+    logger.warn(`Review of ${repoConfig.name} waits: QA could not say whether it covers the repo (coverage unknown)`);
+    return false;
+  }
+  const qaFirst = qaPre && repoConfig.reviewEnabled && !rt.memory.reviewDefer.waiting(repoConfig.name);
   if (qaFirst) {
     const waiting = await tryQaBeforeMerge(rt, repoConfig, config, logger, cycleNumber, events);
     if (waiting === "handled") return true;

@@ -96,13 +96,44 @@ export class QaPlugin implements ForemanPlugin {
   readonly roles = ["qa"] as const;
   readonly qa: QaRunner;
   private readonly mintKey: string;
+  /** Per repo: the coverage answer (or the one in flight) and when it was asked. */
+  private readonly coverage = new Map<string, { at: number; answer: Promise<boolean | "unknown"> }>();
 
   constructor(opts: QaPluginOptions = {}) {
     this.mintKey = opts.mintKey ?? "DEV_SESSION_MINT_KEY";
     this.qa = {
-      covers: (repo, config) => config.qaRepos.includes(repo.githubRepo),
+      covers: (repo, config) => this.covers(repo.githubRepo, config),
       check: (_repo, config, args, logger) => (args.local ? this.checkLocal(config, args, logger) : this.checkDev(config, args, logger)),
     };
+  }
+
+  /**
+   * Whether QA covers `repo` (EM#794 C). A `qaRepos` repo is covered with no spawn (the override: covered even
+   * when QA says no). Otherwise QA answers: `qa.mjs covers --repo R` through the secrets runner, exit 0 =
+   * covered, exit 1 = not. A missing runner or `emRepoPath`, or a QA with no `covers` subcommand (any other
+   * exit), is not covered, so the Console stays covered and any other repo uncovered until QA can answer.
+   * Output naming `registry-unavailable`, a timeout or a spawn error is "unknown". Memoized per repo for
+   * `pollIntervalMs` (one shared in-flight promise); the spawn is killed at `pollIntervalMs`. Never throws.
+   */
+  private covers(repo: string, config: AgentConfig): Promise<boolean | "unknown"> {
+    if (config.qaRepos.includes(repo)) return Promise.resolve(true);
+    const ttl = config.pollIntervalMs;
+    const hit = this.coverage.get(repo);
+    if (hit && Date.now() - hit.at < ttl) return hit.answer;
+    const answer = this.askQa(repo, config, ttl).catch((): "unknown" => "unknown");
+    this.coverage.set(repo, { at: Date.now(), answer });
+    return answer;
+  }
+
+  private async askQa(repo: string, config: AgentConfig, maxMs: number): Promise<boolean | "unknown"> {
+    const { emRepoPath: em, qaPath: qa, qaSecretsRunner: runner } = config;
+    if (!em || !qa || !runner) return false;
+    const args = ["--keys", QA_BEARER_KEYS.join(","), QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "covers", "--repo", repo];
+    const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, maxMs);
+    if (r.timedOut) return "unknown";
+    if (/registry-unavailable/.test(`${r.stdout}\n${r.stderr}`)) return "unknown";
+    if (r.code === null) return "unknown";
+    return r.code === 0;
   }
 
   enabled(config: AgentConfig): boolean {

@@ -300,13 +300,16 @@ export const configSchema = z.object({
   // passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the
   // result is posted on the PR as "## QA Report (report-only)". It never gates:
   // the card moves to prApproved first and nothing waits on QA. Unset = no QA.
-  // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY).
+  // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry
+  // bearer, EM_SLASHBIN_MCP_ROUTER_BEARER or SLASHBIN_MCP_ROUTER_BEARER).
   qaPath: z.string().optional(),
-  // GitHub repos (owner/name) QA applies to. Default none.
+  // GitHub repos (owner/name) QA applies to. Default none. Override: covered even when QA says no.
+  // Any other repo is covered when `bin/qa.mjs covers --repo R` exits 0 (EM#794).
   qaRepos: z.array(z.string()).default([]),
   // The script in the EM checkout (relative to emRepoPath) that runs QA's dev check
-  // with its one secret, DEV_SESSION_MINT_KEY, handed to that child alone. Unset =
-  // the dev check reports `errored` instead of running; the local check needs none.
+  // with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (EM_SLASHBIN_MCP_ROUTER_BEARER,
+  // else SLASHBIN_MCP_ROUTER_BEARER), handed to that child alone. The local check and the `covers`
+  // question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
   qaSecretsRunner: z.string().min(1).optional(),
   // Whether QA gates delivery. false (default) = report-only: the card advances on the
   // SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances,
@@ -315,7 +318,7 @@ export const configSchema = z.object({
   qaGate: z.boolean().default(false),
   // QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA
   // fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs
-  // `bin/qa.mjs check --local` on the approved head (it boots the PR itself, no secret), and only
+  // `bin/qa.mjs check --local` on the approved head (it boots the PR itself; only the registry bearer), and only
   // a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder.
   // Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged.
   // Needs `qaPath` and `techLeadPath`. A config flip, reversible.

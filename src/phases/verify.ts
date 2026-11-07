@@ -69,6 +69,7 @@ export const SRE_TOOLING_HOLDS: readonly string[] = [
  */
 export const FOREMAN_TOOLING_HOLDS: readonly string[] = [
   "qa-errored",
+  "qa-coverage-unknown",
   "qa-held-dev-unreachable",
   "qa-held-sign-in-failed",
   "qa-held-review-unavailable",
@@ -261,7 +262,7 @@ export async function tryVerify(
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
-  if (qaApplies(repoConfig, config)) await takeQaRerunRequests(rt, repoConfig, config, vlog);
+  if ((await qaApplies(repoConfig, config)) === true) await takeQaRerunRequests(rt, repoConfig, config, vlog);
   const awaiting = await codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
   // The holds of the issues this pass looks at: the ones awaiting verification, and the repo's other open
   // issues, whose holds are stale. An issue whose record cannot be read is left alone, not read as unheld.
@@ -364,11 +365,17 @@ export async function tryVerify(
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.
-    const qaBeforeMerge = qaBeforeMergeApplies(repoConfig, config);
+    const qaPre = await qaBeforeMergeApplies(repoConfig, config);
+    const qaBeforeMerge = qaPre === true;
+    // Asked only on a pass, and only when QA could matter; "unknown" is a no-charge hold below, never an advance.
+    const qaCovers = sre.kind === "verdict" && sre.pass ? (qaPre === "unknown" ? "unknown" : await qaApplies(repoConfig, config)) : false;
     // qaBeforeMerge, but no real PASS since the EM's last re-run request (none, or a void 0-shot one): the gate runs here.
     const qaAgain = sre.kind === "verdict" && sre.pass && qaBeforeMerge && await postMergeQaNeeded(target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
     let r: VerifyResult = sre;
-    if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) || qaAgain)) {
+    if (sre.kind === "verdict" && sre.pass && qaCovers === "unknown") {
+      vlog.warn(`QA could not say whether it covers ${repoConfig.githubRepo}; PR #${target.prNumber} is held, not advanced`);
+      r = { ...sre, pass: false, reason: "qa-coverage-unknown", summary: "QA could not say whether it covers this repo (its registry was unavailable or the question timed out)", by: "QA" };
+    } else if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaCovers === true) || qaAgain)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
       const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
       await emit(rt, { kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
@@ -385,7 +392,7 @@ export async function tryVerify(
       }
       await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
-      if (!config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
+      if (!config.qaGate && !qaBeforeMerge && qaCovers === true) {
         void rt.qaReports.run(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
