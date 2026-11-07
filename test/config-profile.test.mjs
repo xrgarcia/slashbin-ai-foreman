@@ -45,6 +45,7 @@ test("the slashbin profile resolves to exactly the values the core used to hard-
   assert.equal(c.unstickEscalationOwner, "xrgarcia");
   assert.deepEqual(c.qaRepos, ["xrgarcia/Slashbin-console"]);
   assert.equal(c.qaSecretsRunner, "scripts/secrets/doppler-run.mjs");
+  assert.equal(c.qaBearerKey, "EM_SLASHBIN_MCP_ROUTER_BEARER@xrgarcia/slashbin-engineering-manager");
   assert.equal(c.epicRefLabel, "engineering-manager");
   assert.equal(c.paperclip.commentAuthorHeader, "x-slashbin-comment-author");
   assert.equal(c.paperclip.enabled, false, "the profile's paperclip block does not turn the board on");
@@ -69,6 +70,7 @@ test("no profile gives the neutral defaults", () => {
   assert.equal(c.unstickEscalationOwner, undefined);
   assert.deepEqual(c.qaRepos, []);
   assert.equal(c.qaSecretsRunner, undefined);
+  assert.equal(c.qaBearerKey, "EM_SLASHBIN_MCP_ROUTER_BEARER");
   assert.equal(c.epicRefLabel, undefined);
   assert.equal(c.paperclip.commentAuthorHeader, undefined);
   assert.deepEqual(c.reviewAllowedTools, BASE_TOOLS);

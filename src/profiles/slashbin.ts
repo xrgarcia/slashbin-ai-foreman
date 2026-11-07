@@ -13,6 +13,10 @@ export const slashbinProfile: ConfigProfile = {
   qaRepos: ["xrgarcia/Slashbin-console"],
   // The EM checkout's wrapper that hands QA's dev run its one Doppler key.
   qaSecretsRunner: "scripts/secrets/doppler-run.mjs",
+  // The registry bearer QA reads with, pinned to its one Doppler home so the runner lists that
+  // project alone. Unpinned, every `covers` spawn listed every project; on 2026-11-07 that hit
+  // Doppler's 240-a-minute account limit and took every agent's secrets down.
+  qaBearerKey: "EM_SLASHBIN_MCP_ROUTER_BEARER@xrgarcia/slashbin-engineering-manager",
   // The review session's MCP servers, as Slashbin's fleet names them.
   reviewAllowedTools: [
     "Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch",

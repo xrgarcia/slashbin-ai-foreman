@@ -303,16 +303,19 @@ export const configSchema = z.object({
   // result is posted on the PR as "## QA Report (report-only)". It never gates:
   // the card moves to prApproved first and nothing waits on QA. Unset = no QA.
   // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry
-  // bearer, EM_SLASHBIN_MCP_ROUTER_BEARER or SLASHBIN_MCP_ROUTER_BEARER).
+  // bearer, `qaBearerKey`).
   qaPath: z.string().optional(),
   // GitHub repos (owner/name) QA applies to. Default none. Override: covered even when QA says no.
   // Any other repo is covered when `bin/qa.mjs covers --repo R` exits 0 (EM#794).
   qaRepos: z.array(z.string()).default([]),
   // The script in the EM checkout (relative to emRepoPath) that runs QA's dev check
-  // with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (EM_SLASHBIN_MCP_ROUTER_BEARER,
-  // else SLASHBIN_MCP_ROUTER_BEARER), handed to that child alone. The local check and the `covers`
+  // with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (`qaBearerKey`), handed to
+  // that child alone. The local check and the `covers`
   // question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
   qaSecretsRunner: z.string().min(1).optional(),
+  // The registry bearer's key for the runner's --keys, as `NAME` or `NAME@project` (a pin lists
+  // that one Doppler project instead of every one). It lives only in `prd`.
+  qaBearerKey: z.string().min(1).default("EM_SLASHBIN_MCP_ROUTER_BEARER"),
   // Whether QA gates delivery. false (default) = report-only: the card advances on the
   // SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances,
   // FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card
@@ -580,6 +583,8 @@ export interface AgentConfig {
   qaRepos: string[];
   /** EM-checkout-relative script that runs QA's dev check with its secret; undefined = the dev check errors. */
   qaSecretsRunner?: string;
+  /** The registry bearer's runner key, `NAME` or `NAME@project` (see configSchema). */
+  qaBearerKey: string;
   /** QA gates the advance to prApproved (see configSchema). */
   qaGate: boolean;
   /** QA runs on the PR head before the Tech Lead merges it (see configSchema). */
@@ -758,6 +763,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
     qaRepos: fileConfig.qaRepos,
     qaSecretsRunner: fileConfig.qaSecretsRunner,
+    qaBearerKey: fileConfig.qaBearerKey,
     qaGate: fileConfig.qaGate,
     qaBeforeMerge: fileConfig.qaBeforeMerge,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
@@ -967,6 +973,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaRepos: [...parsed.qaRepos],
     qaSecretsRunner: parsed.qaSecretsRunner,
+    qaBearerKey: parsed.qaBearerKey,
     qaGate: parsed.qaGate,
     qaBeforeMerge: parsed.qaBeforeMerge,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,

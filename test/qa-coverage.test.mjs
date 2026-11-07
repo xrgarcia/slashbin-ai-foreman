@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QaPlugin, QA_BEARER_KEYS } from "../dist/plugins/qa.js";
+import { QaPlugin } from "../dist/plugins/qa.js";
 import { qaApplies, qaBeforeMergeApplies } from "../dist/qa-report.js";
 import { qaFor, registerPlugin, registeredPlugins, startPlugins } from "../dist/plugins/registry.js";
 import { TechLeadPlugin } from "../dist/plugins/tech-lead.js";
@@ -34,8 +34,9 @@ const keysOf = (a) => a[a.indexOf("--keys") + 1].split(",");
 const CONSOLE = "xrgarcia/Slashbin-console";
 const config = {
   qaPath: qa, emRepoPath: em, qaSecretsRunner: "runner.mjs", qaRepos: [CONSOLE], sessionEnv: [],
-  pollIntervalMs: 1500, qaBeforeMerge: true, techLeadPath: "/x",
+  pollIntervalMs: 1500, qaBeforeMerge: true, techLeadPath: "/x", qaBearerKey: "BEARER@home",
 };
+const QA_BEARER_KEYS = ["BEARER@home"];
 const plugin = new QaPlugin();
 const have = new Set(registeredPlugins().map((p) => p.id));
 if (!have.has("qa")) registerPlugin(new QaPlugin());
@@ -43,8 +44,10 @@ if (!have.has("tech-lead")) registerPlugin(new TechLeadPlugin());
 await startPlugins({ ...config, paperclip: { enabled: false } }, { logger: quiet, configText: () => null });
 const ask = (repo, cfg = config) => qaApplies({ githubRepo: repo }, cfg);
 
-test("the bearer key names are the two the issue names", () => {
-  assert.deepEqual([...QA_BEARER_KEYS], ["EM_SLASHBIN_MCP_ROUTER_BEARER", "SLASHBIN_MCP_ROUTER_BEARER"]);
+test("the runner is asked for the one configured bearer key, pin included", async () => {
+  setMode({ code: 0 });
+  await ask("o/onekey");
+  assert.deepEqual(keysOf(coversCalls().pop()), ["BEARER@home"]);
 });
 
 test("checkDev --keys carries the mint key and both bearer keys, searched dev,prd", async () => {
@@ -78,6 +81,7 @@ test("QA answers for any other repo: 0 covered, 1 not, unset runner / emRepoPath
   const c = coversCalls().pop();
   assert.equal(c[c.indexOf("--repo") + 1], "o/covered");
   assert.deepEqual(keysOf(c), [...QA_BEARER_KEYS]);
+  assert.equal(c[c.indexOf("--keys") + 2], "prd");
   setMode({ code: 1 });
   assert.equal(await ask("o/uncovered"), false);
   assert.equal(await ask("o/norunner", { ...config, qaSecretsRunner: undefined }), false);
@@ -129,4 +133,19 @@ test("the phases never treat unknown as covered or as an advance", () => {
   assert.match(src("phases/review.ts"), /qaPre === "unknown"[\s\S]{0,500}return false/);
   assert.match(src("phases/qa-before-merge.ts"), /qaBeforeMergeApplies\(repoConfig, config\)\) !== true\) return "none"/);
   assert.match(src("phases/revise.ts"), /\(await qaBeforeMergeApplies\(repoConfig, config\)\) === true/);
+});
+
+test("a settled answer outlives the poll interval; an unknown one is re-asked after it (2026-11-07 Doppler flood)", async () => {
+  setMode({ code: 0 });
+  let n = coversCalls().length;
+  assert.equal(await ask("o/settled"), true);
+  setMode({ code: 3, say: "HELD registry-unavailable" });
+  assert.equal(await ask("o/flaky"), "unknown");
+  assert.equal(coversCalls().length - n, 2);
+  await new Promise((r) => setTimeout(r, config.pollIntervalMs + 200));
+  n = coversCalls().length;
+  assert.equal(await ask("o/settled"), true, "kept past pollIntervalMs");
+  assert.equal(coversCalls().length, n);
+  await ask("o/flaky");
+  assert.equal(coversCalls().length - n, 1, "unknown is asked again");
 });
