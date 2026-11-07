@@ -48,10 +48,17 @@ export function qaStepOf(stderr: string): "setup" | "capture" | "review" {
 }
 
 /**
- * The registry bearer's key names (EM#794 C): QA reads the registry with it. The first holder
- * wins: the EM's own, else the team bot's. Names only; the runner hands the value to the QA child alone.
+ * The registry bearer's runner key (EM#794 C): QA reads the registry with it. Names only; the runner
+ * hands the value to the QA child alone. Config `qaBearerKey` (a profile pins it to its one home).
+ * The team bot's SLASHBIN_MCP_ROUTER_BEARER is retired (it answers 401) and is no longer asked for.
  */
-export const QA_BEARER_KEYS = ["EM_SLASHBIN_MCP_ROUTER_BEARER", "SLASHBIN_MCP_ROUTER_BEARER"] as const;
+export const qaBearerKeys = (config: AgentConfig): string[] => [config.qaBearerKey];
+
+/** `covers` needs only the bearer, which lives only in `prd`: one config, one names call. */
+const QA_COVERS_CONFIGS = "prd";
+
+/** A settled covered / not-covered answer is kept this long; registry coverage changes by PR, not by poll. */
+export const QA_COVERS_TTL_MS = 60 * 60 * 1000;
 
 /** The runner's config search order for every QA call: the bearer lives only in `prd`, the mint key in `dev`. */
 const QA_KEY_CONFIGS = "dev,prd";
@@ -97,7 +104,7 @@ export class QaPlugin implements ForemanPlugin {
   readonly qa: QaRunner;
   private readonly mintKey: string;
   /** Per repo: the coverage answer (or the one in flight) and when it was asked. */
-  private readonly coverage = new Map<string, { at: number; answer: Promise<boolean | "unknown"> }>();
+  private readonly coverage = new Map<string, { at: number; ttl: number; answer: Promise<boolean | "unknown"> }>();
 
   constructor(opts: QaPluginOptions = {}) {
     this.mintKey = opts.mintKey ?? "DEV_SESSION_MINT_KEY";
@@ -113,22 +120,29 @@ export class QaPlugin implements ForemanPlugin {
    * covered, exit 1 = not. A missing runner or `emRepoPath`, or a QA with no `covers` subcommand (any other
    * exit), is not covered, so the Console stays covered and any other repo uncovered until QA can answer.
    * Output naming `registry-unavailable`, a timeout or a spawn error is "unknown". Memoized per repo for
-   * `pollIntervalMs` (one shared in-flight promise); the spawn is killed at `pollIntervalMs`. Never throws.
+   * `QA_COVERS_TTL_MS` once settled, "unknown" for `pollIntervalMs` (one shared in-flight promise); the spawn
+   * is killed at `pollIntervalMs`. Never throws.
    */
   private covers(repo: string, config: AgentConfig): Promise<boolean | "unknown"> {
     if (config.qaRepos.includes(repo)) return Promise.resolve(true);
-    const ttl = config.pollIntervalMs;
+    const poll = config.pollIntervalMs;
     const hit = this.coverage.get(repo);
-    if (hit && Date.now() - hit.at < ttl) return hit.answer;
-    const answer = this.askQa(repo, config, ttl).catch((): "unknown" => "unknown");
-    this.coverage.set(repo, { at: Date.now(), answer });
-    return answer;
+    if (hit && Date.now() - hit.at < hit.ttl) return hit.answer;
+    const entry = { at: Date.now(), ttl: poll, answer: Promise.resolve<boolean | "unknown">("unknown") };
+    entry.answer = this.askQa(repo, config, poll)
+      .catch((): "unknown" => "unknown")
+      .then((a) => {
+        if (a !== "unknown") entry.ttl = Math.max(poll, QA_COVERS_TTL_MS);
+        return a;
+      });
+    this.coverage.set(repo, entry);
+    return entry.answer;
   }
 
   private async askQa(repo: string, config: AgentConfig, maxMs: number): Promise<boolean | "unknown"> {
     const { emRepoPath: em, qaPath: qa, qaSecretsRunner: runner } = config;
     if (!em || !qa || !runner) return false;
-    const args = ["--keys", QA_BEARER_KEYS.join(","), QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "covers", "--repo", repo];
+    const args = ["--keys", qaBearerKeys(config).join(","), QA_COVERS_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "covers", "--repo", repo];
     const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, maxMs);
     if (r.timedOut) return "unknown";
     if (/registry-unavailable/.test(`${r.stdout}\n${r.stderr}`)) return "unknown";
@@ -147,7 +161,7 @@ export class QaPlugin implements ForemanPlugin {
     if (!em || !qa) return { kind: "errored", detail: "emRepoPath and qaPath must both be set" };
     const runner = config.qaSecretsRunner;
     if (!runner) return { kind: "errored", detail: "qaSecretsRunner is not set, so the dev run has no way to get its secret" };
-    const keys = [`${this.mintKey}@${repo}`, ...QA_BEARER_KEYS].join(",");
+    const keys = [`${this.mintKey}@${repo}`, ...qaBearerKeys(config)].join(",");
     const args = ["--keys", keys, QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "check", "--repo", repo, "--pr", String(pr), "--out", out];
     const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, QA_MAX_DURATION_MS);
     return readOutcome(r, out, logger);
@@ -166,7 +180,7 @@ export class QaPlugin implements ForemanPlugin {
     if (!runner) return { kind: "errored", detail: "qaSecretsRunner is not set, so the local run has no way to get the registry bearer" };
     // A manifest left by an earlier run must never be read as this one's.
     rmSync(join(out, "manifest.json"), { force: true });
-    const args = ["--keys", QA_BEARER_KEYS.join(","), QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "check", "--local", "--repo", repo, "--pr", String(pr), "--out", out];
+    const args = ["--keys", qaBearerKeys(config).join(","), QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "check", "--local", "--repo", repo, "--pr", String(pr), "--out", out];
     const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, QA_MAX_DURATION_MS);
     return readOutcome(r, out, logger);
   }
