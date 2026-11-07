@@ -132,7 +132,7 @@ export class QaPlugin implements ForemanPlugin {
     const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, maxMs);
     if (r.timedOut) return "unknown";
     if (/registry-unavailable/.test(`${r.stdout}\n${r.stderr}`)) return "unknown";
-    if (r.code === null) return "unknown";
+    if (r.code === null || r.code < 0) return "unknown"; // killed by a signal, or never launched (ENOENT closes with a negative errno)
     return r.code === 0;
   }
 
