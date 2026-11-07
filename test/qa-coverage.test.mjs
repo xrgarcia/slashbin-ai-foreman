@@ -115,6 +115,14 @@ test("a second ask within the TTL spawns zero times; concurrent asks share one s
   assert.equal(coversCalls().length - n, 1);
 });
 
+test("a coverage spawn that never launches (EM checkout missing, ENOENT) is unknown, and stays unknown from the cache", async () => {
+  const bad = { ...config, emRepoPath: join(tmp, "no-such-em") };
+  assert.equal(await ask("o/enoent", bad), "unknown");
+  assert.equal(await ask("o/enoent", bad), "unknown");
+  assert.equal(await qaBeforeMergeApplies({ githubRepo: "o/enoent" }, bad), "unknown");
+  assert.equal(await qaFor({ githubRepo: "o/enoent" }, bad), "unknown");
+});
+
 test("the phases never treat unknown as covered or as an advance", () => {
   const src = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
   assert.match(src("phases/verify.ts"), /qaCovers === "unknown"[\s\S]{0,300}reason: "qa-coverage-unknown"/);
