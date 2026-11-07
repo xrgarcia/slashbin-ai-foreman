@@ -48,11 +48,20 @@ export function qaStepOf(stderr: string): "setup" | "capture" | "review" {
 }
 
 /**
+ * The registry bearer's key names (EM#794 C): QA reads the registry with it. The first holder
+ * wins: the EM's own, else the team bot's. Names only; the runner hands the value to the QA child alone.
+ */
+export const QA_BEARER_KEYS = ["EM_SLASHBIN_MCP_ROUTER_BEARER", "SLASHBIN_MCP_ROUTER_BEARER"] as const;
+
+/** The runner's config search order for every QA call: the bearer lives only in `prd`, the mint key in `dev`. */
+const QA_KEY_CONFIGS = "dev,prd";
+
+/**
  * The QA hand-off's environment: essentials, `sessionEnv`, and the Foreman's own
  * token as GH_TOKEN (QA reads the PR with `gh pr view`; the Foreman is the reader
- * every Claude session already runs as). QA's one secret (the mint key) is NOT
- * here and not in the daemon env: `qaSecretsRunner` in the EM checkout fetches
- * it for the QA child alone.
+ * every Claude session already runs as). QA's secrets (the mint key, the registry
+ * bearer) are NOT here and not in the daemon env: `qaSecretsRunner` in the EM
+ * checkout fetches them for the QA child alone.
  */
 export function buildQaEnv(agentConfig: AgentConfig): Record<string, string> {
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
@@ -107,23 +116,27 @@ export class QaPlugin implements ForemanPlugin {
     if (!em || !qa) return { kind: "errored", detail: "emRepoPath and qaPath must both be set" };
     const runner = config.qaSecretsRunner;
     if (!runner) return { kind: "errored", detail: "qaSecretsRunner is not set, so the dev run has no way to get its secret" };
-    const args = ["--keys", `${this.mintKey}@${repo}`, "dev", "--", "node", join(qa, "bin/qa.mjs"), "check", "--repo", repo, "--pr", String(pr), "--out", out];
+    const keys = [`${this.mintKey}@${repo}`, ...QA_BEARER_KEYS].join(",");
+    const args = ["--keys", keys, QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "check", "--repo", repo, "--pr", String(pr), "--out", out];
     const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, QA_MAX_DURATION_MS);
     return readOutcome(r, out, logger);
   }
 
   /**
    * Locally, before the merge: `qa.mjs check --local` boots the PR itself and generates its own
-   * mint key, so it takes no secret and does not go through `qaSecretsRunner`. It needs git,
-   * npm, the network and GH_TOKEN, all in `buildQaEnv`.
+   * mint key, so it needs only the registry bearer, which `qaSecretsRunner` hands it. It needs git,
+   * npm, the network and GH_TOKEN, all in `buildQaEnv`. With no runner it is `errored`, as the dev run is.
    */
   private async checkLocal(config: AgentConfig, { repo, pr, out }: { repo: string; pr: number; out: string }, logger: Logger): Promise<QaOutcome> {
+    const em = config.emRepoPath;
     const qa = config.qaPath;
-    if (!qa) return { kind: "errored", detail: "qaPath must be set" };
+    if (!em || !qa) return { kind: "errored", detail: "emRepoPath and qaPath must both be set" };
+    const runner = config.qaSecretsRunner;
+    if (!runner) return { kind: "errored", detail: "qaSecretsRunner is not set, so the local run has no way to get the registry bearer" };
     // A manifest left by an earlier run must never be read as this one's.
     rmSync(join(out, "manifest.json"), { force: true });
-    const args = ["check", "--local", "--repo", repo, "--pr", String(pr), "--out", out];
-    const r = await runAgentCli(qa, "bin/qa.mjs", args, buildQaEnv(config), config, QA_MAX_DURATION_MS);
+    const args = ["--keys", QA_BEARER_KEYS.join(","), QA_KEY_CONFIGS, "--", "node", join(qa, "bin/qa.mjs"), "check", "--local", "--repo", repo, "--pr", String(pr), "--out", out];
+    const r = await runAgentCli(em, runner, args, buildQaEnv(config), config, QA_MAX_DURATION_MS);
     return readOutcome(r, out, logger);
   }
 }
