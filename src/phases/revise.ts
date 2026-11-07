@@ -175,7 +175,7 @@ export async function tryRevision(
     // the marker saved at admission stays as it is (outcome unknown), and nothing is written to take back.
     await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, revLogger);
     // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
-    const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
+    const qaFeedback = (await qaBeforeMergeApplies(repoConfig, config)) === true ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
     const result = await revisePRFeedback(
       rt.trust, repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha, headBranch,

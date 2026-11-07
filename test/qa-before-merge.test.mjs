@@ -96,8 +96,8 @@ test("3: PASS posts the QA Report with the head's marker; the post-merge gate do
   assert.ok(phase.indexOf("runQaBeforeMerge(") < phase.indexOf(".reviewPr("), "QA first, then the merge call");
   assert.match(phase, /reviewer\.reviewPr\(repoConfig, config, prNumber, qlog, runAbort\.signal, transcriptPath, undefined, false, headSha\)/, "the merge is pinned to the head QA passed");
   assert.match(phase, /settleReviewOutcome\(/);
-  assert.match(src("phases/verify.ts"), /config\.qaGate && !qaBeforeMerge && qaApplies\(/);
-  assert.match(src("phases/verify.ts"), /!config\.qaGate && !qaBeforeMerge && qaApplies\(/);
+  assert.match(src("phases/verify.ts"), /config\.qaGate && !qaBeforeMerge && qaCovers === true/);
+  assert.match(src("phases/verify.ts"), /!config\.qaGate && !qaBeforeMerge && qaCovers === true/);
 });
 
 // 4. FAIL goes back to the builder and counts as a round.
@@ -155,18 +155,18 @@ test("6: a PASS for a different sha never passes this head", async () => {
 });
 
 // 7. Flag off / outside qaRepos: unchanged.
-test("7: the flag is off by default; it applies only to a qaRepos repo with the Tech Lead and QA configured", () => {
+test("7: the flag is off by default; it applies only to a qaRepos repo with the Tech Lead and QA configured", async () => {
   assert.equal(configSchema.parse({ repos: [] }).qaBeforeMerge, false);
   const cfg = { qaBeforeMerge: true, qaPath: "/q", qaRepos: [REPO], techLeadPath: "/tl" };
-  assert.equal(qaBeforeMergeApplies({ githubRepo: REPO }, cfg), true);
-  assert.equal(qaBeforeMergeApplies({ githubRepo: REPO }, { ...cfg, qaBeforeMerge: false }), false, "flag off");
-  assert.equal(qaBeforeMergeApplies({ githubRepo: "x/other" }, cfg), false, "repo outside qaRepos");
-  assert.equal(qaBeforeMergeApplies({ githubRepo: REPO }, { ...cfg, techLeadPath: undefined }), false);
-  assert.equal(qaBeforeMergeApplies({ githubRepo: REPO }, { ...cfg, qaPath: undefined }), false);
+  assert.equal(await qaBeforeMergeApplies({ githubRepo: REPO }, cfg), true);
+  assert.equal(await qaBeforeMergeApplies({ githubRepo: REPO }, { ...cfg, qaBeforeMerge: false }), false, "flag off");
+  assert.equal(await qaBeforeMergeApplies({ githubRepo: "x/other" }, cfg), false, "repo outside qaRepos");
+  assert.equal(await qaBeforeMergeApplies({ githubRepo: REPO }, { ...cfg, techLeadPath: undefined }), false);
+  assert.equal(await qaBeforeMergeApplies({ githubRepo: REPO }, { ...cfg, qaPath: undefined }), false);
 });
 
 test("7: flag-off parity: the review call appends --no-merge only on request, and the moves are unchanged", () => {
-  assert.match(src("phases/review.ts"), /const qaFirst = qaBeforeMergeApplies\(/);
+  assert.match(src("phases/review.ts"), /const qaPre = repoConfig\.reviewEnabled \? await qaBeforeMergeApplies\(/);
   assert.match(src("plugins/tech-lead.ts"), /noMerge \? \["--no-merge"\] : \[\]/);
   assert.ok(MOVES.reviewMerged && MOVES.changesRequested);
 });
