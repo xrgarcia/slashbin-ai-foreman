@@ -91,10 +91,10 @@ test("the report: heading without the disclaimer, regressions before pre-existin
   assert.match(qaFailSummary(manifests.HELD), /HELD/);
 });
 
-test("gate off by default; the gate needs a QA repo", () => {
+test("gate off by default; the gate needs a QA repo", async () => {
   const cfg = configSchema.parse({ repos: [] });
   assert.equal(cfg.qaGate, false);
-  assert.equal(qaApplies({ githubRepo: "x/y" }, { qaPath: "/q", qaRepos: [REPO], qaGate: true }), false);
+  assert.equal(await qaApplies({ githubRepo: "x/y" }, { qaPath: "/q", qaRepos: [REPO], qaGate: true }), false);
 });
 
 test("verify wiring: the gate runs before the advance; report-only runs only with the gate off", () => {
@@ -102,8 +102,8 @@ test("verify wiring: the gate runs before the advance; report-only runs only wit
   const gateAt = src.indexOf("applyQaGate(sre");
   const advanceAt = src.indexOf('"verifyPassed"');
   assert.ok(gateAt > 0 && gateAt < advanceAt, "QA is decided before pr approved");
-  assert.match(src, /config\.qaGate && !qaBeforeMerge && qaApplies\(/);
-  assert.match(src, /!config.qaGate && !qaBeforeMerge && qaApplies\(/, "gate off keeps the unawaited report-only run");
+  assert.match(src, /config\.qaGate && !qaBeforeMerge && qaCovers === true/);
+  assert.match(src, /!config.qaGate && !qaBeforeMerge && qaCovers === true/, "gate off keeps the unawaited report-only run");
   assert.ok(!/await\s+runQaReport/.test(src));
 });
 
