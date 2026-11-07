@@ -93,7 +93,9 @@ const repoEntrySchema = z.object({
   // Per-repo reviewer identity; falls back to the global value.
   reviewerLogin: z.string().optional(),
   // Owner standing authorization: file this repo's dependency batch issue
-  // already carrying the trigger label. Opt-in per repo, default OFF — owner
+  // already carrying the trigger label and the production grant label
+  // `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for
+  // prod release` per issue). Opt-in per repo, default OFF — owner
   // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
   // the batch unapproved, as before, and nothing builds until a human approves.
   dependencyPreApproved: z.boolean().optional(),
