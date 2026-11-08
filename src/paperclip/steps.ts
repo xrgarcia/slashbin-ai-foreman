@@ -143,7 +143,7 @@ export type Holds = Map<string, Hold>;
 export type NoteOpts = {
   readonly event: PaperclipCommentEvent;
   readonly tag?: "prLink" | "merged" | "session";
-  readonly handoff?: { readonly stage: PaperclipStage; readonly item: WorkItem; readonly owner?: string; readonly variant?: HandoffVariant };
+  readonly handoff?: { readonly stage: PaperclipStage; readonly item: WorkItem; readonly owner?: string; readonly variant?: HandoffVariant; readonly resumeAt?: string };
 };
 
 /** The handoff option for a move to `to`: only a lifecycle stage can hand a card to a seat. */

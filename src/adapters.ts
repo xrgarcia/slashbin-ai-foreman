@@ -332,6 +332,12 @@ export interface SessionEvent {
   readonly qaBeforeMerge?: boolean;
   readonly detail?: string;
   /**
+   * On a verify end that is a scheduled wait, not a failure (the SRE says the PR is not observable yet, or could
+   * not run): the ISO time the Foreman retries, and why. Observers render it as a schedule.
+   */
+  readonly resumeAt?: string;
+  readonly waitReason?: string;
+  /**
    * On an implement end: the items the session actually worked — built,
    * skipped, or failed on. A session handed several items builds one, so the
    * rest were never touched and must not be told this outcome. Absent when

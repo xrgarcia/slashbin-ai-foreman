@@ -1898,3 +1898,25 @@ test("a review-failure block stays while GitHub still reads the issue at inRevie
   await snap();
   assert.equal(fake.rows[0].status, "blocked");
 });
+
+test("a timed verify hold reads as a scheduled wait in Central time, with a handoff that names the resume time, never 'did not pass'", async () => {
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: "agent-sre", description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const { mirror } = mirrorOn(fake, { ...SEATS, ...rich() });
+  await mirror.onSession(verifySession("started"), logger());
+  await mirror.onSession(verifySession("failed", {
+    detail: "waiting — PR #1291 is observable from 2026-11-09T16:59:00.000Z",
+    resumeAt: "2026-11-09T16:59:00.000Z", waitReason: "acceptance needs a 24h log window",
+  }), logger());
+  const note = fake.comments.r1283.at(-1);
+  assert.ok(note.includes("**Dev verification scheduled** — PR #1291 resumes Mon Nov 9, 10:59 am CT: acceptance needs a 24h log window"), note);
+  assert.doesNotMatch(note, /did not pass|next verify pass/);
+  assert.ok(note.includes("**Do:** Nothing to do from this card: dev verification of PR #1291 is scheduled and resumes Mon Nov 9, 10:59 am CT."), note);
+});
+
+test("a failed verify without resumeAt still says it did not pass", async () => {
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: "agent-sre", description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const { mirror } = mirrorOn(fake, { ...SEATS, ...rich() });
+  await mirror.onSession(verifySession("started"), logger());
+  await mirror.onSession(verifySession("failed", { detail: "boom" }), logger());
+  assert.ok(fake.comments.r1283.at(-1).includes("**Dev verification did not pass** — PR #1291: boom"));
+});

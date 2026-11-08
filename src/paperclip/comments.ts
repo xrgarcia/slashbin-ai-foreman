@@ -9,7 +9,7 @@
 
 import type { SessionEvent, SessionReview, WorkItem } from "../adapters.js";
 import { redactAll } from "../redact.js";
-import { milestoneChecklist, type ReviewMilestone } from "../review-progress.js";
+import { centralStamp, milestoneChecklist, type ReviewMilestone } from "../review-progress.js";
 import type { PaperclipCommentEvent, PaperclipConfig } from "./config.js";
 
 export type CommentsConfig = PaperclipConfig["comments"];
@@ -203,6 +203,7 @@ export function sessionComment(event: SessionEvent, item: WorkItem, c: CommentsC
     case "verify:finished":
       return join(`**Dev verification passed** — ${prRef(r.pr, event.pr)}`, detail);
     case "verify:failed":
+      if (event.resumeAt) return `**Dev verification scheduled** — ${prRef(r.pr, event.pr)} resumes ${centralStamp(event.resumeAt)}${event.waitReason ? `: ${event.waitReason}` : ""}`;
       return `**Dev verification did not pass** — ${prRef(r.pr, event.pr)}: ${detail || "unknown error"}`;
     default:
       return null;
