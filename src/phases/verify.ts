@@ -350,6 +350,7 @@ export async function tryVerify(
   activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
   const session: Omit<SessionEvent, "status"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE" };
+  let scheduled: { resumeAt: string; waitReason: string } | undefined;
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the verification ended without a result" };
   const issues = target.issueNumbers.map((n) => `#${n}`).join(", ");
   vlog.info(`Verifying ${repoName} PR #${target.prNumber} in dev (issues: ${issues}), transcript: ${transcriptPath}`);
@@ -405,7 +406,9 @@ export async function tryVerify(
     const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
     const plan = r.kind === "verdict" ? verifyHoldPlan(reason) : { kind: "charge" as const };
     if (plan.kind === "defer") {
-      const wait = formatWait(rt.memory.verifyDefer.start(repoName, agentUnavailable));
+      const waitMs = rt.memory.verifyDefer.start(repoName, agentUnavailable);
+      const wait = formatWait(waitMs);
+      scheduled = { resumeAt: new Date(Date.now() + waitMs).toISOString(), waitReason: `the SRE could not run (${reason})` };
       ended = { status: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
       vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
       const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
@@ -419,6 +422,7 @@ export async function tryVerify(
         kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts: kept[n]?.attempts ?? 0, retryAt: plan.retryAt };
       }
       await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
+      scheduled = { resumeAt: plan.retryAt, waitReason: reason };
       ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
       vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
       events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
@@ -457,7 +461,7 @@ export async function tryVerify(
     return false;
   } finally {
     activeRuns.delete(runAbort);
-    await emit(rt, { kind: "session", session: { ...session, ...ended } }, null, vlog);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(scheduled ?? {}) } }, null, vlog);
   }
 }
 
