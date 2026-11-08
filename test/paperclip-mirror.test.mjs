@@ -1570,6 +1570,41 @@ test("a deferred move GitHub has since moved past is dropped; the snapshot place
   assert.equal(fake.rows[0].status, "in_review", "a stale deferred move took the card back to To Do");
 });
 
+const escalateDuringRun = (row) => {
+  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_ray_action): Ray card: SLA-4310" };
+  Object.assign(row, { status: "blocked", assigneeAgentId: "em-agent", unblockDescriptor: hop, executionRunId: null, checkoutRunId: null });
+  return hop;
+};
+
+test("a deferred Foreman block never overwrites the escalation the awaited run made", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  Object.assign(fake.rows[0], { status: "in_progress", assigneeAgentId: "tl-agent", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onBlocked(item, "required checks not green", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the block is deferred while the run is in flight");
+  const hop = escalateDuringRun(fake.rows[0]);
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+  assert.deepEqual(fake.rows[0].unblockDescriptor, hop, "the deferred block replaced the escalation");
+});
+
+test("a deferred ruling block never overwrites the escalation the awaited run made", async () => {
+  const fake = fakePaperclip();
+  const board = { ...raceBoard(), needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board });
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  Object.assign(fake.rows[0], { status: "in_progress", assigneeAgentId: "tl-agent", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the ruling block is deferred while the run is in flight");
+  const hop = escalateDuringRun(fake.rows[0]);
+  for (let i = 0; i < 2; i++) {
+    await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+    assert.deepEqual(fake.rows[0].unblockDescriptor, hop, `pass ${i + 1}: the deferred ruling replaced the escalation`);
+  }
+});
+
 // --- QA review stage (EM#923): the QA gate has its own column and seat inside the verify session ---
 
 test("qa stage: the QA gate moves the held card to qaReviewing's seat, and a pass leaves it at EM verification", async () => {
