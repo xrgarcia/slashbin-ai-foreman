@@ -274,7 +274,7 @@ export function buildDependencyBatchIssue(
     ``,
     `## Acceptance`,
     ``,
-    `- **No-Script:** the caller-facing surface of a dependency upgrade is the running application itself, and the evidence is the smoke test the implement session performs against it — build, boot, and a real request through the flows the changed packages sit under. A committed script would assert the lockfile, which is the half that already passes today.`,
+    `- **No-Script:** dependency-bump — a version bump with no code change; the implement session's build, boot and smoke test of the running application are the evidence, and a committed script would only assert the lockfile, which already passes today.`,
     ``,
     `### Automated checks`,
     ``,
