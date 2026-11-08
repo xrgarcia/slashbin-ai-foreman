@@ -92,7 +92,7 @@ export class SnapshotSync {
     // Lifecycle issues with no card yet: each gets one at its stage once GitHub reads it open (Foreman #113).
     const fresh: Array<{ item: WorkItem; stage: PaperclipStage; detail: string }> = [];
     // Needs-ruling blocks whose write never landed: delivered once GitHub reads the issue open.
-    const rulings: Array<{ item: WorkItem; id: string }> = [];
+    const rulings: Array<{ item: WorkItem; id: string; stage: PaperclipStage }> = [];
     for (const { item, stage, detail, verifyHeld, foremanHeld } of items) {
       if (closed.has(item.issueNumber)) continue;
       const id = await this.index.resolve(item, false);
@@ -111,7 +111,7 @@ export class SnapshotSync {
       // A needs-ruling block lost to an outage outranks the stage's own placement,
       // however well the card matches it: it sat on the Foreman or the Tech Lead.
       if (stage !== "done" && this.placement.rulingPending(id, stage)) {
-        rulings.push({ item, id });
+        rulings.push({ item, id, stage });
         continue;
       }
       const want = `status:${this.env.statusName(stage === "done" ? "done" : stageTarget(this.env.cfg, stage).bucket)}`;
@@ -195,8 +195,12 @@ export class SnapshotSync {
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)}${state === want ? ", re-assigned" : ""} to match GitHub`);
       await this.notes.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress", handoff: handoffTo(stage, item) });
     }
-    for (const { item, id } of rulings) {
+    for (const { item, id, stage } of rulings) {
       if (live.get(item.issueNumber) !== "open") continue;
+      // Read live before re-delivering: a write that waited (an outage, a run in
+      // flight) is older than a hold put on the card since, and must not replace it.
+      await this.index.refreshRow(id);
+      if (!this.placement.rulingPending(id, stage)) continue;
       const step = PAPERCLIP_STEPS.escalated;
       if (!(await this.placement.move(id, step.stage, false, true))) continue;
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} needs-ruling block delivered: its first write did not land`);
