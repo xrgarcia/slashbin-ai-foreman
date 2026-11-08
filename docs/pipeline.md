@@ -81,8 +81,10 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    (`backoff.skip`). See [skills.md](skills.md) for what the session is told.
    An `approved` issue is held, not built, while a prerequisite is unmet: a GitHub "blocked by"
    issue not yet merged, a Pre-Flight `readiness` block not satisfied, or no `## Acceptance`
-   section naming a committed `scripts/...` path or a `**No-Script:**` reason of at least 40
-   characters (the EM's `approved` rule, enforced again here because a customer can apply the
+   section naming a committed `scripts/...` path or a `**No-Script:** <category> — <reason>` (category one of
+   docs-only, config-only, ci-only, dependency-bump, dead-code-deletion; reason at least 40 characters, not
+   describing a caller-observable check and not saying the builder writes it; an acceptance script path
+   anywhere in the body must sit inside `## Acceptance` and not be repo-prefixed) (the EM's `approved` rule, enforced again here because a customer can apply the
    label themselves; `src/github/acceptance-gate.ts`). A held issue gets one comment per
    reason (hidden marker `<!-- foreman:readiness-hold KEY -->`) and becomes eligible by
    itself once the body is fixed. The acceptance hold is also emitted in the cycle's waiting set (with its
