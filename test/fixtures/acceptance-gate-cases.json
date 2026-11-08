@@ -1,15 +1,121 @@
 {
   "_about": "Shared corpus for the Acceptance rule enforced by .claude/hooks/approved_gate_hook.py (check_acceptance, structural part) and by the Foreman at pickup (slashbin-ai-foreman). ok=true means the issue may be built. Both implementations must give these verdicts. Add a case here before changing either.",
-  "script": "scripts/foreman/foreman-approved-needs-acceptance-acceptance.mjs",
+  "script": "slashbin-ai-foreman: test/acceptance-gate.test.mjs and scripts/acceptance/approved-needs-acceptance.mjs",
   "cases": [
-    { "id": "A1-named-script", "ok": true, "body": "## Problem\nx\n\n## Acceptance\n- **Script:** `scripts/jerky-com/jerky_service-200-acceptance.mjs`\n- **Invocation:** POST /x\n\n## Notes\ny" },
-    { "id": "A2-no-script-with-reason", "ok": true, "body": "## Acceptance\n- **No-Script:** docs-only change to a README, no caller can observe it at runtime.\n" },
-    { "id": "A3-crlf-and-trailing-space-heading", "ok": true, "body": "## Problem\r\nx\r\n\r\n## Acceptance  \r\n- **Script:** `scripts/a/b-1-acceptance.mjs`\r\n" },
-    { "id": "H1-no-section", "ok": false, "body": "## Problem\nx\n\n## Requirements\ny\n" },
-    { "id": "H2-jerky_service-200-checkbox-list-heading-with-suffix", "ok": false, "body": "## Problem\nx\n\n## Acceptance (dev; incident pings are internal-only)\n\n- [ ] **#10555 replay:** classified not_a_ticket 0.95 -> no ping.\n- [ ] A test fails if any path can drop a keyword hit.\n" },
-    { "id": "H3-section-without-script-or-no-script", "ok": false, "body": "## Acceptance\n\n- [ ] it works\n- [ ] a test covers it\n" },
-    { "id": "H4-no-script-reason-too-short", "ok": false, "body": "## Acceptance\n- **No-Script:** internal only\n" },
-    { "id": "H5-only-a-data-file-is-named", "ok": false, "body": "## Acceptance\nRuns against `scripts/a/baseline.json`.\n" },
-    { "id": "H6-heading-only-mentioned-in-prose", "ok": false, "body": "## Problem\nThe red run is pasted in `## Acceptance` above.\n" }
+    {
+      "id": "A1-named-script",
+      "ok": true,
+      "body": "## Problem\nx\n\n## Acceptance\n- **Script:** `scripts/jerky-com/jerky_service-200-acceptance.mjs`\n- **Invocation:** POST /x\n\n## Notes\ny"
+    },
+    {
+      "id": "A2-no-script-with-reason",
+      "ok": true,
+      "body": "## Acceptance\n- **No-Script:** docs-only — change to a README, no caller can observe it at runtime.\n"
+    },
+    {
+      "id": "A3-crlf-and-trailing-space-heading",
+      "ok": true,
+      "body": "## Problem\r\nx\r\n\r\n## Acceptance  \r\n- **Script:** `scripts/a/b-1-acceptance.mjs`\r\n"
+    },
+    {
+      "id": "H1-no-section",
+      "ok": false,
+      "body": "## Problem\nx\n\n## Requirements\ny\n"
+    },
+    {
+      "id": "H2-jerky_service-200-checkbox-list-heading-with-suffix",
+      "ok": false,
+      "body": "## Problem\nx\n\n## Acceptance (dev; incident pings are internal-only)\n\n- [ ] **#10555 replay:** classified not_a_ticket 0.95 -> no ping.\n- [ ] A test fails if any path can drop a keyword hit.\n"
+    },
+    {
+      "id": "H3-section-without-script-or-no-script",
+      "ok": false,
+      "body": "## Acceptance\n\n- [ ] it works\n- [ ] a test covers it\n"
+    },
+    {
+      "id": "H4-no-script-reason-too-short",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** internal only\n"
+    },
+    {
+      "id": "H5-only-a-data-file-is-named",
+      "ok": false,
+      "body": "## Acceptance\nRuns against `scripts/a/baseline.json`.\n"
+    },
+    {
+      "id": "H6-heading-only-mentioned-in-prose",
+      "ok": false,
+      "body": "## Problem\nThe red run is pasted in `## Acceptance` above.\n"
+    },
+    {
+      "id": "A4-no-script-category-config-only",
+      "ok": true,
+      "body": "## Acceptance\n- **No-Script:** config-only — local-dev env lines that no deployed service reads at all.\n"
+    },
+    {
+      "id": "A4-no-script-category-ci-only",
+      "ok": true,
+      "body": "## Acceptance\n- **No-Script:** ci-only — a lint step in the pipeline definition that no caller invokes.\n"
+    },
+    {
+      "id": "A4-no-script-category-dependency-bump",
+      "ok": true,
+      "body": "## Acceptance\n- **No-Script:** dependency-bump — patch bump of a dev-only library, covered by the build-and-run proof.\n"
+    },
+    {
+      "id": "A4-no-script-category-dead-code-deletion",
+      "ok": true,
+      "body": "## Acceptance\n- **No-Script:** dead-code-deletion — helper removed; a repo-wide grep finds zero references to it.\n"
+    },
+    {
+      "id": "H7-no-script-free-text-category",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** the browser check is written by this child so no script exists to name before the build.\n"
+    },
+    {
+      "id": "H8-no-script-unlisted-category",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** internal-tooling — this is the runner's own plumbing and nothing else.\n"
+    },
+    {
+      "id": "H9-no-script-http-status",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** config-only — CLI calls and workflow runs return HTTP 200 after the refresh.\n"
+    },
+    {
+      "id": "H10-no-script-http-request-row",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** config-only — nothing a caller sees changes in this child.\n\n| step | check |\n|---|---|\n| 1 | POST /webhooks/x with a bad HMAC |\n"
+    },
+    {
+      "id": "H11-no-script-shell-command",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** ci-only — lint config tightened for the whole repo, nothing else.\n- `npm run lint` exits 0\n"
+    },
+    {
+      "id": "H12-no-script-browser",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** config-only — stylesheet constant moved, the page in the browser looks the same.\n"
+    },
+    {
+      "id": "H13-no-script-log-line",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** dependency-bump — runtime bump; the SRE confirms the log line shows the new Node version.\n"
+    },
+    {
+      "id": "H14-no-script-child-writes-check",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** docs-only — the child writes the acceptance check in the service repo during the build.\n"
+    },
+    {
+      "id": "H15-acceptance-path-only-in-notes",
+      "ok": false,
+      "body": "## Acceptance\n- **No-Script:** docs-only — documentation wording only, nothing at runtime changes.\n\n## Notes\nSee scripts/slashbin-cli/slashbin-cli-contract-refresh-acceptance.mjs\n"
+    },
+    {
+      "id": "H16-acceptance-path-in-service-repo",
+      "ok": false,
+      "body": "## Acceptance\n- **Script:** `scripts/a/b-1-acceptance.mjs`\n\n## Notes\nAlso slashbin-cli/scripts/x-acceptance.mjs\n"
+    }
   ]
 }
