@@ -58,6 +58,8 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 Variant: **`deployFailed`** (a `blocked` card whose dev deploy failed) is the SRE's, not the
 EM's: route it to the SRE, then release the hold.
 
+Variant: **`verifyScheduled`** (a `merged` card whose dev verification the SRE held until a time, or could not run) is a scheduled wait, not a failure: the comment reads "Dev verification scheduled — PR #N resumes <Central time>" and nothing is needed from the card; the Foreman retries then.
+
 **The card follows GitHub on its own (EM#1150 feature 6).** Each pass, the Foreman's mirror
 places every card from GitHub: the column and the holder the stage calls for (a hand-off lost
 to a Paperclip outage is re-made next pass), a card for any lifecycle issue that has none,
