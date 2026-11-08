@@ -64,7 +64,8 @@ to a Paperclip outage is re-made next pass), a card for any lifecycle issue that
 created at its stage, and done or cancelled, with no agent or person on it, for every card whose
 issue is closed or released. A closed issue's card is terminal: no late or deferred stage update
 moves it or assigns anyone, until GitHub reads the issue open again. A hold a person or a seat
-put on the card after the last pass is read live before any stage move, so it is kept, and a
+put on the card after the last pass is read live before any stage move, a deferred one included,
+so it is kept (a seat escalating during its own run stays Blocked), and a
 ruling block a Paperclip outage lost is re-delivered on the next pass. Never fix a card by hand
 that the next pass would place: fix the issue.
 

@@ -177,13 +177,11 @@ export class PaperclipMirror implements WorkObserver {
   private get blockedAt() { return this.placement.blockedAt; }
   private get rulingHeld() { return this.placement.rulingHeld; }
   private get ghStage() { return this.placement.ghStage; }
-  private get escalatedAt() { return this.placement.escalatedAt; }
   private get prOf() { return this.notes.prOf; }
 
   private ensureBlocks(): Promise<boolean> { return this.placement.ensureBlocks(); }
   private ensureRepo(repo: string, fresh = false): Promise<boolean> { return this.cardIndex.ensureRepo(repo, fresh); }
   private resolve(item: WorkItem, create: boolean): Promise<string | null> { return this.cardIndex.resolve(item, create); }
-  private refreshRow(id: string): Promise<void> { return this.cardIndex.refreshRow(id); }
   private terminal(id: string): boolean { return this.cardIndex.terminal(id); }
   private isClosedCard(id: string): boolean { return this.cardIndex.isClosedCard(id); }
   private setHolder(id: string, agentId: string | null): void { this.cardIndex.setHolder(id, agentId); }
@@ -192,8 +190,6 @@ export class PaperclipMirror implements WorkObserver {
   private keyNow(repo: string): string { return this.cardIndex.keyNow(repo); }
   private mirrors(event: WorkEvent): boolean { return this.cardIndex.mirrors(event); }
   private move(id: string, to: Parameters<Placement["move"]>[1], held = false, liveOpen = false): Promise<boolean> { return this.placement.move(id, to, held, liveOpen); }
-  private externalHold(id: string): boolean { return this.placement.externalHold(id); }
-  private holdOutranks(id: string, stage: PaperclipStage): boolean { return this.placement.holdOutranks(id, stage); }
   private persistBlock(id: string): void { this.placement.persistBlock(id); }
   private clearBlock(id: string): void { this.placement.clearBlock(id); }
   private patch(id: string, body: Record<string, unknown>, commentAuthor?: string | null): Promise<boolean> { return this.placement.patch(id, body, commentAuthor); }
@@ -291,16 +287,9 @@ export class PaperclipMirror implements WorkObserver {
     // reopened SLA-2633 as pending verification on the EM (Foreman #112). A done
     // or cancelled card counts as closed until the snapshot reads its issue open.
     if (this.terminal(id)) return;
-    // At the GitHub stage the card was last placed for, the board is read first:
-    // a seat's escalation made since the last scan is not in the cache, and the
-    // move took the card back from the PO (Foreman #98).
-    const gh = this.ghStage.get(id);
-    if (step.stage !== "done" && (gh === undefined || gh === step.stage)) {
-      await this.refreshRow(id);
-      if (this.externalHold(id) && !this.escalatedAt.has(id)) this.escalatedAt.set(id, gh ?? step.stage);
-    }
-    // A hold that outranks this update keeps the card where it is; the note still says what happened.
-    if (step.stage !== "done" && this.holdOutranks(id, step.stage)) {
+    // A hold that outranks this update, read live (Foreman #98), keeps the card
+    // where it is; the note still says what happened.
+    if (step.stage !== "done" && (await this.placement.holdOutranksLive(id, step.stage))) {
       await this.note(id, step.note, { event: "progress" });
       return;
     }

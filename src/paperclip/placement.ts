@@ -177,6 +177,23 @@ export class Placement {
   }
 
   /**
+   * The hold check an event-driven stage move makes first, read live. At the
+   * GitHub stage the card was last placed for, the board is read now: a seat's
+   * escalation or a person's hold made since the last scan is not in the cache,
+   * and the move took the card back from the PO (Foreman #98). True when a hold
+   * outranks the move to `stage`. The Foreman's stage events and its deferred
+   * moves both pass through here, so neither moves a card past a hold.
+   */
+  async holdOutranksLive(id: string, stage: PaperclipStage): Promise<boolean> {
+    const gh = this.ghStage.get(id);
+    if (gh === undefined || gh === stage) {
+      await this.index.refreshRow(id);
+      if (this.externalHold(id) && !this.escalatedAt.has(id)) this.escalatedAt.set(id, gh ?? stage);
+    }
+    return this.holdOutranks(id, stage);
+  }
+
+  /**
    * True when a needs-ruling block on `id`, made at `stage`, never reached the
    * board: its write failed (Paperclip down) and the card still shows the stage
    * GitHub is at, on the Foreman or the Tech Lead. A card Blocked, or with the
@@ -288,12 +305,34 @@ export class Placement {
     return ok;
   }
 
-  /** Retry the moves a run in flight deferred; the last one asked for wins. */
+  /**
+   * Retry the moves a run in flight deferred; the last one asked for wins. A
+   * retry is decided again now, not replayed: the run it waited for is the one
+   * most likely to have changed the card. Replayed blind, a move deferred during
+   * the EM seat's run undid the escalation that run made (SLA-4308 left Blocked
+   * for in_review) and put a card back in a column GitHub had left (SLA-4311 to
+   * To Do from review), 2026-11-06.
+   */
   async retryDeferredMoves(): Promise<void> {
     for (const [id, to] of [...this.deferredMoves]) {
-      if (this.holds.has(id) || this.index.closedCards.has(id)) { this.deferredMoves.delete(id); continue; }
+      if (this.holds.has(id) || this.index.closedCards.has(id) || !(await this.stillWanted(id, to))) { this.deferredMoves.delete(id); continue; }
       await this.move(id, to);
     }
+  }
+
+  /**
+   * A deferred stage move still stands: GitHub is still at that stage, and no
+   * hold outranks it (holdOutranksLive). The snapshot that runs the retry has
+   * just read GitHub; a card it reads at another stage it has placed itself, or
+   * deferred a move of its own that replaced this one. The Foreman's own blocks
+   * (`blocked`, `needsRuling`) are made at whatever stage GitHub is at, and
+   * a close (`done`) is not a stage, so neither is compared.
+   */
+  private async stillWanted(id: string, to: PaperclipStepMove): Promise<boolean> {
+    if (to === null || to === "waiting" || to === "done") return true;
+    const gh = this.ghStage.get(id);
+    if (gh !== undefined && gh !== to && to !== "blocked" && to !== "needsRuling") return false;
+    return !(await this.holdOutranksLive(id, to));
   }
 
   /**

@@ -1534,6 +1534,42 @@ test("no run on the card: the move is not deferred; a move that leaves it in_pro
   assert.equal(fake.rows[0].assigneeAgentId, AGENT, "and it was written through the run");
 });
 
+// --- A deferred move is decided again when retried, not replayed (SLA-4308, SLA-4311, 2026-11-06) ---
+
+test("a deferred move never undoes the escalation the run it waited for made (SLA-4308)", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "release gate missing", repoConfig, logger());
+  Object.assign(fake.rows[0], { status: "in_progress", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onState(item, "approved", "inReview", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the move is deferred while the EM seat's run is in flight");
+  // The EM seat's run escalates to Ray and ends: Blocked, on the EM, with the hop's descriptor.
+  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_ray_action): Ray card: SLA-4310" };
+  Object.assign(fake.rows[0], { status: "blocked", assigneeAgentId: "em-agent", unblockDescriptor: hop, executionRunId: null, checkoutRunId: null });
+  const before = statusPatches(fake).length;
+  await onSnap(mirror, "example/r", [], logger());
+  assert.equal(statusPatches(fake).length, before, "the deferred move was replayed over the escalation");
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.deepEqual(fake.rows[0].unblockDescriptor, hop);
+  // And it is dropped, not kept for a later pass.
+  await onSnap(mirror, "example/r", [], logger());
+  assert.equal(fake.rows[0].status, "blocked");
+});
+
+test("a deferred move GitHub has since moved past is dropped; the snapshot places the card (SLA-4311)", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "x", repoConfig, logger());
+  Object.assign(fake.rows[0], { status: "in_progress", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onState(item, "inReview", "queued", repoConfig, logger());
+  // The run ends with the card in review, where GitHub is.
+  Object.assign(fake.rows[0], { status: "in_review", assigneeAgentId: AGENT, executionRunId: null, checkoutRunId: null });
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  assert.equal(fake.rows[0].status, "in_review", "a stale deferred move took the card back to To Do");
+});
+
 // --- QA review stage (EM#923): the QA gate has its own column and seat inside the verify session ---
 
 test("qa stage: the QA gate moves the held card to qaReviewing's seat, and a pass leaves it at EM verification", async () => {
