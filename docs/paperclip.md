@@ -322,11 +322,12 @@ any other status and reassigns makes Paperclip cancel that run, and the cancel l
 hold that freezes the card (SLA-2959, 2026-10-29). So a move reads the card first: with
 `executionRunId` or `checkoutRunId` set on a card held by another agent, the move is deferred and
 retried at the end of the next snapshot. A move whose status is `in_progress` is never deferred.
-The retry decides the move again, through the same live hold check every stage update makes
-(`Placement.holdOutranksLive`): it is dropped when a hold now outranks it, or when GitHub has
-moved the issue to another stage (that snapshot placed the card). Replayed blind, a move deferred
-during the EM seat's run undid the escalation the run made (SLA-4308 left Blocked for in_review,
-2026-11-06).
+The retry decides the move again and reads the card live first: a seat's or a person's hold put on
+it while the move waited is newer and wins, over a Foreman block or ruling too, and a stage move is
+also dropped when a hold outranks it or GitHub has moved the issue to another stage (that snapshot
+placed the card). A needs-ruling block re-delivered after a lost write is read live the same way.
+Replayed blind, a move deferred during the EM seat's run undid the escalation the run made (SLA-4308
+left Blocked for in_review, 2026-11-06).
 
 | Stage | Meaning | Default owner | Default status | Default stage label |
 |---|---|---|---|---|

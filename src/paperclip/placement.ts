@@ -321,18 +321,23 @@ export class Placement {
   }
 
   /**
-   * A deferred stage move still stands: GitHub is still at that stage, and no
-   * hold outranks it (holdOutranksLive). The snapshot that runs the retry has
-   * just read GitHub; a card it reads at another stage it has placed itself, or
-   * deferred a move of its own that replaced this one. The Foreman's own blocks
-   * (`blocked`, `needsRuling`) are made at whatever stage GitHub is at, and
-   * a close (`done`) is not a stage, so neither is compared.
+   * A deferred move still stands. The card is read live first, whatever the
+   * move: a seat's escalation or a person's hold on it now was made while the
+   * move waited, so it is newer and wins, the Foreman's own block or ruling
+   * included (it would overwrite the hold's holder and descriptor). A stage move
+   * also stands only while GitHub is at that stage (the snapshot running the
+   * retry has just placed a card GitHub moved on) and no hold outranks it. The
+   * Foreman's blocks (`blocked`, `needsRuling`) are made at whatever stage
+   * GitHub is at, and a close (`done`) is not a stage, so neither is compared.
    */
   private async stillWanted(id: string, to: PaperclipStepMove): Promise<boolean> {
     if (to === null || to === "waiting" || to === "done") return true;
+    const own = to === "blocked" || to === "needsRuling";
     const gh = this.ghStage.get(id);
-    if (gh !== undefined && gh !== to && to !== "blocked" && to !== "needsRuling") return false;
-    return !(await this.holdOutranksLive(id, to));
+    if (!own && gh !== undefined && gh !== to) return false;
+    await this.index.refreshRow(id);
+    if (this.externalHold(id)) return false;
+    return own || !this.holdOutranks(id, to);
   }
 
   /**
