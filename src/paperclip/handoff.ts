@@ -16,6 +16,7 @@
 // a handoff is due, this decides what it says.
 
 import type { Stage } from "../lifecycle.js";
+import { centralStamp } from "../review-progress.js";
 
 /** One stage's handoff: what the holder does, and when it is done. */
 export interface StageHandoff {
@@ -181,6 +182,13 @@ export const HANDOFF_VARIANTS = Object.freeze({
     why: "dev verification failed because the deploy to dev did (the reason is above)",
     done: "the merge is deployed to dev and the hold lifts (the card returns to its stage)",
   },
+  verifyScheduled: {
+    act: false,
+    todo: "Nothing to do from this card: dev verification of {pr} is scheduled and resumes {resumeAt}.",
+    next: "nothing; dev verification of {pr} resumes {resumeAt}",
+    why: "dev verification of {pr} is held until {resumeAt}",
+    done: "dev verification runs at {resumeAt} and passes (`{prApproved}`; the card moves to EM verification) or holds (the card moves to Blocked)",
+  },
 } satisfies Record<string, StageHandoff>);
 export type HandoffVariant = keyof typeof HANDOFF_VARIANTS;
 
@@ -191,6 +199,8 @@ export interface HandoffFacts {
   /** The seat that holds the card now, by name. */
   readonly seat: string;
   readonly pr?: { readonly number: number; readonly url?: string };
+  /** An ISO time the card's next step is scheduled for (the `verifyScheduled` variant). */
+  readonly resumeAt?: string;
   /** The latest outcome on the card (a session's result), and when it came. */
   readonly evidence?: { readonly text: string; readonly at?: string; readonly url?: string };
 }
@@ -207,6 +217,7 @@ function varsOf(f: HandoffFacts, labels: HandoffLabels): Record<string, string> 
     repo: f.repo,
     pr: f.pr ? `PR #${f.pr.number}` : "the PR",
     prNumber: f.pr ? String(f.pr.number) : "<PR>",
+    resumeAt: f.resumeAt ? centralStamp(f.resumeAt) : "its scheduled time",
   };
 }
 
