@@ -21,6 +21,7 @@ import * as reviewFreshness from "../github/review-freshness.js";
 import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
 import { ghAsync } from "../github/gh.js";
+import { probeToken } from "../github/token-probe.js";
 import { fleetState } from "../github-state.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
 import type { ForemanPlugin, PluginRole } from "./contract.js";
@@ -53,6 +54,7 @@ export function githubCodeHost(
     takeStateUsage: () => fleetState.takeUsage(),
     recordActivity: (repo, issueNumber, step, prUrl) => fleetState.recordActivity(repo, issueNumber, step, prUrl),
     clearActivity: (repo, issueNumber) => fleetState.clearActivity(repo, issueNumber),
+    probeToken,
 
     issueLastEditedAt: coreReads.issueLastEditedAt,
     issueCommentRows: coreReads.issueCommentRows,

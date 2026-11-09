@@ -22,10 +22,10 @@ from self-approving its own work.
 
 | Env Var | Description |
 |---|---|
-| `FOREMAN_GITHUB_TOKEN` | The Foreman's own account: opens PRs, moves labels. Required: unset, every Foreman GitHub call fails (no fallback to gh's login) |
+| `FOREMAN_GITHUB_TOKEN` | The Foreman's own account: opens PRs, moves labels. Required: unset or rejected (401), the daemon refuses to start (no fallback to gh's login) |
 | `TECHLEAD_GITHUB_KEY` | The reviewer's account: reviews and merges PRs, and merges sync PRs. Required when review is on |
 | `SRE_GITHUB_KEY` | The verifier's account. Required when `srePath` is set |
-| `EM_GITHUB_TOKEN` | The Engineering Manager's account, for the `unstick` session only. Required when unstick runs |
+| `EM_GITHUB_TOKEN` | The Engineering Manager's account, for the `unstick` session only. Required when `emRepoPath` is set (checked at startup) |
 
 Where to put them: [setup.md](setup.md#1-before-setup). Never paste a token into a
 chat or into the config file.
