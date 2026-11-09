@@ -160,7 +160,21 @@ export async function findPRsNeedingReview(
     const issues = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) => hasLabel(i, prUnderReview));
     // Exclude issues also labeled `pr pending actions` — the revise phase owns those.
-    const reviewable = issues.filter((i) => !hasLabel(i, prPendingActions));
+    const inReview = issues.filter((i) => !hasLabel(i, prPendingActions));
+    // An issue under review that no longer carries the trigger label was withdrawn (revoking `approved` is how
+    // work is called off, as revise honours): its PR is not reviewable, however stale its lifecycle label
+    // (foreman#39: a dormant PR was handed to the reviewer every cycle). Say so rather than skip silently.
+    const withdrawn = inReview.filter((i) => !hasLabel(i, config.triggerLabel));
+    const reviewable = inReview.filter((i) => hasLabel(i, config.triggerLabel));
+    if (withdrawn.length > 0) {
+      logger.warn(
+        `${config.name}: ${withdrawn.length} issue(s) labeled "${prUnderReview}" without "${config.triggerLabel}" — the work was withdrawn, ` +
+        `so review will NOT run on its PR. Owner: the EM — re-apply "${config.triggerLabel}" to resume, or close the PR and clear the label: ` +
+        withdrawn.map((i) => `#${i.number}`).join(", "),
+      );
+    }
+    // Withdrawn work is held, not orphaned: the adoption fallback below would review its PR as an unlinked one.
+    if (reviewable.length === 0 && withdrawn.length > 0) return null;
     if (reviewable.length === 0) {
       return await adoptOrphanedReviewCandidate(config, reviewerLogin, logger, waits, isBuildInFlight);
     }

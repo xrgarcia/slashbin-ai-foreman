@@ -29,6 +29,8 @@ const host = new Proxy({}, {
         case "blockedAmong": return [];
         case "getPRCheckVerdict": return { state: "passing", pending: [], failing: [] };
         case "readPrState": return "OPEN";
+        case "readPrHeadSha": return "abc123";
+        case "prChangedFiles": return ["a.ts"];
         case "findRevokedEmGates": return [];
         default: return [];
       }
@@ -59,7 +61,7 @@ before(async () => {
   writeFileSync(p, JSON.stringify({ codeHost: "fake", techLeadPath: join(tmp, "tlsExit3"), emRepoPath: "/x", paperclip: { enabled: false }, repos }));
   config = loadConfig(p);
   resetRegistryForTests();
-  const source = { id: "fake-src", roles: ["workSource"], enabled: () => true, workSource: { selectWork: async () => [], record: async () => false } };
+  const source = { id: "fake-src", roles: ["workSource"], enabled: () => true, workSource: { selectWork: async () => [], record: async () => false, loadRecord: async () => ({ status: "absent" }), saveRecord: async () => true } };
   for (const pl of [plugin, source, new TechLeadPlugin()]) registerPlugin(pl);
   await startPlugins(config, { logger: quiet, configText: () => null });
   addObserver({ onEvent: (e) => { events.push(e); } });

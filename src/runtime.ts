@@ -30,12 +30,15 @@ import { PhaseMemory } from "./phase-memory.js";
 import { QaReports } from "./qa-report.js";
 import { ReleaseTracker } from "./release-tracker.js";
 import { SkillSync } from "./skill-sync.js";
+import { InputAttempts } from "./step-attempts.js";
 import { EmHandoffs } from "./unstick.js";
 
 export class ForemanRuntime {
   readonly records = new IssueRecordStore();
   readonly releases = new ReleaseTracker(this.records);
   readonly streaks = new NoCommitStreaks(this.records);
+  /** Attempts per (PR, step) on one input: the generalized "no step runs twice on the same input" ledger. */
+  readonly attempts = new InputAttempts(this.records);
   readonly handoffs = new EmHandoffs(this.records);
   /** What became of each dependency batch: durable on the repo record, never in memory (foreman#230). */
   readonly dependencyBatches = new RecordStoreDependencyBatchLedger(this.records);

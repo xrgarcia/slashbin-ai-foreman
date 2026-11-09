@@ -154,6 +154,15 @@ There is no local state file. What the Foreman must remember across restarts is 
 - `src/legacy-records.ts` is a one-time import: a leftover `.agent-state.json` from an
   older install is moved into records on a repo's first pass and then deleted.
 
+No step runs twice on the same input (`src/step-attempts.ts`). Every stage declares in
+`STEP_INPUTS` the input it acts on and the guard that stops it running again on that input
+unchanged; `test/step-inputs.test.mjs` fails when a stage in `src/stages.ts` has no
+declaration or its guard is gone. A step with no richer record of its own (review) uses
+`InputAttempts`: attempts per PR and step on the PR record (`attempts`), recorded before the
+step runs. At the cap it becomes a hold with a named owner (an unstick kind), never another
+retry; a new input (a push) or an EM scope ruling after the last attempt resumes it. A record
+that cannot be read or saved admits nothing.
+
 Derived each pass, never stored: whether an issue is implemented (its labels), the work
 to select, the stage an item is in.
 
