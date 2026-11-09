@@ -343,6 +343,9 @@ export interface CodeHostStateOptions {
   now?: () => number;
 }
 
+/** What the host said about one token: accepted, rejected (401), or unknown (no answer: network, 5xx, back-off). */
+export type TokenProbe = "ok" | "rejected" | "unknown";
+
 /** One comment or issue body a divergence ruling may be found in. */
 export interface IssueTextRow {
   id: string;
@@ -374,6 +377,8 @@ export interface CodeHost {
   takeStateUsage(): { stateQueries: number; statePoints: number };
   recordActivity(repo: string, issueNumber: number, step: string, prUrl?: string): void;
   clearActivity(repo: string, issueNumber: number): void;
+  /** Ask the host whether `token` is accepted (the startup credential check, #43). Never throws. */
+  probeToken(token: string): Promise<TokenProbe>;
 
   // Reads and writes the core used to run the host's CLI for directly.
   /** An issue's `lastEditedAt`: undefined when absent, null when never edited. Throws on a failed read. */

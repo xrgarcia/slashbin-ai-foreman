@@ -76,7 +76,11 @@ The daemon exits 78 (`EX_CONFIG`: a restart cannot fix it, and the example unit'
 - no plugin supplies the work source or the code host (`workSource` and `codeHost` default
   to `github`; any other value is refused), `src/cli.ts`;
 - `dist/` was built from an uncommitted tree, or the build stamp is missing
-  (`dist/build-info.json`, written by `npm run build`), `src/build-info.ts`.
+  (`dist/build-info.json`, written by `npm run build`), `src/build-info.ts`;
+- a required GitHub token is unset (`FOREMAN_GITHUB_TOKEN` always, `EM_GITHUB_TOKEN` when
+  `emRepoPath` is set), or GitHub answers 401 for it, `src/credentials.ts`. This runs after the
+  work-source and code-host check and before the PID file is claimed, in `--once` too. When GitHub cannot be
+  reached to check a token, it logs a warning and starts anyway.
 
 It exits 1 when the PID file names a live process, and an unknown `profile` stops startup.
 

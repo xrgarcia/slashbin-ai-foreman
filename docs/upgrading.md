@@ -45,12 +45,13 @@ repos, a sign-off commit status on release PRs, and new back-off groups.
 
    An unknown profile name stops startup and lists the valid ones. An explicit key in
    `.ai-agent.json` still beats the profile.
-3. **Check the tokens.** `FOREMAN_GITHUB_TOKEN` is required: with it unset every Foreman
-   GitHub call fails (`src/github/gh.ts`). This is unchanged from the previous release;
-   older docs wrongly described a fallback to `gh`'s login. The token must be able to
+3. **Check the tokens.** `FOREMAN_GITHUB_TOKEN` is required: **new in this release:** with
+   it unset, or rejected by GitHub (401), the daemon refuses to start (exit 78,
+   `src/credentials.ts`). The previous release started anyway and failed every GitHub call;
+   neither release falls back to `gh`'s login. The token must be able to
    comment on and open issues in every managed repo, because the record store does both.
-   If the `unstick` stage runs, also set `EM_GITHUB_TOKEN` and `emRepoPath` (or
-   `AI_AGENT_EM_REPO_PATH`). Then run `npm run doctor`: it now fails on a missing
+   If the `unstick` stage runs (`emRepoPath` or `AI_AGENT_EM_REPO_PATH` is set),
+   `EM_GITHUB_TOKEN` is checked the same way at startup. Then run `npm run doctor`: it now fails on a missing
    `FOREMAN_GITHUB_TOKEN`.
 4. **Node.** Unchanged: `engines.node` is `>=22.12`. Only the opt-in metrics log needs
    `node:sqlite`, which 22.12 ships behind a flag ([metrics.md](metrics.md#requirements)).

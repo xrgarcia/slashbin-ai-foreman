@@ -44,10 +44,10 @@ token into a chat or into the config file.
 
 | Variable | Needed when | What it is |
 |---|---|---|
-| `FOREMAN_GITHUB_TOKEN` | Always | The Foreman's own account: it opens PRs and moves labels. Needs write access to every repo. Unset, every Foreman GitHub call fails with `FOREMAN_GITHUB_TOKEN not set`: there is no fallback to `gh`'s login. |
+| `FOREMAN_GITHUB_TOKEN` | Always | The Foreman's own account: it opens PRs and moves labels. Needs write access to every repo. Unset or rejected by GitHub (401), the daemon refuses to start (exit 78): there is no fallback to `gh`'s login. |
 | `TECHLEAD_GITHUB_KEY` | Review is on, or you want sync PRs merged automatically | A second account that reviews and merges, so the Foreman never approves its own work. |
 | `SRE_GITHUB_KEY` | `srePath` is set | The account that verifies merged work in dev. |
-| `EM_GITHUB_TOKEN` | The `unstick` stage runs (see [pipeline.md](pipeline.md)) | The Engineering Manager's account, handed to the unstick session. Also needs `emRepoPath` (the EM checkout). Unset, unstick fails with `EM_GITHUB_TOKEN not set`. |
+| `EM_GITHUB_TOKEN` | The `unstick` stage runs (see [pipeline.md](pipeline.md)) | The Engineering Manager's account, handed to the unstick session. Also needs `emRepoPath` (the EM checkout). Required once `emRepoPath` is set: unset or rejected, the daemon refuses to start. |
 
 The Foreman's token also writes its records: one comment per issue or PR, and one closed
 bookkeeping issue per repo, created on first use. It needs permission to comment on and
