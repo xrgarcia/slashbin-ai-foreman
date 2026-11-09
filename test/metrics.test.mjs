@@ -133,3 +133,10 @@ test("the plugin is registered, an observer, and off by default", () => {
   mp.stop();
   assert.equal(mp.observer, undefined);
 });
+
+test("node:sqlite is never imported at load (Node 22.12 has it only behind a flag)", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const f of ["dist/metrics/recorder.js", "dist/metrics/report.js", "dist/plugins/metrics.js", "dist/plugins/index.js"]) {
+    assert.doesNotMatch(readFileSync(new URL(`../${f}`, import.meta.url), "utf8"), /^import .*node:sqlite/m, f);
+  }
+});
