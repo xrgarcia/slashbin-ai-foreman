@@ -35,7 +35,7 @@ Where an item can be. The `…ing` stages exist only while a session runs.
 
 On a GitHub issue each stage is one label. Where an issue carries more than one, the stage is
 the first that applies in `issueStage` (`src/github-work-source.ts`): `blocked`, `done`,
-`prodVerifyHeld`, `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on
+`prodVerifyHeld`, `awaitingSignoff` / `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on
 back to `approved`. The Foreman writes every label except the EM's `ready for prod release`;
 `pendingVerification` is the one stage waiting on the EM.
 
@@ -54,6 +54,7 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `releaseAuthorized` | `ready for prod release` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
 | `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
 | `releasing` | `release pending` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
+| `awaitingSignoff` | `release pending` while the release PR's EM sign-off status fails | In a release PR the Foreman owns, but the PR's EM sign-off status is failing: an issue in it lacks `ready for prod release`. The Tech Lead's approval and the SRE's deploy wait; the EM signs the issue off or takes it out of the release. |
 | `prodVerifyHeld` | `prod verification held` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
 | `needsRuling` | — (a session holds it) | Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue (an agent's edit or label buys one session; its comment releases nothing). |
 | `blocked` | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |

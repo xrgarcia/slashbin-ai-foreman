@@ -492,6 +492,7 @@ export interface CodeHost {
     body: string;
 }>>;
   hasCommentContaining(config: RepoConfig, num: number, mark: string): Promise<boolean>;
+  reopenedSince(config: RepoConfig, num: number, sinceIso: string): Promise<boolean>;
   hasCommentStartingWith(config: RepoConfig, num: number, heading: string): Promise<boolean>;
 
   // Feature PRs.
@@ -519,6 +520,7 @@ export interface CodeHost {
 
   // Issue bodies.
   readIssueBody(config: RepoConfig, num: number): Promise<string>;
+  readIssueState(config: RepoConfig, repo: string, num: number): Promise<"open" | "closed" | null>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;
