@@ -275,7 +275,7 @@ The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issu
 
 Type: string · Default: none · Env: `AI_AGENT_QA_PATH`
 
-The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry bearer, EM_SLASHBIN_MCP_ROUTER_BEARER or SLASHBIN_MCP_ROUTER_BEARER).
+The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry bearer, `qaBearerKey`).
 
 ### `qaRepos`
 
@@ -287,7 +287,13 @@ GitHub repos (owner/name) QA applies to. Default none. Override: covered even wh
 
 Type: string · Default: none
 
-The script in the EM checkout (relative to emRepoPath) that runs QA's dev check with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (EM_SLASHBIN_MCP_ROUTER_BEARER, else SLASHBIN_MCP_ROUTER_BEARER), handed to that child alone. The local check and the `covers` question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
+The script in the EM checkout (relative to emRepoPath) that runs QA's dev check with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (`qaBearerKey`), handed to that child alone. The local check and the `covers` question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
+
+### `qaBearerKey`
+
+Type: string · Default: `"EM_SLASHBIN_MCP_ROUTER_BEARER"`
+
+The registry bearer's key for the runner's --keys, as `NAME` or `NAME@project` (a pin lists that one Doppler project instead of every one). It lives only in `prd`.
 
 ### `qaGate`
 
@@ -414,6 +420,14 @@ Keep each repo's skill copies on a golden source, one approved issue at a time, 
 Type: object · Default: `{"securityOnly":true}`
 
 The Dependabot stage's selection. Global, like `github`. `securityOnly` (default true) batches and lands only security updates: a Dependabot PR is one iff a package it bumps has an OPEN Dependabot alert on the repo. Other version-update PRs are left alone (not batched, merged or closed). When the alerts API cannot be read (404 with alerts disabled, a network error) the cycle batches nothing. Set `{ "securityOnly": false }` to batch every Dependabot PR.
+
+## Metrics
+
+### `metrics`
+
+Type: object · Default: `{"enabled":false,"retentionDays":90}`
+
+The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle stage advances in a local SQLite file, read back with `npm run metrics:report`. Global. Off unless `enabled`.
 
 ## Per-repo entries (`repos[]`)
 
