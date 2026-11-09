@@ -32,7 +32,7 @@ With no reviewer a person merges, and Reconcile closes the issue if nothing rele
 A dev visual QA FAIL (`hold=visual-qa-failed`) is the EM's decision: the Foreman files nothing, holds the
 issue at its cap and raises unstick kind `rework-decision` that cycle (PR, touched files, verdict, evidence).
 A charged failure with a verdict calls the EM the same way on its first failure, retries still running. The
-EM's "— follow-up to #N" issue or a spec edit releases the hold. (Ray, 2026-10-31; replaces EM#485.)
+EM's fix linked to #N (#N blocked by it, or a sub-issue of #N; `docs/em-coordination.md` §2) or a spec edit releases the hold. (Ray, 2026-10-31; replaces EM#485.)
 
 A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
 one Claude session on that skill against the open Foreman PR. A custom stage that

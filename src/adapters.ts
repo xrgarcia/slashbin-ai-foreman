@@ -15,6 +15,17 @@ export interface WorkItem {
 }
 
 /**
+ * How one work item relates to others, in domain terms (slashbin-ai-foreman#267). `corrects`: the items this one
+ * fixes, strongest signal first; a held verification lets the items that correct it build ahead of the queue.
+ * `mentions`: the items its description names, which never make it a fix. Only a work-source plugin fills it, from
+ * its own native links (GitHub: blocked-by, sub-issue, the legacy title); the core never reads a title for it.
+ */
+export interface Relation {
+  corrects: readonly number[];
+  mentions: readonly number[];
+}
+
+/**
  * The states the Foreman itself may move a work item into. There is no
  * ready-for-release member, on purpose: the release gate is the EM's
  * verification and signature (separation of duties, 2026-07-27), and a

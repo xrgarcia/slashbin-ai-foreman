@@ -5,7 +5,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
 import { verifyVerdict } from "../dist/plugins/sre.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf, followUpsToBuild } from "../dist/orchestrator.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding } from "../dist/orchestrator.js";
+import { correctionsToBuild } from "../dist/phases/verify.js";
+
+/** `Relation`s with no mentions: issue -> the issues it corrects. */
+const corrects = (entries) => new Map(entries.map(([n, c]) => [n, { corrects: c, mentions: [] }]));
 import { TOOLING_HOLDS, SRE_TOOLING_HOLDS } from "../dist/phases/verify.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
@@ -118,29 +122,21 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged
   assert.match(charge, /kind: "blocked"/);
 });
 
-test("followUpsOf: the fix a held verification asks for builds instead of queueing behind it", () => {
+test("correctionsToBuild: the fix a held verification asks for builds instead of queueing behind it", () => {
   // Slashbin-console#1340 waited 32 min behind #1338's verification, which needed it.
-  const titles = new Map([
-    [1340, "Follow-up to #1338: fix the pick view"],
-    [1341, "Unrelated work"],
-    [1342, "follow-up to #13380: a different issue"],
-  ]);
-  assert.deepEqual(followUpsOf(1338, [1340, 1341, 1342], titles), [1340]);
-  assert.deepEqual(followUpsOf(1338, [1341], titles), [], "no follow-up, the hold stands");
-  assert.deepEqual(followUpsOf(1338, [9999], titles), [], "an issue with no cached title is not a follow-up");
+  const rel = corrects([[1340, [1338]], [1342, [13380]]]);
+  assert.deepEqual(correctionsToBuild(1338, [1340, 1341, 1342], rel), [1340]);
+  assert.deepEqual(correctionsToBuild(1338, [1341], rel), [], "no follow-up, the hold stands");
+  assert.deepEqual(correctionsToBuild(1338, [9999], rel), [], "an issue with no correction link is not a follow-up");
 });
 
-test("followUpsToBuild: a follow-up outside the trimmed batch still builds", () => {
+test("correctionsToBuild: a fix outside the trimmed batch still builds", () => {
   // Slashbin-console #1440 behind #1431, 2026-10-27: the batch (size 1) was #1432,
   // so the rework issue #1440 stayed queued and #1431 could never pass.
-  const titles = new Map([
-    [1432, "Unrelated work"],
-    [1433, "More unrelated work"],
-    [1440, reworkIssueTitle(1, 1431)],
-  ]);
-  assert.deepEqual(followUpsToBuild(1431, [1432], [1432, 1433, 1440], titles), [1440]);
-  assert.deepEqual(followUpsToBuild(1431, [1440], [1432, 1440], titles), [1440], "in the batch too: listed once");
-  assert.deepEqual(followUpsToBuild(1431, [1432], [1432, 1433], titles), [], "no follow-up, the hold stands");
+  const rel = corrects([[1440, [1431]]]);
+  assert.deepEqual(correctionsToBuild(1431, [...[1432], ...[1432, 1433, 1440]], rel), [1440]);
+  assert.deepEqual(correctionsToBuild(1431, [...[1440], ...[1432, 1440]], rel), [1440], "in the batch too: listed once");
+  assert.deepEqual(correctionsToBuild(1431, [...[1432], ...[1432, 1433]], rel), [], "no follow-up, the hold stands");
 });
 
 test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state> reasons, nothing else", async () => {
@@ -158,7 +154,6 @@ test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state
 });
 
 // EM#485 (PO, 2026-10-24): a visual QA FAIL goes back to the Foreman as a rework issue.
-const reworkIssueTitle = (round, n) => `Visual QA rework ${round} for #${n} — follow-up to #${n}`; // an EM corrective is titled like this too
 
 test("verifyHoldPlan: visual-qa-failed is the EM's decision; infrastructure and sign-in holds still charge", () => {
   assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "decide" });
@@ -181,10 +176,10 @@ test("devVerifyHolding: a rework hold below max keeps the repo held", () => {
   assert.equal(devVerifyHolding([5, 6], h, VERIFY_MAX_ATTEMPTS), 5);
 });
 
-test("followUpsOf matches a follow-up title for its parent only", () => {
-  const titles = new Map([[20, reworkIssueTitle(1, 12)], [21, reworkIssueTitle(1, 123)]]);
-  assert.deepEqual(followUpsOf(12, [20, 21], titles), [20]);
-  assert.deepEqual(followUpsOf(123, [20, 21], titles), [21]);
+test("correctionsToBuild matches a correction for its parent only", () => {
+  const rel = corrects([[20, [12]], [21, [123]]]);
+  assert.deepEqual(correctionsToBuild(12, [20, 21], rel), [20]);
+  assert.deepEqual(correctionsToBuild(123, [20, 21], rel), [21]);
 });
 
 
@@ -255,7 +250,7 @@ test("the Foreman files no rework issue: the filing helpers are gone", async () 
 
 test("a follow-up corrective releases the hold: it builds, its merge advances base, and a spec edit also releases", async () => {
   const { reopensOnBaseAdvance } = await import("../dist/phases/verify.js");
-  assert.deepEqual(followUpsOf(1538, [1543, 1544], new Map([[1543, "Header row: fix phone layout — follow-up to #1538"], [1544, "Other"]])), [1543]);
+  assert.deepEqual(correctionsToBuild(1538, [1543, 1544], corrects([[1543, [1538]]])), [1543]);
   assert.equal(reopensOnBaseAdvance("visual-qa-failed"), true, "the corrective merging into base reopens the held verification");
   const { UNBLOCK_CHECKS } = await import("../dist/unblock.js");
   assert.ok(UNBLOCK_CHECKS["verify-exhausted"].includes("specEdited") && UNBLOCK_CHECKS["verify-exhausted"].includes("baseAdvanced"));
@@ -264,6 +259,6 @@ test("a follow-up corrective releases the hold: it builds, its merge advances ba
   const { visualDecisionHolder } = await import("../dist/phases/verify.js");
   assert.equal(visualDecisionHolder([1538, 1539], vqaHold, VERIFY_MAX_ATTEMPTS), 1538);
   assert.equal(visualDecisionHolder([1538], { 1538: { ...vqaHold[1538], reason: "acceptance-not-verified" } }, VERIFY_MAX_ATTEMPTS), null);
-  const titles = new Map([[1539, "Older unrelated"], [1543, "Header row: fix phone layout — follow-up to #1538"]]);
-  assert.deepEqual(followUpsToBuild(1538, [1539], [1539, 1543], titles), [1543]);
+  const rel = corrects([[1543, [1538]]]);
+  assert.deepEqual(correctionsToBuild(1538, [...[1539], ...[1539, 1543]], rel), [1543]);
 });

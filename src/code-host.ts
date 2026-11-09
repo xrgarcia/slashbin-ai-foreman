@@ -5,6 +5,7 @@
 
 import type { LifecycleLabels, RepoConfig } from "./config.js";
 import type { GithubConventions } from "./config-schema/github.js";
+import type { Relation } from "./adapters.js";
 import type { Logger } from "./logger.js";
 
 // ---------------------------------------------------------------------------
@@ -521,6 +522,13 @@ export interface CodeHost {
   // Issue bodies.
   readIssueBody(config: RepoConfig, num: number): Promise<string>;
   readIssueState(config: RepoConfig, repo: string, num: number): Promise<"open" | "closed" | null>;
+
+  // The correction relation (slashbin-ai-foreman#267): which issue fixes which, translated from the host's own links.
+  /**
+   * Each of `issues`' relations: the issues it `corrects` (strongest signal first) and the issues its body
+   * `mentions`. Throws when a link cannot be read: a guess is not a fact, so the caller treats it as nothing found.
+   */
+  relationsOf(config: RepoConfig, issues: readonly number[], logger: Logger): Promise<Map<number, Relation>>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;

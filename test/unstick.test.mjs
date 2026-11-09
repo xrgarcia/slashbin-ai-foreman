@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, releaseGateCandidateReason, followUpOrigin,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, releaseGateCandidateReason,
 } from "../dist/unstick.js";
 import { applyOutcome } from "../dist/phases/unstick.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -30,6 +30,7 @@ test("the kinds are the EM contract, verbatim", () => {
     "unrelated-error",
     "epic-ready-to-close",
     "dependency-batch-loop",
+    "unlinked-fix",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
   assert.equal(emUnstickMaxDurationMs("skip"), 20 * 60_000);
@@ -271,16 +272,4 @@ test("grantStateViaEm: exit 0 gives the trimmed stdout; non-zero, empty, tokenle
   } finally {
     if (saved !== undefined) process.env.EM_GITHUB_TOKEN = saved;
   }
-});
-
-test("followUpOrigin: reads the issue a title follows up", () => {
-  assert.equal(followUpOrigin("Fix it — follow-up to #123"), 123);
-  assert.equal(followUpOrigin("plain"), null);
-});
-
-test("followUpTargets: every target in order; followUpsOf matches only the exact holder", async () => {
-  const { followUpTargets } = await import("../dist/unstick.js");
-  const { followUpsOf } = await import("../dist/phases/verify.js");
-  assert.deepEqual(followUpTargets("a — follow-up to #5, follow-up to #12"), [5, 12]);
-  assert.deepEqual(followUpsOf(12, [1, 2, 3], new Map([[1, "x follow-up to #12"], [2, "x follow-up to #123"], [3, "no"]])), [1]);
 });

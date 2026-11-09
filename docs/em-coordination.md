@@ -89,16 +89,27 @@ come at 10 minutes, then 20, then the issue goes `blocked` (verify-exhausted).
 | `codex-unavailable`, `em-mirror-unavailable`, `registry-unavailable`, `tooling-unavailable`, `evidence-check-failed`, `no-evidence-comment`, `qa-errored`, `qa-coverage-unknown`, `qa-held-qa-local-boot-failed`, `qa-held-qa-local-seed-missing`, `qa-held-worker-data-unavailable`, `qa-held-attribution-unavailable`, `qa-held-dev-unreachable`, `qa-held-sign-in-failed`, `qa-held-review-unavailable`, `qa-held-pr-unreadable`, `qa-held-baseline-unreadable`, `qa-held-registry-unavailable` | defer (tooling) | retries on `backoff.agentUnavailable` (2 → 30 min), no attempt charged, silent | none — wait. Persisting for hours is a tooling defect: file it on the SRE or Foreman |
 | `github-unavailable` (Tech Lead exit 3), or a Tech Lead exit 1 whose stderr is a transient GitHub transport error (TLS handshake timeout, ECONNRESET, ENOTFOUND, `dial tcp`, 502/503/504) | defer (tooling) | the review is retried on `backoff.agentUnavailable`, no failure charged, the card is **not** moved to Blocked, silent (foreman#180). Auth, 404, 422 and rate-limit errors are never treated this way | none — wait. Persisting for hours is a tooling defect: file it on the Foreman |
 | `wait-until-YYYYMMDDTHHMMZ` | wait | retries at that time, no charge | none — wait |
-| `visual-qa-failed` | decide | **files nothing and builds nothing.** Holds at its cap at once (retrying unchanged code cannot pass) and raises the unstick kind `rework-decision` in the same cycle, with the PR, the files it touched, the verdict and the evidence links (Ray, 2026-10-31; Slashbin-console#1538: an automatic rework changed `JourneyBar.tsx` while the cause was in `DashboardLayout.tsx`, and the release queue was held ~24h) | **yours — decide the fix, on the first FAIL.** Read the evidence, find the component that owns the defect (it may lie outside the PR's files), and file the corrective titled "… — follow-up to #N" or edit the spec. The follow-up merging into base (`baseAdvanced`) or a spec edit (`specEdited`) releases the hold and re-verifies |
+| `visual-qa-failed` | decide | **files nothing and builds nothing.** Holds at its cap at once (retrying unchanged code cannot pass) and raises the unstick kind `rework-decision` in the same cycle, with the PR, the files it touched, the verdict and the evidence links (Ray, 2026-10-31; Slashbin-console#1538: an automatic rework changed `JourneyBar.tsx` while the cause was in `DashboardLayout.tsx`, and the release queue was held ~24h) | **yours — decide the fix, on the first FAIL.** Read the evidence, find the component that owns the defect (it may lie outside the PR's files), and file the corrective **linked to #N** (below) or edit the spec. The follow-up merging into base (`baseAdvanced`) or a spec edit (`specEdited`) releases the hold and re-verifies |
 | every other `qa-held-*` (`unsafe-host`, `browser-crashed`, `nothing-captured`, `page-unplaced`), `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
 | `dev-verify-failed`, `deploy=…` | charged | blocked with owner SRE (`deployFailed`) | route to the SRE |
-| `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked`; the retries keep running, but the first failure also raises `rework-decision` (§3) | **yours — decide the fix, on the first failure; do not wait out the attempts.** Read the evidence and the touched files: edit the spec (`specEdited` releases it at once) or file the fix as a follow-up (below). `baseAdvanced` does **not** release this one. Deploy failures (`dev-verify-failed`, `deploy=…`) and runs that returned no verdict raise nothing early; they stay with the SRE and `verify-exhausted` |
+| `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked`; the retries keep running, but the first failure also raises `rework-decision` (§3) | **yours — decide the fix, on the first failure; do not wait out the attempts.** Read the evidence and the touched files: edit the spec (`specEdited` releases it at once) or file the fix linked to the held issue (below). `baseAdvanced` does **not** release this one. Deploy failures (`dev-verify-failed`, `deploy=…`) and runs that returned no verdict raise nothing early; they stay with the SRE and `verify-exhausted` |
 
-**A fix for a held verification jumps the queue only by its title.** An issue whose title
-contains `follow-up to #N` builds at once, alone, ahead of the repo's queue, while #N's
-verification waits on it (`followUpsOf`, `src/phases/verify.ts`). A corrective the EM files
-for an unmet outcome must end its title `— follow-up to #<parent>`; without it, the fix
-queues behind the very verification it is meant to clear.
+**A fix for a held verification jumps the queue only when it is linked to the issue it corrects.**
+The Foreman knows one relation, *corrects* (`Relation`, `src/adapters.ts`): issue F corrects
+issue N. While N's dev verification holds the repo, F builds at once, alone, ahead of the
+queue (`correctionsToBuild`, `src/phases/verify.ts`). GitHub records the relation three ways,
+read only by the GitHub plugin (`relationsOf`, `src/github/corrections.ts`): mark **N blocked
+by F** (the exact link: N's verification does wait on F), make F a **sub-issue of N**, or end
+F's title `— follow-up to #N` (optional; kept so everything already filed keeps working). The
+core never reads a title. A corrective the EM files for an unmet outcome must carry a link;
+without one, the fix queues behind the very verification it is meant to clear.
+
+The Foreman never guesses the link. When nothing corrects N and an approved issue's body
+mentions N (`#N`, `repo#N` or `owner/repo#N`, e.g. in `## References`), that issue stays
+queued, the Foreman raises the unstick kind `unlinked-fix` once for it and N (§3), and posts
+one comment on it: "This looks like the fix for #N; mark #N as blocked by this issue, or make
+this a sub-issue of #N, or it queues behind #N." It moves no card and is not a block. Add the
+link and the next pass builds the fix first.
 
 Blocks the build and release stages raise (`BlockKind`, `src/unblock.ts`; each releases
 itself when its check turns true):
@@ -128,7 +139,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -141,10 +152,14 @@ the repo and PR it was first seen on, and the SRE's evidence links. It is repo-l
 The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
 fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
 `epic-ready-to-close` fires when the release stage closes an issue after its production verification and that issue
-names an epic (`<epicRefLabel> #N` in its body, `engineering-manager #N` in the `slashbin` profile; unset, this kind never fires; or in the body of the issue a "follow-up to #N" title names).
+names an epic (`<epicRefLabel> #N` in its body, `engineering-manager #N` in the `slashbin` profile; unset, this kind never fires; or in the body of the issue the issue it corrects names).
 It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
+`unlinked-fix` fires when a held dev verification #N holds the repo's queue, nothing corrects #N, and an approved
+issue's body mentions #N (§2). Its subject is that issue, once per issue and #N (`dedupeKey` #N), standing until the
+issue closes. The EM confirms it is the fix and adds the link (#N blocked by it, or it a sub-issue of #N), or rules it
+is not and writes nothing.
 `dependency-batch-loop` fires when the dependency sweep has filed the same batch (the same Dependabot PRs at the same head
 commits) 3 times in 24 hours. The sweep then **holds that batch**: it files nothing more for those PRs and raises this kind once,
 repo-level (issue 0). Each of those issues ended with no PR of its own (`landed`), so a Dependabot PR is almost certainly open

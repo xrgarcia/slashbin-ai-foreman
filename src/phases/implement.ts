@@ -12,11 +12,12 @@ import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-back
 import { runnerName } from "../refusal.js";
 import { backoffDelay, formatWait } from "../backoff.js";
 import { fieldTable } from "../issue-records.js";
-import { devVerifyHolding, followUpsToBuild, visualDecisionHolder } from "./verify.js";
+import { correctionsToBuild, devVerifyHolding, unlinkedFixes, visualDecisionHolder } from "./verify.js";
 import { alignLocalBase, resolveStartRef, settleSkillSync, type SyncOutcome } from "../skill-sync.js";
 import { CycleEvent, activeRuns, itemOf, notifyOnce, prReport, releaseIfResolved, startReport, stoppedReason } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
+import { HandoffNotSaved } from "../unstick.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
@@ -129,6 +130,52 @@ async function escalateSkips(rt: ForemanRuntime, items: { n: number; reason: str
     repoLogger.warn(`Escalated #${n} for the EM's ruling: ${reason}`);
     await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved" }, repoConfig, repoLogger);
   }
+}
+
+/** The comment on an issue that looks like the fix for held #`held` but is not linked to it (slashbin-ai-foreman#267). */
+export function unlinkedFixComment(held: number): string {
+  return `This looks like the fix for #${held}; mark #${held} as blocked by this issue, or make this a sub-issue of #${held}, or it queues behind #${held}.`;
+}
+
+/**
+ * The build-first check (slashbin-ai-foreman#267): the `candidates` that correct `holder` build now, ahead of the
+ * queue, because its dev verification waits on them. The relation is the code host's (`relationsOf`); the core never
+ * reads a title. Unreadable, nothing is a fix and the queue builds in order. When nothing corrects it and
+ * `verifying` holds the queue, each candidate that only mentions it is raised once to the EM as `unlinked-fix` (one
+ * per item and holder, standing until the item closes) and told once on the issue. The Foreman never adds the link:
+ * a guess is not a fact.
+ */
+export async function fixesForHold(
+  rt: ForemanRuntime, repoConfig: RepoConfig, holder: number, verifying: number | null, candidates: readonly number[], logger: Logger,
+): Promise<number[]> {
+  let relations;
+  try {
+    relations = await codeHost().relationsOf(repoConfig, candidates, logger);
+  } catch (err) {
+    logger.warn(`#${holder}: its corrections could not be read (${(err instanceof Error ? err.message : String(err)).split("\n")[0]}) — building in queue order`);
+    return [];
+  }
+  const fixes = correctionsToBuild(holder, candidates, relations);
+  if (fixes.length > 0 || verifying !== holder) return fixes;
+  for (const n of unlinkedFixes(holder, candidates, relations)) {
+    const reason = `#${n} looks like the fix for #${holder}, whose dev verification is held: its body mentions #${holder}, but #${holder} is not blocked by it and it is not a sub-issue of #${holder}, so it queues behind #${holder}.`;
+    let fresh: boolean;
+    try {
+      fresh = await rt.handoffs.raise(repoConfig, { kind: "unlinked-fix", subject: n, dedupeKey: String(holder), reason });
+    } catch (err) {
+      if (!(err instanceof HandoffNotSaved)) throw err;
+      logger.warn(`#${n}: could not record the unlinked-fix question for #${holder} — asked again next pass`);
+      continue;
+    }
+    if (!fresh) continue;
+    logger.warn(`#${n} looks like the fix for #${holder} but is not linked to it — it queues behind #${holder}; the EM is asked`);
+    try {
+      await codeHost().commentOnIssue(repoConfig, n, unlinkedFixComment(holder));
+    } catch (err) {
+      logger.warn(`#${n}: the unlinked-fix comment could not be posted: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return fixes;
 }
 
 /**
@@ -454,7 +501,7 @@ export async function tryBatchImplementation(
   }
   const verifyHolds = fieldTable(mergedRecords, "verifyHeld");
   const verifying = devVerifyHolding(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
-  // The fix a failed verification asks for is filed as a follow-up to it.
+  // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (Slashbin-console#1340 behind #1338, 32 min, 2026-10-20).
   // It builds now, alone. Looked for in all of `handOff`, not the trimmed batch:
@@ -462,10 +509,14 @@ export async function tryBatchImplementation(
   // it (Slashbin-console #1440 behind #1431, 2026-10-27).
   // A visual QA FAIL is capped at once (the EM decides), so it no longer holds the repo; its follow-up still goes first.
   const followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
-  const fixes = !featurePr && followUpOf !== null ? followUpsToBuild(followUpOf, actionableIssues, handOff, titles) : [];
+  // The fix is the issue that CORRECTS the held one, by the code host's relation (blocked-by, sub-issue or the legacy
+  // title: `Relation`, src/adapters.ts). Read only while a hold stands and no feature PR does.
+  const fixes = !featurePr && followUpOf !== null
+    ? await fixesForHold(rt, repoConfig, followUpOf, verifying, [...new Set([...actionableIssues, ...handOff])], repoLogger)
+    : [];
   if (fixes.length > 0) {
     actionableIssues.splice(0, actionableIssues.length, ...fixes);
-    repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the follow-up to #${followUpOf}, whose dev verification is waiting on it`);
+    repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the fix for #${followUpOf}, whose dev verification is waiting on it`);
   }
   const prHolder = featurePr ? `open Foreman PR #${featurePr.number}` : null;
   const verifyHolder = verifying !== null && fixes.length === 0 ? `#${verifying}'s dev verification` : null;
