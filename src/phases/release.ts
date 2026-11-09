@@ -38,7 +38,8 @@ import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
 import type { Move } from "../lifecycle.js";
 import { roleFor } from "../plugins/registry.js";
-import type { VerifyResult } from "../plugins/contract.js";
+import type { DeployTrailer, VerifyResult } from "../plugins/contract.js";
+import { parseWaitUntil } from "../contract/result-v1.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues } from "../release-tracker.js";
 import type { ProdRelease } from "../issue-records.js";
@@ -333,6 +334,31 @@ export const DEPLOY_STOPS: Readonly<Record<string, string>> = {
   "merge-refused-repeatedly": "GitHub refused the SRE's merge repeatedly at this head (`merge-refused-repeatedly`)",
   "merge-blocked-check": "a required check is red at this head, after one re-run (`merge-blocked-check`)",
 };
+
+/** The longest a time hold is waited for before the release is asked about again: a far `eligible_at` is re-checked daily. */
+export const MAX_TIME_HOLD_MS = 24 * 3_600_000;
+
+/**
+ * What an unmerged deploy's hold means (agent contract v1). The deployer's own
+ * `holdClass` decides when it sent one: `person` stops the release, `time`
+ * waits until `eligibleAt` (capped at a day), `transient` takes the back-off.
+ * A legacy trailer carries no class, so the Foreman's `DEPLOY_STOPS` list
+ * decides as before. Pure, exported for tests.
+ */
+export function deployHoldPlan(
+  t: Pick<DeployTrailer, "hold" | "holdClass" | "holdReason">,
+  nowMs: number,
+): { kind: "stop"; reason: string } | { kind: "wait"; untilMs: number } | { kind: "backoff" } {
+  const hold = t.hold ?? "";
+  const cls = t.holdClass ?? (DEPLOY_STOPS[hold] ? "person" : undefined);
+  if (cls === "person") {
+    return { kind: "stop", reason: DEPLOY_STOPS[hold] ?? `the deployer held it (\`${hold || "no slug"}\`)${t.holdReason ? `: ${t.holdReason}` : ""}` };
+  }
+  // A named time (`wait-until-…`, legacy or v1) clears by itself: wait for it.
+  const at = parseWaitUntil(hold);
+  if (at !== null && cls !== "transient") return { kind: "wait", untilMs: Math.min(Math.max(at, nowMs), nowMs + MAX_TIME_HOLD_MS) };
+  return { kind: "backoff" };
+}
 
 async function stopRelease(rt: ForemanRuntime, repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger): Promise<void> {
   const body =
@@ -852,9 +878,15 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   if (r.kind !== "trailer" || !r.trailer.merged) {
     // If this cannot be cleared the next pass reads the PR: still open, the "deploying" record is dropped then.
     await dropRelease(rt, repoConfig, pr.number, logger);
-    const stop = r.kind === "trailer" ? DEPLOY_STOPS[r.trailer.hold ?? ""] : undefined;
-    if (stop && r.kind === "trailer") {
-      await stopRelease(rt, repoConfig, pr.number, pending, stop, r.trailer.evidence, logger);
+    const plan = r.kind === "trailer" ? deployHoldPlan(r.trailer, now()) : undefined;
+    if (plan?.kind === "stop" && r.kind === "trailer") {
+      await stopRelease(rt, repoConfig, pr.number, pending, plan.reason, r.trailer.evidence, logger);
+      return true;
+    }
+    if (plan?.kind === "wait") {
+      // A hold that clears by itself at a named time (#193): wait for it, no person, no count bump.
+      const ms = rt.memory.releaseBackoff.waitUntil(key, plan.untilMs);
+      logger.info(`Release PR #${pr.number}: SRE held it until ${new Date(plan.untilMs).toISOString()} (${r.kind === "trailer" ? r.trailer.hold : ""}); retry in ${formatWait(ms)}`);
       return true;
     }
     const why = r.kind === "trailer" ? `not merged (${r.trailer.hold ?? "no reason given"})` : r.reason;

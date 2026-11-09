@@ -352,7 +352,8 @@ export const handoffSubject = (githubRepo: string, pr: number): string => `${git
 
 /** The unrelated errors a fresh SRE result reported, and where they were first seen. */
 export interface FreshUnrelated {
-  seen: { errors: readonly string[]; evidence: readonly string[] };
+  /** `signatures`, when the agent sent them (contract v1), are index-aligned with `errors` and dedupe instead of the folded text. */
+  seen: { errors: readonly string[]; evidence: readonly string[]; signatures?: readonly string[] };
   seenOn: string;
 }
 
@@ -375,10 +376,11 @@ export function epicRefs(body: string, label: string | undefined): number[] {
 }
 
 /** The alert for one error the SRE excluded as not caused by the release it verified. Pure, exported for tests. */
-export function unrelatedErrorAlert(error: string, seenOn: string, evidence: readonly string[]): Alert {
+export function unrelatedErrorAlert(error: string, seenOn: string, evidence: readonly string[], signature?: string): Alert {
   const shown = evidence.length ? ` Evidence: ${evidence.slice(0, 4).join(" ")}` : "";
   return {
-    kind: "unrelated-error", subject: 0, dedupeKey: hash12(unrelatedSignature(error)),
+    // The agent's own signature when it sent one (contract v1, #157): it knows which parts of its error vary.
+    kind: "unrelated-error", subject: 0, dedupeKey: hash12(signature ? `v1:${signature}` : unrelatedSignature(error)),
     reason: `The SRE excluded this error as not caused by the release it verified (first seen on ${seenOn}): ${error.trim().slice(0, 600)}.${shown}`,
   };
 }
@@ -494,8 +496,8 @@ export class EmHandoffs {
   async settleHandoffs(repoConfig: RepoConfig, subject: string, fresh?: FreshUnrelated): Promise<number> {
     if (fresh) {
       const held = this.pending.get(subject) ?? this.pending.set(subject, new Map()).get(subject)!;
-      for (const error of fresh.seen.errors) {
-        const alert = unrelatedErrorAlert(error, fresh.seenOn, fresh.seen.evidence);
+      for (const [i, error] of fresh.seen.errors.entries()) {
+        const alert = unrelatedErrorAlert(error, fresh.seenOn, fresh.seen.evidence, fresh.seen.signatures?.[i]);
         if (!held.has(alert.dedupeKey)) held.set(alert.dedupeKey, alert);
       }
     }

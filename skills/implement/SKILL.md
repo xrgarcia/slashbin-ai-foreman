@@ -101,7 +101,7 @@ records a failed attempt and hands you the same issue next cycle.
 Whenever you stop **on an issue you have selected**:
 
 1. **Comment on the issue** saying what is missing and what would unblock it.
-2. **End your output with this exact line and nothing after it:**
+2. **End your output with this exact line, followed only by the `FOREMAN_RESULT_V1` line (see the end of this skill):**
 
    ```
    FOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one line: what stopped you>"
@@ -242,3 +242,20 @@ fails, note it and continue with the text.
 - One issue, one commit, one PR. Each commit leaves the checks passing.
 - Only implement work items the prompt names — refuse any other.
 - An issue meant for a different repository or service is skipped, with a comment.
+
+## Structured result (contract v1)
+
+After the trailer above (or, when you opened a PR, as your last line), print one more line:
+`FOREMAN_RESULT_V1` and one JSON object, on a single line. The Foreman reads this line first;
+the `FOREMAN_RESULT:` lines stay until every agent has moved. Prose goes only in `reason_text`
+and decides nothing. Examples, one per outcome:
+
+```
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"pr-opened","pr":42,"issues_named":[127]}
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"skipped","skipped_issue":127,"waiting_on":"acme/site#166","reason_text":"refund_policy.md is on unmerged PR #166"}
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"skipped","skipped_issue":127,"waiting_on":"#88","reason_text":"the feature branch is occupied by open PR #88"}
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"landed","landed_issue":127,"reason_text":"all 16 PRs already on develop"}
+```
+
+`waiting_on` names the issue or PR the skip waits on (`#N` here, `owner/repo#N` elsewhere): the skip clears when it closes or merges.
+The schema is `schemas/implementer.v1.json` in the Foreman package.

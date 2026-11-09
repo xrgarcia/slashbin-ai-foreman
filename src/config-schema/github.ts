@@ -44,8 +44,13 @@ export const githubConventionsSchema = z.object({
   // {base} and {production} are the two branch names.
   syncTitle: name.default("chore: sync {base} with {production} (merge commits backfill)"),
   // Title of a PR the reconcile stage opens for orphaned commits naming one
-  // issue. {N} is its number.
-  reconcileTitle: name.default("feat: implement #{N}"),
+  // issue. {N} is its number, and it must appear as `(#{N})`: the strict
+  // matcher that decides a merged PR delivered its issue reads only a closing
+  // keyword or a `(#N)` title suffix, and the reconciler's body says only
+  // "Related to #N" (#239: every reconciled PR dead-ended at verify-no-pr).
+  reconcileTitle: name.default("feat: implement (#{N})").refine((t) => t.includes("(#{N})"), {
+    message: "reconcileTitle must contain (#{N}): without it the Foreman's own strict parser cannot find the issue a reconciled PR delivers (#239)",
+  }),
   // The same, for commits naming no issue or several. {n} is the commit count,
   // {branch} the feature branch.
   reconcileBatchTitle: name.default("feat: implement {n} change(s) from {branch}"),
