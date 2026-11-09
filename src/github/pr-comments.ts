@@ -34,6 +34,16 @@ export const hasCommentStartingWith = (config: RepoConfig, num: number, heading:
 export const hasCommentContaining = (config: RepoConfig, num: number, mark: string): Promise<boolean> =>
   anyCommentMatches(config, num, (b) => b.includes(mark));
 
+/** True when issue `num` was reopened after `sinceIso` (a person reopening it means it is being worked again). Throws on a failed read. */
+export async function reopenedSince(config: RepoConfig, num: number, sinceIso: string): Promise<boolean> {
+  const out = await ghAsync([
+    "api", `repos/${config.githubRepo}/issues/${num}/events?per_page=100`, "--paginate",
+    "--jq", ".[] | select(.event == \"reopened\") | .created_at | @json",
+  ], config.repoPath);
+  const since = Date.parse(sinceIso);
+  return out.split("\n").filter((l) => l.trim()).some((l) => !(Date.parse(JSON.parse(l) as string) <= since));
+}
+
 /** Comment on PR `pr`. Throws on a failed write. */
 export async function commentOnPr(config: RepoConfig, pr: number, body: string): Promise<void> {
   await ghAsync(["pr", "comment", String(pr), "--repo", config.githubRepo, "--body", body], config.repoPath);

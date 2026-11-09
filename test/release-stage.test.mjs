@@ -105,6 +105,7 @@ if (a[0] === "api") {
   const path = a.find((x, i) => i > 0 && !x.startsWith("-") && !valued.has(a[i - 1]));
   const method = flag("--method") || "GET";
   let m;
+  if ((m = /issues\\/(\\d+)\\/events/.exec(path)) && (flag("--jq") || "").includes("reopened")) { if (st.eventsFail) { process.stderr.write("GraphQL: could not resolve"); process.exit(1); } out(((st.reopened || {})[m[1]] || []).map((t) => JSON.stringify(t)).join("\\n")); }
   if ((m = /issues\\/(\\d+)\\/events/.exec(path))) out(((st.events || {})[m[1]] || []).map((e) => JSON.stringify(e)).join("\\n"));
   if (method === "POST" && /\\/statuses\\//.test(path)) { (st.statuses = st.statuses || []).push({ sha: path.split("/").pop(), ...fields() }); save(); out(""); }
   if (method === "POST" && (m = /issues\\/(\\d+)\\/comments$/.exec(path))) { comment(m[1], fields().body); save(); out(""); }
@@ -1727,12 +1728,70 @@ test("stranded sweep: merged work with no recorded verification is never closed;
   assert.equal(commentsOn(396).length, 1, "and once across a restart: the marker on the issue is the memory");
 });
 
-test("stranded sweep: an unlabeled issue nothing delivered, an approved one, and a labelled one are left alone", async () => {
-  world({ issues: [bare(40), issue(41), { ...bare(42), labels: ["release pending"] }], compareFiles: 0 });
-  await seed(rt, repo, 41, { prodVerified: verifiedAt() });
+test("stranded sweep: an issue that still carries the trigger label is recovered, as closing strips only lifecycle labels", async () => {
+  world({ issues: [issue(618), issue(620)], compareFiles: 0 });
+  await seed(rt, repo, 618, { prodVerified: verifiedAt() });
+  await seed(rt, repo, 620, { prodVerified: verifiedAt() });
   await run();
-  for (const n of [40, 41]) { assert.equal(gh().issues[n].state, "OPEN"); assert.deepEqual(commentsOn(n), []); }
+  assert.equal(gh().issues[618].state, "CLOSED", "approved is the trigger, not a lifecycle label");
+  assert.equal(gh().issues[620].state, "CLOSED");
+});
+
+test("stranded sweep: an issue reopened after its verification is not closed again; one reopened before it is", async () => {
+  world({ issues: [issue(618), issue(620)], compareFiles: 0 });
+  await seed(rt, repo, 618, { prodVerified: verifiedAt() });
+  await seed(rt, repo, 620, { prodVerified: verifiedAt() });
+  patchGh((st) => { st.reopened = { 618: ["2026-10-11T08:00:00Z"], 620: ["2026-10-09T08:00:00Z"] }; });
+  await run();
+  assert.equal(gh().issues[618].state, "OPEN", "a person reopened it after it was verified: it is being worked again");
+  assert.deepEqual(commentsOn(618), []);
+  assert.equal(gh().issues[620].state, "CLOSED", "a reopen before the verification does not count");
+});
+
+test("stranded sweep: events that cannot be read leave the issue open to be retried", async () => {
+  world({ issues: [bare(618)], compareFiles: 0 });
+  await seed(rt, repo, 618, { prodVerified: verifiedAt() });
+  patchGh((st) => { st.eventsFail = true; });
+  await run();
+  assert.equal(gh().issues[618].state, "OPEN");
+  patchGh((st) => { st.eventsFail = false; });
+  rescan();
+  await run();
+  assert.equal(gh().issues[618].state, "CLOSED");
+});
+
+test("stranded sweep: a no-code delivery (a Foreman skip record, no PR) is asked about, once; no signal is rechecked later, not settled", async () => {
+  world({ issues: [bare(680), bare(40)], compareFiles: 0 });
+  await seed(rt, repo, 680, { skipped: { lastSkippedAt: "2026-10-12T10:00:00Z", reason: "already implemented on develop" } });
+  await run();
+  assert.equal(gh().issues[680].state, "OPEN", "never closed without a recorded verification");
+  assert.equal(commentsOn(680).length, 1);
+  assert.match(commentsOn(680)[0], /already implemented on develop/);
+  assert.match(commentsOn(680)[0], /delivered without code/);
+  assert.deepEqual(commentsOn(40), [], "an ordinary unapproved issue is not asked about");
+  assert.ok(rt.memory.strandedChecked.get(`${REPO}#40`) < Infinity, "a miss is retried, not settled for the process");
+  rescan();
+  await run();
+  assert.equal(commentsOn(680).length, 1, "asked once");
+});
+
+test("stranded sweep: a PR that merges after an earlier miss is found on the recheck", async () => {
+  world({ issues: [bare(396)], compareFiles: 0 });
+  await run();
+  assert.deepEqual(commentsOn(396), []);
+  patchGh((st) => { st.prs[70] = releasePr(70, "Closes #396", { state: "MERGED", headRefName: "feat/396", baseRefName: "develop", mergedAt: new Date().toISOString() }); });
+  rt.memory.strandedChecked.clear();
+  rescan();
+  await run();
+  assert.equal(commentsOn(396).length, 1);
+});
+
+test("stranded sweep: a labelled or blocked issue is left alone", async () => {
+  world({ issues: [{ ...bare(42), labels: ["release pending"] }], compareFiles: 0 });
+  await seed(rt, repo, 42, { prodVerified: verifiedAt() });
+  await run();
   assert.equal(gh().issues[42].state, "OPEN");
+  assert.ok(!commentsOn(42).some((c) => /stranded-issue|Verified in production/.test(c)), "the sweep does not touch it");
 });
 
 test("stranded sweep: an issue whose record cannot be read is not closed or asked about", async () => {

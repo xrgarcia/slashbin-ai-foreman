@@ -112,6 +112,7 @@ export function githubCodeHost(
     commentOnPr: prComments.commentOnPr,
     commentsWithTimes: prComments.commentsWithTimes,
     hasCommentContaining: prComments.hasCommentContaining,
+    reopenedSince: prComments.reopenedSince,
     hasCommentStartingWith: prComments.hasCommentStartingWith,
     findOpenFeaturePR: prs.findOpenFeaturePR,
     getReferencedIssuesFromOpenPR: prs.getReferencedIssuesFromOpenPR,
