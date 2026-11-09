@@ -6,7 +6,7 @@
 // stage labels. It owns those blocks and the label ids. The card index's state
 // and the session holds reach it by constructor injection, never by import.
 
-import { ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, SESSION_STAGE, stageTarget, withIssueLabel, withStage, type PaperclipBucket } from "./board.js";
+import { customerLabelOf, ensureCustomerLabels, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, NO_CUSTOMER_LABEL, SESSION_STAGE, stageTarget, withCustomerLabel, withIssueLabel, withStage, type PaperclipBucket } from "./board.js";
 import type { PaperclipStage } from "./config.js";
 import type { PaperclipEnv } from "./env.js";
 import type { IndexPort } from "./ports.js";
@@ -51,6 +51,11 @@ export class Placement {
   readonly holdAction = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
+  /** Customer label name (and the marker) -> id, or the lookup in flight; dropped on failure and on a reload. */
+  private customerLabelIds: Promise<Map<string, string> | null> | null = null;
+  private customerLabelKey = "";
+  /** The registry failure last warned about, so one outage warns once. */
+  private customerWarned: unknown;
   /** The company's `issue` label id, once ensured (undefined until a label write needed it). */
   private issueLabelId: string | undefined;
   /** Cards confirmed to carry the issue label, so a sync reads and writes each once. */
@@ -68,6 +73,7 @@ export class Placement {
   /** A reloaded config may rename the labels: look them up again. */
   resetLabels(): void {
     this.stageLabelIds = null;
+    this.customerLabelIds = null;
     this.issueLabelId = undefined;
   }
 
@@ -343,9 +349,10 @@ export class Placement {
   /**
    * The card's label ids with `key`'s stage label as its only one (`key`
    * undefined: the stage labels as they are) and the issue label present
-   * once; null when nothing changes or the labels cannot be read.
+   * once; null when nothing changes or the labels cannot be read. `customer` is a
+   * customer label id, or null for the `no customer label` marker; omitted leaves customer labels as they are.
    */
-  async labelIdsFor(id: string, key: string | null | undefined): Promise<string[] | null> {
+  async labelIdsFor(id: string, key: string | null | undefined, customer?: string | null): Promise<string[] | null> {
     this.stageLabelIds ??= (async () => {
       const r = await this.env.safeCall("ensure stage labels", () => ensureStageLabels(this.env.client, this.env.cfg));
       if (!r.ok) this.stageLabelIds = null;
@@ -362,8 +369,55 @@ export class Placement {
     const current = Array.isArray(row.value?.labelIds) ? row.value.labelIds : [];
     let next = key === undefined ? [...current] : withStage(current, ids, key);
     if (this.issueLabelId) next = withIssueLabel(next, this.issueLabelId);
+    if (customer !== undefined) {
+      const known = await this.customerLabelIds;
+      const wantId = customer ?? known?.get(NO_CUSTOMER_LABEL.name);
+      if (known && wantId) next = withCustomerLabel(next, [...known.values()], wantId);
+    }
     if (this.issueLabelId && current.includes(this.issueLabelId)) this.issueLabelled.add(id);
     return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
+  }
+
+  /**
+   * The customer label a card of an issue with `issueLabels` should carry: its id, null for the
+   * `no customer label` marker, or undefined when the step is off (labels unread, no registry, registry or board unavailable).
+   */
+  async wantedCustomer(issueLabels: readonly string[] | undefined): Promise<string | null | undefined> {
+    const identity = this.env.identity;
+    if (!identity || issueLabels === undefined) return undefined;
+    let names: string[];
+    try {
+      names = await identity.customerLabels();
+    } catch (err) {
+      if (this.customerWarned !== err) {
+        this.customerWarned = err;
+        this.env.log("warn", `Paperclip mirror: registry customer labels unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return undefined;
+    }
+    const key = [...names].sort().join("\n");
+    if (key !== this.customerLabelKey) this.customerLabelIds = null;
+    this.customerLabelKey = key;
+    this.customerLabelIds ??= (async () => {
+      const r = await this.env.safeCall("ensure customer labels", () => ensureCustomerLabels(this.env.client, names));
+      if (!r.ok) this.customerLabelIds = null;
+      return r.ok ? r.value : null;
+    })();
+    const ids = await this.customerLabelIds;
+    if (!ids) return undefined;
+    const name = customerLabelOf(issueLabels, names);
+    return name === null ? null : ids.get(name) ?? undefined;
+  }
+
+  /** True when `have` does not carry exactly the wanted customer label (from `wantedCustomer`; undefined: nothing wanted). */
+  async customerStale(have: RowContent | undefined, want: string | null | undefined): Promise<boolean> {
+    if (want === undefined) return false;
+    const known = await this.customerLabelIds;
+    const wantId = want ?? known?.get(NO_CUSTOMER_LABEL.name);
+    if (!known || !wantId) return false;
+    const ids = new Set(known.values());
+    const carried = (have?.labelIds ?? []).filter((id) => ids.has(id));
+    return !(carried.length === 1 && carried[0] === wantId);
   }
 
   /** True when the card is not yet known to carry the issue label (so a sync should write it). */
