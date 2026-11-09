@@ -21,8 +21,9 @@ Every setting the Foreman reads, with its default, its environment override and 
 
 - **Where it lives.** `.ai-agent.json` (or `ai-agent.config.json`) in the daemon's working directory,
   or the file named by `--config <path>`. Start from `.ai-agent.example.json`.
-- **Precedence.** An environment variable beats the file; the file beats the default. Every key is
-  optional except `repos[].name` and `repos[].repoPath`.
+- **Precedence.** An environment variable beats the file; the file beats the selected `profile`; the profile
+  beats the neutral default ([profiles](config-guide.md#profiles)). Every key is optional except
+  `repos[].name` and `repos[].repoPath`.
 - **Validation.** The whole file is checked when it loads. A wrong type or out-of-range value stops
   the daemon at start with the key named, never mid-run.
 - **Hot reload.** The daemon re-reads the file at the start of every cycle, so an edit takes effect
@@ -381,7 +382,7 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick` → `skill-deliver`
 
-The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the ten built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the eleven built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 
@@ -703,4 +704,14 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 - `stages`: the stage list and custom stages, [pipeline.md](pipeline.md#pipeline-stages-stages) and `src/stages.ts`.
 - `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).
 - `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).
+- `metrics`: [metrics.md](metrics.md).
 - The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).
+
+## Environment-only variables
+
+Read from the daemon's environment, with no config key:
+
+- `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY`, `EM_GITHUB_TOKEN`: the GitHub accounts ([security.md](security.md#two-github-identities)).
+- `FOREMAN_STATE_DIR`: where the state files (`.github-state.json`, the legacy `.agent-state.json`, the default metrics database) live. Default: the daemon's working directory.
+- `AI_AGENT_SHUTDOWN_DRAIN_MS`: the graceful-stop drain window. Default: the longest `maxDurationMs` or `reviewMaxDurationMs`.
+- `FOREMAN_SYSTEMD_UNIT`: the user unit `npm start`, `stop` and `restart` drive. Default: `slashbin-foreman.service`.

@@ -401,7 +401,7 @@ export const configSchema = z.object({
   // (src/lanes.ts): revise+implement form the `build` lane, promote+release the
   // `release` lane, every other built-in a lane of its own, and each (repo, lane)
   // pair polls on its own loop. Order matters only inside a lane. Omitted, it is
-  // the ten built-ins in order; `release` runs only when both srePath and
+  // the eleven built-ins in order; `release` runs only when both srePath and
   // techLeadPath are set and is skipped with a startup warning otherwise. Listing
   // `release` explicitly without both is refused at startup. A custom stage is
   // `{ id, skillPath }`: one Claude session on that skill, in the lane of the
