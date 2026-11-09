@@ -39,7 +39,7 @@ npm run metrics:report -- [--repo <name>] [--issue <n>] [--since <days>] [--json
 ```
 
 Per item: pickup time (the latest `implement` session `started` naming the item before its first
-`inReview`), each stage entered with the time in it, total pickup to `done`, and approved to `done`.
+`inReview`), each stage entered (the first build appears as a derived `implementing` span from pickup to `inReview`, since the Foreman writes no such row; `approved` ends at pickup) with the time in it, total pickup to `done`, and approved to `done`.
 Then, over items that reached `done` in the window (default 30 days): count, median, p75 and p90 hours
 per stage and for the total. `--repo` takes the name or `owner/name`. The command runs whether or not
 the plugin is enabled.

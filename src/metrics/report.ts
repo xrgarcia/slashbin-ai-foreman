@@ -67,12 +67,6 @@ export function buildTimeline(repo: string, issue: number, rows: readonly Metric
   const stageRows = byTime.filter((r) => STAGE_KINDS.has(r.kind) && r.stage);
   // A repeat of the stage the item is already in is not an advance.
   const distinct = stageRows.filter((r, i) => i === 0 || r.stage !== stageRows[i - 1]!.stage);
-  const stages: StageSpan[] = distinct.map((r, i) => ({
-    stage: r.stage!,
-    at: r.at,
-    hours: i + 1 < distinct.length ? hoursBetween(r.at, distinct[i + 1]!.at) : null,
-  }));
-
   // Pickup: an implement session lists a whole batch of candidates but builds one, so it is
   // derived: the latest implement-started session naming the item before its first inReview.
   const firstReview = distinct.find((r) => r.stage === "inReview");
@@ -83,6 +77,21 @@ export function buildTimeline(repo: string, issue: number, rows: readonly Metric
       if (Date.parse(r.at) <= Date.parse(firstReview.at)) pickup = r.at;
     }
   }
+
+  // The build is never a stage row, so the first build is spliced in at pickup: `approved` ends
+  // there and `implementing` runs to the first inReview. A real implementing row is left alone.
+  const points: Array<{ stage: string; at: string }> = distinct.map((r) => ({ stage: r.stage!, at: r.at }));
+  if (pickup && firstReview && !points.some((p) => p.stage === "implementing" && Date.parse(p.at) >= Date.parse(pickup!) && Date.parse(p.at) <= Date.parse(firstReview.at))) {
+    const fi = points.findIndex((p) => p.stage === "inReview");
+    let idx = 0;
+    while (idx < fi && Date.parse(points[idx]!.at) <= Date.parse(pickup)) idx++;
+    points.splice(idx, 0, { stage: "implementing", at: pickup });
+  }
+  const stages: StageSpan[] = points.map((p, i) => ({
+    stage: p.stage,
+    at: p.at,
+    hours: i + 1 < points.length ? hoursBetween(p.at, points[i + 1]!.at) : null,
+  }));
 
   const done = distinct.find((r) => r.stage === "done");
   const approved = distinct.find((r) => r.stage === "approved");

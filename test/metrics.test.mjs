@@ -92,14 +92,15 @@ test("report: pickup from a batch implement session, durations, total, aggregate
   const [a, b] = buildTimelines(all);
   assert.equal(a.issue, 7);
   assert.equal(a.pickup, t(1));
-  assert.deepEqual(a.stages.map((s) => [s.stage, s.hours]), [["approved", 3], ["inReview", 2], ["approved", 4], ["done", null]]);
+  assert.deepEqual(a.stages.map((s) => [s.stage, s.hours]), [["approved", 1], ["implementing", 2], ["inReview", 2], ["approved", 4], ["done", null]]);
   assert.equal(a.totalHours, 8);
   assert.equal(a.approvedToDoneHours, 9);
   assert.equal(b.pickup, t(0.5));
   assert.equal(b.doneAt, null);
   const agg = aggregate([a, b]);
   assert.equal(agg.items, 1);
-  assert.equal(agg.stages.approved.median, 7);
+  assert.equal(agg.stages.approved.median, 5);
+  assert.equal(agg.stages.implementing.median, 2);
   assert.equal(agg.stages.inReview.count, 1);
   assert.equal(agg.total.median, 8);
   assert.equal(aggregate([a, b], Date.parse(t(10))).items, 0);
