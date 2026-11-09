@@ -6,7 +6,7 @@
 // stage labels. It owns those blocks and the label ids. The card index's state
 // and the session holds reach it by constructor injection, never by import.
 
-import { customerLabelOf, ensureCustomerLabels, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, NO_CUSTOMER_LABEL, SESSION_STAGE, stageTarget, withCustomerLabel, withIssueLabel, withStage, type PaperclipBucket } from "./board.js";
+import { customerLabelsOf, ensureCustomerLabels, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, NO_CUSTOMER_LABEL, SESSION_STAGE, stageTarget, withCustomerLabels, withIssueLabel, withStage, type PaperclipBucket } from "./board.js";
 import type { PaperclipStage } from "./config.js";
 import type { PaperclipEnv } from "./env.js";
 import type { IndexPort } from "./ports.js";
@@ -349,10 +349,10 @@ export class Placement {
   /**
    * The card's label ids with `key`'s stage label as its only one (`key`
    * undefined: the stage labels as they are) and the issue label present
-   * once; null when nothing changes or the labels cannot be read. `customer` is a
-   * customer label id, or null for the `no customer label` marker; omitted leaves customer labels as they are.
+   * once; null when nothing changes or the labels cannot be read. `customer` is the
+   * wanted customer label ids (from `wantedCustomer`, marker included); omitted leaves customer labels as they are.
    */
-  async labelIdsFor(id: string, key: string | null | undefined, customer?: string | null): Promise<string[] | null> {
+  async labelIdsFor(id: string, key: string | null | undefined, customer?: readonly string[]): Promise<string[] | null> {
     this.stageLabelIds ??= (async () => {
       const r = await this.env.safeCall("ensure stage labels", () => ensureStageLabels(this.env.client, this.env.cfg));
       if (!r.ok) this.stageLabelIds = null;
@@ -371,18 +371,18 @@ export class Placement {
     if (this.issueLabelId) next = withIssueLabel(next, this.issueLabelId);
     if (customer !== undefined) {
       const known = await this.customerLabelIds;
-      const wantId = customer ?? known?.get(NO_CUSTOMER_LABEL.name);
-      if (known && wantId) next = withCustomerLabel(next, [...known.values()], wantId);
+      if (known && customer.length > 0) next = withCustomerLabels(next, [...known.values()], customer);
     }
     if (this.issueLabelId && current.includes(this.issueLabelId)) this.issueLabelled.add(id);
     return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
   }
 
   /**
-   * The customer label a card of an issue with `issueLabels` should carry: its id, null for the
-   * `no customer label` marker, or undefined when the step is off (labels unread, no registry, registry or board unavailable).
+   * The customer label ids a card of an issue with `issueLabels` should carry, in name order: every
+   * registry match, or the `no customer label` marker alone when none matches; never empty. Undefined
+   * when the step is off (labels unread, no registry, registry or board unavailable).
    */
-  async wantedCustomer(issueLabels: readonly string[] | undefined): Promise<string | null | undefined> {
+  async wantedCustomer(issueLabels: readonly string[] | undefined): Promise<readonly string[] | undefined> {
     const identity = this.env.identity;
     if (!identity || issueLabels === undefined) return undefined;
     let names: string[];
@@ -405,19 +405,21 @@ export class Placement {
     })();
     const ids = await this.customerLabelIds;
     if (!ids) return undefined;
-    const name = customerLabelOf(issueLabels, names);
-    return name === null ? null : ids.get(name) ?? undefined;
+    const want = customerLabelsOf(issueLabels, names).map((n) => ids.get(n));
+    if (want.some((x) => x === undefined)) return undefined;
+    if (want.length > 0) return want as string[];
+    const marker = ids.get(NO_CUSTOMER_LABEL.name);
+    return marker ? [marker] : undefined;
   }
 
-  /** True when `have` does not carry exactly the wanted customer label (from `wantedCustomer`; undefined: nothing wanted). */
-  async customerStale(have: RowContent | undefined, want: string | null | undefined): Promise<boolean> {
+  /** True when `have` does not carry exactly the wanted customer label set (from `wantedCustomer`; undefined: nothing wanted). */
+  async customerStale(have: RowContent | undefined, want: readonly string[] | undefined): Promise<boolean> {
     if (want === undefined) return false;
     const known = await this.customerLabelIds;
-    const wantId = want ?? known?.get(NO_CUSTOMER_LABEL.name);
-    if (!known || !wantId) return false;
+    if (!known) return false;
     const ids = new Set(known.values());
     const carried = (have?.labelIds ?? []).filter((id) => ids.has(id));
-    return !(carried.length === 1 && carried[0] === wantId);
+    return carried.length !== want.length || !want.every((id) => carried.includes(id));
   }
 
   /** True when the card is not yet known to carry the issue label (so a sync should write it). */

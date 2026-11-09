@@ -1959,6 +1959,26 @@ test("customer label: the issue's registry label lands on the card in the card's
   assert.deepEqual(customerOf(fake, fake.rows[0]), ["no customer label"]);
 });
 
+test("customer label: two issue labels put both ids on the card in name order, in one PATCH; the set follows the issue as labels are added and removed", async () => {
+  const fake = fakePaperclip([ownedRow("backlog", { labelIds: ["keep-me"] })], [], [{ id: "keep-me", name: "bug" }]);
+  const { mirror } = mirrorOn(fake, OWNED, customerRegistry(["jerky-com", "slashbin-ai", "slashbin-io"]));
+  const snap = (labels) => mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels })] }, logger());
+  await snap(["slashbin-io", "bug", "slashbin-ai"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["slashbin-ai", "slashbin-io"]);
+  assert.equal(labelName(fake, fake.rows[0]).includes("bug"), true);
+  assert.equal(writesTo(fake, "r7").length, 1, "issue and both customer labels in one PATCH");
+  await snap(["slashbin-io", "slashbin-ai"]);
+  assert.equal(writesTo(fake, "r7").length, 1, "an unchanged second snapshot writes nothing");
+  await snap(["slashbin-io"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["slashbin-io"]);
+  await snap(["jerky-com", "slashbin-io"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["jerky-com", "slashbin-io"]);
+  await snap([]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["no customer label"]);
+  await snap(["slashbin-ai", "jerky-com"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["jerky-com", "slashbin-ai"], "the marker never sits beside a real label");
+});
+
 test("customer label: undefined labels, no registry client and a registry outage write no customer or marker label; the outage warns once", async () => {
   const none = fakePaperclip([ownedRow("backlog")]);
   const a = mirrorOn(none, OWNED, customerRegistry(["jerky-com"]));

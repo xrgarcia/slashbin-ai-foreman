@@ -383,7 +383,7 @@ export class SnapshotSync {
     const body: Record<string, unknown> = {};
     if (have?.title !== want.title) body.title = want.title;
     if (have?.description !== want.description) body.description = want.description;
-    // The registry customer label of the issue's labels (open cards only; a closed card's labels are unknown).
+    // The registry customer labels of the issue's labels (open cards only; a closed card's labels are unknown).
     const customer = c.state === "open" ? await this.placement.wantedCustomer(c.labels) : undefined;
     const free = !this.holds.has(id) && !state.startsWith("waiting\n");
     // The receiver's entry text on a Foreman-held card reads as a waiting hold; it is GitHub's hold, unread.
@@ -432,7 +432,7 @@ export class SnapshotSync {
         body.status ??= status;
       }
     }
-    // Backfill: a card that predates the issue label, or carries another customer label than its issue's, is fixed once, whatever its stage.
+    // Backfill: a card that predates the issue label, or carries another customer label set than its issue's, is fixed once, whatever its stage.
     if (!("labelIds" in body) && have && ((await this.placement.needsIssueLabel(id, have)) || (await this.placement.customerStale(have, customer)))) {
       const labelIds = await this.placement.labelIdsFor(id, undefined, customer);
       if (labelIds) body.labelIds = labelIds;
