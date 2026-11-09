@@ -1,8 +1,7 @@
 import { z } from "zod";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
 import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 import { enabledFor } from "./plugins/registry.js";
 import {
@@ -647,13 +646,38 @@ const SESSION_ENV_FORBIDDEN: readonly string[] = [
   "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY",
 ];
 
+/**
+ * The `origin` URL of a checkout, read from its git config files rather than by running `git remote
+ * get-url` (config loading is synchronous, and a subprocess here would hold the event loop on every
+ * reload; slashbin-ai-foreman#253). A linked worktree's `.git` is a file naming its gitdir, whose
+ * `commondir` points at the config. Undefined when there is none.
+ */
+function originUrlOf(repoPath: string): string | undefined {
+  const root = resolve(repoPath);
+  let gitDir = resolve(root, ".git");
+  if (statSync(gitDir).isFile()) {
+    const m = readFileSync(gitDir, "utf-8").match(/^gitdir:\s*(.+)$/m);
+    if (!m) return undefined;
+    gitDir = resolve(root, m[1].trim());
+  }
+  const commonFile = resolve(gitDir, "commondir");
+  const common = existsSync(commonFile) ? readFileSync(commonFile, "utf-8").trim() : "";
+  const configDir = common ? (isAbsolute(common) ? common : resolve(gitDir, common)) : gitDir;
+  let inOrigin = false;
+  for (const raw of readFileSync(resolve(configDir, "config"), "utf-8").split("\n")) {
+    const line = raw.trim();
+    const section = line.match(/^\[\s*(\S+)(?:\s+"([^"]*)")?\s*\]/);
+    if (section) { inOrigin = section[1].toLowerCase() === "remote" && section[2] === "origin"; continue; }
+    const kv = inOrigin ? line.match(/^url\s*=\s*(.+)$/i) : null;
+    if (kv) return kv[1].trim();
+  }
+  return undefined;
+}
+
 function inferGithubRepo(repoPath: string): string | undefined {
   try {
-    const remote = execSync("git remote get-url origin", {
-      cwd: resolve(repoPath),
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    const remote = originUrlOf(repoPath);
+    if (!remote) return undefined;
     const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/);
     return match?.[1];
   } catch {
