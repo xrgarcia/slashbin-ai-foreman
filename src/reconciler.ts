@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { git as runGit } from "./git-exec.js";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { codeHost } from "./plugins/registry.js";
@@ -41,36 +41,15 @@ interface OrphanedCommit {
 
 const GIT_TIMEOUT_MS = 30_000;
 
-export function git(args: string[], cwd: string): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: GIT_TIMEOUT_MS,
-  }).trim();
-}
-
 /**
- * `git` without blocking the event loop, for the network call: `git fetch` against a
- * remote that is not answering waits out the whole timeout, and a synchronous one
- * froze every lane and observer for it (2026-11-06, `spawnSync git ETIMEDOUT`).
+ * `git` without blocking the event loop (a synchronous one froze every lane and observer for the
+ * whole timeout of a remote that was not answering, 2026-11-06, `spawnSync git ETIMEDOUT`).
  *
- * The async `execFile` reports its own timeout as a kill (`killed`, SIGTERM, no
- * code), which `formatGitError` would read as a shutdown; it is given the code
- * `execFileSync` reports, `ETIMEDOUT`. A SIGTERM from systemd is not Node's kill,
- * so `killed` stays false and it still reads as cancelled.
+ * A timeout rejects with the code `ETIMEDOUT`, which `formatGitError` reads as a timeout; a
+ * SIGTERM from systemd is not Node's kill, so it still reads as cancelled.
  */
 export function gitAsync(args: string[], cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("git", args, { cwd, encoding: "utf-8", timeout: GIT_TIMEOUT_MS }, (err, stdout, stderr) => {
-      if (!err) return resolve(stdout.trim());
-      const e = err as Error & { killed?: boolean; code?: unknown; stderr?: string; stdout?: string };
-      if (e.killed) e.code = "ETIMEDOUT";
-      e.stderr = stderr;
-      e.stdout = stdout;
-      reject(e);
-    });
-  });
+  return runGit(args, cwd, { timeoutMs: GIT_TIMEOUT_MS });
 }
 
 /**
@@ -125,11 +104,11 @@ export function formatGitError(err: unknown): GitFailure {
  * featureBranch (exact name only, so `features-x` by a person is not swept in). Every candidate goes
  * through the one ownership test, so a human-named head is never scanned, reconciled or deleted.
  */
-function getRemoteOwnedBranches(config: RepoConfig): string[] {
+async function getRemoteOwnedBranches(config: RepoConfig): Promise<string[]> {
   try {
     const patterns = [`origin/${branchPrefixOf(config)}*`];
     if (config.featureBranch && config.featureBranch !== config.baseBranch) patterns.push(`origin/${config.featureBranch}`);
-    const output = git(["branch", "-r", "--list", ...patterns], config.repoPath);
+    const output = await gitAsync(["branch", "-r", "--list", ...patterns], config.repoPath);
     if (!output) return [];
     return [...new Set(output
       .split("\n")
@@ -228,7 +207,7 @@ export async function pruneMergedBranches(config: RepoConfig, logger: Logger, br
       if (open !== null) continue; // open, or unknown: delete nothing
       const closed = await readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
       if (closed === "unknown") continue;
-      const sha = git(["rev-parse", `origin/${branch}`], config.repoPath);
+      const sha = await gitAsync(["rev-parse", `origin/${branch}`], config.repoPath);
       if (!closed.deliveredShas.includes(sha)) continue;
       if (await codeHost().deleteMergedBranch(config, branch)) {
         deleted.push(branch);
@@ -304,7 +283,7 @@ export async function reconcileRepo(
   }
 
   // Only Foreman-owned heads are scanned (per-issue branches, plus the legacy shared one).
-  const featureBranches = getRemoteOwnedBranches(config);
+  const featureBranches = await getRemoteOwnedBranches(config);
   if (featureBranches.length === 0) {
     return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
@@ -323,7 +302,7 @@ export async function reconcileRepo(
   for (const branch of featureBranches) {
     let commits: OrphanedCommit[];
     try {
-      const log = git(
+      const log = await gitAsync(
         ["log", `origin/${config.baseBranch}..origin/${branch}`, "--format=%H %s"],
         config.repoPath,
       );
