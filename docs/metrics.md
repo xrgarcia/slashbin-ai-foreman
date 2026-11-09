@@ -8,8 +8,17 @@ spent in each stage, and from pickup to production, can be read back. Off by def
 ```
 
 `path` is optional (a leading `~` is expanded). The default file is `foreman-metrics.db` in the
-Foreman's state directory. It is SQLite in WAL mode, so the EM, PO and bots on this machine can read it
+Foreman's state directory (the daemon's working directory, or `FOREMAN_STATE_DIR` when set). It is SQLite in WAL mode, so the EM, PO and bots on this machine can read it
 while the Foreman writes. Keys: see `docs/configuration.md`.
+
+## Requirements
+
+The log uses `node:sqlite`, which Node 22.12 (the declared minimum) ships only behind a
+flag. With `metrics` off, the daemon starts on 22.12 as usual. With it on where
+`node:sqlite` is unavailable, the daemon still starts, logs
+`metrics: could not open <path>: ...` and records nothing; `metrics:report` fails on such a
+Node as well. Run the Foreman on a Node where `node:sqlite` loads without a flag before
+enabling it (`node -e "require('node:sqlite')"` is the check).
 
 ## What is recorded
 
@@ -42,7 +51,8 @@ Per item: pickup time (the latest `implement` session `started` naming the item 
 `inReview`), each stage entered (the first build appears as a derived `implementing` span from pickup to `inReview`, since the Foreman writes no such row; `approved` ends at pickup) with the time in it, total pickup to `done`, and approved to `done`.
 Then, over items that reached `done` in the window (default 30 days): count, median, p75 and p90 hours
 per stage and for the total. `--repo` takes the name or `owner/name`. The command runs whether or not
-the plugin is enabled.
+the plugin is enabled, but it exits with `No metrics database at <path>` until a daemon
+with `metrics.enabled` has created the file.
 
 Direct SQL, e.g. the stage log of one item:
 

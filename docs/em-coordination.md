@@ -32,7 +32,7 @@ poll (every 5 minutes); touching it cancels or duplicates a stage.
 
 | Stage | Label | Foreman does by itself | EM input |
 |---|---|---|---|
-| `approved` | `approved` | builds on its next cycle, once Pre-Flight readiness, `## Acceptance` and every blocked-by link clear; one feature PR in flight per repo, and with `buildWaitsForDevVerify` the next build waits until the last merge is dev-verified | none — wait. A spec it refuses gets one comment per reason: fix the body |
+| `approved` | `approved` | builds on its next cycle, once Pre-Flight readiness, `## Acceptance` and every blocked-by issue is merged to the base branch or closed (a blocker at `pr merged`, `pr approved`, `ready for prod release`, `release pending`, `prod verification held` or `ready to close` counts; open and unmerged does not); one feature PR in flight per repo, and with `buildWaitsForDevVerify` the next build waits until the last merge is dev-verified | none — wait. To hold a dependent until its blocker is **closed** (not merely merged), put `issue_closed: owner/repo#N` in a ```` ```readiness ```` fence under `## Pre-Flight` (one fence per issue; `src/github/readiness.ts`) — a blocked-by link alone releases it at merge. A spec it refuses gets one comment per reason: fix the body |
 | `implementing` | — | implement session opens a PR | none — wait |
 | `inReview` | `pr under review` | starts the Tech Lead review | none — wait |
 | `reviewing` | `pr under review` | Tech Lead review running | none — wait |

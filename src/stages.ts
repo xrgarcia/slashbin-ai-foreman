@@ -59,7 +59,7 @@ export const stageEntrySchema = z.union([builtinStageSchema, customStageSchema])
 export type StageEntry = z.infer<typeof stageEntrySchema>;
 export type CustomStage = z.infer<typeof customStageSchema>;
 
-/** A fresh copy of the default sequence — the ten built-ins, in order. */
+/** A fresh copy of the default sequence — the eleven built-ins, in order. */
 export function defaultStages(): StageEntry[] {
   return BUILTIN_STAGES.map((type) => ({ type }));
 }
