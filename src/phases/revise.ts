@@ -5,7 +5,7 @@ import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { revisePRFeedback } from "./revise-workflow.js";
-import { latestQaFailLines, qaBeforeMergeApplies } from "../qa-report.js";
+import { latestQaFailLines, qaBeforeMergeApplies, qaRerunVoidsHead } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
 import { runnerName } from "../refusal.js";
 import { type BlockKind } from "../unblock.js";
@@ -65,6 +65,27 @@ export async function tryRevision(
 
   // The head the no-commit streak is keyed on. An unreadable head throws and fails the pass (EM#1244 f5).
   const head = pending.pr.headRefOid ?? await codeHost().readPrHeadSha(repoConfig, prNumber, revLogger);
+
+  // The EM's `**EM QA re-run` on an open PR (docs/em-coordination.md): a QA FAIL that was QA's own defect moved the
+  // card here, and nothing below would ever send it back to QA (slashbin-io-docs#645). Before every gate and any paid
+  // session: back to review, where the next QA pass voids the reused verdict. One-shot: QA's fresh report spends it.
+  if ((await qaBeforeMergeApplies(repoConfig, config)) === true) {
+    let rerun = false;
+    try {
+      rerun = qaRerunVoidsHead(await codeHost().commentsWithTimes(repoConfig, prNumber), head);
+    } catch (e) {
+      revLogger.warn(`Could not read PR #${prNumber}'s comments for an EM QA re-run (${String(e).slice(0, 200)}); revising as usual`);
+    }
+    if (rerun) {
+      revLogger.warn(`PR #${prNumber} has an EM QA re-run newer than every QA Report for ${head.slice(0, 7)} — returning it to review for QA, no revise session`);
+      rt.memory.revisionStoppedHead.delete(repoName);
+      rt.memory.revisionEscalated.delete(repoName);
+      await rt.streaks.clear(repoConfig, prNumber);
+      for (const n of pending.issueNumbers) await advance(rt, itemOf(repoConfig, n), "qaRerunRevise", repoConfig, revLogger);
+      events.push({ message: `${repoConfig.githubRepo} PR #${prNumber}: EM QA re-run — back to review and QA, no revise session`, level: "info" });
+      return null;
+    }
+  }
 
   // A stopped revision resumes when someone pushes to the PR out of band.
   // Read once, up front: a streak that cannot be read is not "no streak", and a paid session is not started on a guess.
