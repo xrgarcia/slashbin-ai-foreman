@@ -17,7 +17,7 @@ export function byReviewer(review: { author?: { login?: string } }, reviewerLogi
 }
 
 /**
- * True when the PR already has an APPROVED/CHANGES_REQUESTED review by
+ * True when the PR already has an APPROVED/CHANGES_REQUESTED/COMMENTED review by
  * `reviewerLogin` submitted at or after the PR's latest commit (i.e. the current
  * head has already been reviewed). On any lookup failure returns false — we'd
  * rather (rarely) re-review than silently never review.
@@ -72,7 +72,9 @@ export async function readFreshReview(
   return reviews.some(
     (r) =>
       byReviewer(r, reviewerLogin) &&
-      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") &&
+      // A COMMENTED review counts: a reviewer that holds the PR without a verdict (it was withdrawn, or the
+      // question is the EM's) has looked at this head, and running it again returns the same answer (foreman#39).
+      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "COMMENTED") &&
       !!r.submittedAt &&
       new Date(r.submittedAt).getTime() >= lastCommitMs,
   );
@@ -92,10 +94,12 @@ export async function currentVerdictRequestsChanges(
   const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
     reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
   };
-  const verdicts = (data.reviews ?? [])
-    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+  // The reviewer's latest review of any kind: a COMMENTED review after the verdict holds the head, so the
+  // verdict is answered and the labels are not stranded (foreman#39).
+  const latest = (data.reviews ?? [])
+    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "COMMENTED") && r.submittedAt)
     .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
-  return verdicts[verdicts.length - 1]?.state === "CHANGES_REQUESTED";
+  return latest[latest.length - 1]?.state === "CHANGES_REQUESTED";
 }
 
 /**
@@ -143,6 +147,11 @@ export async function returnedToReviewSinceVerdict(
     .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
   const last = verdicts[verdicts.length - 1];
   if (!last || last.state !== "CHANGES_REQUESTED") return false;
+  // A COMMENTED review after the verdict holds the head: a relabel with no commit never reopens it (foreman#39).
+  const commentedAfter = (data.reviews ?? []).some(
+    (r) => byReviewer(r, reviewerLogin) && r.state === "COMMENTED" && r.submittedAt && new Date(r.submittedAt).getTime() >= new Date(last.submittedAt!).getTime(),
+  );
+  if (commentedAfter) return false;
   const verdictMs = new Date(last.submittedAt!).getTime();
   const label = config.lifecycleLabels.prUnderReview;
   for (const n of issueNumbers) {

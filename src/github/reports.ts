@@ -43,7 +43,9 @@ export async function readPrDigest(
 /** The paths a PR changed. Throws when it could not be read: an unread list is never "no UI files" (EM#1244 f5). */
 export async function prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): Promise<string[]> {
   const j = JSON.parse(await ghAsync(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
-  return Array.isArray(j.files) ? j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean) : [];
+  // No `files` array is an unread list, not an empty one: "this PR changes nothing" is a claim (foreman#110), never a default.
+  if (!Array.isArray(j.files)) throw new Error(`PR #${pr}: GitHub returned no file list`);
+  return j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean);
 }
 
 /**

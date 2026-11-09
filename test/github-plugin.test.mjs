@@ -152,7 +152,7 @@ test("a fake work source registered as a plugin is the one selection and impleme
 });
 
 test("review counts the fake work source's queue to keep its checkout; nothing falls back to GitHub", async () => {
-  writeFileSync(F.issues, JSON.stringify([{ number: 9, title: "under review", labels: [{ name: "pr under review" }] }]));
+  writeFileSync(F.issues, JSON.stringify([{ number: 9, title: "under review", labels: [{ name: "approved" }, { name: "pr under review" }] }]));
   writeFileSync(F.prOpen, "");
   const fake = fakeSource();
   let reviewed = 0;

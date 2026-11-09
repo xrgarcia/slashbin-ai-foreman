@@ -61,6 +61,7 @@ if (args[0] === "issue" && args[1] === "list") out([{ number: ${ISSUE}, title: "
 else if (args[0] === "pr" && args[1] === "list") out([{ number: ${PR}, url: "https://github.com/${REPO}/pull/${PR}", title: "Build #${ISSUE}", body: "Closes #${ISSUE}", headRefName: "foreman/${ISSUE}-build", baseRefName: "develop" }]);
 else if (args[0] === "pr" && args[1] === "view" && has("headRefOid")) out({ headRefOid: w.head });
 else if (args[0] === "pr" && args[1] === "view" && has("--json state")) out({ state: "OPEN" });
+else if (args[0] === "pr" && args[1] === "view" && has("--json files")) out({ files: [{ path: "a.ts" }] });
 else if (args[0] === "pr" && args[1] === "view" && has("reviews")) out({ reviews: w.reviews ?? [], commits: [{ committedDate: "2026-11-01T19:40:00Z" }] });
 else if (args[0] === "pr" && args[1] === "view") out("{}");
 else if (args[0] === "api" && has("/branches/")) out(w.head);
