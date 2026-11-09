@@ -103,3 +103,24 @@ export function ghSpawnProblems(sources) {
   }
   return problems;
 }
+
+/**
+ * Core files that read an issue title for a relation (slashbin-ai-foreman#267), given each src-relative file's
+ * text: the `follow-up to #N` phrase anywhere in code, or a line that touches a title and an issue-number pattern
+ * (`#\d` / `#(\d+)`). The relation comes from the code host (`relationsOf`); only plugin code reads a title for
+ * it. No allowlist covers this. Comments are ignored.
+ */
+export function titleRelationProblems(sources) {
+  const problems = [];
+  for (const [rel, text] of Object.entries(sources)) {
+    if (isPlugin(rel)) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+    if (/follow-up\s+to\s+#/i.test(code)) {
+      problems.push(`src/${rel} parses a title for "follow-up to #N"; ask the code host (codeHost().relationsOf) instead`);
+      continue;
+    }
+    const line = code.split("\n").find((l) => /\btitles?\b/i.test(l) && /#\(?\\d/.test(l));
+    if (line) problems.push(`src/${rel} reads an issue title for an issue number (${line.trim().slice(0, 80)}); ask the code host (codeHost().relationsOf) instead`);
+  }
+  return problems;
+}

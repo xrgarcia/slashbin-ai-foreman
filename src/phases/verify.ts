@@ -3,7 +3,7 @@
 import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import type { SessionEvent } from "../adapters.js";
+import type { Relation, SessionEvent } from "../adapters.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { roleFor } from "../plugins/registry.js";
@@ -11,7 +11,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { fieldTable, type VerifyHold } from "../issue-records.js";
-import { followUpTargets, handoffSubject } from "../unstick.js";
+import { handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
@@ -140,8 +140,8 @@ export function devVerifyHolding(
 
 /**
  * The merged issue whose visual QA FAIL is waiting on the EM's decision, or null. It does not hold the repo
- * (the cap frees it), but the EM's follow-up to it must still build before unrelated queued work, so
- * implement looks its follow-ups up too. Pure, exported for tests.
+ * (the cap frees it), but the EM's fix for it must still build before unrelated queued work, so
+ * implement looks up what corrects it too. Pure, exported for tests.
  */
 export function visualDecisionHolder(merged: readonly number[], held: Readonly<Record<number, VerifyHold>>, maxAttempts: number): number | null {
   for (const n of [...merged].sort((a, b) => a - b)) {
@@ -152,25 +152,28 @@ export function visualDecisionHolder(merged: readonly number[], held: Readonly<R
 }
 
 /**
- * The issues in `batch` filed as the follow-up to `holder` — the fix its dev
- * verification is waiting on — by the title's "follow-up to #N". Pure,
- * exported for tests.
+ * What a held dev verification lets build now: the `candidates` that correct
+ * `holder` (`Relation.corrects`, src/adapters.ts; slashbin-ai-foreman#267). The
+ * caller passes everything buildable, not just the trimmed batch: a fix filed
+ * after the queue's older work sat outside it, and the verification waited on
+ * a fix the build never saw (Slashbin-console #1440 behind #1431, 2026-10-27).
+ * Pure, exported for tests.
  */
-export function followUpsOf(holder: number, batch: readonly number[], titles: ReadonlyMap<number, string>): number[] {
-  return batch.filter((n) => followUpTargets(titles.get(n) ?? "").includes(holder));
+export function correctionsToBuild(holder: number, candidates: readonly number[], relations: ReadonlyMap<number, Relation>): number[] {
+  return [...new Set(candidates)].filter((n) => relations.get(n)?.corrects.includes(holder));
 }
 
 /**
- * What a held dev verification lets build now: its follow-ups, found across
- * everything buildable (`handOff`), not just the build's `batch`. The batch is
- * trimmed to the top of the queue by priority then number, so a rework issue
- * filed after the queue's older work sat outside it, and the verification
- * waited on a fix the build never saw (Slashbin-console #1440 behind #1431,
- * 2026-10-27: "this build takes #1432, 2 stay queued", every cycle). Pure,
- * exported for tests.
+ * The `candidates` that look like the fix for `holder` but carry no relation to
+ * it: they mention it without correcting it, so they queue behind the very
+ * verification they may be meant to clear (Slashbin-console#1476 behind #1438,
+ * foreman#131). Never built on that guess; the caller says so. Pure, exported for tests.
  */
-export function followUpsToBuild(holder: number, batch: readonly number[], handOff: readonly number[], titles: ReadonlyMap<number, string>): number[] {
-  return followUpsOf(holder, [...new Set([...batch, ...handOff])], titles);
+export function unlinkedFixes(holder: number, candidates: readonly number[], relations: ReadonlyMap<number, Relation>): number[] {
+  return [...new Set(candidates)].filter((n) => {
+    const r = relations.get(n);
+    return n !== holder && r !== undefined && r.mentions.includes(holder) && !r.corrects.includes(holder);
+  });
 }
 
 /** The evidence links (comment and image URLs) in the SRE's or QA's output, distinct, in order, at most `max`. Pure, exported for tests. */

@@ -46,7 +46,7 @@ import type { ProdRelease } from "../issue-records.js";
 import { fieldTable } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
-import { epicChildClosedAlert, followUpOrigin } from "../unstick.js";
+import { epicChildClosedAlert } from "../unstick.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
@@ -191,17 +191,20 @@ async function writable(repoConfig: RepoConfig, rel: ProdRelease, logger: Logger
 
 /**
  * Hand the EM the epics a child about to close in production belongs to: those its body names, or for a
- * "follow-up to #N" those #N names. Recorded BEFORE the child is closed, so the hand-off is durable when the
+ * fix those of the issue it corrects (`relationsOf`). Recorded BEFORE the child is closed, so the hand-off is durable when the
  * close is acknowledged. A failed read of the body or a failed save throws: nothing is closed, the pass fails
  * closed, and the next healthy pass finds the child still open and raises it again.
  */
-async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: number, title: string, logger: Logger): Promise<void> {
+async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: number, logger: Logger): Promise<void> {
   // No epic label configured (`epicRefLabel`): epics are not tracked, so nothing is read or raised.
   const label = repoConfig.epicRefLabel;
   if (!label) return;
   let epics = epicRefs(await codeHost().readIssueBody(repoConfig, n), label);
-  const origin = followUpOrigin(title);
-  if (!epics.length && origin !== null) epics = epicRefs(await codeHost().readIssueBody(repoConfig, origin), label);
+  if (!epics.length) {
+    // A fix belongs to the epics of the issue it corrects (its strongest link: `Relation`, src/adapters.ts).
+    const origin = (await codeHost().relationsOf(repoConfig, [n], logger)).get(n)?.corrects[0];
+    if (origin !== undefined) epics = epicRefs(await codeHost().readIssueBody(repoConfig, origin), label);
+  }
   // An epic already closed has nothing left to be ready for. Unreadable counts as open: asking twice is cheaper than never.
   if (repoConfig.epicRepo) {
     const open: number[] = [];
@@ -242,7 +245,7 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   const openIssues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const open = new Set(openIssues.map((i) => i.number));
   for (const n of (await writable(repoConfig, rel, logger)).filter((i) => open.has(i) && saved.has(i))) {
-    await noteEpicClose(rt, repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
+    await noteEpicClose(rt, repoConfig, n, logger);
     // Close first, comment once it is closed: a close that fails is retried next pass and must not repeat the comment.
     if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
       notClosed.push(n);
