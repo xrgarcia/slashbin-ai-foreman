@@ -157,7 +157,7 @@ async function reviewPass(
   // The session reads the code from here rather than cloning one for itself.
   // Prepared before the run so it is warm on arrival; see review-checkout.ts
   // for why an unmanaged clone per review took the whole box down.
-  const checkoutPath = prepareReviewCheckout(config, repoConfig, reviewLogger);
+  const checkoutPath = await prepareReviewCheckout(config, repoConfig, reviewLogger);
 
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);

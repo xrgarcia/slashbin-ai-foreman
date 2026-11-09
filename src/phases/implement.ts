@@ -208,7 +208,7 @@ export async function tryBatchImplementation(
 
   // Read-only: say once per golden version that this repo's skill copy is
   // behind. The copy changes only below, when an approved issue is built.
-  if (config.skillSync?.enabled) rt.skillSync.noticeSkillDrift(config.skillSync, repoConfig, repoLogger);
+  if (config.skillSync?.enabled) await rt.skillSync.noticeSkillDrift(config.skillSync, repoConfig, repoLogger);
 
   // Gate: are there approved issues to implement? The work source offers
   // every eligible item, uncapped. Two lists are cut from that offer:
@@ -472,8 +472,8 @@ export async function tryBatchImplementation(
     // it, never the session; it cannot fail the issue.
     // Hygiene: local <base> is brought level with origin/<base>. Correctness does not depend on it: the session starts
     // from an exact ref (below), never from wherever local <base> points.
-    alignLocalBase(repoConfig, repoLogger);
-    if (config.skillSync?.enabled) skillSync = rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
+    await alignLocalBase(repoConfig, repoLogger);
+    if (config.skillSync?.enabled) skillSync = await rt.skillSync.syncSkillsForIssue(config.skillSync, repoConfig, actionableIssues, repoLogger);
     // A skip is as fail-open as a failure and was silent: the forecaster's ship skill went
     // undelivered for a day on an unlogged "uncommitted changes" skip (EM, 2026-11-05).
     if (skillSync?.status === "skipped") repoLogger.warn(`Skill sync skipped — implementing on the existing skill: ${skillSync.reason}`);
@@ -483,7 +483,7 @@ export async function tryBatchImplementation(
     const branches: Record<number, string> = {};
     for (const n of actionableIssues) branches[n] = foremanBranchName(repoConfig, n, titles.get(n) ?? "");
     // The session's start ref: this session's own skill-sync commit if it made one, else origin/<base> as a SHA.
-    const startRef = resolveStartRef(repoConfig, skillSync);
+    const startRef = await resolveStartRef(repoConfig, skillSync);
     const result = await implementApprovedIssues(rt.trust, repoConfig, repoLogger, runAbort.signal, priorFailure, actionableIssues, actionableIssues, branches, startRef)
       .catch(reportLaunchThrew);
     reportRunResult(runnerName(), !!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
@@ -750,7 +750,7 @@ export async function tryBatchImplementation(
   } finally {
     activeRuns.delete(runAbort);
     rt.builds.ended(repoName);
-    if (skillSync) settleSkillSync(repoConfig, skillSync, repoLogger);
+    if (skillSync) await settleSkillSync(repoConfig, skillSync, repoLogger);
     await emit(rt, { kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }
 }

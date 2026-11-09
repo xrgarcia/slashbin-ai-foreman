@@ -310,7 +310,7 @@ export async function tryVerify(
       // Waiting on the Foreman's fix: it landed once its issue's PR merged (or, with none filed, base moved).
       const landed = h.rework.issue !== null
         ? (await codeHost().findIssuesMergedToBase(repoConfig, [h.rework.issue], vlog)).length > 0
-        : baseAdvancedSince(repoConfig, h.heldAt) === true;
+        : (await baseAdvancedSince(repoConfig, h.heldAt)) === true;
       if (landed) {
         held[n] = { ...h, rework: { ...h.rework, landed: true } };
         vlog.info(`#${n}: the visual QA rework ${h.rework.issue !== null ? `#${h.rework.issue} ` : ""}landed — re-verifying`);
@@ -323,7 +323,7 @@ export async function tryVerify(
       ? await releaseIfResolved(rt, "verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
       : await releaseIfResolved(rt, kind, {
         specEdited: await issueEditedSince(repoConfig, n, h.heldAt),
-        ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
+        ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: await baseAdvancedSince(repoConfig, h.heldAt) } : {}),
         // Exhausted on a reason that no longer charges (it joined TOOLING_HOLDS after the
         // attempts were spent): those attempts were never verdicts, so it reopens.
         ...(exhausted ? { holdNoLongerCharged: isToolingHold(h.reason) } : {}),
