@@ -255,3 +255,31 @@ test("batch instructions merge into the issue's own branch and deliver via its P
   assert.doesNotMatch(body, /Merge the branches into `develop` locally/);
   assert.match(body, /own PR into `develop`/);
 });
+
+test("the issue's acceptance: plain `Updates express from 4.22.3 to 5.3.0` reads as a major, renders yes, counts in the title", () => {
+  const c = describeDependencyPR(158, "chore(deps): bump express and @types/express", "Updates express from 4.22.3 to 5.3.0");
+  assert.equal(c.major, true);
+  const { title, body } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(title, /\(1 major\)/);
+  assert.match(body, /\*\*yes\*\*/);
+  assert.match(body, /\*\*1 of these is a major version change\.\*\*/);
+});
+
+test("a generic group keeps an unread package in its inventory: major stays unknown, nothing claims no major", () => {
+  const body = "Updates `qs` from 6.11.0 to 6.14.0\n\n| Package | From | To |\n|---|---|---|\n| [qs](https://x/qs) | `6.11.0` | `6.14.0` |\n| [express](https://x/express) | see changelog | see changelog |\n";
+  const c = describeDependencyPR(315, "chore(deps): bump the npm_and_yarn group with 2 updates", body);
+  assert.deepEqual(c.packages.map((p) => p.toLowerCase()).sort(), ["express", "qs"]);
+  assert.equal(c.major, null);
+  const { title, body: issue } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(title, /\(1 unknown\)/);
+  assert.doesNotMatch(issue, /None of these crosses a major version/);
+  assert.match(issue, /express \(version not stated\)/);
+});
+
+test("a mixed batch reports the known major and the unknown ones in the anchor sentence as well as the title", () => {
+  const known = describeDependencyPR(415, "chore(deps): bump vite from 5.4.21 to 8.2.2");
+  const unread = describeDependencyPR(315, "chore(deps): bump qs and express");
+  const { title, body } = buildDependencyBatchIssue("develop", [known, unread]);
+  assert.match(title, /\(1 major\) \(1 unknown\)/);
+  assert.match(body, /\*\*1 of these is a major version change\.\*\*.*A further 1 is grouped with versions the PR does not state/);
+});

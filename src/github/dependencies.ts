@@ -191,8 +191,9 @@ export function describeDependencyPR(number: number, title: string, body?: strin
   const moves = versionMovesFromBody(body ?? "");
   // A group title ("bump the npm_and_yarn group ...") names no package; the body does.
   if (packages.length === 0 || /\bgroup\b/i.test(grouped?.[1] ?? "")) {
-    const named = [...new Set(moves.map((m) => m.package))];
-    if (named.length > 0) packages = named;
+    const seen = new Map<string, string>();
+    for (const name of [...packagesMentionedInBody(body ?? ""), ...moves.map((m) => m.package)]) if (!seen.has(name.toLowerCase())) seen.set(name.toLowerCase(), name);
+    if (seen.size > 0) packages = [...seen.values()];
   }
   const readable = packages.length > 0 && packages.every((p) => moves.some((m) => m.package.toLowerCase() === p.toLowerCase()));
   const relevant = moves.filter((m) => packages.some((p) => p.toLowerCase() === m.package.toLowerCase()));
@@ -204,6 +205,18 @@ export function describeDependencyPR(number: number, title: string, body?: strin
     change.to = relevant[0].to;
   }
   return change;
+}
+
+/** Every package a Dependabot PR body names, whether or not it states the versions (so an unread one stays in the inventory). */
+export function packagesMentionedInBody(body: string): string[] {
+  const names: string[] = [];
+  for (const m of body.matchAll(/Updates\s+`?\[?([^\s`\]\[]+)\]?`?(?:\([^)]*\))?(?=\s+from\b|[ \t]*$)/gm)) names.push(m[1]);
+  for (const m of body.matchAll(/Bumps\s+\[([^\]]+)\]\([^)]*\)/g)) names.push(m[1]);
+  for (const line of body.split("\n")) {
+    const row = /^\|\s*\[([^\]]+)\]\([^)]*\)\s*\|/.exec(line.trim());
+    if (row) names.push(row[1]);
+  }
+  return names;
 }
 
 /**
@@ -222,7 +235,7 @@ export function versionMovesFromBody(body: string): { package: string; from: str
     moves.set(key, { package: pkg, from, to });
   };
   const ver = "v?[0-9][^\\s`|,;)]*";
-  for (const m of body.matchAll(new RegExp(`Updates \`([^\`]+)\` from \`?(${ver})\`? to \`?(${ver})\`?`, "g"))) add(m[1], m[2], m[3].replace(/[.]$/, ""));
+  for (const m of body.matchAll(new RegExp(`Updates \`?([^\`\\s]+)\`? from \`?(${ver})\`? to \`?(${ver})\`?`, "g"))) add(m[1], m[2], m[3].replace(/[.]$/, ""));
   for (const m of body.matchAll(new RegExp(`Bumps \\[([^\\]]+)\\]\\([^)]*\\) from \`?(${ver})\`? to \`?(${ver})\`?`, "g"))) add(m[1], m[2], m[3].replace(/[.]$/, ""));
   for (const line of body.split("\n")) {
     const row = new RegExp(`^\\|\\s*\\[([^\\]]+)\\]\\([^)]*\\)\\s*\\|\\s*\`?(${ver})\`?\\s*\\|\\s*\`?(${ver})\`?\\s*\\|`).exec(line.trim());
@@ -299,7 +312,8 @@ export function buildDependencyBatchIssue(
     `proves the application still runs.`,
     ``,
     majors.length > 0
-      ? `**${majors.length} of these ${majors.length === 1 ? "is a" : "are"} major version change${majors.length === 1 ? "" : "s"}.** A major bump is the class most likely to break a runtime while passing every check.`
+      ? `**${majors.length} of these ${majors.length === 1 ? "is a" : "are"} major version change${majors.length === 1 ? "" : "s"}.** A major bump is the class most likely to break a runtime while passing every check.` +
+        (unknownMajors.length > 0 ? ` A further ${unknownMajors.length} ${unknownMajors.length === 1 ? "is" : "are"} grouped with versions the PR does not state (marked unknown below): read ${unknownMajors.length === 1 ? "it" : "them"} too.` : "")
       : unknownMajors.length > 0
         ? `No PR here is known to cross a major version, but ${unknownMajors.length} ${unknownMajors.length === 1 ? "is" : "are"} grouped with versions the PR does not state (marked unknown below) — read ${unknownMajors.length === 1 ? "it" : "them"} before deciding.`
         : `None of these crosses a major version.`,
