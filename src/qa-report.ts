@@ -302,7 +302,7 @@ export async function runQaBeforeMerge(repo: string, pr: number, headSha: string
       const comments = deps.comments ? await deps.comments(pr) : null;
       // Several markers for one sha (a PASS, then a re-run, then a fresh FAIL): the newest one is the verdict.
       const verdict = hasPass && hasFail && comments ? newestVerdict(comments, passMarker, failMarker) : hasPass ? "PASS" : "FAIL";
-      if (comments && rerunVoidsVerdict(comments, passMarker, failMarker)) {
+      if (comments && qaRerunVoidsHead(comments, headSha)) {
         logger.warn(`QA: PR #${pr} has an EM QA re-run newer than every QA Report for ${headSha.slice(0, 7)}; running QA again`);
       } else if (verdict === "FAIL") {
         return { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true };
@@ -410,6 +410,10 @@ export function rerunVoidsVerdict(comments: readonly PrComment[], ...markers: st
   const report = comments.filter((c) => markers.some((m) => c.body.includes(m))).reduce<string | null>((a, c) => (a === null || c.at > a ? c.at : a), null);
   return request !== null && report !== null && request > report;
 }
+
+/** Pure: the EM's `**EM QA re-run` is newer than every PASS/FAIL report for `headSha`. The one predicate runQaBeforeMerge and the revise phase share. */
+export const qaRerunVoidsHead = (comments: readonly PrComment[], headSha: string): boolean =>
+  rerunVoidsVerdict(comments, qaVerdictMarker(headSha, "PASS"), qaVerdictMarker(headSha, "FAIL"));
 
 /** Pure: which of the two verdict markers is on the newest report. A tie, or neither found, reads as FAIL (the stricter). */
 export function newestVerdict(comments: readonly PrComment[], passMarker: string, failMarker: string): "PASS" | "FAIL" {

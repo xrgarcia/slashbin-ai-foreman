@@ -79,6 +79,7 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
   reviewMerged: async (c, cfg, n, log) => await c.reviewOutcome(cfg, n, "prMerged", log),
   changesRequested: async (c, cfg, n, log) => await c.reviewOutcome(cfg, n, "prPendingActions", log),
   revised: async (c, cfg, n, log) => await c.revisionDone(cfg, n, log),
+  qaRerunRevise: async (c, cfg, n, log) => await c.revisionDone(cfg, n, log),
   verifyPassed: async (c, cfg, n, log) => await c.verifyPassed(cfg, n, log),
   qaRerun: async (c, cfg, n, log) => await c.qaRerun(cfg, n, log),
   recoverPassed: async (c, cfg, n, log) => await c.deadZoneResolve(cfg, n, "pass", log),

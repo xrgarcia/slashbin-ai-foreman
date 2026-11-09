@@ -75,6 +75,7 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `reviewMerged` | inReview | merged | `merged` | The review approved and merged (qaBeforeMerge on: after QA passed the approved head); dev verification is next. |
 | `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, QA failed the approved head (qaBeforeMerge on), or a stranded changes-requested verdict is caught up. |
 | `revised` | changesRequested | inReview | `inReview` | A revise session pushed changes; back to review. |
+| `qaRerunRevise` | changesRequested | inReview | `inReview` | The EM asked for QA again on the open PR (a PR comment opening `**EM QA re-run`, newer than every QA Report for its head) while it waited for a revise session: no session runs, and it goes back to review and QA. |
 | `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`. |
 | `qaRerun` | approved | merged | `merged` | The EM asked for QA again on the merged PR (a PR comment opening `**EM QA re-run`): dev verification and the QA gate run again (slashbin-ai-foreman#158). |
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |
@@ -101,6 +102,7 @@ stateDiagram-v2
   inReview --> merged: reviewMerged
   inReview --> changesRequested: changesRequested
   changesRequested --> inReview: revised
+  changesRequested --> inReview: qaRerunRevise
   merged --> approved: verifyPassed
   approved --> merged: qaRerun
   unknown --> approved: recoverPassed
