@@ -21,6 +21,8 @@ export const REPO_KEY_TTL_MS = 60 * 60_000;
 export interface RepoIdentity {
   /** The key `repo` is compared on. Memoised since the last `beginScan`. Throws when the registry cannot answer. */
   keyOf(repo: string): Promise<string>;
+  /** The registry's customer GitHub labels (the non-null `systems.github_label` of each live customer). Memoised, failure included, until the next `beginScan`. Throws when the registry cannot answer. */
+  customerLabels(): Promise<string[]>;
   /** A new scan: drop answers older than REPO_KEY_TTL_MS and reopen the MCP session. */
   beginScan(): void;
   /** HTTP requests sent to the registry so far (retries included), for the scan's log line. */
@@ -49,7 +51,7 @@ export type RepoIdentityOptions = {
   now?: () => number;
 };
 
-type Answer = { kind?: unknown; key?: unknown };
+type Answer = { kind?: unknown; key?: unknown; customers?: unknown };
 
 /** The JSON-RPC message in a response body, whether the server sent JSON or one SSE event. */
 function rpcMessage(body: string, contentType: string): { result?: unknown; error?: { message?: string } } {
@@ -64,15 +66,15 @@ function rpcMessage(body: string, contentType: string): { result?: unknown; erro
 }
 
 /** The tool's answer: `structuredContent`, else the first text block parsed as JSON. */
-function answerOf(result: unknown): Answer {
+function answerOf(result: unknown, tool: string): Answer {
   const r = (result ?? {}) as { isError?: boolean; structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> };
-  if (r.isError) throw new RepoIdentityError(`repo_identity failed: ${r.content?.[0]?.text ?? "tool error"}`);
+  if (r.isError) throw new RepoIdentityError(`${tool} failed: ${r.content?.[0]?.text ?? "tool error"}`);
   if (r.structuredContent && typeof r.structuredContent === "object") return r.structuredContent as Answer;
   const text = r.content?.find((c) => c.type === "text")?.text;
   try {
     return JSON.parse(text ?? "") as Answer;
   } catch {
-    throw new RepoIdentityError("repo_identity answered with no result");
+    throw new RepoIdentityError(`${tool} answered with no result`);
   }
 }
 
@@ -84,6 +86,7 @@ export function createRepoIdentity(opts: RepoIdentityOptions): RepoIdentity {
   let requests = 0;
   let session: Promise<string | null> | null = null;
   let id = 0;
+  let customers: Promise<string[]> | null = null;
 
   const postOnce = async (payload: object, sessionId: string | null) => {
     requests++;
@@ -130,15 +133,27 @@ export function createRepoIdentity(opts: RepoIdentityOptions): RepoIdentity {
     return session;
   };
 
-  const ask = async (repo: string): Promise<string> => {
+  /** One tool call on the scan's session; the tool's answer. */
+  const call = async (tool: string, args: object): Promise<Answer> => {
     const sid = await open();
-    const call = await post({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name: "repo_identity", arguments: { repo } } }, sid);
-    const msg = rpcMessage(call.body, call.res.headers.get("content-type") ?? "");
-    if (msg.error) throw new RepoIdentityError(`repo_identity failed: ${msg.error.message ?? "error"}`);
-    const a = answerOf(msg.result);
+    const res = await post({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name: tool, arguments: args } }, sid);
+    const msg = rpcMessage(res.body, res.res.headers.get("content-type") ?? "");
+    if (msg.error) throw new RepoIdentityError(`${tool} failed: ${msg.error.message ?? "error"}`);
+    return answerOf(msg.result, tool);
+  };
+
+  const ask = async (repo: string): Promise<string> => {
+    const a = await call("repo_identity", { repo });
     if (a.kind !== "slashbin" && a.kind !== "other" && a.kind !== "unknown") throw new RepoIdentityError(`repo_identity answered an unknown kind for ${repo}`);
     // Only a Slashbin or exactly-registered repo has a key worth comparing; anything else is itself.
     return a.kind !== "unknown" && typeof a.key === "string" && a.key ? a.key : repo;
+  };
+
+  const askCustomers = async (): Promise<string[]> => {
+    const a = await call("list_customers", {});
+    if (!Array.isArray(a.customers)) throw new RepoIdentityError("list_customers answered no customers");
+    const labels = a.customers.map((c: { systems?: { github_label?: unknown } } | null) => c?.systems?.github_label);
+    return labels.filter((l): l is string => typeof l === "string" && l !== "");
   };
 
   return {
@@ -152,7 +167,12 @@ export function createRepoIdentity(opts: RepoIdentityOptions): RepoIdentity {
       p.catch(() => { if (memo.get(repo) === entry) memo.delete(repo); });
       return p;
     },
+    customerLabels() {
+      customers ??= askCustomers();
+      return customers;
+    },
     beginScan() {
+      customers = null;
       for (const [repo, e] of memo) if (now() - e.at >= REPO_KEY_TTL_MS) memo.delete(repo);
       session = null;
     },

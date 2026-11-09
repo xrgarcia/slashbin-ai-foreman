@@ -2,7 +2,7 @@
 // stage → holder/status/label, the live-session lease, one stage label per card.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stageTarget, assigneeFor, liveRows, withStage, ensureStageLabels } from "../dist/paperclip/board.js";
+import { stageTarget, assigneeFor, liveRows, withStage, ensureStageLabels, customerLabelOf, withCustomerLabel, ensureCustomerLabels, NO_CUSTOMER_LABEL } from "../dist/paperclip/board.js";
 import { PAPERCLIP_STAGES } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
 
@@ -96,4 +96,38 @@ test("ensureStageLabels: creates only the missing labels; a lost race (409) re-l
   assert.equal(m.get("changesRequested"), "race");
   assert.equal(created.length, 9);
   assert.equal(m.size, 11);
+});
+
+const REG = ["cmneb", "jerky-com", "slashbin-ai", "slashbin-io"];
+
+test("customerLabelOf: exact registry names only; several matches give the lexicographically smallest; none is null", () => {
+  assert.equal(customerLabelOf(["bug", "jerky-com"], REG), "jerky-com");
+  assert.equal(customerLabelOf(["bug", "S3", "approved"], REG), null);
+  assert.equal(customerLabelOf(["Jerky-Com", "jerky-com-x"], REG), null);
+  assert.equal(customerLabelOf(["slashbin-io", "cmneb"], REG), "cmneb");
+  assert.equal(customerLabelOf([], REG), null);
+});
+
+test("withCustomerLabel: strips every customer and marker id, keeps the rest in order, appends the wanted one", () => {
+  assert.deepEqual(withCustomerLabel(["a", "c1", "b", "c2", "m"], new Set(["c1", "c2", "m"]), "c2"), ["a", "b", "c2"]);
+  assert.deepEqual(withCustomerLabel(["a"], ["c1"], "m"), ["a", "m"]);
+});
+
+test("ensureCustomerLabels: reuses by name, creates the rest and the marker, a lost race (409) re-lists", async () => {
+  const labels = [{ id: "e1", name: "jerky-com" }];
+  const created = [];
+  const client = {
+    listLabels: async () => labels,
+    createLabel: async (l) => {
+      if (l.name === "cmneb") { labels.push({ id: "race", name: l.name }); throw Object.assign(new Error("409"), { status: 409 }); }
+      const made = { id: `n${created.length}`, ...l };
+      created.push(made.name); labels.push(made);
+      return made;
+    },
+  };
+  const m = await ensureCustomerLabels(client, REG);
+  assert.equal(m.get("jerky-com"), "e1");
+  assert.equal(m.get("cmneb"), "race");
+  assert.deepEqual(created, ["slashbin-ai", "slashbin-io", NO_CUSTOMER_LABEL.name]);
+  assert.equal(m.size, 5);
 });
