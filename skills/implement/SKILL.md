@@ -111,7 +111,7 @@ Whenever you stop **on an issue you have selected**:
 the Foreman was tracking for this repo.
 
 When the stop is waiting on another issue or PR — a dependency not merged yet, a file
-another PR delivers — add `waiting_on="<owner/repo#N>"` (or `#N` in this repo):
+another PR delivers, or a PR occupying the feature branch (name the occupying PR) — add `waiting_on="<owner/repo#N>"` (or `#N` in this repo):
 
 ```
 FOREMAN_RESULT: skipped issue=127 waiting_on="acme/site#166" reason="refund_policy.md is on unmerged PR #166"

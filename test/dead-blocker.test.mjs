@@ -140,7 +140,8 @@ test("wiring: landed is checked before PR attribution and behind the SHA guard; 
 
 test("a wait on an open PR is never told to dependents or labelled blocked", () => {
   const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
-  assert.match(impl, /isDeadBlockerReason\(reason\) && prBlockingSkip\(reason\) === null/);
+  assert.match(impl, /waitingOn \? waitingOnIsPr !== false : prBlockingSkip\(reason\) !== null/);
+  assert.match(impl, /isDeadBlockerReason\(reason\) && !waitsOnPr/);
 });
 
 test("a dependent is escalated under ITS repo's config, with a stuck kind the unstick stage reads", () => {
