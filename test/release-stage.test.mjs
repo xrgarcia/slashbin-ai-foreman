@@ -1802,3 +1802,14 @@ test("stranded sweep: an issue whose record cannot be read is not closed or aske
   assert.equal(gh().issues[618].state, "OPEN");
   assert.deepEqual(commentsOn(618), []);
 });
+
+test("stranded sweep: a skip waiting on a prerequisite is not a delivery and prompts no request", async () => {
+  world({ issues: [bare(681)], compareFiles: 0 });
+  await seed(rt, repo, 681, { skipped: { lastSkippedAt: "2026-10-12T10:00:00Z", reason: "blocked on a prerequisite", waitingOn: "example/rel#5" } });
+  await run();
+  assert.deepEqual(commentsOn(681), [], "no sign-off request");
+  assert.equal(gh().issues[681].state, "OPEN");
+  rescan();
+  await run();
+  assert.deepEqual(commentsOn(681), []);
+});

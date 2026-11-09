@@ -579,7 +579,7 @@ async function sweepStranded(rt: ForemanRuntime, repoConfig: RepoConfig, release
     if (ref) { await ask(n, `Its work merged to \`${repoConfig.baseBranch}\` in PR #${ref.prNumber} (${ref.prUrl}).`, ref.prNumber); continue; }
     // No merged PR in the lookup's window is not a verdict. A Foreman skip record is a no-code delivery.
     const skipped = records.get(n)?.skipped;
-    if (skipped) { await ask(n, `The Foreman skipped it (${skipped.reason}) and no recent merged PR closes it, so it may have been delivered without code.`); continue; }
+    if (skipped && !skipped.waitingOn) { await ask(n, `The Foreman skipped it (${skipped.reason}) and no recent merged PR closes it, so it may have been delivered without code.`); continue; }
     later(n);
   }
 }
