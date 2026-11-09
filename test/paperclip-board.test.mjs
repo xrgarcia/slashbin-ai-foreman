@@ -2,7 +2,7 @@
 // stage → holder/status/label, the live-session lease, one stage label per card.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stageTarget, assigneeFor, liveRows, withStage, ensureStageLabels, customerLabelOf, withCustomerLabel, ensureCustomerLabels, NO_CUSTOMER_LABEL } from "../dist/paperclip/board.js";
+import { stageTarget, assigneeFor, liveRows, withStage, ensureStageLabels, customerLabelsOf, withCustomerLabels, ensureCustomerLabels, NO_CUSTOMER_LABEL } from "../dist/paperclip/board.js";
 import { PAPERCLIP_STAGES } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
 
@@ -100,17 +100,17 @@ test("ensureStageLabels: creates only the missing labels; a lost race (409) re-l
 
 const REG = ["a second customer", "shop", "slashbin-ai", "slashbin-io"];
 
-test("customerLabelOf: exact registry names only; several matches give the lexicographically smallest; none is null", () => {
-  assert.equal(customerLabelOf(["bug", "shop"], REG), "shop");
-  assert.equal(customerLabelOf(["bug", "S3", "approved"], REG), null);
-  assert.equal(customerLabelOf(["Shop", "shop-x"], REG), null);
-  assert.equal(customerLabelOf(["slashbin-io", "a second customer"], REG), "a second customer");
-  assert.equal(customerLabelOf([], REG), null);
+test("customerLabelsOf: exact registry names only, every match once, ascending; none is empty", () => {
+  assert.deepEqual(customerLabelsOf(["bug", "shop"], REG), ["shop"]);
+  assert.deepEqual(customerLabelsOf(["bug", "S3", "approved"], REG), []);
+  assert.deepEqual(customerLabelsOf(["Shop", "shop-x"], REG), []);
+  assert.deepEqual(customerLabelsOf(["slashbin-io", "a second customer", "slashbin-io"], REG), ["a second customer", "slashbin-io"]);
+  assert.deepEqual(customerLabelsOf([], REG), []);
 });
 
-test("withCustomerLabel: strips every customer and marker id, keeps the rest in order, appends the wanted one", () => {
-  assert.deepEqual(withCustomerLabel(["a", "c1", "b", "c2", "m"], new Set(["c1", "c2", "m"]), "c2"), ["a", "b", "c2"]);
-  assert.deepEqual(withCustomerLabel(["a"], ["c1"], "m"), ["a", "m"]);
+test("withCustomerLabels: strips every customer and marker id, keeps the rest in order, appends the wanted ones", () => {
+  assert.deepEqual(withCustomerLabels(["a", "c1", "b", "c2", "m"], new Set(["c1", "c2", "m"]), ["c1", "c2"]), ["a", "b", "c1", "c2"]);
+  assert.deepEqual(withCustomerLabels(["a", "c1"], ["c1", "m"], ["m"]), ["a", "m"]);
 });
 
 test("ensureCustomerLabels: reuses by name, creates the rest and the marker, a lost race (409) re-lists", async () => {
