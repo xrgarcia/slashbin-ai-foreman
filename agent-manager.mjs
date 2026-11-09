@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn, execSync } from "child_process";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, openSync } from "fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync, openSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { recentLogs } from "./agent-logs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRY_POINT = join(__dirname, "dist", "cli.js");
@@ -198,13 +199,8 @@ function status() {
       }
     }
 
-    // Show last 5 log lines
-    try {
-      const log = readFileSync(LOG_FILE, "utf8").trim().split("\n");
-      const tail = log.slice(-5);
-      console.log("\nRecent logs:");
-      tail.forEach((l) => console.log(`  ${l}`));
-    } catch { /* no log file */ }
+    // The last 5 log lines, from where this daemon actually logs (agent-logs.mjs).
+    printRecent(5, "\nRecent logs");
   } else {
     console.log(`Agent${repoName ? ` (${repoName})` : ""} is not running`);
     if (pid) {
@@ -214,14 +210,45 @@ function status() {
   }
 }
 
+function readRecent(count) {
+  return recentLogs({
+    unit: systemdUnit(),
+    logFile: LOG_FILE,
+    count,
+    journal: (u, n) => execSync(`journalctl --user -u ${u} -n ${n} --no-pager -o cat`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
+    readFile: (f) => ({ text: readFileSync(f, "utf8"), mtimeMs: statSync(f).mtimeMs }),
+  });
+}
+
+/** Prints the last `count` log lines under `heading`, naming the source and labelling stale ones. */
+function printRecent(count, heading) {
+  const unit = systemdUnit();
+  const r = recentLogs({
+    unit,
+    logFile: LOG_FILE,
+    count,
+    journal: (u, n) => execSync(`journalctl --user -u ${u} -n ${n} --no-pager -o cat`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
+    readFile: (f) => ({ text: readFileSync(f, "utf8"), mtimeMs: statSync(f).mtimeMs }),
+  });
+  if (!r) {
+    console.log("No log file found");
+    return;
+  }
+  console.log(`${heading} (${r.source}):`);
+  if (r.note) console.log(`  [stale] ${r.note}`);
+  r.lines.forEach((l) => console.log(`  ${l}`));
+}
+
 function logs() {
   const lines = parseInt(args[1], 10) || 30;
-  try {
-    const log = readFileSync(LOG_FILE, "utf8").trim().split("\n");
-    log.slice(-lines).forEach((l) => console.log(l));
-  } catch {
+  const r = readRecent(lines);
+  if (!r) {
     console.log("No log file found");
+    return;
   }
+  console.error(`(${r.source})`);
+  if (r.note) console.error(`[stale] ${r.note}`);
+  r.lines.forEach((l) => console.log(l));
 }
 
 switch (command) {
