@@ -295,11 +295,22 @@ const sameSha = (a: string, b: string): boolean => a.length >= 7 && b.length >= 
 export async function runQaBeforeMerge(repo: string, pr: number, headSha: string, deps: QaDeps, logger: Logger): Promise<QaPreMergeDecision> {
   const has = deps.hasMarker ?? (async () => false);
   try {
-    if (await has(pr, qaVerdictMarker(headSha, "PASS"))) {
-      if (!(await reusedPassIsVoid(pr, headSha, deps))) return { kind: "pass", reused: true };
-      logger.warn(`QA: PR #${pr} has a PASS for ${headSha.slice(0, 7)} that captured no shot of a client change; running QA again`);
-    } else if (await has(pr, qaVerdictMarker(headSha, "FAIL"))) {
-      return { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true };
+    const passMarker = qaVerdictMarker(headSha, "PASS");
+    const failMarker = qaVerdictMarker(headSha, "FAIL");
+    const [hasPass, hasFail] = [await has(pr, passMarker), await has(pr, failMarker)];
+    if (hasPass || hasFail) {
+      const comments = deps.comments ? await deps.comments(pr) : null;
+      // Several markers for one sha (a PASS, then a re-run, then a fresh FAIL): the newest one is the verdict.
+      const verdict = hasPass && hasFail && comments ? newestVerdict(comments, passMarker, failMarker) : hasPass ? "PASS" : "FAIL";
+      if (comments && rerunVoidsVerdict(comments, passMarker, failMarker)) {
+        logger.warn(`QA: PR #${pr} has an EM QA re-run newer than every QA Report for ${headSha.slice(0, 7)}; running QA again`);
+      } else if (verdict === "FAIL") {
+        return { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true };
+      } else if (!(await reusedPassIsVoid(pr, headSha, deps))) {
+        return { kind: "pass", reused: true };
+      } else {
+        logger.warn(`QA: PR #${pr} has a PASS for ${headSha.slice(0, 7)} that captured no shot of a client change; running QA again`);
+      }
     }
   } catch (e) {
     logger.warn(`QA: PR #${pr} marker lookup failed (${String(e).slice(0, 200)}); running QA`);
@@ -386,6 +397,24 @@ async function changedOf(pr: number, deps: QaDeps): Promise<string[]> {
   } catch {
     return [CLIENT_PREFIX];
   }
+}
+
+/**
+ * Pure: whether the EM's `**EM QA re-run` voids the reused verdict: its newest comment is newer than the newest
+ * report carrying any of `markers` (every verdict marker for the sha). Any report newer than the request spends
+ * it, so it runs once per comment. It is not a review round (rulingState counts only QA reports and
+ * fail-stands). Same predicate as the post-merge re-run (newestRequest).
+ */
+export function rerunVoidsVerdict(comments: readonly PrComment[], ...markers: string[]): boolean {
+  const request = newestRequest(comments);
+  const report = comments.filter((c) => markers.some((m) => c.body.includes(m))).reduce<string | null>((a, c) => (a === null || c.at > a ? c.at : a), null);
+  return request !== null && report !== null && request > report;
+}
+
+/** Pure: which of the two verdict markers is on the newest report. A tie, or neither found, reads as FAIL (the stricter). */
+export function newestVerdict(comments: readonly PrComment[], passMarker: string, failMarker: string): "PASS" | "FAIL" {
+  const at = (m: string): string => comments.filter((c) => c.body.includes(m)).reduce((a, c) => (c.at > a ? c.at : a), "");
+  return at(passMarker) > at(failMarker) ? "PASS" : "FAIL";
 }
 
 /** Every PASS report on the PR for this head is void (none has shots). False when the edges to read it are missing. */
