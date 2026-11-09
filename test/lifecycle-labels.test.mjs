@@ -51,6 +51,10 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(GH_LOG)}, JSON.stringify(args) + "\\n");
 if (args[0] === "issue" && args[1] === "list") { process.stdout.write(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")); process.exit(0); }
+if (args[0] === "issue" && args[1] === "view") {
+  const i = JSON.parse(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")).find((x) => String(x.number) === args[2]);
+  process.stdout.write(JSON.stringify(i ? { state: "OPEN", labels: i.labels } : null)); process.exit(0);
+}
 if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) { process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs"); process.exit(0); }
 if (args[0] === "api" && /\\/branches\\//.test(args[1])) { process.stdout.write("0".repeat(40)); process.exit(0); }
 process.stdout.write("[]");
@@ -168,11 +172,11 @@ test("actionable set excludes the CONFIGURED lifecycle labels, not the defaults"
 
 test("implementation applies the configured under-review label", async () => {
   const c = load({ lifecycleLabels: CUSTOM });
-  resetGh();
+  resetGh([issue(7, "approved")]);
   const item = { issueNumber: 7, repo: "example/acceptance" };
   assert.equal(await new GitHubIssueConnector().record(
     { kind: "transition", item, observed: false, ...transition("implemented") }, c.repos[0], logger), true);
-  const [call] = ghCalls();
+  const call = ghCalls().find((a) => a[0] === "issue" && a[1] === "edit");
   assert.deepEqual(call, ["issue", "edit", "7", "--repo", "example/acceptance", "--add-label", "in-review"]);
 });
 

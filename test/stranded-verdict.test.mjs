@@ -30,9 +30,9 @@ test("a current verdict is checked for CHANGES_REQUESTED before the PR is skippe
   assert.match(guard, /stranded: true/);
 });
 
-test("only the latest verdict counts, and only CHANGES_REQUESTED strands", () => {
+test("only the latest review counts (a later COMMENTED holds), and only CHANGES_REQUESTED strands", () => {
   assert.match(body, /\.sort\(/);
-  assert.match(body, /verdicts\[verdicts\.length - 1\]\?\.state === "CHANGES_REQUESTED"/);
+  assert.match(body, /latest\[latest\.length - 1\]\?\.state === "CHANGES_REQUESTED"/);
   assert.match(body, /byReviewer\(r, reviewerLogin\)/);
 });
 

@@ -12,6 +12,7 @@ import type { Move, StageOrDone } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
+import { isForemanOwnedHead } from "./foreman-branch.js";
 import { laterStageLabels } from "./github/lifecycle-scan.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
 import { acceptanceVerdict } from "./github/acceptance-gate.js";
@@ -249,6 +250,21 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   async implementationDone(config: RepoConfig, num: number, logger: Logger): Promise<boolean> {
     const labels = config.lifecycleLabels;
     try {
+      // The issue is read live before the write, never assumed: an issue whose `approved` was withdrawn (or that
+      // closed) while its PR was being built must not be pulled back into review by the reconciler
+      // (foreman#46). A read that fails writes nothing.
+      const issue = await viewIssue(config, num);
+      if (!issue) {
+        logger.warn(`Not adding "${labels.prUnderReview}" to #${num}: the issue could not be read`);
+        return false;
+      }
+      if (issue.state !== "OPEN" || !issue.labels.includes(config.triggerLabel)) {
+        logger.warn(
+          `Not adding "${labels.prUnderReview}" to #${num}: it ${issue.state !== "OPEN" ? "is closed" : `no longer carries "${config.triggerLabel}" (withdrawn)`}. ` +
+          `Owner: the EM — re-apply "${config.triggerLabel}" if the work should resume.`,
+        );
+        return false;
+      }
       await ghAsync([
         "issue", "edit", String(num),
         "--repo", config.githubRepo,
@@ -746,6 +762,34 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
           covered.add(n);
         }
       }
+
+      // A side-branch PR (a head the Foreman does not own) still covers its issue, but it must not HIDE it
+      // (foreman#45): nothing the Foreman runs will review or merge it, so the issue would sit "covered" forever.
+      // Surface it as a hold with a named owner (the EM: close it, or re-home it onto a Foreman branch).
+      const sideBranch = new Map<number, number>();
+      for (const pr of openPrs) {
+        if (isForemanOwnedHead(config, pr.headRefName)) continue;
+        for (const n of extractImplementedIssues({ title: pr.title, body: pr.body })) {
+          if (actionable.includes(n) && !sideBranch.has(n)) sideBranch.set(n, pr.number);
+        }
+      }
+      if (sideBranch.size > 0) {
+        const held = this.acceptanceHeld.get(repo) ?? [];
+        for (const [issue, prNumber] of sideBranch) {
+          held.push({
+            item: { issueNumber: issue, repo },
+            reason: `covered only by PR #${prNumber}, whose head is not a Foreman branch, so nothing will review or merge it. Owner: the EM — close it or re-home it onto a \`${config.branchPrefix ?? "foreman/"}\` branch`,
+            skipped: true,
+          });
+        }
+        this.acceptanceHeld.set(repo, held);
+        const key = [...sideBranch].map(([i, n]) => `${i}:${n}`).sort().join(",");
+        const memo = `side:${repo}`;
+        if (this.coveredSkipAnnounced.get(memo) !== key) {
+          this.coveredSkipAnnounced.set(memo, key);
+          logger.warn(`${repo}: approved issue(s) ${[...sideBranch].map(([i, n]) => `#${i} (PR #${n})`).join(", ")} covered only by a side-branch PR; held for the EM`);
+        }
+      } else this.coveredSkipAnnounced.delete(`side:${repo}`);
 
       const uncovered: number[] = [];
       for (const issueNum of actionable) {
