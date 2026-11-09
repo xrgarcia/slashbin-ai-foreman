@@ -1667,3 +1667,79 @@ test("release view: updating R releases is O(R), not O(R^2): the view is a map, 
   assert.match(follow, /byPr\.set\(next\.pr, next\)/);
   assert.doesNotMatch(follow, /\.filter\(|\.sort\(/, "no per-update scan or sort");
 });
+
+// #220: issues the lifecycle lost. A close that failed after the labels were stripped (jerky_shipping #618/#620)
+// left an open issue with no label that nothing looked at; the sweep finds it from GitHub, not from labels.
+const bare = (number) => ({ number, title: `Issue ${number}`, state: "OPEN", labels: [] });
+const verifiedAt = () => ({ pr: 90, mergeSha: MERGE, at: "2026-10-10T21:41:00.000Z", tag: "release-20261010-2141-pr90", evidence: "healthcheck green, /orders 200" });
+const rescan = () => rt.memory.lastAdoptScan.clear();
+const patchGh = (fn) => { const st = gh(); fn(st); writeFileSync(GH_STATE, JSON.stringify(st)); };
+
+test("stranded sweep: an open unlabeled issue with a recorded production verification is closed with that evidence", async () => {
+  world({ issues: [bare(618), bare(620)], compareFiles: 0 });
+  await seed(rt, repo, 618, { prodVerified: verifiedAt() });
+  await seed(rt, repo, 620, { prodVerified: verifiedAt() });
+  await run();
+  assert.equal(gh().issues[618].state, "CLOSED");
+  assert.equal(gh().issues[620].state, "CLOSED");
+  assert.equal(gh().issues[618].reason, "completed");
+  const text = commentsOn(618).join("\n");
+  assert.match(text, /Verified in production/);
+  assert.match(text, /healthcheck green, \/orders 200/, "the evidence is on the issue");
+  assert.match(text, /close did not land/, "and the cause");
+  assert.equal(commentsOn(618).length, 1);
+  rescan();
+  await run();
+  assert.equal(commentsOn(618).length, 1, "a later scan does not comment again");
+});
+
+test("stranded sweep: a close that fails is retried on the next scan, with no comment until it lands", async () => {
+  world({ issues: [bare(618)], compareFiles: 0 });
+  await seed(rt, repo, 618, { prodVerified: verifiedAt() });
+  patchGh((st) => { st.failClose = [618]; });
+  await run();
+  assert.equal(gh().issues[618].state, "OPEN");
+  assert.deepEqual(commentsOn(618), []);
+  patchGh((st) => { st.failClose = []; });
+  rescan();
+  await run();
+  assert.equal(gh().issues[618].state, "CLOSED");
+  assert.equal(commentsOn(618).length, 1);
+});
+
+test("stranded sweep: merged work with no recorded verification is never closed; one marked request names the sign-off needed", async () => {
+  world({
+    issues: [bare(396)],
+    prs: [releasePr(70, "Closes #396", { state: "MERGED", headRefName: "feat/396", baseRefName: "develop", mergedAt: new Date().toISOString() })],
+    compareFiles: 0,
+  });
+  await run();
+  assert.equal(gh().issues[396].state, "OPEN", "no production verification is recorded, so it is not closed");
+  assert.equal(commentsOn(396).length, 1);
+  assert.match(commentsOn(396)[0], /foreman:stranded-issue/);
+  assert.match(commentsOn(396)[0], /ready for prod release/);
+  assert.match(commentsOn(396)[0], /production sign-off record/);
+  rescan();
+  await run();
+  assert.equal(commentsOn(396).length, 1, "asked once in a process");
+  rt = new ForemanRuntime(); memoryRecords();
+  await run();
+  assert.equal(commentsOn(396).length, 1, "and once across a restart: the marker on the issue is the memory");
+});
+
+test("stranded sweep: an unlabeled issue nothing delivered, an approved one, and a labelled one are left alone", async () => {
+  world({ issues: [bare(40), issue(41), { ...bare(42), labels: ["release pending"] }], compareFiles: 0 });
+  await seed(rt, repo, 41, { prodVerified: verifiedAt() });
+  await run();
+  for (const n of [40, 41]) { assert.equal(gh().issues[n].state, "OPEN"); assert.deepEqual(commentsOn(n), []); }
+  assert.equal(gh().issues[42].state, "OPEN");
+});
+
+test("stranded sweep: an issue whose record cannot be read is not closed or asked about", async () => {
+  world({ issues: [bare(618)], compareFiles: 0 });
+  await seed(rt, repo, 618, { prodVerified: verifiedAt() });
+  breakRecords([618]);
+  await run();
+  assert.equal(gh().issues[618].state, "OPEN");
+  assert.deepEqual(commentsOn(618), []);
+});

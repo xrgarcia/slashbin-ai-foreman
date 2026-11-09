@@ -20,6 +20,10 @@
 // promotion-verify sweep blocked ("**Production release check needs a
 // person.**"). Those skip steps 1 and 2.
 //
+// And it recovers what the lifecycle lost (#220): an open issue with no lifecycle label that nothing carries is
+// closed on its recorded production verification, or, when only its merge is known, one request asks the EM for the
+// sign-off (`sweepStranded`). Never closed without a recorded verification.
+//
 // No Discord message on any outcome (owner direction, 2026-10-10): a pass is
 // the closing comment on the issue, a hold or STOP is a comment and a label on
 // each issue, which moves its Paperclip card. Everything else is the log.
@@ -56,6 +60,11 @@ export const SOAK_DELAY_MS = 30 * 60_000;
 export const ADOPT_WINDOW_MS = 48 * 3_600_000;
 /** How often a repo is scanned for releases to adopt: one `gh pr list` each time. */
 export const ADOPT_SCAN_MS = 10 * 60_000;
+
+/** How many unlabeled open issues one scan looks at for the stranded sweep (their records are read, one call each). */
+export const STRANDED_SCAN_CAP = 25;
+/** Marks the one request the stranded sweep leaves on an issue whose work merged but that nothing carries. */
+export const STRANDED_MARK = "<!-- foreman:stranded-issue";
 
 /** Spacing of those head reads: one `commits/<branch>` call per repo per minute while a release is held. */
 export const HEAD_PROBE_MS = 60_000;
@@ -495,6 +504,69 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, releases
 }
 
 /**
+ * Open issues the lifecycle lost, found from GitHub every scan and not from the labels (#220).
+ *
+ * `passRelease` used to strip an issue's lifecycle labels before closing it; a close that failed left it open,
+ * unlabelled and carried by nothing (jerky_shipping #618 and #620, 2026-10-10), and no later pass looked at an
+ * issue with no label. Closing first (`closeReleased`) stops new ones; this recovers the ones already there, and
+ * any that never carried a label (#396, #680). An open issue with no lifecycle, blocked or trigger label that no
+ * release carries is one of two things:
+ *   - its record holds a passed production verification: it was verified, the close did not land. It is closed
+ *     now with that evidence;
+ *   - its work merged to the base branch (a PR that says it closes it) and nothing records it verified: it is not
+ *     closed, one comment asks the EM for the sign-off that lets the release stage carry and verify it.
+ * Anything else is an ordinary unapproved issue and is left alone. An issue is never closed without a recorded
+ * production verification. An issue carrying the trigger label is skipped: a person re-approving it is the signal
+ * that it is being worked again, whatever its old record says. Each issue is settled once per process, at most
+ * STRANDED_SCAN_CAP are read per scan, and one whose record cannot be read waits for a later scan.
+ */
+async function sweepStranded(rt: ForemanRuntime, repoConfig: RepoConfig, releases: readonly ProdRelease[], logger: Logger): Promise<void> {
+  const tracked = new Set(releases.flatMap((r) => r.issues));
+  const lifecycle = Object.values(repoConfig.lifecycleLabels);
+  const skip = [...lifecycle, repoConfig.github.blockedLabel, repoConfig.triggerLabel];
+  const key = (n: number) => `${repoConfig.githubRepo}#${n}`;
+  const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const candidates = open
+    .filter((i) => !skip.some((l) => codeHost().hasLabel(i, l)) && !tracked.has(i.number) && !rt.memory.strandedChecked.has(key(i.number)))
+    .slice(0, STRANDED_SCAN_CAP);
+  if (candidates.length === 0) return;
+  const { records, unavailable } = await rt.records.loadIssueRecords(repoConfig, candidates.map((i) => i.number));
+  const unrecorded: number[] = [];
+  for (const i of candidates) {
+    if (unavailable.has(i.number)) continue;
+    const verified = records.get(i.number)?.prodVerified;
+    if (!verified) { unrecorded.push(i.number); continue; }
+    if (!(await advance(rt, itemOf(repoConfig, i.number), "prodVerified", repoConfig, logger))) continue;  // retried next scan
+    rt.memory.strandedChecked.add(key(i.number));
+    await comment(repoConfig, i.number,
+      `**Verified in production.** Release PR #${verified.pr}${verified.mergeSha ? ` (\`${short(verified.mergeSha)}\`)` : ""} passed its production verification` +
+      `${verified.at ? ` at ${verified.at}` : ""}${verified.tag ? `, tagged \`${verified.tag}\`` : ""}, but this issue stayed open with no lifecycle label: ` +
+      `the close did not land. Closed now on that record. Evidence: ${verified.evidence ?? "the SRE's verification on the release PR"}.`, logger);
+    logger.info(`Closed #${i.number} on its recorded production verification (release PR #${verified.pr}); the release's close had not landed`);
+  }
+  if (unrecorded.length === 0) return;
+  const merged = await codeHost().findIssuesMergedToBase(repoConfig, unrecorded, logger);
+  const shipped = new Map(merged.map((m) => [m.issueNumber, m]));
+  for (const n of unrecorded) {
+    const ref = shipped.get(n);
+    if (!ref) { rt.memory.strandedChecked.add(key(n)); continue; }
+    try {
+      if (await codeHost().hasCommentContaining(repoConfig, n, STRANDED_MARK)) { rt.memory.strandedChecked.add(key(n)); continue; }
+    } catch (err) {
+      logger.debug(`Could not read #${n}'s comments: ${errText(err)}`);
+      continue;
+    }
+    rt.memory.strandedChecked.add(key(n));
+    await comment(repoConfig, n,
+      `${STRANDED_MARK} pr=${ref.prNumber} -->\n**Open, merged, and carried by no release.** Its work merged to \`${repoConfig.baseBranch}\` in PR #${ref.prNumber} ` +
+      `(${ref.prUrl}), but this issue has no lifecycle label and no production verification is recorded for it, so no release will carry it and it is not closed. ` +
+      `**EM: needs the production sign-off record.** Apply \`${repoConfig.lifecycleLabels.readyForProd}\` if the work should ship: the release stage then ` +
+      "carries it, the SRE verifies it in production, and the release closes it on a pass. Otherwise close it by hand.", logger);
+    logger.info(`#${n} merged in PR #${ref.prNumber} but nothing carries it; asked the EM for the production sign-off`);
+  }
+}
+
+/**
  * An orphan's work is on production with nothing left on base, so the release
  * whose merge IS production's head shipped it. That happens when an issue
  * reaches `ready for prod release` after promote read the list for the open
@@ -839,7 +911,10 @@ export async function tryRelease(
     // joined to another release or blocked as an orphan until every record reads, and nothing needs unblocking after.
     if (!reloaded) rlog.info("Release orphans: the release PRs cannot be listed; no issue is joined or blocked this scan");
     else if (reloaded.unreadable.size > 0) rlog.info(`Release orphans: release PR(s) ${[...reloaded.unreadable].map((n) => `#${n}`).join(", ")} cannot be read from the work source; no issue is joined or blocked this scan`);
-    else await blockOrphans(rt, repoConfig, releases, rlog);
+    else {
+      await blockOrphans(rt, repoConfig, releases, rlog);
+      await sweepStranded(rt, repoConfig, releases, rlog);
+    }
     releases = (await rt.releases.loadReleases(repoConfig, rlog))?.releases ?? releases;
   }
 

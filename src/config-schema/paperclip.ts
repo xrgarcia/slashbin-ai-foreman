@@ -68,8 +68,9 @@ const boardStagesSchema = z.object({
   // In the release PR the Foreman owns (`release pending`): Tech Lead approval, SRE deploy, prod verification.
   releasing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "releasing"),
   // In the release PR the Foreman owns, held by its failing EM sign-off status: an issue in it lacks
-  // `ready for prod release`. in_review, the EM's column: point `owner` at the EM's role to hand it over.
-  awaitingSignoff: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingSignoff"),
+  // `ready for prod release`. Blocked (#198): the release is stopped on a person; point `owner` at the EM's role
+  // to hand it over. The card returns to Releasing on the pass after the status turns green.
+  awaitingSignoff: stage(PAPERCLIP_FOREMAN_ROLE, "blocked", "awaitingSignoff"),
   // Merged to production, but prod verification held (`prod verification held`): re-verified on a back-off.
   // in_review, not blocked: the Foreman is still acting on it, and blocked is a person's queue.
   prodVerifyHeld: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "prodVerifyHeld"),

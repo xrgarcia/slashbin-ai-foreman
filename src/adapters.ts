@@ -171,6 +171,16 @@ export interface SnapshotHold {
   readonly author?: string | null;
 }
 
+/**
+ * The release PR whose failing EM sign-off status holds a `release pending` issue, read live each pass: its number and
+ * link, and the listed open issues that carry no sign-off label (empty when the status fails for another reason).
+ */
+export interface SignoffHold {
+  readonly pr: number;
+  readonly url: string;
+  readonly unsigned: readonly number[];
+}
+
 /** One item as the work source shows it at the end of a cycle. */
 export interface SnapshotCard {
   readonly item: WorkItem;
@@ -184,6 +194,8 @@ export interface SnapshotCard {
   readonly hold?: SnapshotHold;
   /** An open item's labels in the source's own terms, for a mirror that assigns by them (a human hold). */
   readonly labels?: readonly string[];
+  /** Set on a card at `awaitingSignoff`: what holds it. */
+  readonly signoff?: SignoffHold;
 }
 
 /** One lifecycle item as the work source shows it at the end of a cycle. */
@@ -201,6 +213,8 @@ export interface SnapshotItem {
    * behind it is stale. Absent: not read; nothing is inferred.
    */
   readonly foremanHeld?: boolean;
+  /** Set on an item at `awaitingSignoff`: the release PR and the unsigned issues that hold it. */
+  readonly signoff?: SignoffHold;
 }
 
 /**
