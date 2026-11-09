@@ -54,11 +54,14 @@ whether you pushed.
    PR's own CI is red. The checklist is: make each named failing check pass. Read
    `.github/workflows/` for the exact command each check runs, reproduce it locally, fix
    the code (never the test), and confirm it passes before pushing.
-5. **A comment starting `<!-- foreman-empty-diff` means the PR changes no files.** There is
-   nothing to review, so the review sent it here. Read the newest comment starting
-   `**EM scope ruling` and land exactly what it asks. With no ruling, or a ruling that asks
-   for nothing, push nothing: end with the no-commit trailer and comment why nothing can
-   land. Never invent a change to give the PR a diff.
+5. **A comment starting `<!-- foreman-empty-diff sha=<sha> -->` is current only while it
+   matches the PR.** Compare its `sha=` with the PR's head now (`gh pr view --json
+   headRefOid,files`). When they differ, or the PR now changes files, the comment is
+   history: ignore it and work the checklist from the review. When it matches and the PR
+   still changes no files, there is nothing to review, so the review sent it here. Read the
+   newest comment starting `**EM scope ruling` and land exactly what it asks. With no
+   ruling, or a ruling that asks for nothing, push nothing: end with the no-commit trailer
+   and comment why nothing can land. Never invent a change to give the PR a diff.
 6. **Prefer a revert; fix only what this PR introduced.** When a finding is about a change
    this PR made and the change is not needed, undo it (revert the commit or delete the hunk)
    instead of patching around it. Fix only defects this PR introduced. A defect that was
