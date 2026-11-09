@@ -16,3 +16,23 @@ test("durable reasons and mere citations are not PR blocks", () => {
   assert.equal(prBlockingSkip("already delivered by PR #50; nothing to do"), null);
   assert.equal(prBlockingSkip("diverged from origin/features"), null);
 });
+
+// Agent contract step 4a: the typed waitingOn decides; the reason is only the fallback.
+import { waitingPr } from "../dist/phases/implement.js";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+setCodeHost(githubCodeHost());
+const reads = (m) => async (ref) => {
+  const s = m[`${ref.repo}#${ref.number}`];
+  if (!s) throw new Error("unreadable");
+  return s;
+};
+test("waitingPr names a PR in its own repo, never an issue or a failed read", async () => {
+  const r = reads({ "o/r#7": { open: true, isPr: true }, "o/r#5": { open: false, isPr: true }, "other/repo#5": { open: true, isPr: true }, "o/r#12": { open: true, isPr: false } });
+  assert.deepEqual(await waitingPr({ waitingOn: "#7" }, "o/r", r), { repo: "o/r", number: 7 });
+  assert.deepEqual(await waitingPr({ waitingOn: "#5" }, "o/r", r), { repo: "o/r", number: 5 });
+  assert.deepEqual(await waitingPr({ waitingOn: "other/repo#5" }, "o/r", r), { repo: "other/repo", number: 5 });
+  assert.equal(await waitingPr({ waitingOn: "#12" }, "o/r", r), null);
+  assert.equal(await waitingPr({ waitingOn: "#99" }, "o/r", r), null);
+  assert.equal(await waitingPr({}, "o/r", r), null);
+});

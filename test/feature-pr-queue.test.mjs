@@ -50,6 +50,7 @@ test("queued is announced once per hold, not once per cycle", () => {
 
 test("an old skip on the open feature PR hands over to the gate", () => {
   assert.match(src, /prBlockingSkip\(entry\.reason\) === featurePr\.number/);
+  assert.match(src, /pr\.repo === repoConfig\.githubRepo && pr\.number === featurePr\.number/);
 });
 
 // Ray, 2026-10-14: one issue in flight per repo, from build until verified on
