@@ -35,6 +35,7 @@
     "labels:install": "node scripts/install-labels.mjs",
     "paperclip:register": "node scripts/paperclip/agent.mjs",
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",
+    "metrics:report": "node dist/cli.js metrics:report",
     "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs",
     "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check"
   },
