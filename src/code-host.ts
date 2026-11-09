@@ -114,8 +114,14 @@ export interface DependencyChange {
   packages: string[];
   from?: string;
   to?: string;
-  /** True when the leading version component moves. `0.x` counts every minor. */
-  major: boolean;
+  /** Every package whose version move could be read (a grouped PR's body lists them); empty when none could. */
+  moves?: { package: string; from: string; to: string }[];
+  /**
+   * True when a leading version component moves (`0.x` counts every minor); false when every
+   * package's move was read and none does; null when it cannot be told (a grouped PR whose
+   * versions are not stated). Null is "unknown", never "no".
+   */
+  major: boolean | null;
 }
 
 // From github/review-queue.ts.
@@ -457,7 +463,7 @@ export interface CodeHost {
 };
   createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, labels: string[], logger?: Logger): Promise<number | null>;
   dependencyBatchBases(baseBranch: string | undefined, productionBranch: string, legacyFeatureBranch?: string): string[];
-  describeDependencyPR(number: number, title: string): DependencyChange;
+  describeDependencyPR(number: number, title: string, body?: string): DependencyChange;
   fetchOpenAlertPackages(repo: string, cwd: string): Promise<Set<string>>;
   findDependencyPRs(repo: string, cwd: string, bases: readonly string[], logger?: Logger, conventions?: GithubConventions): Promise<PrSnapshot[]>;
   findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): Promise<IssueSnapshot | undefined>;
