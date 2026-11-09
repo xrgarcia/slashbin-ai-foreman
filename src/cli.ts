@@ -32,6 +32,7 @@ slashbin-ai-agent v${getVersion()}
 
 Usage: slashbin-ai-agent [options]
        slashbin-ai-agent paperclip:doctor [--config <path>]
+       slashbin-ai-agent metrics:report [--repo <name>] [--issue <n>] [--since <days>] [--json]
 
 Options:
   --config <path>  Path to .ai-agent.json config file
@@ -46,6 +47,7 @@ Commands:
                     checkout, branches, skills and labels (read-only; exits non-zero on any FAIL)
   paperclip:doctor  Check Paperclip reachability, company, agent registration, and config
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
+  metrics:report    Time each work item spent per lifecycle stage, from the metrics log (docs/metrics.md)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
 repoPath, githubRepo, baseBranch, branchPrefix, triggerLabel, skillPath, prompt.

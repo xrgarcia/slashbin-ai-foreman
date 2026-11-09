@@ -265,6 +265,7 @@ that names one. The core never imports GitHub or Paperclip code and never runs `
 |---|---|---|---|
 | GitHub | `workSource`, `codeHost` | [`src/plugins/github.ts`](src/plugins/github.ts) | `workSource` / `codeHost` is `github` (the default) |
 | Paperclip | `observer` | [`src/plugins/paperclip.ts`](src/plugins/paperclip.ts) | `paperclip.enabled`, with `companyId` and `agentId` |
+| Metrics | `observer` | [`src/plugins/metrics.ts`](src/plugins/metrics.ts) | `metrics.enabled` ([docs](docs/metrics.md)) |
 | Tech Lead | `reviewer` | [`src/plugins/tech-lead.ts`](src/plugins/tech-lead.ts) | `techLeadPath` is set |
 | SRE | `verifier`, `deployer` | [`src/plugins/sre.ts`](src/plugins/sre.ts) | `srePath` is set |
 | QA | `qa` | [`src/plugins/qa.ts`](src/plugins/qa.ts) | `qaPath` is set (covers `qaRepos`) |

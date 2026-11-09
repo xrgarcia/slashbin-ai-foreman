@@ -206,4 +206,5 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
   `.ai-agent.json` files keep working unchanged. Every key is commented where it is
   declared; `docs/configuration.md` is generated from those comments and the generator
   fails on an uncommented key. `docs/README.md` is the docs index.
+- **Metrics** — the opt-in `metrics` observer logs stage advances to SQLite; `npm run metrics:report` reads it (`docs/metrics.md`).
 - **Persistence** — work-source records survive restarts; the daemon resumes where it left off.
