@@ -13,6 +13,7 @@ import { configureRunner } from "./refusal.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
 import type { ForemanRuntime } from "./runtime.js";
+import { startEventLoopMonitor } from "./event-loop-delay.js";
 import { checkKindContract } from "./unstick-contract.js";
 
 export interface DaemonOptions {
@@ -31,6 +32,8 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   let stopping = false;
   let sleepResolve: (() => void) | null = null;
   let activeConfig = config;
+  // Event-loop stall detector (#228): logs any freeze over 250 ms with the lane passes in flight.
+  const loopMonitor = startEventLoopMonitor(logger);
 
   // No Discord (owner, 2026-10-11: "GitHub and Paperclip are where Foreman should be
   // posting important messages"). What needs a person is a label and comment on the
@@ -253,7 +256,10 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
           // The first lane mirrors the board every pass, as the whole-repo pass
           // did; the others only after they changed something, so splitting a
           // repo into lanes does not multiply the idle snapshot rate.
-          const result = await runLanePass(rt, repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work");
+          // The pass is in the stall detector's in-flight set until it returns, throws, or is cut short.
+          const result = await loopMonitor.track(repoName, laneName, () =>
+            runLanePass(rt, repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work"),
+          );
           didWork = result.processed > 0;
           for (const event of result.events) logger[event.level](event.message);
         } catch (err) {
@@ -333,6 +339,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    loopMonitor.disable();
 
     logger.info("Shutting down...");
     requestShutdown();
