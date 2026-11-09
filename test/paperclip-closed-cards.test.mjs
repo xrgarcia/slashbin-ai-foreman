@@ -236,7 +236,7 @@ test("closedWins: an issue in both the open list and the closed read is closed",
   assert.deepEqual(out.map((x) => [x.item.issueNumber, x.state]), [[8, "open"], [7, "completed"], [9, "not_planned"]]);
 });
 
-test("issueStates: open, completed, not planned; a missing issue or a failed request is left out", () => {
+test("issueStates: open, completed, not planned; a missing issue or a failed request is left out", async () => {
   const queries = [];
   const numbers = Array.from({ length: 27 }, (_, i) => i + 1);
   const query = (q) => {
@@ -245,23 +245,23 @@ test("issueStates: open, completed, not planned; a missing issue or a failed req
     return { repository: { s0: { state: "OPEN" }, s1: { state: "CLOSED", stateReason: "COMPLETED" }, s2: { state: "CLOSED", stateReason: "NOT_PLANNED" }, s3: null } };
   };
   const log = logger();
-  const got = issueStates(REPO, "/tmp", numbers, log, query);
+  const got = await issueStates(REPO, "/tmp", numbers, log, query);
   assert.equal(queries.length, 4, "25 to a request; the failed batch of 2 is re-read one number per request");
   assert.match(queries[0], /s0: issue\(number: 1\) \{ state stateReason \}/);
   assert.deepEqual([...got], [[1, "open"], [2, "completed"], [3, "not_planned"], [26, "open"], [27, "open"]]);
   assert.ok(log.lines.some((m) => /issue states not read: HTTP 502/.test(m)));
 });
 
-test("issueStates: 0, a negative number and a non-integer never appear in any query", () => {
+test("issueStates: 0, a negative number and a non-integer never appear in any query", async () => {
   const queries = [];
   const query = (q) => { queries.push(q); return { repository: { s0: { state: "OPEN" }, s1: { state: "OPEN" } } }; };
-  const got = issueStates(REPO, "/tmp", [0, -3, 1.5, NaN, 5, 6], logger(), query);
+  const got = await issueStates(REPO, "/tmp", [0, -3, 1.5, NaN, 5, 6], logger(), query);
   assert.equal(queries.length, 1);
   assert.ok(!/number: (0|-3|1\.5|NaN)\b/.test(queries[0]), queries[0]);
   assert.deepEqual([...got], [[5, "open"], [6, "open"]]);
 });
 
-test("issueStates: a batch with one unresolvable number still returns the others", () => {
+test("issueStates: a batch with one unresolvable number still returns the others", async () => {
   const queries = [];
   const query = (q) => {
     queries.push(q);
@@ -269,17 +269,17 @@ test("issueStates: a batch with one unresolvable number still returns the others
     return { repository: { s0: { state: "OPEN" } } };
   };
   const log = logger();
-  const got = issueStates(REPO, "/tmp", [4, 99, 7], log, query);
+  const got = await issueStates(REPO, "/tmp", [4, 99, 7], log, query);
   assert.deepEqual([...got], [[4, "open"], [7, "open"]]);
   assert.equal(queries.length, 4, "one batch, then one read per number");
   assert.ok(log.lines.some((m) => /issue state #99 not read: Could not resolve/.test(m)));
   assert.ok(!log.lines.some((m) => /issue state #(4|7) not read/.test(m)));
 });
 
-test("issueStates: a healthy batch of 25 is one request", () => {
+test("issueStates: a healthy batch of 25 is one request", async () => {
   let calls = 0;
   const query = () => { calls++; return { repository: {} }; };
-  issueStates(REPO, "/tmp", Array.from({ length: 25 }, (_, i) => i + 1), logger(), query);
+  await issueStates(REPO, "/tmp", Array.from({ length: 25 }, (_, i) => i + 1), logger(), query);
   assert.equal(calls, 1);
 });
 

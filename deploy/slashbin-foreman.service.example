@@ -29,17 +29,20 @@ RestartPreventExitStatus=78
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/<user>
 
-# The EM repo whose /review-all-prs skill the review phase runs. Point this at the
-# checkout that tracks your WORKING branch, not a promoted one: an acceptance
-# script committed to `develop` is invisible to a reviewer reading `main`, which
-# on 2026-08-31 had the Foreman report a committed script as never written and
-# spend a review cycle rewriting it.
+# The EM checkout (`emRepoPath` in .ai-agent.json is its config twin). Every builder
+# session reads the shared handoff contract from it, the unstick stage runs from it, and
+# the QA secrets runner lives in it. Point this at the checkout that tracks your WORKING
+# branch, not a promoted one: an acceptance script committed to `develop` is invisible
+# to a reader of `main`, which on 2026-08-31 had the Foreman report a committed script
+# as never written and spend a review cycle rewriting it.
 Environment=AI_AGENT_EM_REPO_PATH=/path/to/slashbin-engineering-manager
 
-# Optional Discord status bridge.
-#Environment=DISCORD_BRIDGE_URL=ws://127.0.0.1:9802
-#Environment=DISCORD_BOT_ID=<numeric id>
-#Environment=DISCORD_STATUS_CHANNEL=<numeric id>
+# The daemon refuses to run without its own GitHub token (there is no fallback to
+# gh's login); supply it through your secret manager (the doppler wrapper above).
+#   FOREMAN_GITHUB_TOKEN   always
+#   TECHLEAD_GITHUB_KEY    review on, or sync PRs merged automatically
+#   SRE_GITHUB_KEY         srePath set
+#   EM_GITHUB_TOKEN        unstick stage
 
 KillSignal=SIGTERM
 

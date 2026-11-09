@@ -116,7 +116,7 @@ const tableOf = (repo: LegacyRepo | undefined, field: string): Table => ((repo?.
 async function closedIssues(repoConfig: RepoConfig, numbers: number[], logger: Logger): Promise<Set<number>> {
   const source = activeWorkSource();
   if (!source?.states) return new Set();
-  const open = new Set(codeHost().openIssueLabels(repoConfig, logger).map((i) => i.number));
+  const open = new Set((await codeHost().openIssueLabels(repoConfig, logger)).map((i) => i.number));
   const candidates = numbers.filter((n) => !open.has(n));
   if (candidates.length === 0) return new Set();
   const states = await source.states(repoConfig, candidates, logger);
@@ -230,7 +230,7 @@ export class LegacyImport {
     this.releases.noteReleasePrs(id, [...legacy.releases.keys(), ...(legacy.tracked ? [legacy.tracked.pr] : [])]);
     this.streaks.noteStreakPrs(id, legacy.streaks.keys());
 
-    const stateOf = (pr: number) => codeHost().getPrState(id, pr, repoConfig.repoPath, logger);
+    const stateOf = async (pr: number) => await codeHost().getPrState(id, pr, repoConfig.repoPath, logger);
     const pending = new Set<number>();
     const droppedReleases = new Set<number>();
     const droppedStreaks = new Set<number>();
@@ -238,12 +238,12 @@ export class LegacyImport {
     let movedReleases = 0, movedStreaks = 0, movedBranches = 0, droppedTracked = false;
 
     for (const [pr, rel] of legacy.releases) {
-      if (stateOf(pr) === "CLOSED") { droppedReleases.add(pr); continue; }
+      if (await stateOf(pr) === "CLOSED") { droppedReleases.add(pr); continue; }
       if (await this.records.importPrRecord(repoConfig, pr, (d) => { d.release = d.release ?? rel; })) { droppedReleases.add(pr); movedReleases++; }
       else pending.add(pr);
     }
     for (const [pr, streak] of legacy.streaks) {
-      const state = stateOf(pr);
+      const state = await stateOf(pr);
       if (state === "CLOSED" || state === "MERGED") { droppedStreaks.add(pr); continue; }
       if (await this.records.importPrRecord(repoConfig, pr, (d) => { d.noCommit = d.noCommit ?? streak; })) { droppedStreaks.add(pr); movedStreaks++; }
       else pending.add(pr);
@@ -257,7 +257,7 @@ export class LegacyImport {
     for (const [branch, head] of legacy.rejected) {
       let last: { number: number; headRefOid: string } | undefined;
       try {
-        last = codeHost().closedPrsForBranch(id, branch, repoConfig.baseBranch, repoConfig.repoPath)
+        last = (await codeHost().closedPrsForBranch(id, branch, repoConfig.baseBranch, repoConfig.repoPath))
           .filter((p) => !p.mergedAt && p.headRefOid)
           .sort((a, b) => String(b.closedAt ?? "").localeCompare(String(a.closedAt ?? "")))[0];
       } catch {

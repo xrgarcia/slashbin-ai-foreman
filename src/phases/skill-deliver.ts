@@ -29,12 +29,12 @@ export async function trySkillDeliver(
   if (!repoConfig.syncOnly || !config.skillSync?.enabled) return 0;
   let delivered = 0;
   try {
-    const issues = codeHost()
-      .getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)
+    const issues = (await codeHost()
+      .getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
       .filter((i) => codeHost().hasLabel(i, HUMAN_LANE_LABEL))
       .sort((a, b) => a.number - b.number);
     for (const issue of issues) {
-      const out = rt.skillSync.deliverSkillsForIssue(config.skillSync, repoConfig, issue, logger);
+      const out = await rt.skillSync.deliverSkillsForIssue(config.skillSync, repoConfig, issue, logger);
       // Current is repo-wide (origin/<base> carries the skills): no issue needs anything. A skip or failure repeats on the next issue.
       if (out.status !== "delivered" && out.status !== "exists") break;
       if (out.status === "delivered") {

@@ -15,16 +15,24 @@ move between states, is in [lifecycle.md](lifecycle.md) *(generated)*.
 
 ## The stages
 
-The Foreman runs these stages on every configured repo. Omitted, `stages` is the ten
+The Foreman runs these stages on every configured repo. Omitted, `stages` is the eleven
 built-ins in this order (`src/stages.ts`):
 
 ```
-Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot → Unstick
+Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot → Unstick → Skill Deliver
 ```
 
 1. **Reconcile** — finds commits on a Foreman branch that no PR carries (orphaned
    work) and opens a PR for them. The PR titles are `github.reconcileTitle` /
    `github.reconcileBatchTitle` ([configuration.md](configuration.md#github-conventions-github)).
+   It also prunes: a `foreman/` branch with no open PR that still sits exactly at the head a
+   merged PR delivered is deleted from origin. A branch that moved on, or has an open PR,
+   is never touched. **Per-issue branches:** every issue is built on its own branch
+   `<branchPrefix><issue>-<slug>` (default prefix `foreman/`, env `AI_AGENT_BRANCH_PREFIX`;
+   the slug is the issue title, lowercase, at most 40 characters), cut from `baseBranch`.
+   There is no shared build branch. An `origin/` branch that already exists for the issue is
+   resumed by merging, never rebased. A branch is the Foreman's if it starts with the prefix
+   (or is the legacy shared `featureBranch`, so old PRs still resolve).
 2. **Review** *(opt-in)* — when `reviewEnabled` is set, hands each open feature PR
    awaiting review to the **Tech Lead** (`techLeadPath`), which reviews under its own
    GitHub token and owns its own merge and label decisions. Its label side effects
@@ -34,8 +42,8 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    [review.md](review.md). With no reviewer plugin enabled the PR is left for a person;
    once it is merged to the base branch, Reconcile moves the issue to `pr merged`, on to
    `pr approved` when no verifier is enabled, and comments and closes it when no deployer
-   or promote path is left to release it. It works in any branch layout and resumes on
-   the next pass if a write fails.
+   or promote path is left to release it (marker `<!-- foreman:human-merge-close -->`).
+   It works in any branch layout and resumes on the next pass if a write fails.
 3. **Verify** *(on when `srePath` is set)* — once review has merged a PR (issue at
    `pr merged`), the SRE plugin (`src/plugins/sre.ts`, running `bin/sre.mjs verify`) checks the merged work in the dev
    environment and moves its issues to `pr approved`. A failed verification is retried
@@ -51,13 +59,29 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    PR: an existing comment with the heading ends it. `DEV_SESSION_MINT_KEY` reaches only
    the QA child, through `qaSecretsRunner` in the EM checkout (needs `emRepoPath`; unset, a dev QA run reports errored).
    **With `qaGate: true`** QA runs *before* the advance: PASS advances; FAIL (a regression,
-   or a defect with no baseline) takes the visual-QA rework path (`hold=visual-qa-failed`,
-   the rework issue carrying QA's regression lines and shot names); HELD or an
+   or a defect with no baseline) holds the card as `visual-qa-failed` and calls the EM
+   (`rework-decision`) on the first FAIL, because the fix is a technical decision. The Foreman
+   files no rework issue and retries nothing on unchanged code (the hold sits at its cap at once);
+   the PR re-verifies when the EM's follow-up merges or the spec is edited. HELD or an
    inconsistent verdict holds the card as `qa-held-*` / `qa-inconsistent` (stays `pr merged`,
    Blocked, charged on `backoff.verifyRetry`); a crash or the 90-minute timeout is `qa-errored`,
    a tooling hold that retries on `backoff.agentUnavailable` without charging an attempt.
-   Visual-QA rework runs at most 2 rounds (`verifyRetry.maxAttempts` 3). The comment is `## QA Report`, keyed by head SHA and verdict so
-   a re-run after a restart does not double-post. Default false = the report-only step above.
+   The comment is `## QA Report`, keyed by head SHA and verdict so a re-run after a restart does
+   not double-post. Default false = the report-only step above.
+   **A void PASS is not a PASS.** A PASS with `Shots: 0` on a PR that changed client code
+   (`client/...`, or a whole-app build input such as `package.json`, `vite.config.*`, a lockfile)
+   checked nothing, so it counts as HELD. A comment opening `**EM QA re-run` on a merged PR,
+   newer than every QA report, sends it back for a fresh run (`qaRerun`).
+   **QA before the merge (`qaBeforeMerge: true`, needs `qaPath` and `techLeadPath`)** supersedes both
+   modes for a `qaRepos` repo: development, code review, then QA, and only then the SRE. The Tech Lead
+   approves with `--no-merge`; QA runs `check --local` on the approved head (it boots the PR
+   itself); a PASS has the Tech Lead merge on that approval and dev verification follows; a FAIL goes
+   back to the builder (it counts as a review round, so three of them raise `needsRuling`); a run with no verdict holds the PR unmerged and retries.
+   Code: `src/phases/qa-before-merge.ts`.
+   **Holds that are not failures.** A tooling hold (the SRE or QA could not run) is asked again
+   shortly and charges no attempt. A hold the SRE names `wait-until-YYYYMMDDTHHMMZ` means the rest
+   becomes observable at that time: no attempt is charged, the PR is not picked again before it, the
+   repo's next build is freed, and the card shows a scheduled verify with the resume time.
 4. **Promote** — opens or updates the promotion PR (base branch → production branch,
    `develop` → `main` by default) for issues labeled `ready for prod release`, moving
    them to `release pending`. `ready for prod release` is the one lifecycle label a
@@ -67,9 +91,22 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    and verifies it in production, the Foreman tags the merge commit (an annotated tag,
    never a GitHub Release; name from `github.releaseTagFormat`) and closes each issue on
    a passed prod verification, or labels it `prod verification held` and re-verifies on
-   the `backoff.prodVerifyRetry` schedule. It also adopts promotion PRs merged by anyone
-   else in the last 48 hours. Full flow: [lifecycle.md](lifecycle.md#the-release-stage).
+   the `backoff.prodVerifyRetry` schedule. Thirty minutes after the merge the SRE soaks the
+   release once more; a soak hold reopens the issues the same way. It also adopts promotion PRs
+   merged by anyone else in the last 48 hours. Full flow: [lifecycle.md](lifecycle.md#the-release-stage).
    One deploy may run up to `sreDeployMaxDurationMs` (2 h by default).
+   **The release carries all of the base branch.** Every issue whose merge sits in
+   `production..base` is adopted into the release PR: listed in its body, so the SRE verifies it in production,
+   with merges that name no issue listed by PR number (the sync PR and dependency-bot PRs are not
+   listed). Adoption lists, it does not sign: only issues the EM marked `ready for prod release` move
+   to `release pending`; the Foreman never applies that label to an adopted one.
+   **The EM's sign-off gate.** While any listed issue lacks `ready for prod release` (or a label a signed
+   issue moves on to: `release pending`, `prod verification held`, `ready to close`), the
+   Foreman puts a failing status `github.signoffStatusContext` (default `foreman/em-sign-off`) on
+   the release PR head with one comment naming the unsigned issues, and asks neither the Tech Lead to
+   approve nor the SRE to merge. Every pass recomputes it, so it turns green once the last issue is
+   signed. Make that context a required check on the production branch to hold a human merge too.
+   Code: `src/phases/release.ts`, `src/github/release-carry.ts`, `src/github/release-signoff.ts`.
 6. **Revise** — finds PRs with pending review feedback (`pr pending actions`) and
    revises them, ahead of new work. A PR that keeps being sent back is held for a
    person's scope ruling instead of being revised forever (`needsRuling` in
@@ -79,10 +116,17 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    (`github.priorityLabels`), then oldest — and hands it `buildBatchSize` of them
    (default 1). Issues the session declined on purpose are backed off
    (`backoff.skip`). See [skills.md](skills.md) for what the session is told.
+   One open Foreman PR is in flight per repo. A build waits while a PR awaits revision, and
+   (`buildWaitsForDevVerify`, default on) until the repo's last merge has passed dev verification;
+   a merge whose attempts are spent, or that waits on a named time, frees the repo. A
+   title saying "follow-up to #N" builds first. The session is told its branch and where
+   it starts (`FOREMAN_BRANCHES`, `FOREMAN_BRANCH_PREFIX`, `FOREMAN_START_REF`).
    An `approved` issue is held, not built, while a prerequisite is unmet: a GitHub "blocked by"
    issue not yet merged, a Pre-Flight `readiness` block not satisfied, or no `## Acceptance`
-   section naming a committed `scripts/...` path or a `**No-Script:**` reason of at least 40
-   characters (the EM's `approved` rule, enforced again here because a customer can apply the
+   section naming a committed `scripts/...` path or a `**No-Script:** <category> — <reason>` (category one of
+   docs-only, config-only, ci-only, dependency-bump, dead-code-deletion; reason at least 40 characters, not
+   describing a caller-observable check and not saying the builder writes it; an acceptance script path
+   anywhere in the body must sit inside `## Acceptance` and not be repo-prefixed) (the EM's `approved` rule, enforced again here because a customer can apply the
    label themselves; `src/github/acceptance-gate.ts`). A held issue gets one comment per
    reason (hidden marker `<!-- foreman:readiness-hold KEY -->`) and becomes eligible by
    itself once the body is fixed. The acceptance hold is also emitted in the cycle's waiting set (with its
@@ -92,7 +136,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
 8. **Branch Sync** — merges the production branch back into the base branch
    (`main` → `develop`) through a sync PR, to keep them aligned after promotions. The
    sync PR is merged under `TECHLEAD_GITHUB_KEY`; without it, the PR opens but does not
-   merge.
+   merge. Skipped when `baseBranch` equals `productionBranch`.
 9. **Dependabot** — files one issue covering the open Dependabot **security** PRs on the working
    branches, so the updates go through the implement session like any other work. A PR is a
    security update iff a package it bumps has an open Dependabot alert on the repo (grouped PRs: the
@@ -100,22 +144,38 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    PRs are left alone — not batched, merged or closed. If the alerts API cannot be read (404 when
    alerts are disabled, a network error) the cycle batches nothing. `dependabot.securityOnly: false`
    restores batching every Dependabot PR. It is
-   filed with the trigger label when the repo sets `dependencyPreApproved` (opt-in per repo, default off, so a newly onboarded repo needs a deliberate edit). Renovate
+   filed with the trigger label and the production grant label `deliver-to-prod` (`PROD_GRANT_LABEL`; owner decision 2026-11-06) when the repo sets `dependencyPreApproved` (opt-in per repo, default off, so a newly onboarded repo needs a deliberate edit). Renovate
    instead of Dependabot: `github.dependencyBranchPrefixes: ["renovate/"]`.
+   **A batch is its PRs at their head commits, and the repo record remembers what became of it** (`dependencyBatches`,
+   `src/dependency-batch/`; foreman#230). A batch that ended is never filed again; a new Dependabot push is a new batch and is
+   filed once; the same batch filed 3 times in 24 h is held and raised to the EM as `dependency-batch-loop`. When the implement
+   session answers `landed` for a batch issue, the Foreman closes each Dependabot PR in the batch (`CodeHost.retireDependencyPR`,
+   a comment naming why) and records the batch as `landed`; if a close fails the batch is not recorded, and the 3-in-24 h cap is
+   the backstop.
 10. **Unstick** *(on when `emRepoPath` is set; independent of `paperclip.enabled`)* — no
     Claude session. For each stuck issue the EM plugin (`src/plugins/em.ts`) runs `node <emRepoPath>/bin/em.mjs unstick
     --repo <owner/name> --issue <N> --kind <kind> --reason <text>` (cwd `emRepoPath`,
-    `EM_GITHUB_TOKEN`, killed after 20 minutes, 40 for `rework-decision`). Kinds: skip, divergence, verify-held,
+    `EM_GITHUB_TOKEN`, killed after 20 minutes, 40 for `rework-decision`). Kinds: skip, verify-held,
     verify-exhausted, verify-no-pr, revision-exhausted, revision-stalemate,
-    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision, unrelated-error,
-    epic-ready-to-close (`UNSTICK_KINDS`, `src/unstick.ts`). A hold with
-    retries left is not called for. Divergence is repo-level, so it is called once per
-    issue the Foreman announced it on, or with issue 0 when it announced none. Outcomes
-    are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked`, 2
-    `escalated` (no retry until the reason changes), 3 `declined`, anything else
-    `failed` (retried to 3 attempts). The Foreman never clears a block on exit 0 and
+    needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision, unrelated-error, dependency-batch-loop,
+    epic-ready-to-close (`UNSTICK_KINDS`, `src/unstick.ts`; `divergence` is also listed but retired, never raised, since there is no shared
+    branch to diverge). A hold with
+    retries left is not called for. Outcomes
+    are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked` (a handoff: while the question stands it is called again after `backoff.handoff`, 10 minutes doubling, up to 3 recalls, then the escalation owner is told once), 2
+    `escalated` (no retry until the reason changes), 3 `declined`, `refused` (the EM's runner was out of tokens or rate-limited: no attempt spent, called again when the limit lifts, and the EM is not called for anything else until then), anything else
+    `failed` (retried to 3 attempts, then re-armed on a 1 h to 24 h back-off, one call each; an exit 3 `unknown kind` rejection is `failed`, not `declined`). The Foreman never clears a block on exit 0 and
     never writes Paperclip; the EM releases the hold on GitHub and the unblock checks
     see it. A comment opening `**EM unstick` does not count as the issue changing.
+    Three kinds are not holds. `unrelated-error`: errors the SRE excluded from a verification
+    as not this release's never hold it; each distinct error signature is raised to the EM once, to route. `epic-ready-to-close`: an issue closed after its
+    production verification that belongs to an epic tells the EM to close the epic if it was the
+    last open child. `dependency-batch-loop`: see Dependabot above. The kinds with no issue use
+    issue 0 and live in the repo's own record.
+11. **Skill Deliver** *(only on `syncOnly` human-lane repos)* — no Claude session, no PR, no label,
+    no comment. For each open `approved-for-human` issue it puts a skill-sync commit on
+    `feature/<N>-<slug>`, cut from fresh `origin/<base>`, for the person's direct-mode skill to
+    resume. Nothing happens when `origin/<base>` already carries the current skills.
+    See [skill-sync.md](skill-sync.md#human-lane-sync-only-repos).
 
 Other behaviour of the loop:
 

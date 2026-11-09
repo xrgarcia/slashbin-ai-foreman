@@ -129,8 +129,11 @@ export interface Deployer {
 }
 
 export interface QaRunner {
-  /** Whether QA checks this repo. */
-  covers(repo: RepoConfig, config: AgentConfig): boolean;
+  /**
+   * Whether QA checks this repo. `"unknown"` = QA could not say (its registry was unavailable, or the
+   * question timed out): the caller holds without charging and never advances on it. Never rejects.
+   */
+  covers(repo: RepoConfig, config: AgentConfig): Promise<boolean | "unknown">;
   /**
    * Check PR `pr`, writing its manifest under `out`: on dev (`local` false), or
    * booted locally from the PR (`local` true, before the merge).
@@ -166,6 +169,11 @@ export interface Unsticker {
    * compares (it is part of the release-gate reason). Null when it could not be read; never throws.
    */
   grantState?(repo: RepoConfig, config: AgentConfig, issue: number, logger: Logger): Promise<string | null>;
+  /**
+   * The kinds the receiver says it accepts, published by the receiver itself so the sender's list is checked against
+   * it and never kept as a second copy (foreman#232). Null when it could not be read; never throws.
+   */
+  publishedKinds?(config: AgentConfig, logger: Logger): Promise<readonly string[] | null>;
 }
 
 /** The agent roles, each named as its field on ForemanPlugin. */

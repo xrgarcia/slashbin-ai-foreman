@@ -2,7 +2,7 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import { byReviewer } from "./review-freshness.js";
 import { backoffSettings } from "../backoff.js";
 import type { CheckRollupEntry, CheckVerdict } from "../code-host.js";
@@ -49,9 +49,9 @@ export function summarizeCheckRollup(rollup: CheckRollupEntry[]): CheckVerdict {
 }
 
 /** Read the PR's checks. A lookup failure answers `none`, i.e. review as before. */
-export function getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): CheckVerdict {
+export async function getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): Promise<CheckVerdict> {
   try {
-    const raw = gh([
+    const raw = await ghAsync([
       "pr", "view", String(prNumber),
       "--repo", config.githubRepo,
       "--json", "statusCheckRollup",
@@ -75,14 +75,14 @@ export const CI_GATE_MARKER = "<!-- foreman-ci-gate -->";
  * How many CI-gate bounces this PR has had since the reviewer last reviewed it.
  * A reviewer verdict resets the count: it means the PR reached review.
  */
-export function countCiBouncesSinceReview(
+export async function countCiBouncesSinceReview(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): number {
+): Promise<number> {
   try {
-    const raw = gh([
+    const raw = await ghAsync([
       "pr", "view", String(prNumber),
       "--repo", config.githubRepo,
       "--json", "comments,reviews",
@@ -125,12 +125,12 @@ export function ciBounceComment(verdict: CheckVerdict): string {
  * through its work source (on GitHub: `pr under review` → `pr pending actions`,
  * the label the revise phase picks up). The comment is PR-level and stays here.
  */
-export function bounceForRedCI(
+export async function bounceForRedCI(
   config: RepoConfig,
   prNumber: number,
   verdict: CheckVerdict,
-): void {
-  gh([
+): Promise<void> {
+  await ghAsync([
     "pr", "comment", String(prNumber),
     "--repo", config.githubRepo,
     "--body", ciBounceComment(verdict),
@@ -142,8 +142,8 @@ export function bounceForRedCI(
  * code host rather than the work source — a diverged feature branch (foreman#44)
  * is a git fact, so it is said on GitHub whatever source supplied the work.
  */
-export function commentOnIssue(config: RepoConfig, issueNumber: number, body: string): void {
-  gh([
+export async function commentOnIssue(config: RepoConfig, issueNumber: number, body: string): Promise<void> {
+  await ghAsync([
     "issue", "comment", String(issueNumber),
     "--repo", config.githubRepo,
     "--body", body,

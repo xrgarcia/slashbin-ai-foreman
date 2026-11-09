@@ -39,6 +39,7 @@ const SESSION_STEP: Partial<Record<`${SessionEvent["phase"]}:${SessionEvent["sta
 
 /** The outcome a session's end leaves on its cards, for the next handoff's "why". */
 function outcomeOf(e: SessionEvent): string {
+  if (e.resumeAt && e.waitReason) return e.waitReason;
   const detail = (e.detail ?? "").trim();
   if (detail) return detail;
   const v = e.report?.review;
@@ -142,7 +143,10 @@ export class ThreadNotes {
           this.holds.delete(id);
           const fallback = h.fallback ?? SESSION_FALLBACK_STAGE[h.phase];
           await this.placement.move(id, h.restore ?? fallback);
-          if (h.restore === null) handoff = handoffTo(fallback, item);
+          if (h.restore === null) {
+            handoff = handoffTo(fallback, item);
+            if (handoff && event.resumeAt && phase === "verify") handoff = { ...handoff, variant: "verifyScheduled", resumeAt: event.resumeAt };
+          }
           leaseChanged = true;
           released = true;
         }
@@ -185,7 +189,7 @@ export class ThreadNotes {
       this.deferred.set(id, q);
       return;
     }
-    const handoff = opts.handoff ? this.handoffFor(id, opts.handoff.stage, opts.handoff.item, opts.handoff.owner, opts.handoff.variant) : null;
+    const handoff = opts.handoff ? this.handoffFor(id, opts.handoff.stage, opts.handoff.item, opts.handoff.owner, opts.handoff.variant, opts.handoff.resumeAt) : null;
     const body = finishComment(handoff ? `${text}\n\n${handoff}` : text, this.env.comments, this.env.secrets);
     if (!body) return;
     // Never the same note twice in a row (SLA-514 got one four times).
@@ -204,10 +208,11 @@ export class ThreadNotes {
    * Foreman holds that stage. Cites the last session's outcome once, so a later
    * handoff never offers it as its reason.
    */
-  private handoffFor(id: string, stage: PaperclipStage, item: WorkItem, owner?: string, variant?: HandoffVariant): string | null {
+  private handoffFor(id: string, stage: PaperclipStage, item: WorkItem, owner?: string, variant?: HandoffVariant, resumeAt?: string): string | null {
     const evidence = this.evidence.get(id);
     this.evidence.delete(id);
-    const facts = this.handoffFacts(id, stage, item, evidence, owner);
+    const base = this.handoffFacts(id, stage, item, evidence, owner);
+    const facts = base && resumeAt ? { ...base, resumeAt } : base;
     return facts ? handoffComment(stage, facts, this.env.labels, variant) : null;
   }
 

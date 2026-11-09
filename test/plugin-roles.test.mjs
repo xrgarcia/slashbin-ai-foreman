@@ -34,7 +34,7 @@ setStatePath(mkTmp("plugin-roles-"));
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return logger; } };
 const NONE = { qaRepos: [], stages: [], paperclip: { enabled: false } };
 
-test("each agent plugin is on exactly when its path key is set, and fills its roles with the agent's own functions", () => {
+test("each agent plugin is on exactly when its path key is set, and fills its roles with the agent's own functions", async () => {
   const cases = [
     [new TechLeadPlugin(), "techLeadPath", ["reviewer"]],
     [new SrePlugin(), "srePath", ["verifier", "deployer"]],
@@ -63,9 +63,9 @@ test("each agent plugin is on exactly when its path key is set, and fills its ro
   assert.equal(roleFor("deployer", { ...NONE, srePath: "/x" })?.deploy, deployViaSre);
   assert.equal(roleFor("unstick", { ...NONE, emRepoPath: "/x" })?.unstick, unstickViaEm);
   const repo = { githubRepo: "o/qa" };
-  assert.equal(qaFor(repo, { ...NONE, qaPath: "/x" }), undefined, "QA covers only qaRepos");
-  assert.ok(qaFor(repo, { ...NONE, qaPath: "/x", qaRepos: ["o/qa"] }));
-  assert.equal(qaFor(repo, { ...NONE, qaRepos: ["o/qa"] }), undefined, "QA off without qaPath");
+  assert.equal(await qaFor(repo, { ...NONE, qaPath: "/x" }), undefined, "QA covers only qaRepos");
+  assert.ok(await qaFor(repo, { ...NONE, qaPath: "/x", qaRepos: ["o/qa"] }));
+  assert.equal(await qaFor(repo, { ...NONE, qaRepos: ["o/qa"] }), undefined, "QA off without qaPath");
 });
 
 // A fake QA and a fake unstick plugin, each on only under its own config flag.

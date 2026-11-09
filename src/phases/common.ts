@@ -2,7 +2,7 @@
 // session-report builders, and the helpers that report a step (itemOf,
 // notifyOnce, reportReviewOutcomes). Module state lives here, once.
 
-import { spawnSync } from "node:child_process";
+import { gitResult } from "../git-exec.js";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
@@ -60,9 +60,9 @@ export async function releaseIfResolved(
  * SRE verifies against, so a failure the spec caused is fixed by editing it, not
  * by new code. Undefined when GitHub cannot say: unknown never unblocks.
  */
-export function issueEditedSince(repoConfig: RepoConfig, n: number, sinceIso: string): boolean | undefined {
+export async function issueEditedSince(repoConfig: RepoConfig, n: number, sinceIso: string): Promise<boolean | undefined> {
   try {
-    const at = codeHost().issueLastEditedAt(repoConfig, n);
+    const at = await codeHost().issueLastEditedAt(repoConfig, n);
     if (at === undefined) return undefined;
     if (at === null) return false;
     const since = Date.parse(sinceIso);
@@ -76,9 +76,9 @@ export function issueEditedSince(repoConfig: RepoConfig, n: number, sinceIso: st
  * Whether `origin/<base>` gained a commit after `sinceIso`, read from the local
  * clone without fetching. Undefined when git cannot say: unknown never unblocks.
  */
-export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boolean | undefined {
-  const r = spawnSync("git", ["log", "-1", "--format=%cI", `origin/${repoConfig.baseBranch}`], { cwd: repoConfig.repoPath, encoding: "utf8" });
-  const at = Date.parse((r.stdout ?? "").trim());
+export async function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): Promise<boolean | undefined> {
+  const r = await gitResult(["log", "-1", "--format=%cI", `origin/${repoConfig.baseBranch}`], repoConfig.repoPath, { timeoutMs: 30_000 });
+  const at = Date.parse(r.stdout.toString("utf8").trim());
   const since = Date.parse(sinceIso);
   if (r.status !== 0 || Number.isNaN(at) || Number.isNaN(since)) return undefined;
   return at > since;
@@ -95,27 +95,27 @@ export function itemOf(repoConfig: RepoConfig, issueNumber: number): WorkItem {
 // comment, never a failed session.
 
 /** The items' goals (their issue titles), for a session's start. */
-export function startReport(repoConfig: RepoConfig, issues: ReadonlyArray<number>, logger: Logger): SessionReport | undefined {
+export async function startReport(repoConfig: RepoConfig, issues: ReadonlyArray<number>, logger: Logger): Promise<SessionReport | undefined> {
   if (!wantsSessionReports()) return undefined;
-  const goals = codeHost().issueTitles(repoConfig, issues, logger);
+  const goals = await codeHost().issueTitles(repoConfig, issues, logger);
   return Object.keys(goals).length ? { goals } : undefined;
 }
 
 /** A PR's title and diff stat; `pr` is a number, a URL or a head branch. */
-export function prReport(repoConfig: RepoConfig, pr: string | number, logger: Logger): SessionPr | undefined {
-  return codeHost().readPrDigest(repoConfig.githubRepo, pr, repoConfig.repoPath, logger) ?? undefined;
+export async function prReport(repoConfig: RepoConfig, pr: string | number, logger: Logger): Promise<SessionPr | undefined> {
+  return await codeHost().readPrDigest(repoConfig.githubRepo, pr, repoConfig.repoPath, logger) ?? undefined;
 }
 
 /** A finished review: its trailer for `pr`, and the review body it posted since `since`. */
-export function reviewReport(
+export async function reviewReport(
   repoConfig: RepoConfig, pr: number, trailers: ReadonlyArray<ReviewTrailer>, summary: string | undefined,
   since: Date, logger: Logger,
-): SessionReport {
-  const digest = prReport(repoConfig, pr, logger);
+): Promise<SessionReport> {
+  const digest = await prReport(repoConfig, pr, logger);
   const t = trailers.find((x) => x.pr === pr);
   if (!t) return { ...(digest ? { pr: digest } : {}), ...(summary ? { text: summary } : {}) };
   // A minute's slack for clock skew between this host and GitHub.
-  const body = codeHost().readLatestReviewBody(repoConfig.githubRepo, pr, new Date(since.getTime() - 60_000).toISOString(), repoConfig.repoPath, logger);
+  const body = await codeHost().readLatestReviewBody(repoConfig.githubRepo, pr, new Date(since.getTime() - 60_000).toISOString(), repoConfig.repoPath, logger);
   const parsed = parseReviewBody(body ?? summary);
   return {
     ...(digest ? { pr: digest } : {}),
@@ -137,7 +137,7 @@ export function reviewReport(
  * reconcile, which reports its own.
  */
 export async function reportReviewOutcomes(rt: ForemanRuntime, repoConfig: RepoConfig, issueNumbers: number[], logger: Logger): Promise<void> {
-  for (const [n, outcome] of codeHost().readReviewOutcomes(repoConfig, issueNumbers, logger)) {
+  for (const [n, outcome] of await codeHost().readReviewOutcomes(repoConfig, issueNumbers, logger)) {
     await advance(rt, itemOf(repoConfig, n), reviewMove(workStateOf(outcome)), repoConfig, logger, { observed: true });
   }
 }
@@ -221,11 +221,11 @@ export function workStateOf(outcome: ReviewOutcome): "approved" | "merged" | "ch
  * three more QA FAILs and revises after its issue was labelled (foreman#167). Issues that cannot be read
  * pause it for this pass: an unknown hold is not a lifted one.
  */
-export function pausedByBlockedLabel(rt: ForemanRuntime, repoConfig: RepoConfig, phase: string, pr: number, issueNumbers: ReadonlyArray<number>, logger: Logger): boolean {
+export async function pausedByBlockedLabel(rt: ForemanRuntime, repoConfig: RepoConfig, phase: string, pr: number, issueNumbers: ReadonlyArray<number>, logger: Logger): Promise<boolean> {
   const key = `${phase}:${repoConfig.githubRepo}#${pr}`;
   let held: number[];
   try {
-    held = codeHost().blockedAmong(repoConfig, issueNumbers, logger);
+    held = await codeHost().blockedAmong(repoConfig, issueNumbers, logger);
   } catch (err) {
     logger.debug(`PR #${pr}: ${phase} waits a pass, its issues' labels could not be read: ${err instanceof Error ? err.message : String(err)}`);
     return true;

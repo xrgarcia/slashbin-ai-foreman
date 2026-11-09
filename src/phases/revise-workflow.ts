@@ -35,7 +35,7 @@ export async function revisePRFeedback(
   // Without this, a silent no-op would be reported as success and the
   // orchestrator would (incorrectly) transition labels to `pr under review`,
   // hiding the fact that the requested fix was never applied.
-  const beforeSha = knownBeforeSha !== undefined ? knownBeforeSha : codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
+  const beforeSha = knownBeforeSha !== undefined ? knownBeforeSha : await codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
 
   const prContext = prNumber
     ? `\n\nCONTEXT: PR #${prNumber} needs revision. PR branch: ${headBranch} (push only to this branch). Linked issues: ${(issueNumbers || []).map(n => `#${n}`).join(", ")}. Read the review comments on PR #${prNumber} to understand what changes are requested.`
@@ -108,7 +108,7 @@ Work autonomously. Do not ask questions.`;
   //
   // A branch that does not exist yet reads null; a read that FAILS throws and fails the
   // pass (EM#1244 f5): neither a trailer nor an exit code is trusted on an unread branch.
-  const afterSha = codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
+  const afterSha = await codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
   if (beforeSha && afterSha && beforeSha === afterSha) {
     // Declared no-commit: the revision determined the branch is already correct
     // and said so on the trailer. That is a real outcome, not a misfire, and it

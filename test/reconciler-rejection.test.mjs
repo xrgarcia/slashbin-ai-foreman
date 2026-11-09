@@ -52,7 +52,7 @@ test("git failures carry stderr and distinguish a shutdown from a fault", () => 
     "a signal-killed fetch must be reported as cancelled, not failed — unless our own timeout killed it");
   assert.match(reconciler, /timedOut = e\?\.code === "ETIMEDOUT"/,
     "Node's execFileSync timeout also sends SIGTERM; ETIMEDOUT is what tells it apart (foreman#61)");
-  const fetchCatch = reconciler.slice(reconciler.indexOf('git(["fetch", "origin", "--prune"]'));
+  const fetchCatch = reconciler.slice(reconciler.indexOf('gitAsync(["fetch", "origin", "--prune"]'));
   assert.match(fetchCatch.slice(0, 900), /if \(failure\.cancelled\)/,
     "the fetch catch must branch on cancellation");
   assert.doesNotMatch(

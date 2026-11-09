@@ -156,12 +156,19 @@ export function roleFor<R extends AgentRole>(role: R, config: AgentConfig): NonN
   return undefined;
 }
 
-/** The QA runner that covers `repo`, or undefined. */
-export function qaFor(repo: RepoConfig, config: AgentConfig): QaRunner | undefined {
+/**
+ * The QA runner that covers `repo`, undefined when none does, or `"unknown"` when no plugin covers it
+ * and one could not say. Never compare the result for truthiness: `"unknown"` is truthy.
+ */
+export async function qaFor(repo: RepoConfig, config: AgentConfig): Promise<QaRunner | "unknown" | undefined> {
+  let unknown = false;
   for (const p of pluginsFor("qa")) {
-    if (p.qa && p.enabled(config) && p.qa.covers(repo, config)) return p.qa;
+    if (!p.qa || !p.enabled(config)) continue;
+    const covers = await p.qa.covers(repo, config);
+    if (covers === true) return p.qa;
+    if (covers === "unknown") unknown = true;
   }
-  return undefined;
+  return unknown ? "unknown" : undefined;
 }
 
 /**

@@ -102,13 +102,8 @@ for (const [role, needs] of [["workSource", "select work from"], ["codeHost", "o
 
 if (process.env.FOREMAN_GITHUB_TOKEN) {
   line("PASS", "FOREMAN_GITHUB_TOKEN", "set — gh runs as the Foreman's account");
-} else if (haveGh) {
-  try {
-    run("gh", ["auth", "status"]);
-    line("WARN", "FOREMAN_GITHUB_TOKEN", "unset — the Foreman will act as the account gh is logged in as. Set it to give the Foreman its own GitHub identity.");
-  } catch {
-    line("FAIL", "FOREMAN_GITHUB_TOKEN", "unset, and gh is not logged in. Set FOREMAN_GITHUB_TOKEN or run `gh auth login`.");
-  }
+} else {
+  line("FAIL", "FOREMAN_GITHUB_TOKEN", "unset — every Foreman gh call throws \"FOREMAN_GITHUB_TOKEN not set\" (src/github/gh.ts); there is no fallback to gh's login. Set it in the daemon's environment.");
 }
 const anyReview = config.repos.some((r) => r.reviewEnabled);
 const syncs = config.stages.some((s) => s.type === "branch-sync");
@@ -119,12 +114,12 @@ if (config.srePath) {
   if (process.env.SRE_GITHUB_KEY) line("PASS", "SRE_GITHUB_KEY", "set");
   else line("FAIL", "SRE_GITHUB_KEY", "unset, and srePath is set — the verify stage refuses to run without it.");
 }
-// QA report (report-only): needs the QA checkout and the EM checkout's qaSecretsRunner, which supplies its one secret.
+// QA report (report-only): needs the QA checkout and the EM checkout's qaSecretsRunner, which supplies its secrets (the mint key and the registry bearer).
 if (config.qaPath) {
   const qaOk = existsSync(join(config.qaPath, "bin/qa.mjs"));
   const runner = config.qaSecretsRunner;
   const runnerOk = Boolean(runner && config.emRepoPath && existsSync(join(config.emRepoPath, runner)));
-  const runnerWhy = !runner ? "qaSecretsRunner is not set (it supplies DEV_SESSION_MINT_KEY). " : `emRepoPath has no ${runner} (it supplies DEV_SESSION_MINT_KEY). `;
+  const runnerWhy = !runner ? "qaSecretsRunner is not set (it supplies DEV_SESSION_MINT_KEY and the registry bearer EM_SLASHBIN_MCP_ROUTER_BEARER / SLASHBIN_MCP_ROUTER_BEARER). " : `emRepoPath has no ${runner} (it supplies DEV_SESSION_MINT_KEY and the registry bearer EM_SLASHBIN_MCP_ROUTER_BEARER / SLASHBIN_MCP_ROUTER_BEARER). `;
   if (qaOk && runnerOk) line("PASS", "QA report", `on for ${config.qaRepos.join(", ")}`);
   else line("FAIL", "QA report", `${!qaOk ? "qaPath has no bin/qa.mjs. " : ""}${!runnerOk ? runnerWhy : ""}QA reports will post as errored.`.trim());
 }
@@ -145,7 +140,7 @@ else if (config.stages.some((s) => s.type === "release") && releaseStageReady(co
 let golden = null;
 if (config.skillSync.enabled) {
   try {
-    golden = readGolden(config.skillSync, { fetch: false });
+    golden = await readGolden(config.skillSync, { fetch: false });
     line("PASS", "skill sync", `on — golden ${golden.label}@${golden.version}: ${[...golden.skills.keys()].sort().join(", ")}`);
     const unknown = config.skillSync.skills.filter((n) => !golden.skills.has(n));
     if (unknown.length) line("WARN", "skill sync", `skillSync.skills names ${unknown.join(", ")}, which the golden does not have — never synced.`);
@@ -223,7 +218,7 @@ for (const repo of config.repos) {
       line("PASS", `${at}: skill sync`, "opted out (skillSyncSkills is empty)");
     } else {
       try {
-        const stale = describeDrift(driftAt(repo.repoPath, ref, config.skillSync, golden, names));
+        const stale = describeDrift(await driftAt(repo.repoPath, ref, config.skillSync, golden, names));
         if (stale) line("WARN", `${at}: skill sync`, `${ref} is behind ${golden.label}@${golden.version}: ${stale} — synced with the next approved issue here.`);
         else line("PASS", `${at}: skill sync`, `${names.join(", ")} current at ${ref}`);
       } catch (err) {

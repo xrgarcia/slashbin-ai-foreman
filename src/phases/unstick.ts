@@ -30,7 +30,7 @@ import type { UnstickOutcome } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
@@ -79,11 +79,14 @@ export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number
   // `recalls` existed is a handoff too, with none made yet.
   const handedOff = cur.recalls ?? (cur.status === "invoked" ? 0 : undefined);
   const { waitUntil: _w, ...rest } = cur;
+  // A call made on a question whose first burst is spent is a re-arm: it is ONE call (attempts keep counting, never
+  // reset), and each failed one lengthens the wait to the next (`SPENT_QUESTION_REARM`).
+  const rearm = cur.attempts >= UNSTICK_MAX_ATTEMPTS;
   if (o.kind === "refused") {
     const refusals = (cur.refusals ?? 0) + 1;
     const until = o.resetAtMs !== undefined && o.resetAtMs > nowMs ? o.resetAtMs : nowMs + backoffDelay(refusals, upstream);
     // A refusal is not an answer: the prior status's recall count is kept, the attempt is not spent.
-    return { ...rest, ...(handedOff !== undefined ? { recalls: handedOff } : {}), status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
+    return { ...rest, attempts: cur.attempts, ...(handedOff !== undefined ? { recalls: handedOff } : {}), status: "refused", refusals, waitUntil: new Date(until).toISOString(), lastCallAt: at, detail: o.detail.slice(0, 500) };
   }
   const { refusals: _r, ...clean } = rest;
   // A recall the EM declines as already answered: the handoff stands and the watch goes on (a decline is final
@@ -97,6 +100,7 @@ export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number
     status: toStatus(o),
     attempts: cur.attempts + 1,
     lastCallAt: at,
+    ...(rearm && o.kind === "failed" ? { rearms: (cur.rearms ?? 0) + 1 } : {}),
     ...(o.kind === "invoked" ? { recalls: handedOff === undefined ? 0 : handedOff + 1 } : {}),
     ...(o.detail ? { detail: o.detail.slice(0, 500) } : {}),
   };
@@ -118,10 +122,10 @@ export async function tryUnstick(
   try {
     // The issues this pass looks at: the repo's open ones. When GitHub cannot be read there are none, and the
     // pass keeps to what is held in state (the questions about no issue) and prunes nothing it cannot see.
-    let issues: ReturnType<CodeHost["getOpenIssues"]> | null = null;
+    let issues: Awaited<ReturnType<CodeHost["getOpenIssues"]>> | null = null;
     if (!isUpstreamBlocked("github")) {
       try {
-        issues = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
+        issues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, log);
       } catch (err) {
         log.warn(`Could not read open issues for the unstick pass: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -216,7 +220,8 @@ export async function tryUnstick(
         // The reason changed while the call ran: it is a new question, answered next pass.
         if (!cur || cur.reason !== c.reason) return;
         table[key] = applyOutcome(cur, outcome, Date.now(), config.backoff.upstream);
-        if (outcome.kind === "failed" && table[key]!.attempts >= UNSTICK_MAX_ATTEMPTS) spent = table[key];
+        // The first burst just ran out: the one give-up notice. A re-arm call after it never says so again.
+        if (outcome.kind === "failed" && table[key]!.attempts === UNSTICK_MAX_ATTEMPTS && !table[key]!.gaveUpAt) spent = table[key];
       });
       // The runner is out of tokens or rate-limited: reportRunResult paused it, so the calls left wait for the reset.
       if (refused) {
@@ -229,13 +234,20 @@ export async function tryUnstick(
       // Issue 0 is a repo-level hold with no issue to comment on. With no
       // `unstickEscalationOwner` there is nobody to mention: the entry stays
       // `failed` at the cap, as for a failed post, and the log says why.
-      if (spent && c.issue > 0) {
+      if (spent) {
         const owner = config.unstickEscalationOwner;
-        if (!owner) {
-          log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — no unstickEscalationOwner configured, so nobody is mentioned`);
+        const markNoticed = () => mutate(rt, repoConfig, c.issue, (table) => {
+          const cur = table[key];
+          if (cur && cur.reason === c.reason) table[key] = { ...cur, gaveUpAt: new Date().toISOString() };
+        });
+        if (c.issue <= 0 || !owner) {
+          // Nothing to comment on (a repo-level alert) or nobody to mention: say so in the log, once. The question stays
+          // `failed` and is asked again on the re-arm back-off.
+          log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — ${owner ? "no issue to comment on" : "no unstickEscalationOwner configured, so nobody is mentioned"}; it is asked again on a back-off of ${Math.round(SPENT_QUESTION_REARM.baseMs / 3_600_000)} h up to ${Math.round(SPENT_QUESTION_REARM.capMs / 3_600_000)} h`);
+          await markNoticed();
         } else {
           try {
-            (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
+            await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
             await mutate(rt, repoConfig, c.issue, (table) => {
               const cur = table[key];
               if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
@@ -276,7 +288,7 @@ async function giveUpHandoff(
     return;
   }
   try {
-    (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, handoffGiveUpComment(owner, entry));
+    await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, handoffGiveUpComment(owner, entry));
     await mark({ status: "escalated" });
     log.warn(`${what} — escalated to @${owner}`);
   } catch (err) {

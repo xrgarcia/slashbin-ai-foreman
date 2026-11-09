@@ -14,6 +14,7 @@ export interface ConfigProfile {
   readonly unstickEscalationOwner?: string;
   readonly qaRepos?: readonly string[];
   readonly qaSecretsRunner?: string;
+  readonly qaBearerKey?: string;
   readonly reviewAllowedTools?: readonly string[];
   readonly epicRefLabel?: string;
   readonly paperclip?: { readonly commentAuthorHeader?: string };

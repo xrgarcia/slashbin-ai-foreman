@@ -24,8 +24,24 @@ const logger = createLogger({ format: "text", level: "error" });
 const corpus = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "acceptance-gate-cases.json"), "utf8"));
 
 test("the shared corpus: every case gets the verdict the EM hook gives", () => {
-  assert.equal(corpus.cases.length, 9);
+  assert.equal(corpus.cases.length, 23);
   for (const c of corpus.cases) assert.equal(acceptanceVerdict(c.body).ok, c.ok, c.id);
+});
+
+test("the Foreman never refuses the dependency-batch issue it files itself", async () => {
+  const { buildDependencyBatchIssue } = await import("../dist/github/dependencies.js");
+  const change = { number: 1, title: "t", packages: ["x"], from: "1.0.0", to: "2.0.0", major: true };
+  for (const changes of [[change], [change, { ...change, number: 2, major: false }]]) {
+    const { body } = buildDependencyBatchIssue("features", changes);
+    assert.match(body, /\*\*No-Script:\*\* dependency-bump — /);
+    assert.deepEqual(acceptanceVerdict(body), { ok: true });
+  }
+});
+
+test("an unknown No-Script category is refused and the reason lists the categories", () => {
+  const v = acceptanceVerdict("## Acceptance\n- **No-Script:** tooling — a long enough reason that has no caller surface at all.\n");
+  assert.equal(v.ok, false);
+  for (const c of ["docs-only", "config-only", "ci-only", "dependency-bump", "dead-code-deletion"]) assert.match(v.reason, new RegExp(c));
 });
 
 test("a hold reason names the heading and the fix, and never echoes the body", () => {

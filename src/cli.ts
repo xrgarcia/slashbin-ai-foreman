@@ -9,8 +9,9 @@ import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
+import { checkCredentials } from "./credentials.js";
 import { registerBuiltinPlugins } from "./plugins/index.js";
-import { codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
+import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
 import type { PluginContext } from "./plugins/contract.js";
 import { workSourceRefusal } from "./work-source.js";
 import { ForemanRuntime } from "./runtime.js";
@@ -32,6 +33,7 @@ slashbin-ai-agent v${getVersion()}
 
 Usage: slashbin-ai-agent [options]
        slashbin-ai-agent paperclip:doctor [--config <path>]
+       slashbin-ai-agent metrics:report [--repo <name>] [--issue <n>] [--since <days>] [--json]
 
 Options:
   --config <path>  Path to .ai-agent.json config file
@@ -46,6 +48,7 @@ Commands:
                     checkout, branches, skills and labels (read-only; exits non-zero on any FAIL)
   paperclip:doctor  Check Paperclip reachability, company, agent registration, and config
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
+  metrics:report    Time each work item spent per lifecycle stage, from the metrics log (docs/metrics.md)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
 repoPath, githubRepo, baseBranch, branchPrefix, triggerLabel, skillPath, prompt.
@@ -149,6 +152,7 @@ async function main(rt: ForemanRuntime): Promise<void> {
 
   logger.info(`slashbin-ai-agent v${getVersion()}`);
 
+
   // Plugins (EM#1150): every registered plugin this config enables is started
   // here. A config reload starts one it newly enables, stops one it disables,
   // and hands the reloaded config to one that stays on.
@@ -167,6 +171,19 @@ async function main(rt: ForemanRuntime): Promise<void> {
   if (noSource) {
     logger.error(`Refusing to start: ${noSource}`);
     process.exit(78);
+  }
+
+  // Credentials before any cycle or PID claim (#43): a missing or
+  // rejected GitHub token otherwise failed every phase, every cycle, while the
+  // process looked healthy. 78 (EX_CONFIG): a restart cannot supply a token.
+  const creds = await checkCredentials(config, (token) => codeHost().probeToken(token));
+  if (creds.refusal) {
+    // stderr, like the config refusals above: the operator who started it by hand reads it there.
+    console.error(`Refusing to start: ${creds.refusal}`);
+    process.exit(78);
+  }
+  if (creds.unverified.length) {
+    logger.warn(`Could not reach GitHub to check ${creds.unverified.join(", ")}; starting anyway.`);
   }
 
   if (once) {

@@ -60,19 +60,19 @@ export async function implementApprovedIssues(
   const branchMap: Record<number, string> = {};
   for (const n of new Set([...(handOff ?? []), ...(issueNumbers ?? [])])) branchMap[n] = branches?.[n] ?? foremanBranchName(config, n, "");
   const candidates = [...new Set(Object.values(branchMap))];
-  const shaOf = (b: string) => codeHost().getRemoteBranchSha(config.githubRepo, b, config.repoPath, logger);
+  const shaOf = async (b: string) => await codeHost().getRemoteBranchSha(config.githubRepo, b, config.repoPath, logger);
   const branchList = candidates.join(", ") || `${config.branchPrefix}<N>-<slug>`;
 
   // Captured so a DECLARED skip can be distinguished from a declaration made
   // while the agent was in fact pushing work. Evidence beats narrative in both
   // directions: the trailer is only honoured when the branch really did not move.
   // A PR open BEFORE the run (a legacy `features` PR draining, or a prior attempt's branch) may legitimately be the head afterwards.
-  const preExistingHead = codeHost().findOpenFeaturePR(config)?.headBranch ?? null;
-  const beforeShas = new Map(candidates.map((b) => [b, shaOf(b)] as const));
+  const preExistingHead = (await codeHost().findOpenFeaturePR(config))?.headBranch ?? null;
+  const beforeShas = new Map(await Promise.all(candidates.map(async (b) => [b, await shaOf(b)] as const)));
   /** The first candidate branch whose remote sha differs from before the session (a new branch counts as moved). */
-  const movedBranch = (): { branch: string; before: string | null; after: string } | null => {
+  const movedBranch = async (): Promise<{ branch: string; before: string | null; after: string } | null> => {
     for (const b of candidates) {
-      const after = shaOf(b);
+      const after = await shaOf(b);
       const before = beforeShas.get(b) ?? null;
       if (after && after !== before) return { branch: b, before, after };
     }
@@ -191,7 +191,7 @@ Work autonomously. Do not ask questions.`;
   // its issue and the orchestrator closes only an issue in the batch.
   const declaredLanded = detectDeclaredLanded(result.stdout);
   if (declaredLanded.landed) {
-    const moved = movedBranch();
+    const moved = await movedBranch();
     if (moved) {
       logger.warn(
         `Agent emitted a landed trailer but ${moved.branch} advanced ` +
@@ -212,7 +212,7 @@ Work autonomously. Do not ask questions.`;
 
   const declaredSkip = detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
-    const moved = movedBranch();
+    const moved = await movedBranch();
     if (moved) {
       logger.warn(
         `Agent emitted a skip trailer but ${moved.branch} advanced ` +
@@ -261,10 +261,10 @@ Work autonomously. Do not ask questions.`;
   let prUrl = prMatch ? `https://${prMatch[0]}` : undefined;
 
   // Fallback: query GitHub directly for an open feature PR. This spawn is
-  // outside runGh, so it has to honour the GitHub back-off itself.
+  // outside runGhAsync, so it has to honour the GitHub back-off itself.
   if (!prUrl && !isUpstreamBlocked("github")) {
     logger.info("PR URL not found in output, querying GitHub as fallback");
-    const fallbackUrl = codeHost().featurePrUrlFallback(config);
+    const fallbackUrl = await codeHost().featurePrUrlFallback(config);
     if (fallbackUrl?.startsWith("https://")) {
       prUrl = fallbackUrl;
       logger.info(`PR found via GitHub fallback: ${prUrl}`);
@@ -272,8 +272,8 @@ Work autonomously. Do not ask questions.`;
   }
 
   // The head the session built on: the open Foreman PR's own branch, else the branch that moved, else the first candidate.
-  const openPr = codeHost().findOpenFeaturePR(config);
-  const headBranch = openPr?.headBranch ?? movedBranch()?.branch ?? candidates[0] ?? `${config.branchPrefix}unknown`;
+  const openPr = await codeHost().findOpenFeaturePR(config);
+  const headBranch = openPr?.headBranch ?? (await movedBranch())?.branch ?? candidates[0] ?? `${config.branchPrefix}unknown`;
 
   // The assigned branch is the contract. A PR from any other head is not success for a fresh issue; the legacy shared
   // head counts only for a PR that was already open before this run.
@@ -285,7 +285,7 @@ Work autonomously. Do not ask questions.`;
 
   if (prUrl) {
     // Verify the PR actually exists on GitHub
-    const verified = codeHost().verifyPRExists(
+    const verified = await codeHost().verifyPRExists(
       config.githubRepo,
       headBranch,
       config.baseBranch,
@@ -297,7 +297,7 @@ Work autonomously. Do not ask questions.`;
       return { success: false, error: "PR creation could not be verified" };
     }
     // Post-implementation self-check: verify the PR has actual file changes
-    const changedFiles = codeHost().checkPRHasChanges(config.githubRepo, headBranch, config.baseBranch, config.repoPath, logger);
+    const changedFiles = await codeHost().checkPRHasChanges(config.githubRepo, headBranch, config.baseBranch, config.repoPath, logger);
     if (changedFiles === 0) {
       return { success: false, error: "PR exists but has no file changes" };
     }
@@ -308,7 +308,7 @@ Work autonomously. Do not ask questions.`;
 
   // If Claude exited cleanly but no new PR was found, check if an existing
   // feature PR already has the work (Claude may have added commits to it).
-  const existingPR = codeHost().verifyPRExists(
+  const existingPR = await codeHost().verifyPRExists(
     config.githubRepo,
     headBranch,
     config.baseBranch,

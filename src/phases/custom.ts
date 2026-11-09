@@ -35,9 +35,9 @@ export async function tryCustomStage(
     return { outcome: "blocked", reason: "upstream back-off", ran: false };
   }
 
-  let pr: ReturnType<CodeHost["findOpenFeaturePR"]>;
+  let pr: Awaited<ReturnType<CodeHost["findOpenFeaturePR"]>>;
   try {
-    pr = codeHost().findOpenFeaturePR(repoConfig);
+    pr = await codeHost().findOpenFeaturePR(repoConfig);
   } catch (err) {
     // Could not look is not "nothing to check": hold the later stages this pass.
     return { outcome: "blocked", reason: `work in flight unreadable: ${err instanceof Error ? err.message : String(err)}`, ran: false };

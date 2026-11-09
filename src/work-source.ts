@@ -42,7 +42,7 @@ export function workSourceRefusal(config: Pick<AgentConfig, "workSource"> | unde
 
 /**
  * Per-observer, per-event limit. Generous because observers run OFF the build
- * path (see `enqueue`): the daemon's gh calls are execFileSync and block the
+ * path (see `enqueue`): the daemon's gh calls were once synchronous and blocked the
  * event loop, so a 5 s limit expired on a healthy Paperclip during the
  * startup sweep and dropped the note (2026-10-01, first mirror run). A hung
  * observer now delays only the notes queued behind it, never a build step.

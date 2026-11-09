@@ -3,7 +3,7 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { formatGhError, getOpenIssues } from "./cache.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import type { RulingState } from "../code-host.js";
 export type { RulingState } from "../code-host.js";
 
@@ -11,10 +11,10 @@ export type { RulingState } from "../code-host.js";
 // --- Session reports (observers only) ---
 
 /** Each of `numbers` with its open issue's title, from the cycle's issue snapshot. Empty on a failed read. */
-export function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, logger: Logger): Record<number, string> {
+export async function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, logger: Logger): Promise<Record<number, string>> {
   const out: Record<number, string> = {};
   try {
-    for (const i of getOpenIssues(config.githubRepo, config.repoPath, logger)) {
+    for (const i of await getOpenIssues(config.githubRepo, config.repoPath, logger)) {
       if (numbers.includes(i.number) && i.title) out[i.number] = i.title;
     }
   } catch (err) {
@@ -24,14 +24,14 @@ export function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, 
 }
 
 /** A PR's title and diff stat, for a session summary. Display only: null when it could not be read, and no decision rests on it. */
-export function readPrDigest(
+export async function readPrDigest(
   repo: string,
   pr: string | number,
   cwd: string,
   logger: Logger,
-): { number: number; url: string; title: string; additions: number; deletions: number; changedFiles: number } | null {
+): Promise<{ number: number; url: string; title: string; additions: number; deletions: number; changedFiles: number } | null> {
   try {
-    const out = gh(["pr", "view", String(pr), "--repo", repo, "--json", "number,url,title,additions,deletions,changedFiles"], cwd);
+    const out = await ghAsync(["pr", "view", String(pr), "--repo", repo, "--json", "number,url,title,additions,deletions,changedFiles"], cwd);
     const j = JSON.parse(out || "{}");
     return typeof j.number === "number" ? j : null;
   } catch (err) {
@@ -41,18 +41,20 @@ export function readPrDigest(
 }
 
 /** The paths a PR changed. Throws when it could not be read: an unread list is never "no UI files" (EM#1244 f5). */
-export function prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): string[] {
-  const j = JSON.parse(gh(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
-  return Array.isArray(j.files) ? j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean) : [];
+export async function prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): Promise<string[]> {
+  const j = JSON.parse(await ghAsync(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
+  // No `files` array is an unread list, not an empty one: "this PR changes nothing" is a claim (foreman#110), never a default.
+  if (!Array.isArray(j.files)) throw new Error(`PR #${pr}: GitHub returned no file list`);
+  return j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean);
 }
 
 /**
  * The body of the newest review posted on `pr` at or after `since` (ISO), the
  * one a review session just wrote. Display only: null when there is none or the read failed, and no decision rests on it.
  */
-export function readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): string | null {
+export async function readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): Promise<string | null> {
   try {
-    const out = gh(["api", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd);
+    const out = await ghAsync(["api", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd);
     const reviews = (JSON.parse(out || "[]") as Array<{ body?: string; submitted_at?: string }>)
       .filter((r) => (r.body ?? "").trim() && Date.parse(r.submitted_at ?? "") >= Date.parse(since));
     return reviews.length ? reviews[reviews.length - 1].body ?? null : null;
@@ -95,11 +97,11 @@ export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: Readon
 }
 
 /** A PR's ruling state, read from its reviews and comments. Throws on a failed read (EM#1244 f5). */
-export function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState {
+export async function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): Promise<RulingState> {
     const lines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
-    const reviews = lines(gh(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
+    const reviews = lines(await ghAsync(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
       `.[] | {id, state, at: (.submitted_at // ""), escalate: ((.body // "") | contains("${TECH_LEAD_ESCALATE_MARKER}"))} | @json`], cwd)) as ReviewFact[];
-    const comments = lines(gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
+    const comments = lines(await ghAsync(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
       `.[] | {at: .created_at, head: ((.body // "") | .[0:140])} | @json`], cwd)) as CommentFact[];
     return rulingState(reviews, comments);
 }

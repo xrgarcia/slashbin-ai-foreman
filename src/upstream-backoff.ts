@@ -22,7 +22,7 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
  * This module is the ONLY owner of that state — one entry per upstream, shared
  * by every repo loop. Nothing else stores a limit, a window or a probe result.
  *
- *  - github: `runGh` refuses to spawn while blocked; at each window end the
+ *  - github: `runGhAsync` refuses to spawn while blocked; at each window end the
  *    module itself probes the bucket that tripped, with the token that tripped
  *    it, and either clears or extends. A GraphQL trip is probed on the GraphQL
  *    endpoint itself: `/rate_limit` reports a different bucket (2026-10-02:
@@ -45,7 +45,7 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
 /** `"github"`, or a runner's configured name. */
 export type Upstream = string;
 
-/** Thrown by `runGh` while GitHub is backing off — no `gh` process was spawned. */
+/** Thrown by `runGhAsync` while GitHub is backing off — no `gh` process was spawned. */
 export class UpstreamBackoffError extends Error {
   constructor(message: string) {
     super(message);
@@ -221,9 +221,17 @@ function releaseWaiters(u: Upstream): void {
 
 function onWindowEnd(u: Upstream): void {
   if (u === "github") {
-    const probe = probeGitHub();
-    if (probe.clear) clear("github");
-    else extend("github", probe.resetAtMs);
+    // Awaited off the timer: the probe spawns gh, and a GitHub that does not
+    // answer must not stall the event loop while it waits. The state stays
+    // "blocked" until the probe settles, so no call slips through meanwhile.
+    const s = stateOf("github");
+    const settle = (probe: UpstreamProbeResult) => {
+      // A reset (tests) or a new window scheduled while the probe ran wins.
+      if (stateOf("github") !== s || s.state !== "blocked" || s.timer) return;
+      if (probe.clear) clear("github");
+      else extend("github", probe.resetAtMs);
+    };
+    void probeGitHub().then(settle, () => settle({ clear: false }));
     return;
   }
   const s = stateOf(u);
@@ -247,7 +255,7 @@ export interface UpstreamProbeResult {
 }
 
 /** The code host's own probe of the bucket that tripped, with the token that tripped it. */
-export type GitHubProbe = (trip: { token?: string; resource?: GhResource }) => UpstreamProbeResult;
+export type GitHubProbe = (trip: { token?: string; resource?: GhResource }) => Promise<UpstreamProbeResult> | UpstreamProbeResult;
 
 /** Process-wide: the code host's probe of the bucket that tripped. */
 let githubProbe: GitHubProbe | undefined;
@@ -261,7 +269,7 @@ export function setUpstreamProbe(u: "github", probe: GitHubProbe | undefined): v
   if (u === "github") githubProbe = probe;
 }
 
-function probeGitHub(): UpstreamProbeResult {
+async function probeGitHub(): Promise<UpstreamProbeResult> {
   const s = stateOf("github");
   if (!githubProbe) return { clear: false };
   return githubProbe({ token: s.trippedToken, resource: s.trippedResource });

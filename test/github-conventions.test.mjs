@@ -128,7 +128,7 @@ else process.stdout.write("[]");
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
-  // runGh refuses without a Foreman token; the fake gh never reads it.
+  // runGhAsync refuses without a Foreman token; the fake gh never reads it.
   savedToken = process.env.FOREMAN_GITHUB_TOKEN;
   process.env.FOREMAN_GITHUB_TOKEN = "test-token";
 });
@@ -145,27 +145,27 @@ function arrange(st) {
 const calls = () => readFileSync(ghLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 const flag = (args, name) => args[args.indexOf(name) + 1];
 
-test("findDependencyPRs selects by the configured branch prefixes", () => {
+test("findDependencyPRs selects by the configured branch prefixes", async () => {
   const pr = (n, head) => ({ number: n, url: "u", title: "t", body: "", headRefName: head, baseRefName: "features" });
   arrange({ prs: [pr(1, "dependabot/npm/x"), pr(2, "renovate/y"), pr(3, "feature/z")] });
-  assert.deepEqual(findDependencyPRs("example/a", tmp, ["features"]).map((p) => p.number), [1]);
+  assert.deepEqual((await findDependencyPRs("example/a", tmp, ["features"])).map((p) => p.number), [1]);
   const c = { ...DEFAULT_GITHUB_CONVENTIONS, dependencyBranchPrefixes: ["renovate/"] };
-  assert.deepEqual(findDependencyPRs("example/b", tmp, ["features"], undefined, c).map((p) => p.number), [2]);
+  assert.deepEqual((await findDependencyPRs("example/b", tmp, ["features"], undefined, c)).map((p) => p.number), [2]);
 });
 
-test("findOpenDependencyBatchIssue matches the configured title prefix", () => {
+test("findOpenDependencyBatchIssue matches the configured title prefix", async () => {
   arrange({ issues: [{ number: 4, title: "deps: land 2 dependency updates", labels: [], body: "" }] });
   const c = { ...DEFAULT_GITHUB_CONVENTIONS, dependencyBatchTitlePrefix: "deps: land " };
   const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-  assert.equal(findOpenDependencyBatchIssue("example/c", tmp, logger), undefined);
-  assert.equal(findOpenDependencyBatchIssue("example/d", tmp, logger, c)?.number, 4);
+  assert.equal(await findOpenDependencyBatchIssue("example/c", tmp, logger), undefined);
+  assert.equal((await findOpenDependencyBatchIssue("example/d", tmp, logger, c))?.number, 4);
 });
 
-test("promotion and sync PRs carry the configured titles and signature", () => {
+test("promotion and sync PRs carry the configured titles and signature", async () => {
   const c = { ...DEFAULT_GITHUB_CONVENTIONS, promotionTitle: "ship #{N}: {title}", syncTitle: "sync {production} into {base}", signature: "by the bot" };
   arrange({});
-  createPromotionPR("example/a", "prod", "dev", [{ number: 12, title: "Fix x" }], tmp, undefined, c);
-  createSyncPR("example/a", "prod", "dev", 2, tmp, undefined, c);
+  await createPromotionPR("example/a", "prod", "dev", [{ number: 12, title: "Fix x" }], tmp, undefined, c);
+  await createSyncPR("example/a", "prod", "dev", 2, tmp, undefined, c);
   const [promo, sync] = calls().filter((a) => a[0] === "pr" && a[1] === "create");
   assert.equal(flag(promo, "--title"), "ship #12: Fix x");
   assert.match(flag(promo, "--body"), /- #12: Fix x\n\n---\nby the bot$/);

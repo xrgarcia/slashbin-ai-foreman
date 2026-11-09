@@ -276,3 +276,31 @@ test("through the work source: gh never reachable gives unavailable", async () =
   const result = await activeWorkSource().loadRecord(issue(22), cfg);
   assert.equal(result.status, "unavailable");
 });
+
+// foreman#236: the daemon's io is async (ghAsync), so two saves of one item can
+// overlap. They are queued per record: one comment is posted, then edited.
+test("concurrent saves of one item over an async io post one comment, then edit it", async () => {
+  const { io, calls, board } = fakeIo();
+  const slow = { login: async () => SELF, run: (args) => new Promise((r) => setTimeout(() => r(io.run(args)), 5)) };
+  const store = new GitHubRecordStore(slow);
+  const [a, b] = await Promise.all([store.saveRecord(issue(21), { v: 1 }, cfg), store.saveRecord(issue(21), { v: 2 }, cfg)]);
+  assert.deepEqual([a, b], [true, true]);
+  assert.equal(calls.filter((x) => x.includes("POST")).length, 1, "two POSTs would leave two record comments");
+  assert.equal(board.get("21").length, 1);
+  assert.deepEqual(await new GitHubRecordStore(io).loadRecord(issue(21), cfg), { status: "found", record: { v: 2 } });
+});
+
+test("a hung read of one item does not hold up another item's load", async () => {
+  const { io } = fakeIo();
+  await new GitHubRecordStore(io).saveRecord(issue(31), { ok: true }, cfg);
+  let hang;
+  const gated = {
+    login: async () => SELF,
+    run: (args) => (args.some((a) => a.includes("/issues/30/")) ? new Promise((r) => { hang = () => r(io.run(args)); }) : Promise.resolve(io.run(args))),
+  };
+  const store = new GitHubRecordStore(gated);
+  const stuck = store.loadRecord(issue(30), cfg);
+  assert.deepEqual(await store.loadRecord(issue(31), cfg), { status: "found", record: { ok: true } });
+  hang();
+  assert.deepEqual(await stuck, { status: "absent" });
+});
