@@ -19,23 +19,50 @@ export function describeAge(ms) {
   return `${Math.floor(s / 86400)}d`;
 }
 
+/** `systemctl --user show -p ActiveState -p MainPID -p ActiveEnterTimestamp` -> the unit's live state. */
+export function parseUnitShow(text) {
+  const kv = Object.fromEntries(String(text).split("\n").map((l) => { const i = l.indexOf("="); return i < 0 ? [l, ""] : [l.slice(0, i), l.slice(i + 1).trim()]; }));
+  const mainPid = parseInt(kv.MainPID, 10) || 0;
+  return { active: kv.ActiveState === "active" && mainPid > 0, mainPid, startedAt: kv.ActiveEnterTimestamp || "" };
+}
+
+/** The time of a `journalctl -o short-iso` line (`2026-11-09T06:03:58-0600 host unit[pid]: msg`), or null. */
+export function journalLineTime(line) {
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:[.,]\d+)?([+-])(\d{2}):?(\d{2})/.exec(line);
+  if (!m) return null;
+  const t = Date.parse(`${m[1]}${m[2]}${m[3]}:${m[4]}`);
+  return Number.isNaN(t) ? null : t;
+}
+
 /**
  * The last `count` log lines and where they came from.
  *
+ * Journald lines are shown as current only when the unit is active, they are from its current run
+ * (`since` its start) and the newest is within STALE_LOG_MS of now. Anything else is still shown
+ * but labelled, so an old "Shutting down..." never reads as live.
+ *
  * @param {object} o
- * @param {string|null} o.unit      the systemd user unit running the daemon, or null when there is none
+ * @param {string|null} o.unit      the systemd user unit that manages the daemon, or null when there is none
+ * @param {{ active: boolean, mainPid: number, startedAt: string } | null} [o.state]  the unit's live state
  * @param {string} o.logFile        the path `agent-manager.mjs start` logs to
  * @param {number} o.count
- * @param {(unit: string, count: number) => string} o.journal   journald's last lines for the unit; may throw
+ * @param {(unit: string, count: number, since: string | null) => string} o.journal   `-o short-iso` lines; may throw
  * @param {(file: string) => { text: string, mtimeMs: number }} o.readFile   may throw when there is no file
  * @param {number} [o.now]
  * @returns {{ source: string, lines: string[], note: string | null } | null}  null: nothing to show
  */
-export function recentLogs({ unit, logFile, count, journal, readFile, now = Date.now() }) {
+export function recentLogs({ unit, state = null, logFile, count, journal, readFile, now = Date.now() }) {
   if (unit) {
     try {
-      const lines = journal(unit, count).trim().split("\n").filter(Boolean);
-      if (lines.length > 0) return { source: `journald (${unit})`, lines, note: null };
+      const active = Boolean(state?.active);
+      const lines = journal(unit, count, active && state.startedAt ? state.startedAt : null).trim().split("\n").filter(Boolean);
+      if (lines.length > 0) {
+        const newest = journalLineTime(lines[lines.length - 1]);
+        let note = null;
+        if (!active) note = `${unit} is not running: these journal lines are historical${newest ? `, the newest ${describeAge(now - newest)} old` : ""}`;
+        else if (newest !== null && now - newest > STALE_LOG_MS) note = `the newest journal line is ${describeAge(now - newest)} old: the daemon has logged nothing since, so these lines may be stale`;
+        return { source: `journald (${unit})`, lines, note };
+      }
     } catch { /* journald not readable here: fall back to the file, labelled */ }
   }
   let file;

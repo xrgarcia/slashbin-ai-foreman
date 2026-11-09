@@ -3,7 +3,7 @@ import { spawn, execSync } from "child_process";
 import { readFileSync, writeFileSync, unlinkSync, existsSync, openSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { recentLogs } from "./agent-logs.mjs";
+import { recentLogs, parseUnitShow } from "./agent-logs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRY_POINT = join(__dirname, "dist", "cli.js");
@@ -177,32 +177,41 @@ function restart() {
   }
 }
 
+/** Prints `Uptime: Hh Mm` for `pid` from /proc (Linux); silent where /proc is not there. */
+function printUptime(pid) {
+  if (isWindows) return;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const startTicks = parseInt(stat.split(" ")[21], 10);
+    const systemUptime = parseFloat(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
+    const processUptime = systemUptime - startTicks / 100;
+    console.log(`Uptime: ${Math.floor(processUptime / 3600)}h ${Math.floor((processUptime % 3600) / 60)}m`);
+  } catch {
+    // /proc not available (macOS) — skip uptime
+  }
+}
+
 function status() {
+  const label = `Agent${repoName ? ` (${repoName})` : ""}`;
+  // When a systemd unit manages the daemon, the unit is the identity: its MainPID and start time, whatever the PID file says
+  // (the PID file can name a child, or be gone after a graceful stop).
+  const unit = systemdUnit();
+  const state = unit ? unitState(unit) : null;
+  if (unit && state?.active) {
+    console.log(`${label} is running under ${unit} (MainPID ${state.mainPid})`);
+    if (state.startedAt) console.log(`Started: ${state.startedAt}`);
+    printUptime(state.mainPid);
+    printRecent(5, "\nRecent logs");
+    return;
+  }
   const pid = readPid();
   if (isRunning(pid)) {
-    console.log(`Agent${repoName ? ` (${repoName})` : ""} is running (PID ${pid})`);
-
-    // Show uptime on Linux
-    if (!isWindows) {
-      try {
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        const startTicks = parseInt(stat.split(" ")[21], 10);
-        const uptime = readFileSync("/proc/uptime", "utf8");
-        const systemUptime = parseFloat(uptime.split(" ")[0]);
-        const clkTck = 100;
-        const processUptime = systemUptime - startTicks / clkTck;
-        const hours = Math.floor(processUptime / 3600);
-        const mins = Math.floor((processUptime % 3600) / 60);
-        console.log(`Uptime: ${hours}h ${mins}m`);
-      } catch {
-        // /proc not available (macOS) — skip uptime
-      }
-    }
-
+    console.log(`${label} is running (PID ${pid})`);
+    printUptime(pid);
     // The last 5 log lines, from where this daemon actually logs (agent-logs.mjs).
     printRecent(5, "\nRecent logs");
   } else {
-    console.log(`Agent${repoName ? ` (${repoName})` : ""} is not running`);
+    console.log(`${label} is not running${unit ? ` (${unit} is not active)` : ""}`);
     if (pid) {
       console.log(`(stale PID file referenced ${pid})`);
       cleanPid();
@@ -210,12 +219,24 @@ function status() {
   }
 }
 
+/** The managing unit's live state (ActiveState, MainPID, ActiveEnterTimestamp), or null when it cannot be read. */
+function unitState(unit) {
+  try {
+    return parseUnitShow(execSync(`systemctl --user show ${unit} -p ActiveState -p MainPID -p ActiveEnterTimestamp`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+  } catch {
+    return null;
+  }
+}
+
 function readRecent(count) {
+  const unit = systemdUnit();
   return recentLogs({
-    unit: systemdUnit(),
+    unit,
+    state: unit ? unitState(unit) : null,
     logFile: LOG_FILE,
     count,
-    journal: (u, n) => execSync(`journalctl --user -u ${u} -n ${n} --no-pager -o cat`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
+    // Current run only when the unit is active (`since` its start); short-iso so each line carries its time.
+    journal: (u, n, since) => execSync(`journalctl --user -u ${u} -n ${n} --no-pager -o short-iso${since ? ` --since "${since}"` : ""}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
     readFile: (f) => ({ text: readFileSync(f, "utf8"), mtimeMs: statSync(f).mtimeMs }),
   });
 }
@@ -247,7 +268,7 @@ function logs() {
     return;
   }
   console.error(`(${r.source})`);
-  if (r.note) console.error(`[stale] ${r.note}`);
+  if (r.note) console.log(`# [stale] ${r.note}`);
   r.lines.forEach((l) => console.log(l));
 }
 
