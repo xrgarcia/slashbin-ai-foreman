@@ -115,13 +115,24 @@ test("CLI status, unit active, PID file names a different process: reports the u
   assert.match(out, /running under slashbin-foreman\.service \(MainPID 3011437\)/);
   assert.match(out, /Started: Fri 2026-09-25 12:46:29 CDT/);
   assert.match(out, /live line/);
+  assert.doesNotMatch(out, /historical|stale|not running/, "an active unit's fresh lines carry no stopped-unit notice");
   assert.doesNotMatch(out, /Shutting down/);
   assert.doesNotMatch(out, new RegExp(`PID ${process.pid}`));
 });
 
 test("CLI status, unit active, PID file absent: still reports the unit", () => {
   const { run } = cli({ unitActive: "yes", journal: `${nowIso()} host node[1]: live line` });
-  assert.match(run("status").stdout, /running under slashbin-foreman\.service \(MainPID 3011437\)/);
+  const out = run("status").stdout;
+  assert.match(out, /running under slashbin-foreman\.service \(MainPID 3011437\)/);
+  assert.doesNotMatch(out, /historical|not running/);
+});
+
+test("CLI status, unit active, journal's newest line is old: labelled stale, not declared stopped", () => {
+  const { run } = cli({ unitActive: "yes", journal: "2026-09-25T17:45:24+0000 host node[1]: Shutting down..." });
+  const out = run("status").stdout;
+  assert.match(out, /running under slashbin-foreman\.service/);
+  assert.match(out, /may be stale/);
+  assert.doesNotMatch(out, /is not running/);
 });
 
 test("CLI status, unit stopped and no PID file: not running, no stale line shown as current", () => {

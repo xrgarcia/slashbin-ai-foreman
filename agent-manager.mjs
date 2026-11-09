@@ -243,14 +243,7 @@ function readRecent(count) {
 
 /** Prints the last `count` log lines under `heading`, naming the source and labelling stale ones. */
 function printRecent(count, heading) {
-  const unit = systemdUnit();
-  const r = recentLogs({
-    unit,
-    logFile: LOG_FILE,
-    count,
-    journal: (u, n) => execSync(`journalctl --user -u ${u} -n ${n} --no-pager -o cat`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
-    readFile: (f) => ({ text: readFileSync(f, "utf8"), mtimeMs: statSync(f).mtimeMs }),
-  });
+  const r = readRecent(count);
   if (!r) {
     console.log("No log file found");
     return;
