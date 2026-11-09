@@ -149,8 +149,8 @@ export function reviewTrailerFromV1(v: RoleResult<"reviewer">): ReviewTrailer {
 /**
  * The review trailers a Tech Lead run printed: its v1 line for `prNumber` wins
  * over the legacy line for that PR. A v1 line that fails its schema fails
- * closed (the review is a failure naming the field), unless the legacy line
- * reports the merge: a merge is never read as "nothing happened". Exported for tests.
+ * closed (the review is a failure naming the field); the legacy trailers ride
+ * along, so a merge they report is never read as "nothing happened". Exported for tests.
  */
 export function readReviewTrailers(stdout: string, prNumber: number, logger?: Logger): { trailers: ReviewTrailer[] } | { error: string; legacy: ReviewTrailer[] } {
   const legacy = parseReviewTrailerRecords(stdout);
@@ -158,10 +158,7 @@ export function readReviewTrailers(stdout: string, prNumber: number, logger?: Lo
   recordContractPath("tech-lead", "reviewer", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger?.info(m));
   if (v1.status === "absent") return { trailers: legacy };
   if (v1.status === "ok") return { trailers: [...legacy.filter((t) => t.pr !== prNumber), reviewTrailerFromV1(v1.result)] };
-  if (legacy.some((t) => t.pr === prNumber && t.merged)) {
-    logger?.warn(`Tech Lead PR #${prNumber}: contract-invalid-result (${v1.problem}); the legacy trailer reports the merge, so it stands`);
-    return { trailers: legacy };
-  }
+  // Always an error; the legacy trailers travel with it, so a merge they report is still recorded.
   return { error: `contract-invalid-result: ${v1.problem}`, legacy };
 }
 

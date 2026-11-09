@@ -4,7 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatResultV1 } from "../dist/contract/result-v1.js";
+import { formatResultV1, readResultV1 } from "../dist/contract/result-v1.js";
+import { verifyHoldPlan } from "../dist/phases/verify.js";
 import { checkSkillExamples, checkAgentOutput, checkDeterministic, usageRows } from "../dist/contract/conformance.js";
 import { checkTitlesParse } from "../dist/github/title-check.js";
 import { readDeploy, deployTrailerFromV1 } from "../dist/plugins/sre.js";
@@ -71,7 +72,7 @@ test("deploy hold plan: person stops, a far time is capped at a day, transient b
   assert.equal(deployHoldPlan({ hold: "merge-failed" }, NOW).kind, "backoff");
 });
 
-test("deploy v1 fails closed: an invalid line is a person hold naming the field, but a reported merge stays true", () => {
+test("deploy v1 fails closed: an invalid line is a person hold naming the field, a reported merge stays true but its verify verdict is held", () => {
   const bad = formatResultV1({ schema: 1, role: "deployer", outcome: "held", pr: 12, merged: false, verify: "hold", hold: "x" });
   const held = readDeploy(bad, 12).trailer;
   assert.equal(held.merged, false);
@@ -82,6 +83,29 @@ test("deploy v1 fails closed: an invalid line is a person hold naming the field,
   const merged = readDeploy(`SRE_DEPLOY pr=#12 merged=yes merge_sha=${SHA} verify=pass\n${bad}`, 12).trailer;
   assert.equal(merged.merged, true);
   assert.equal(merged.mergeSha, SHA);
+  // The legacy verify=pass is not trusted beside an invalid v1 line: the release is held for a fresh verification.
+  assert.equal(merged.verify, "hold");
+  assert.equal(merged.hold, "contract-invalid-result");
+  assert.equal(merged.holdClass, "person");
+  assert.match(merged.holdReason, /hold_class/);
+  assert.equal(verifyHoldPlan(merged.hold).kind, "charge");
+});
+
+test("v1 routing fields fail closed: a malformed pr or role is invalid, never absent; a valid other PR or role is ignored", () => {
+  const legacy = "FOREMAN_REVIEW pr=#12 verdict=APPROVE merged=yes deploy=SUCCESS";
+  const line = (o) => `FOREMAN_RESULT_V1 ${JSON.stringify(o)}`;
+  for (const pr of ["12", null]) {
+    const r = readResultV1(`${legacy}\n${line({ schema: 1, role: "verifier", pr, outcome: "pass" })}`, "verifier", 12);
+    assert.equal(r.status, "invalid", `pr=${JSON.stringify(pr)}`);
+    assert.match(r.problem, /\bpr\b/);
+  }
+  for (const role of [undefined, null, "verfier"]) {
+    const r = readResultV1(line({ schema: 1, ...(role === undefined ? {} : { role }), pr: 12, outcome: "pass" }), "verifier", 12);
+    assert.equal(r.status, "invalid", `role=${JSON.stringify(role)}`);
+    assert.match(r.problem, /\brole\b/);
+  }
+  assert.equal(readResultV1(line({ schema: 1, role: "verifier", pr: 13, outcome: "pass" }), "verifier", 12).status, "absent");
+  assert.equal(readResultV1(formatResultV1({ role: "reviewer", pr: 12, outcome: "approve", merged: true, deploy: "success" }), "verifier", 12).status, "absent");
 });
 
 test("deploy v1: unrelated errors carry the agent's signature", () => {
@@ -98,7 +122,7 @@ test("#157: one signature, different wording, one alert; no signature keeps the 
   assert.notEqual(unrelatedErrorAlert("Redis ECONNRESET at 10:01 on host-a", "PR #1", []).dedupeKey, a.dedupeKey);
 });
 
-test("review v1 replaces the legacy trailer for its PR; invalid fails closed unless legacy reports the merge", () => {
+test("review v1 replaces the legacy trailer for its PR; invalid is always an error; a legacy merge rides along", () => {
   const legacy = "FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=no deploy=NA";
   const v1 = formatResultV1({ schema: 1, role: "reviewer", pr: 100, outcome: "request-changes", merged: false, deploy: "na" });
   const ok = readReviewTrailers(`${legacy}\n${v1}`, 100);
@@ -106,7 +130,9 @@ test("review v1 replaces the legacy trailer for its PR; invalid fails closed unl
   const bad = formatResultV1({ schema: 1, role: "reviewer", pr: 100, outcome: "maybe", merged: false, deploy: "na" });
   assert.match(readReviewTrailers(`${legacy}\n${bad}`, 100).error, /contract-invalid-result: .*outcome/);
   const mergedLegacy = "FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS";
-  assert.equal(readReviewTrailers(`${mergedLegacy}\n${bad}`, 100).trailers[0].merged, true);
+  const mergedBad = readReviewTrailers(`${mergedLegacy}\n${bad}`, 100);
+  assert.match(mergedBad.error, /contract-invalid-result: .*outcome/);
+  assert.equal(mergedBad.legacy[0].merged, true);
   assert.deepEqual(readReviewTrailers(legacy, 100).trailers.map((t) => t.verdict), ["APPROVE"]);
 });
 

@@ -161,8 +161,9 @@ export function deployTrailerFromV1(d: RoleResult<"deployer">): DeployTrailer {
 /**
  * A deploy run's trailer for `prNumber`: the v1 line first, else the legacy
  * `SRE_DEPLOY` line. A v1 line that fails its schema fails closed as a person
- * hold naming the field, except that a merge the legacy line reports stays
- * true: a merge must never be read as "nothing happened". Exported for tests.
+ * hold naming the field. A merge the legacy line reports stays true with its
+ * SHA (a merge is never "nothing happened"), but its verify verdict is not
+ * trusted: the release is held for a fresh verification. Exported for tests.
  */
 export function readDeploy(stdout: string, prNumber: number, logger?: Logger): { trailer: DeployTrailer | null; unrelated?: UnrelatedErrors } {
   const v1 = readResultV1(resultText(stdout), "deployer", prNumber);
@@ -175,7 +176,9 @@ export function readDeploy(stdout: string, prNumber: number, logger?: Logger): {
     return { trailer, ...(unrelated ? { unrelated } : {}) };
   }
   logger?.warn(`SRE deploy of PR #${prNumber}: ${CONTRACT_INVALID_HOLD} (${v1.problem})`);
-  if (legacy?.merged) return { trailer: legacy };
+  // The merge and its SHA stand; the legacy verify verdict does not: production verification stays open, held
+  // on the contract, until a later valid verification passes.
+  if (legacy?.merged) return { trailer: { pr: prNumber, merged: true, mergeSha: legacy.mergeSha, verify: "hold", hold: CONTRACT_INVALID_HOLD, holdClass: "person", holdReason: v1.problem, ...(legacy.evidence ? { evidence: legacy.evidence } : {}) } };
   return { trailer: { pr: prNumber, merged: false, mergeSha: null, verify: "none", hold: CONTRACT_INVALID_HOLD, holdClass: "person", holdReason: v1.problem } };
 }
 
