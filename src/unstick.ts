@@ -46,6 +46,7 @@ export const UNSTICK_KINDS = [
   "unrelated-error",
   "epic-ready-to-close",
   "dependency-batch-loop",
+  "unlinked-fix",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -123,21 +124,11 @@ export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): stri
 /** The kinds only an event can report: there is no persisted condition to read them from. */
 /** Immutable constant (not state): the kinds only an event can report. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
-  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop",
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop", "unlinked-fix",
 ]);
 
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
 export const RELEASE_GATE_REASON = "at `pr approved` — dev verification passed, awaiting the EM outcome gate (`ready for prod release`)";
-
-/** Every issue a title says it follows up ("— follow-up to #N"), in order. The one parser for that phrase. */
-export function followUpTargets(title: string): number[] {
-  return [...(title ?? "").matchAll(/follow-up to #(\d+)/gi)].map((m) => Number(m[1]));
-}
-
-/** The first issue a title follows up, else null. */
-export function followUpOrigin(title: string): number | null {
-  return followUpTargets(title)[0] ?? null;
-}
 
 /**
  * The release-gate reason for one issue: the stable text, the issue's labels (sorted), and the EM's own

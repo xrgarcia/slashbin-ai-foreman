@@ -119,7 +119,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    One open Foreman PR is in flight per repo. A build waits while a PR awaits revision, and
    (`buildWaitsForDevVerify`, default on) until the repo's last merge has passed dev verification;
    a merge whose attempts are spent, or that waits on a named time, frees the repo. A
-   title saying "follow-up to #N" builds first. The session is told its branch and where
+   fix linked to the held issue (it corrects it: the held issue blocked by it, it a sub-issue of the held issue, or a "follow-up to #N" title) builds first; an issue that only mentions the held one queues and is raised once as `unlinked-fix`. The session is told its branch and where
    it starts (`FOREMAN_BRANCHES`, `FOREMAN_BRANCH_PREFIX`, `FOREMAN_START_REF`).
    An `approved` issue is held, not built, while a prerequisite is unmet: a GitHub "blocked by"
    issue not yet merged, a Pre-Flight `readiness` block not satisfied, or no `## Acceptance`
@@ -158,7 +158,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
     `EM_GITHUB_TOKEN`, killed after 20 minutes, 40 for `rework-decision`). Kinds: skip, verify-held,
     verify-exhausted, verify-no-pr, revision-exhausted, revision-stalemate,
     needs-ruling, dead-zone, deploy-failed, release-gate, rework-decision, unrelated-error, dependency-batch-loop,
-    epic-ready-to-close (`UNSTICK_KINDS`, `src/unstick.ts`; `divergence` is also listed but retired, never raised, since there is no shared
+    epic-ready-to-close, unlinked-fix (`UNSTICK_KINDS`, `src/unstick.ts`; `divergence` is also listed but retired, never raised, since there is no shared
     branch to diverge). A hold with
     retries left is not called for. Outcomes
     are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked` (a handoff: while the question stands it is called again after `backoff.handoff`, 10 minutes doubling, up to 3 recalls, then the escalation owner is told once), 2
@@ -166,10 +166,10 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
     `failed` (retried to 3 attempts, then re-armed on a 1 h to 24 h back-off, one call each; an exit 3 `unknown kind` rejection is `failed`, not `declined`). The Foreman never clears a block on exit 0 and
     never writes Paperclip; the EM releases the hold on GitHub and the unblock checks
     see it. A comment opening `**EM unstick` does not count as the issue changing.
-    Three kinds are not holds. `unrelated-error`: errors the SRE excluded from a verification
+    Four kinds are not holds. `unrelated-error`: errors the SRE excluded from a verification
     as not this release's never hold it; each distinct error signature is raised to the EM once, to route. `epic-ready-to-close`: an issue closed after its
     production verification that belongs to an epic tells the EM to close the epic if it was the
-    last open child. `dependency-batch-loop`: see Dependabot above. The kinds with no issue use
+    last open child. `dependency-batch-loop`: see Dependabot above. `unlinked-fix`: an issue that mentions a held verification but is not linked to it (see Implement). The kinds with no issue use
     issue 0 and live in the repo's own record.
 11. **Skill Deliver** *(only on `syncOnly` human-lane repos)* — no Claude session, no PR, no label,
     no comment. For each open `approved-for-human` issue it puts a skill-sync commit on

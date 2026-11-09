@@ -1,1 +1,1 @@
-["skip","divergence","verify-held","verify-exhausted","verify-no-pr","revision-exhausted","revision-stalemate","needs-ruling","dead-zone","deploy-failed","release-gate","rework-decision","unrelated-error","epic-ready-to-close","dependency-batch-loop"]
+["skip","divergence","verify-held","verify-exhausted","verify-no-pr","revision-exhausted","revision-stalemate","needs-ruling","dead-zone","deploy-failed","release-gate","rework-decision","unrelated-error","epic-ready-to-close","dependency-batch-loop","unlinked-fix"]
