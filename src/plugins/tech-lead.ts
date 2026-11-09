@@ -1,7 +1,9 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
-import { SUMMARY_DISPLAY_LIMIT, type ReviewResult, type ReviewTrailer } from "../session/protocol.js";
+import { SUMMARY_DISPLAY_LIMIT, extractStreamResult, type ReviewResult, type ReviewTrailer } from "../session/protocol.js";
+import { readResultV1, waitUntilSlug, type RoleResult } from "../contract/result-v1.js";
+import { recordContractPath } from "../contract/usage.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "../review-progress.js";
 import { isTransientGhError } from "../github/gh.js";
@@ -124,7 +126,9 @@ export async function reviewViaTechLead(
     return { success: false, error: `Tech Lead review failed (exit ${out.code}): ${(out.stderr.trim() || out.stdout).trim().slice(-400)}` };
   }
 
-  const trailers = parseReviewTrailerRecords(out.stdout);
+  const read = readReviewTrailers(out.stdout, prNumber, logger);
+  if ("error" in read) return { success: false, error: read.error, trailers: read.legacy };
+  const trailers = read.trailers;
   const declaredNoOp = REVIEW_NOOP_SENTINEL.test(out.stdout);
   if (trailers.length === 0 && !declaredNoOp) {
     return { success: false, error: "Tech Lead exited 0 without a FOREMAN_REVIEW trailer — outcome unknown; check the issue labels", trailers };
@@ -133,6 +137,29 @@ export async function reviewViaTechLead(
   const summary = out.stdout.trim().slice(0, SUMMARY_DISPLAY_LIMIT);
   logger.info(`Tech Lead review of ${repoConfig.githubRepo} PR #${prNumber}: ${statusLine || "no-op"}`);
   return { success: true, summary, statusLine, trailers };
+}
+
+/** A v1 reviewer result as the legacy review trailer. Pure, exported for tests. */
+export function reviewTrailerFromV1(v: RoleResult<"reviewer">): ReviewTrailer {
+  const verdict = v.outcome === "approve" ? "APPROVE" : v.outcome === "request-changes" ? "REQUEST_CHANGES" : "NONE";
+  const hold = v.hold === "wait-until" && v.eligible_at ? waitUntilSlug(v.eligible_at) : v.hold ?? undefined;
+  return { pr: v.pr, verdict, merged: v.merged, deploy: v.deploy.toUpperCase(), ...(hold ? { hold } : {}) };
+}
+
+/**
+ * The review trailers a Tech Lead run printed: its v1 line for `prNumber` wins
+ * over the legacy line for that PR. A v1 line that fails its schema fails
+ * closed (the review is a failure naming the field); the legacy trailers ride
+ * along, so a merge they report is never read as "nothing happened". Exported for tests.
+ */
+export function readReviewTrailers(stdout: string, prNumber: number, logger?: Logger): { trailers: ReviewTrailer[] } | { error: string; legacy: ReviewTrailer[] } {
+  const legacy = parseReviewTrailerRecords(stdout);
+  const v1 = readResultV1(extractStreamResult(stdout) ?? stdout, "reviewer", prNumber);
+  recordContractPath("tech-lead", "reviewer", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger?.info(m));
+  if (v1.status === "absent") return { trailers: legacy };
+  if (v1.status === "ok") return { trailers: [...legacy.filter((t) => t.pr !== prNumber), reviewTrailerFromV1(v1.result)] };
+  // Always an error; the legacy trailers travel with it, so a merge they report is still recorded.
+  return { error: `contract-invalid-result: ${v1.problem}`, legacy };
 }
 
 /** The Tech Lead's promotion approval: one read of the diff and one review. */

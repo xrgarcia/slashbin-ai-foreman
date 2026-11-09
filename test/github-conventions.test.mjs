@@ -44,7 +44,7 @@ test("defaults are the names the Foreman always used", () => {
   assert.equal(fillTitle(d.promotionTitle, { title: "Fix x", N: 5 }), "release: Fix x");
   assert.equal(fillTitle(d.promotionBatchTitle, { n: 3 }), "release: promote 3 changes to production");
   assert.equal(fillTitle(d.syncTitle, { base: "develop", production: "main" }), "chore: sync develop with main (merge commits backfill)");
-  assert.equal(fillTitle(d.reconcileTitle, { N: 7 }), "feat: implement #7");
+  assert.equal(fillTitle(d.reconcileTitle, { N: 7 }), "feat: implement (#7)");
   assert.equal(signed("body", d), "body\n\n---\nAutomated by slashbin-ai-agent");
   assert.ok(Object.isFrozen(d) && Object.isFrozen(d.priorityLabels) && Object.isFrozen(d.priorityLabels[0]));
 });
