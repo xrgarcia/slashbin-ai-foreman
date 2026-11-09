@@ -2,7 +2,7 @@
 // session-report builders, and the helpers that report a step (itemOf,
 // notifyOnce, reportReviewOutcomes). Module state lives here, once.
 
-import { spawnSync } from "node:child_process";
+import { gitResult } from "../git-exec.js";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { SessionPr, SessionReport, WorkItem } from "../adapters.js";
@@ -76,9 +76,9 @@ export async function issueEditedSince(repoConfig: RepoConfig, n: number, sinceI
  * Whether `origin/<base>` gained a commit after `sinceIso`, read from the local
  * clone without fetching. Undefined when git cannot say: unknown never unblocks.
  */
-export function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): boolean | undefined {
-  const r = spawnSync("git", ["log", "-1", "--format=%cI", `origin/${repoConfig.baseBranch}`], { cwd: repoConfig.repoPath, encoding: "utf8" });
-  const at = Date.parse((r.stdout ?? "").trim());
+export async function baseAdvancedSince(repoConfig: RepoConfig, sinceIso: string): Promise<boolean | undefined> {
+  const r = await gitResult(["log", "-1", "--format=%cI", `origin/${repoConfig.baseBranch}`], repoConfig.repoPath, { timeoutMs: 30_000 });
+  const at = Date.parse(r.stdout.toString("utf8").trim());
   const since = Date.parse(sinceIso);
   if (r.status !== 0 || Number.isNaN(at) || Number.isNaN(since)) return undefined;
   return at > since;

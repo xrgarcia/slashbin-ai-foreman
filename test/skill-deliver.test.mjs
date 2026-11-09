@@ -103,12 +103,12 @@ const STALE = { ".claude/skills/implement-approved-issues/SKILL.md": "implement 
 const repoOf = (clone) => ({ name: "svc", repoPath: clone, baseBranch: "develop" });
 const ISSUE = { number: 42, title: "Add the Quiz popup! (v2)" };
 
-test("deliver: a stale repo gets ONE commit on feature/<N>-<slug> cut from origin/<base>, pushed, with no PR and no checkout change", () => {
+test("deliver: a stale repo gets ONE commit on feature/<N>-<slug> cut from origin/<base>, pushed, with no PR and no checkout change", async () => {
   const cfg = cfgFor(makeGolden(tmp));
   const clone = makeRepo(tmp, { ...STALE, ".claude/skills/implement-approved-issues/old.md": "gone\n" });
   const base = git(clone, "rev-parse", "origin/develop");
   put(clone, "scratch.txt", "someone's untracked file\n");
-  const out = skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
 
   assert.equal(out.status, "delivered");
   assert.equal(out.branch, "feature/42-add-the-quiz-popup-v2");
@@ -129,43 +129,43 @@ test("deliver: a stale repo gets ONE commit on feature/<N>-<slug> cut from origi
   assert.equal(readFileSync(join(clone, ".claude/skills/implement-approved-issues/SKILL.md"), "utf8"), "implement v1\n");
 });
 
-test("deliver: a dirty checkout does not matter, a current repo gets nothing", () => {
+test("deliver: a dirty checkout does not matter, a current repo gets nothing", async () => {
   const cfg = cfgFor(makeGolden(tmp));
   const clone = makeRepo(tmp, CURRENT);
   put(clone, "README.md", "uncommitted\n");
-  const out = skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
   assert.equal(out.status, "current");
   assert.equal(git(join(tmp, "svc.git"), "branch", "--list", "feature/*"), "");
 });
 
-test("deliver: an existing feature/<N>-* branch (the person's, or an earlier delivery) is left alone, never pushed over", () => {
+test("deliver: an existing feature/<N>-* branch (the person's, or an earlier delivery) is left alone, never pushed over", async () => {
   const cfg = cfgFor(makeGolden(tmp));
   const clone = makeRepo(tmp, STALE);
-  const first = skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
+  const first = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
   assert.equal(first.status, "delivered");
   // Same issue again, even with a re-worded title: the branch exists under another slug.
-  const again = skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 42, title: "Quiz popup, reworded" }, logger());
+  const again = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 42, title: "Quiz popup, reworded" }, logger());
   assert.deepEqual(again, { status: "exists", branch: first.branch });
   assert.equal(git(join(tmp, "svc.git"), "rev-parse", first.branch), first.sha, "no force, no second commit");
   // Issue 4 is not issue 42: `feature/4-*` must not match `feature/42-...`.
-  assert.equal(skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 4, title: "Other" }, logger()).status, "delivered");
+  assert.equal((await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 4, title: "Other" }, logger())).status, "delivered");
 });
 
-test("deliver: the branch is what the direct-mode skill looks for (feature/<N>-*), and an empty slug still has a dash", () => {
+test("deliver: the branch is what the direct-mode skill looks for (feature/<N>-*), and an empty slug still has a dash", async () => {
   const cfg = cfgFor(makeGolden(tmp));
   const clone = makeRepo(tmp, STALE);
-  const out = skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 9, title: "!!!" }, logger());
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 9, title: "!!!" }, logger());
   assert.equal(out.branch, "feature/9-issue");
   assert.ok(git(clone, "ls-remote", "--heads", "origin", "feature/9-*").includes("refs/heads/feature/9-issue"));
 });
 
-test("deliver: an unreadable golden or a failing push is an outcome, not a throw", () => {
+test("deliver: an unreadable golden or a failing push is an outcome, not a throw", async () => {
   const bad = cfgFor(join(tmp, "nowhere"));
   const clone = makeRepo(tmp, STALE);
-  assert.equal(skillSync.deliverSkillsForIssue(bad, repoOf(clone), ISSUE, logger()).status, "skipped");
+  assert.equal((await skillSync.deliverSkillsForIssue(bad, repoOf(clone), ISSUE, logger())).status, "skipped");
   const cfg = cfgFor(makeGolden(tmp));
   git(clone, "remote", "set-url", "--push", "origin", join(tmp, "no-such.git"));
-  assert.equal(skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger()).status, "failed");
+  assert.equal((await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger())).status, "failed");
 });
 
 // --- The stage ---
@@ -177,7 +177,7 @@ test("the skill-deliver stage is its own lane, needs no checkout lock and spawns
   assert.equal(stageSpawnsSession({ type: "skill-deliver" }), false);
 });
 
-test("syncOnly: read from a repo entry; a repo without it is not sync-only", () => {
+test("syncOnly: read from a repo entry; a repo without it is not sync-only", async () => {
   const dir = mkTmp("skill-sync-cfg-");
   const f = join(dir, "c.json");
   const entry = (name, extra = {}) => ({ name, repoPath: dir, githubRepo: `o/${name}`, ...extra });
@@ -187,7 +187,7 @@ test("syncOnly: read from a repo entry; a repo without it is not sync-only", () 
   assert.ok(!c.repos.find((r) => r.name === "foreman").syncOnly);
 });
 
-test("stage wiring: a sync-only repo runs only skill-deliver, others never run it, and a human repo is not onboarded, mirrored or labelled", () => {
+test("stage wiring: a sync-only repo runs only skill-deliver, others never run it, and a human repo is not onboarded, mirrored or labelled", async () => {
   const orch = readFileSync(join(root, "src", "orchestrator.ts"), "utf8");
   assert.match(orch, /!!repoConfig\.syncOnly !== delivers\) return \{ processed: 0/);
   assert.ok(orch.indexOf("!!repoConfig.syncOnly !== delivers") < orch.indexOf("onboardRepo"), "the sync-only gate runs before onboarding");

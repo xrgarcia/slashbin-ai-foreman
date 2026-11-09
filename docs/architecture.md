@@ -180,7 +180,10 @@ and lanes in flight, the gh usage counters, the state directory, the back-off co
 
 Two rules keep the event loop free. Every GitHub call goes through the async runner
 (`ghAsync`, `src/github/gh.ts`): `execFile` plus a timer between retries, so a GitHub
-that is not answering cannot starve the observers. Work runs in lanes: each (repo, lane)
+that is not answering cannot starve the observers. Every `git` call goes through
+`src/git-exec.ts`, also async with a timeout; `test/no-sync-subprocess.test.mjs` fails the
+build if `spawnSync`, `execFileSync` or `execSync` appears anywhere in `src/` (empty
+allow-list). Work runs in lanes: each (repo, lane)
 pair has its own poll loop, one item at a time, and a repo's checkout lock serializes
 only the stages that touch its clone ([pipeline.md](pipeline.md#lanes-stages-run-side-by-side)).
 

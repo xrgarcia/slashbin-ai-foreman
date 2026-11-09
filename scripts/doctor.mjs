@@ -140,7 +140,7 @@ else if (config.stages.some((s) => s.type === "release") && releaseStageReady(co
 let golden = null;
 if (config.skillSync.enabled) {
   try {
-    golden = readGolden(config.skillSync, { fetch: false });
+    golden = await readGolden(config.skillSync, { fetch: false });
     line("PASS", "skill sync", `on — golden ${golden.label}@${golden.version}: ${[...golden.skills.keys()].sort().join(", ")}`);
     const unknown = config.skillSync.skills.filter((n) => !golden.skills.has(n));
     if (unknown.length) line("WARN", "skill sync", `skillSync.skills names ${unknown.join(", ")}, which the golden does not have — never synced.`);
@@ -218,7 +218,7 @@ for (const repo of config.repos) {
       line("PASS", `${at}: skill sync`, "opted out (skillSyncSkills is empty)");
     } else {
       try {
-        const stale = describeDrift(driftAt(repo.repoPath, ref, config.skillSync, golden, names));
+        const stale = describeDrift(await driftAt(repo.repoPath, ref, config.skillSync, golden, names));
         if (stale) line("WARN", `${at}: skill sync`, `${ref} is behind ${golden.label}@${golden.version}: ${stale} — synced with the next approved issue here.`);
         else line("PASS", `${at}: skill sync`, `${names.join(", ")} current at ${ref}`);
       } catch (err) {
