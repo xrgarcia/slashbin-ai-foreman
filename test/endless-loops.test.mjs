@@ -47,6 +47,7 @@ const st = JSON.parse(fs.readFileSync(${JSON.stringify(ghState)}, "utf8"));
 const out = (v) => process.stdout.write(JSON.stringify(v));
 fs.appendFileSync(${JSON.stringify(join(tmp, "gh.log"))}, JSON.stringify(a) + "\\n");
 if (a[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(a[1])) process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs");
+else if (a[0] === "api" && /\\/events$/.test(a[1])) process.stdout.write(st.labeledAt ?? "");
 else if (a[0] === "api" && /\\/branches\\//.test(a[1])) process.stdout.write("0".repeat(40));
 else if (a[0] === "pr" && a[1] === "list") out(st.prs ?? []);
 else if (a[0] === "issue" && a[1] === "list") out(st.issues ?? []);
@@ -73,9 +74,9 @@ after(() => {
 });
 
 let n = 0;
-function arrange({ issues, prs, reviews = [], committed = ago(600), extraRepo = {}, extra = {} } = {}) {
+function arrange({ issues, prs, reviews = [], committed = ago(600), labeledAt = "", extraRepo = {}, extra = {} } = {}) {
   const repo = `example/loops${++n}`;
-  writeFileSync(ghState, JSON.stringify({ issues, prs: prs?.map((p) => ({ ...p, url: `https://github.com/${repo}/pull/${p.number}` })), reviews, committed }));
+  writeFileSync(ghState, JSON.stringify({ issues, prs: prs?.map((p) => ({ ...p, url: `https://github.com/${repo}/pull/${p.number}` })), reviews, committed, labeledAt }));
   const p = join(tmp, `cfg${n}.json`);
   writeFileSync(p, JSON.stringify({ emRepoPath: tmp, ...extra, repos: [{ name: `r${n}`, repoPath: tmp, githubRepo: repo, ...extraRepo }] }));
   return loadConfig(p).repos[0];
@@ -103,6 +104,61 @@ test("#39: a COMMENTED review at the head is a fresh review", async () => {
 test("#39: a COMMENTED review older than the last commit is not fresh", async () => {
   const cfg = arrange({ issues: [], reviews: [{ author: { login: TL }, state: "COMMENTED", submittedAt: ago(60) }], committed: ago(30) });
   assert.equal(await readFreshReview(cfg, 50, TL, quiet), false);
+});
+
+test("#39 R1: CHANGES_REQUESTED, a relabel, then a current COMMENTED review holds the head (not stranded, not reviewed)", async () => {
+  const cfg = arrange({
+    issues: [issue(5, "approved", "pr under review")], prs: [featurePr()], committed: ago(300),
+    reviews: [
+      { author: { login: TL }, state: "CHANGES_REQUESTED", submittedAt: ago(200) },
+      { author: { login: TL }, state: "COMMENTED", submittedAt: ago(100) },
+    ],
+    labeledAt: ago(150),
+  });
+  assert.equal(await findPRsNeedingReview(cfg, TL, quiet, new BackoffTracker(), () => false), null);
+});
+
+test("#39 R3: a relabel with no commit after a COMMENTED hold does not reopen the head", async () => {
+  const cfg = arrange({
+    issues: [issue(5, "approved", "pr under review")], prs: [featurePr()], committed: ago(300),
+    reviews: [
+      { author: { login: TL }, state: "CHANGES_REQUESTED", submittedAt: ago(200) },
+      { author: { login: TL }, state: "COMMENTED", submittedAt: ago(100) },
+    ],
+    labeledAt: ago(10),
+  });
+  assert.equal(await findPRsNeedingReview(cfg, TL, quiet, new BackoffTracker(), () => false), null);
+});
+
+test("#39: a genuinely unanswered CHANGES_REQUESTED is still stranded-recovered", async () => {
+  const cfg = arrange({
+    issues: [issue(5, "approved", "pr under review")], prs: [featurePr()], committed: ago(300),
+    reviews: [{ author: { login: TL }, state: "CHANGES_REQUESTED", submittedAt: ago(100) }],
+    labeledAt: ago(500),
+  });
+  assert.equal((await findPRsNeedingReview(cfg, TL, quiet, new BackoffTracker(), () => false))?.stranded, true);
+});
+
+test("#39: a CHANGES_REQUESTED answered by a relabel with no commit is still re-reviewed", async () => {
+  const cfg = arrange({
+    issues: [issue(5, "approved", "pr under review")], prs: [featurePr()], committed: ago(300),
+    reviews: [{ author: { login: TL }, state: "CHANGES_REQUESTED", submittedAt: ago(100) }],
+    labeledAt: ago(10),
+  });
+  const c = await findPRsNeedingReview(cfg, TL, quiet, new BackoffTracker(), () => false);
+  assert.deepEqual(c?.issueNumbers, [5]);
+  assert.ok(!c?.stranded);
+});
+
+test("#39 R2: an open issue that lost `approved` (no lifecycle label) holds its PR, never reviewed as unlinked", async () => {
+  const cfg = arrange({ issues: [issue(5)], prs: [featurePr()] });
+  assert.equal(await findPRsNeedingReview(cfg, TL, quiet, new BackoffTracker(), () => false), null);
+});
+
+test("S3: the revise skill honours an empty-diff comment only while its sha matches the current head", () => {
+  const skill = readFileSync(join(root, "skills/revise/SKILL.md"), "utf8");
+  assert.match(skill, /foreman-empty-diff sha=<sha>/);
+  assert.match(skill, /history: ignore it/);
 });
 
 // --- #46 ----------------------------------------------------------------------

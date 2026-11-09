@@ -325,6 +325,9 @@ export async function adoptOrphanedReviewCandidate(
   // An open approved issue the PR names, adoptable or not: one in revise or
   // past review is that stage's to move, so the PR is not reviewed without it.
   let tracked = false;
+  // An open issue the PR names that lost the trigger label: the work was called off, so the PR is held for the EM,
+  // not reviewed as an unlinked one (foreman#39).
+  const withdrawnRefs: number[] = [];
   for (const num of refs) {
     try {
       const info: { state: string; labels: { name: string }[] } = known
@@ -336,7 +339,7 @@ export async function adoptOrphanedReviewCandidate(
         ], config.repoPath));
       if (info.state !== "OPEN") continue;
       const names = new Set(info.labels.map((l) => l.name));
-      if (!names.has(config.triggerLabel)) continue;
+      if (!names.has(config.triggerLabel)) { withdrawnRefs.push(num); continue; }
       tracked = true;
       if (names.has(prPendingActions)) continue;
       if (names.has(readyForProd)) continue;
@@ -349,6 +352,13 @@ export async function adoptOrphanedReviewCandidate(
     }
   }
   if (adopted.length === 0) {
+    if (!tracked && withdrawnRefs.length > 0) {
+      logger.warn(
+        `${config.name}: PR #${pr.number} names open issue(s) without "${config.triggerLabel}" (${withdrawnRefs.map((n) => `#${n}`).join(", ")}) — the work was withdrawn, ` +
+        `so review will NOT run on it. Owner: the EM — re-apply "${config.triggerLabel}" to resume, or close the PR`,
+      );
+      return null;
+    }
     if (!tracked) return unlinked(`names no open "${config.triggerLabel}" issue`);
     logger.debug(`${config.name}: PR #${pr.number} is orphaned but its issues are owned by revise or prod`);
     return null;
