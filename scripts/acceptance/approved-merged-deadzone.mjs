@@ -57,6 +57,7 @@ async function child() {
   const out = { stuck: null, skipLogs: 0, logs: [], error: null };
   try {
     const bin = join(tmp, "bin"); mkdirSync(bin);
+    writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}'); // fake gh is CJS; a stray ancestor type:module package.json must not make it ESM
     const board = [{ number: 7, title: "work item", labels: sc.labels.map((name) => ({ name })) }];
     const pr = (p, state) => ({ number: p.number, url: `https://github.com/${REPO}/pull/${p.number}`, title: `feat: work item`,
       body: p.body, headRefName: p.head ?? "features", baseRefName: p.base, state, mergedAt: p.mergedAt ?? null,
@@ -87,7 +88,7 @@ out([]);
     const logger = { debug: rec("debug"), info: rec("info"), warn: rec("warn"), error: rec("error") };
     logger.child = () => logger;
 
-    out.stuck = github.findStuckMergedIssues(repo, logger).map((s) => ({ issue: s.issueNumber, pr: s.prNumber }));
+    out.stuck = (await github.findStuckMergedIssues(repo, logger)).map((s) => ({ issue: s.issueNumber, pr: s.prNumber }));
     const src = new (await imp("github-work-source.js")).GitHubIssueConnector();
     for (let i = 0; i < 3; i++) await src.selectWork(repo, config, logger);
     out.skipLogs = out.logs.filter((l) => l.level !== "debug" && /all have linked PRs/.test(l.msg)).length;

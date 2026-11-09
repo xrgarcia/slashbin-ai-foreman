@@ -74,6 +74,7 @@ const tmp = mkdtempSync(join(tmpdir(), "foreman-425-skills-"));
 const bin = join(tmp, "bin");
 const capture = join(tmp, "claude-capture.json");
 mkdirSync(bin);
+writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}'); // the fakes are CJS; a stray ancestor package.json (type:module) must not turn them ESM
 writeFileSync(join(bin, "claude"),
   `#!/usr/bin/env node\nconst fs=require("fs");\n` +
   `const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>k.startsWith("FOREMAN_")&&k!=="FOREMAN_GITHUB_TOKEN"));\n` +
