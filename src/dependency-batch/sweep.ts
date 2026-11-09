@@ -68,7 +68,7 @@ export class DependencyBatchSweep {
       logger.warn(`dependency batch ${batch.key}: could not record issue #${number} in the ledger; a landed result on it will not retire the PRs`);
     }
 
-    const majors = issue.changes.filter((c) => c.major).length;
+    const majors = issue.changes.filter((c) => c.major === true).length;
     logger.info(
       `Filed dependency batch issue #${number} for ${prs.length} PR(s) on ${found.bases.join("/")}` +
       (majors > 0 ? ` — ${majors} major` : "") +

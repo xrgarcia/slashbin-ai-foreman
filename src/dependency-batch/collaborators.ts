@@ -16,7 +16,7 @@ export interface DependencyHostPort {
   selectSecurityPRs<T extends Pick<PrSnapshot, "title" | "body">>(prs: readonly T[], alertPackages: ReadonlySet<string>): T[];
   formatGhError(err: unknown): { message: string; stderr: string; status: number | null };
   findOpenDependencyBatchIssue(repo: string, cwd: string, logger: Logger, conventions?: GithubConventions): Promise<{ number: number } | undefined>;
-  describeDependencyPR(number: number, title: string): DependencyChange;
+  describeDependencyPR(number: number, title: string, body?: string): DependencyChange;
   buildDependencyBatchIssue(landingBranch: string, changes: readonly DependencyChange[], conventions?: GithubConventions, baseBranch?: string): { title: string; body: string };
   createDependencyBatchIssue(repo: string, cwd: string, title: string, body: string, labels: string[], logger?: Logger): Promise<number | null>;
 }
@@ -90,7 +90,7 @@ export class BatchIssueComposer {
   constructor(private readonly host: Pick<DependencyHostPort, "describeDependencyPR" | "buildDependencyBatchIssue">) {}
 
   compose(repoConfig: RepoConfig, prs: readonly PrSnapshot[]): ComposedIssue {
-    const changes = prs.map((p) => this.host.describeDependencyPR(p.number, p.title));
+    const changes = prs.map((p) => this.host.describeDependencyPR(p.number, p.title, p.body));
     const { title, body } = this.host.buildDependencyBatchIssue(repoConfig.baseBranch, changes, repoConfig.github, repoConfig.baseBranch);
     return { title, body, changes };
   }
