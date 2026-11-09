@@ -116,7 +116,7 @@ test("renamed labels are the ones checked", () => {
   const labels = ["go", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release",
     "release pending", "prod verification held", "ready to close", "on hold"];
   const cfg = { triggerLabel: "go", github: { blockedLabel: "on hold" }, repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] };
-  assert.equal(arrange(cfg, { "acme/a": { ...ready(), labels } })().status, 0);
+  assert.equal(arrange(cfg, { "acme/a": { ...ready(), labels } })({ FOREMAN_GITHUB_TOKEN: TOKEN }).status, 0);
   assert.match(arrange(cfg, { "acme/a": ready() })().out, /^FAIL  a: labels — missing "go", "on hold"/m);
 });
 
@@ -127,7 +127,7 @@ test("tokens: review without the reviewer's token fails; an SRE path needs its t
   assert.match(r.out, /^FAIL  TECHLEAD_GITHUB_KEY — unset, and review is enabled/m);
   assert.match(r.out, /^FAIL  SRE_GITHUB_KEY — unset, and srePath is set/m);
   const w = arrange({ repos: [{ name: "a", githubRepo: "acme/a" }] }, { "acme/a": ready() })();
-  assert.match(w.out, /^WARN  FOREMAN_GITHUB_TOKEN — unset/m);
+  assert.match(w.out, /^FAIL  FOREMAN_GITHUB_TOKEN — unset — .*no fallback to gh's login/m);
   assert.match(w.out, /^WARN  TECHLEAD_GITHUB_KEY — unset — branch-sync PRs/m);
   // No Tech Lead or SRE: the default stages carry release, so it is skipped, and said so.
   assert.match(w.out, /^WARN  release stage — release stage skipped: techLeadPath and srePath not set/m);

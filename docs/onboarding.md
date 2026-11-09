@@ -47,6 +47,14 @@ the daemon's machine, its three branches, and write access for the Foreman's tok
    After every pass the Foreman publishes the repo's open work to the board, so the
    repo's issues appear there from its first pass ([paperclip.md](paperclip.md)).
 
+A repo with `syncOnly: true` (the human lane, which runs only the `skill-deliver` stage)
+skips both onboarding and the records import, since each writes to the repo.
+
+On a machine upgraded from the old release, the first pass over each repo also imports
+that repo's legacy state ([upgrading.md](upgrading.md#what-happens-to-existing-state-on-first-start)).
+The first time the Foreman saves repo-level state it creates a closed issue titled
+"Foreman repo records (bookkeeping, do not close or edit)". Leave it alone.
+
 Code: `src/onboarding.ts` (labels), `src/phases/implement.ts` and `src/skill-sync.ts`
 (skills), `src/orchestrator.ts` `publishBoard` (board). Tests:
 `test/onboarding.test.mjs`.

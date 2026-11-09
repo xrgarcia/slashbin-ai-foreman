@@ -102,13 +102,8 @@ for (const [role, needs] of [["workSource", "select work from"], ["codeHost", "o
 
 if (process.env.FOREMAN_GITHUB_TOKEN) {
   line("PASS", "FOREMAN_GITHUB_TOKEN", "set — gh runs as the Foreman's account");
-} else if (haveGh) {
-  try {
-    run("gh", ["auth", "status"]);
-    line("WARN", "FOREMAN_GITHUB_TOKEN", "unset — the Foreman will act as the account gh is logged in as. Set it to give the Foreman its own GitHub identity.");
-  } catch {
-    line("FAIL", "FOREMAN_GITHUB_TOKEN", "unset, and gh is not logged in. Set FOREMAN_GITHUB_TOKEN or run `gh auth login`.");
-  }
+} else {
+  line("FAIL", "FOREMAN_GITHUB_TOKEN", "unset — every Foreman gh call throws \"FOREMAN_GITHUB_TOKEN not set\" (src/github/gh.ts); there is no fallback to gh's login. Set it in the daemon's environment.");
 }
 const anyReview = config.repos.some((r) => r.reviewEnabled);
 const syncs = config.stages.some((s) => s.type === "branch-sync");

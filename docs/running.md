@@ -5,6 +5,8 @@
 ## Contents
 
 - [Daemon management](#daemon-management)
+- [Refusals to start](#refusals-to-start)
+- [Other commands](#other-commands)
 - [Back-offs](#back-offs)
 - [GitHub API budget](#github-api-budget)
 
@@ -31,7 +33,11 @@ npm run dev        # Watch mode (auto-reload on source changes)
 
 The CLI itself: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`, and
 `--help`. To run it as a service that survives reboots, see
-`deploy/slashbin-foreman.service.example`.
+`deploy/slashbin-foreman.service.example`. Under that unit, `npm start`, `stop` and
+`restart` go through `systemctl --user` (unit name `slashbin-foreman.service`, or
+`FOREMAN_SYSTEMD_UNIT`), and `scripts/restart-drained.sh` restarts it through the drain
+and exits 0 only once the new process logs `Daemon starting` (it waits up to 70 minutes,
+and refuses first if `node_modules` is a symlink or `dist/config.js` cannot load).
 
 The daemon writes `.agent[-<repo>].pid` itself at startup, before it does any
 work — not just when launched via `npm start`. A daemon started any other way
@@ -48,11 +54,31 @@ way is onboarded before its first piece of work ([onboarding.md](onboarding.md))
 
 **Graceful stop.** On stop the daemon drains every lane of every repo before exiting,
 for up to the longest run any watched repo is budgeted (the largest `maxDurationMs`, or
-`reviewMaxDurationMs` if longer), so a restart does not kill a build mid-flight. Set
-`AI_AGENT_SHUTDOWN_DRAIN_MS` when you deliberately want a fast, work-destroying stop.
+`reviewMaxDurationMs` if longer; 60 minutes by default), so a restart does not kill a
+build mid-flight. Set `AI_AGENT_SHUTDOWN_DRAIN_MS` (milliseconds) when you deliberately
+want a different window, for example a fast, work-destroying stop.
 
-**State.** What the Foreman has done and is waiting on is kept in the work source's records (one comment per issue, PR and repo),
-so a restart picks up where it left off.
+**State.** What the Foreman has done and is waiting on is kept on GitHub, in the work
+source's records: one comment per issue or PR, written by the Foreman's own login, and a
+closed bookkeeping issue per repo (created on first save) for repo-level state. A restart,
+or a different machine, picks up where it left off. The only local files are
+`.github-state.json`, a snapshot cache that is rebuilt if lost, and, on a machine upgraded
+from the old release, the legacy `.agent-state.json`, which is imported once and then
+deleted ([upgrading.md](upgrading.md#what-happens-to-existing-state-on-first-start)).
+Both live in the state directory: the daemon's working directory, or `FOREMAN_STATE_DIR`
+when set (`npm test` and `npm run acceptance` set it to a throwaway directory).
+
+## Refusals to start
+
+The daemon exits 78 (`EX_CONFIG`: a restart cannot fix it, and the example unit's
+`RestartPreventExitStatus=78` stops instead of looping) when:
+
+- no plugin supplies the work source or the code host (`workSource` and `codeHost` default
+  to `github`; any other value is refused), `src/cli.ts`;
+- `dist/` was built from an uncommitted tree, or the build stamp is missing
+  (`dist/build-info.json`, written by `npm run build`), `src/build-info.ts`.
+
+It exits 1 when the PID file names a live process, and an unknown `profile` stops startup.
 
 ## Back-offs
 
@@ -84,10 +110,20 @@ override, e.g. `AI_AGENT_BACKOFF_SKIP_BASE_MS`.
 ```
 
 The older top-level `skipBackoffMs`, `upstreamBackoffBaseMs` and `upstreamBackoffCapMs`
-still work. Every group (including `approvedUnmerged`, `releaseRetry` and
-`prodVerifyRetry`), field and env name: [configuration.md](configuration.md#back-offs).
+still work. Every group (including `approvedUnmerged`, `releaseRetry`,
+`prodVerifyRetry`, `handoff`, `paperclip` and `registry`), field and env name: [configuration.md](configuration.md#back-offs).
 
 Code: `src/backoff.ts`.
+
+## Other commands
+
+| Command | What it does |
+|---|---|
+| `npm run doctor` | Checks tokens, labels, branches (base and production), skills and the work source / code host plugins ([setup.md](setup.md)) |
+| `npm run metrics:report [-- --repo <r> --issue <n> --since <days> --json]` | Reads the metrics log; default window 30 days ([metrics.md](metrics.md)) |
+| `npm run paperclip:doctor [-- --config <path>]` | Read-only Paperclip integration check |
+| `npm run acceptance` | Builds, then runs every `scripts/acceptance/*.mjs` with a minimal env, a throwaway state directory and no `gh` login; stops on the first failure |
+| `npm test` | Builds, then runs `test/*.test.mjs` with `FOREMAN_STATE_DIR` set to a temp directory |
 
 ## GitHub API budget
 

@@ -29,6 +29,9 @@ with its next approved issue, in that issue's own PR.
   the checkout, under the checkout lock.
   - It commits them on the local base branch; the issue's own branch is cut from it, and the base is moved back once the session ends:
     `chore(skills): sync <names> from <source>@<version> (#<issue>)`.
+  - Skill files are added with `git add --force`, so a repo that ignores `.claude/` still gets
+    them, and a file the golden no longer has is removed. The commit skips repo hooks
+    (`--no-verify`): it is a reviewed copy, and CI still runs on the PR.
   - The session then runs on the fresh skill, and the commit is pushed with the
     session's work. So it rides the issue's PR.
   - `(#<issue>)` appears only when the session was handed exactly one issue.
@@ -36,7 +39,8 @@ with its next approved issue, in that issue's own PR.
   the issue is built on the skill already there:
   - the golden can't be read
   - the checkout has uncommitted changes, or local commits that origin doesn't have
-  - any git step fails
+  - any git step fails (a warning is logged; the index and the skill files are put back exactly
+    as found, so a failed sync never leaves uncommitted changes that would block the next one)
 - **Leaves no strays.** If the session pushes nothing, the sync commit is taken back
   off the local branch, and the next issue syncs again.
 - **Not in revise.** A revision answers review using the skill it was built with.
