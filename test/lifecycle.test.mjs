@@ -78,6 +78,8 @@ const LABELS = [
   ["changesRequested", "pr merged", true, ["--remove-label", "pr under review", "--add-label", "pr pending actions"]],
   ["revised", "pr under review", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
   ["revised", "pr merged", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
+  ["qaRerunRevise", "pr under review", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
+  ["qaRerunRevise", "pr merged", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
   ["verifyPassed", "pr under review", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
   ["verifyPassed", "pr merged", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
   // slashbin-ai-foreman#158: the EM's QA re-run sends a dev-verified issue back to verification.
