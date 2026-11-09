@@ -83,7 +83,12 @@ export interface Reviewer {
 }
 
 /** Errors a verifier excluded from a verification, with the evidence links beside them. */
-export interface UnrelatedErrors { errors: string[]; evidence: string[] }
+export interface UnrelatedErrors {
+  errors: string[];
+  evidence: string[];
+  /** The agent's own stable signature per error, index-aligned with `errors` (contract v1). Absent on the legacy prose lines. */
+  signatures?: string[];
+}
 
 /** What a verification came back with. */
 export type VerifyResult =
@@ -110,6 +115,14 @@ export interface DeployTrailer {
   verify: "pass" | "hold" | "fail" | "none";
   hold?: string;
   evidence?: string;
+  /**
+   * How the hold clears (contract v1): `time` by itself at the `wait-until-…` time in `hold`, `person` by a
+   * person or a new commit, `transient` on the retry back-off. Absent on a legacy trailer: the Foreman falls
+   * back to its own `DEPLOY_STOPS` list.
+   */
+  holdClass?: "time" | "person" | "transient";
+  /** Why it holds, for the card. Display only: it decides nothing. */
+  holdReason?: string;
 }
 
 /** What a deploy came back with. */

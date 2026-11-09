@@ -132,3 +132,17 @@ fails, note it and continue with the text.
 - Revise only the PR you were given, or PRs carrying the pending-revision label from
   `FOREMAN_LIFECYCLE_LABELS`.
 - A fix that needs changes outside this repository is skipped and noted in the PR comment.
+
+## Structured result (contract v1)
+
+End with one more line: `FOREMAN_RESULT_V1` and one JSON object, on a single line. The Foreman
+reads it first; the `FOREMAN_REVISION` trailer stays until every agent has moved. Prose goes only
+in `reason_text` and decides nothing. Examples:
+
+```
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"pushed","changed":["code","tests"]}
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"no-commit","reason_text":"the branch already satisfies every finding"}
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"reverted","changed":["revert"],"reverted_findings":[2],"pr_body_stale":true}
+```
+
+`no-commit` requires `reason_text`. The schema is `schemas/reviser.v1.json` in the Foreman package.

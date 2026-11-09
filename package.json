@@ -5,12 +5,15 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "slashbin-ai-agent": "dist/cli.js"
+    "slashbin-ai-agent": "dist/cli.js",
+    "foreman-conformance": "dist/plugins/conformance-cli.js"
   },
   "files": [
     "dist",
     "hooks",
-    "skills"
+    "skills",
+    "schemas",
+    "conformance"
   ],
   "scripts": {
     "build": "tsc && node scripts/stamp-build.mjs",
@@ -37,7 +40,8 @@
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",
     "metrics:report": "node dist/cli.js metrics:report",
     "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs",
-    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check"
+    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check",
+    "schemas": "npm run build && node scripts/contract/generate-schemas.mjs"
   },
   "engines": {
     "node": ">=22.12"

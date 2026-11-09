@@ -246,6 +246,17 @@ export class BackoffTracker {
     return wait;
   }
 
+  /**
+   * Wait for `key` until a time the agent named (a hold that clears by itself,
+   * e.g. a STOP that only needs the deploy window). Keeps the count: waiting for
+   * a clock is not another failure in a row. Returns the wait in ms.
+   */
+  waitUntil(key: string, untilMs: number, now = Date.now()): number {
+    const count = this.by.get(key)?.count ?? 0;
+    this.by.set(key, { until: Math.max(now, untilMs), count });
+    return Math.max(0, untilMs - now);
+  }
+
   /** Whether `key` is inside a wait right now. */
   waiting(key: string, now = Date.now()): boolean {
     return (this.by.get(key)?.until ?? 0) > now;

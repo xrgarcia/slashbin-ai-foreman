@@ -1,10 +1,12 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
-import { SUMMARY_DISPLAY_LIMIT, type ReviewTrailer } from "../session/protocol.js";
+import { SUMMARY_DISPLAY_LIMIT, extractStreamResult, type ReviewTrailer } from "../session/protocol.js";
+import { readResultV1, waitUntilSlug, type RoleResult } from "../contract/result-v1.js";
+import { recordContractPath } from "../contract/usage.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { cliTail, parseReviewTrailerRecords, parseUnrelatedErrors, runAgentCli, type CliRun } from "./agent-cli.js";
-import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, Verifier, VerifyResult } from "./contract.js";
+import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, UnrelatedErrors, Verifier, VerifyResult } from "./contract.js";
 
 /**
  * The SRE (`<srePath>/bin/sre.mjs`) as the verifier and deployer plugin
@@ -47,13 +49,43 @@ export function verifyVerdict(t: ReviewTrailer): { pass: boolean; reason?: strin
   return { pass: false, reason: t.deploy === "FAILURE" ? "dev-verify-failed" : `deploy=${t.deploy}` };
 }
 
-/** A verify run's trailer for `prNumber`, read into the verdict. */
+/** The hold a v1 line that failed its schema becomes: never a pass, and a person decides (verifyHoldPlan). */
+export const CONTRACT_INVALID_HOLD = "contract-invalid-result";
+
+/** The text a v1 line is read from: a stream-JSON envelope's result, else the plain stdout. */
+const resultText = (stdout: string): string => extractStreamResult(stdout) ?? stdout;
+
+/** A v1 `unrelated_errors` list as the Foreman's UnrelatedErrors, signatures kept. Pure, exported for tests. */
+export function unrelatedFromV1(list: RoleResult<"verifier">["unrelated_errors"], extraEvidence?: string | null): UnrelatedErrors | undefined {
+  if (!list?.length) return undefined;
+  const evidence = [...new Set([...list.map((e) => e.evidence).filter((e): e is string => !!e), ...(extraEvidence ? [extraEvidence] : [])])];
+  return { errors: list.map((e) => e.text ?? e.signature), signatures: list.map((e) => e.signature), evidence };
+}
+
+/** A v1 verifier result as the legacy review trailer, so verifyVerdict and verifyHoldPlan read both alike. Pure, exported for tests. */
+export function verifierTrailerFromV1(v: RoleResult<"verifier">): ReviewTrailer {
+  const hold = v.hold === "wait-until" && v.eligible_at ? waitUntilSlug(v.eligible_at) : v.hold ?? undefined;
+  const base = { pr: v.pr, ...(hold ? { hold } : {}) };
+  if (v.outcome === "pass") return { ...base, verdict: "APPROVE", merged: true, deploy: "SUCCESS" };
+  if (v.outcome === "fail") return { ...base, verdict: "APPROVE", merged: true, deploy: "FAILURE" };
+  if (v.outcome === "hold") return { ...base, verdict: "APPROVE", merged: true, deploy: "NA", hold: hold ?? "verify-held" };
+  return { ...base, verdict: "NONE", merged: false, deploy: "NA" };
+}
+
+/** A verify run's trailer for `prNumber`, read into the verdict: the v1 line first, else the legacy trailer. */
 function readVerify(r: CliRun, repoConfig: RepoConfig, prNumber: number, what: string, logger: Logger): VerifyResult {
-  const trailer = parseReviewTrailerRecords(r.stdout).filter((t) => t.pr === prNumber).pop();
+  const v1 = readResultV1(resultText(r.stdout), "verifier", prNumber);
+  recordContractPath("sre", "verifier", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger.info(m));
+  if (v1.status === "invalid") {
+    logger.warn(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: HOLD (${CONTRACT_INVALID_HOLD}: ${v1.problem})`);
+    const trailer: ReviewTrailer = { pr: prNumber, verdict: "NONE", merged: false, deploy: "NA", hold: CONTRACT_INVALID_HOLD };
+    return { kind: "verdict", pass: false, trailer, reason: CONTRACT_INVALID_HOLD, summary: `${v1.problem}\n\n${r.stdout.trim()}`.slice(-SUMMARY_DISPLAY_LIMIT) };
+  }
+  const trailer = v1.status === "ok" ? verifierTrailerFromV1(v1.result) : parseReviewTrailerRecords(r.stdout).filter((t) => t.pr === prNumber).pop();
   if (!trailer) return { kind: "error", error: "SRE exited 0 without a FOREMAN_REVIEW trailer for this PR" };
   const v = verifyVerdict(trailer);
   logger.info(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
-  const unrelated = parseUnrelatedErrors(r.stdout);
+  const unrelated = v1.status === "ok" ? unrelatedFromV1(v1.result.unrelated_errors) : parseUnrelatedErrors(r.stdout);
   return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}) };
 }
 
@@ -110,6 +142,46 @@ export function parseDeployTrailer(stdout: string, prNumber: number): DeployTrai
   return found;
 }
 
+/** A v1 deployer result as the Foreman's deploy trailer. Pure, exported for tests. */
+export function deployTrailerFromV1(d: RoleResult<"deployer">): DeployTrailer {
+  return {
+    pr: d.pr,
+    merged: d.merged,
+    mergeSha: d.merge_sha ?? null,
+    verify: d.verify,
+    // A time hold travels as the existing `wait-until-…` slug, the one representation of eligibility the
+    // Foreman reads (verify and release alike); the deployer's own slug moves into the reason.
+    ...(d.hold_class === "time" && d.eligible_at ? { hold: waitUntilSlug(d.eligible_at) } : d.hold ? { hold: d.hold } : {}),
+    ...(d.evidence?.length ? { evidence: d.evidence[0] } : {}),
+    ...(d.hold_class ? { holdClass: d.hold_class } : {}),
+    ...(d.reason_text || (d.hold_class === "time" && d.hold) ? { holdReason: [d.hold_class === "time" ? d.hold : null, d.reason_text].filter(Boolean).join(": ") } : {}),
+  };
+}
+
+/**
+ * A deploy run's trailer for `prNumber`: the v1 line first, else the legacy
+ * `SRE_DEPLOY` line. A v1 line that fails its schema fails closed as a person
+ * hold naming the field. A merge the legacy line reports stays true with its
+ * SHA (a merge is never "nothing happened"), but its verify verdict is not
+ * trusted: the release is held for a fresh verification. Exported for tests.
+ */
+export function readDeploy(stdout: string, prNumber: number, logger?: Logger): { trailer: DeployTrailer | null; unrelated?: UnrelatedErrors } {
+  const v1 = readResultV1(resultText(stdout), "deployer", prNumber);
+  recordContractPath("sre", "deployer", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger?.info(m));
+  const legacy = parseDeployTrailer(stdout, prNumber);
+  if (v1.status === "absent") return { trailer: legacy };
+  if (v1.status === "ok") {
+    const trailer = deployTrailerFromV1(v1.result);
+    const unrelated = unrelatedFromV1(v1.result.unrelated_errors, trailer.evidence);
+    return { trailer, ...(unrelated ? { unrelated } : {}) };
+  }
+  logger?.warn(`SRE deploy of PR #${prNumber}: ${CONTRACT_INVALID_HOLD} (${v1.problem})`);
+  // The merge and its SHA stand; the legacy verify verdict does not: production verification stays open, held
+  // on the contract, until a later valid verification passes.
+  if (legacy?.merged) return { trailer: { pr: prNumber, merged: true, mergeSha: legacy.mergeSha, verify: "hold", hold: CONTRACT_INVALID_HOLD, holdClass: "person", holdReason: v1.problem, ...(legacy.evidence ? { evidence: legacy.evidence } : {}) } };
+  return { trailer: { pr: prNumber, merged: false, mergeSha: null, verify: "none", hold: CONTRACT_INVALID_HOLD, holdClass: "person", holdReason: v1.problem } };
+}
+
 /**
  * Hand release PR `prNumber` at `sha` to the SRE (`sre.mjs deploy`): it
  * validates, merges (as itself, sha-pinned, never squash), waits for the
@@ -133,10 +205,10 @@ export async function deployViaSre(
   const r = await runAgentCli(sre, "bin/sre.mjs",
     ["deploy", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--sha", sha],
     buildSreEnv(agentConfig, repoConfig), agentConfig, agentConfig.sreDeployMaxDurationMs, abortSignal, transcriptPath);
-  const trailer = parseDeployTrailer(r.stdout, prNumber);
+  const { trailer, unrelated: v1Unrelated } = readDeploy(r.stdout, prNumber, logger);
   // A merge the trailer reports is the truth whatever the exit: it must never
   // be read as "nothing happened".
-  const unrelated = parseUnrelatedErrors(r.stdout);
+  const unrelated = v1Unrelated ?? parseUnrelatedErrors(r.stdout);
   // The deploy may carry its evidence link only on the trailer.
   if (unrelated && trailer?.evidence && !unrelated.evidence.includes(trailer.evidence)) unrelated.evidence.push(trailer.evidence);
   if (trailer?.merged) return { kind: "trailer", trailer, ...(unrelated ? { unrelated } : {}) };
