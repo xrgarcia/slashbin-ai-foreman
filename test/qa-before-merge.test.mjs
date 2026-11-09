@@ -322,3 +322,30 @@ test("EM re-run: the void is one pure predicate in qa-report.ts, built on the on
   assert.equal(code.split("EM_QA_RERUN_PATTERN.test(").length - 1, 1, "one use of the pattern: newestRequest");
   assert.match(code, /export function rerunVoidsVerdict/);
 });
+
+const passReport = (at) => ({ at, body: `## QA Report\n${qaVerdictMarker(SHA, "PASS")}\n**Verdict: PASS**\nShots: 1` });
+const both = (comments, outcome = ran("PASS", 0)) => {
+  const d = deps(outcome, { comments: async () => comments });
+  d.markers.add(qaVerdictMarker(SHA, "PASS"));
+  d.markers.add(qaVerdictMarker(SHA, "FAIL"));
+  return d;
+};
+
+test("EM re-run: PASS at 10:00, re-run at 11:00, fresh FAIL at 12:00 -> the cached FAIL, reused, no QA run", async () => {
+  const d = both([passReport("2026-11-09T10:00:00Z"), rerun("2026-11-09T11:00:00Z"), failReport("2026-11-09T12:00:00Z")]);
+  const out = await runQaBeforeMerge(REPO, 5, SHA, d, logger);
+  assert.deepEqual([out.kind, out.reused], ["fail", true]);
+  assert.equal(d.runs, 0);
+});
+
+test("EM re-run mirror: FAIL at 10:00, re-run at 11:00, fresh PASS at 12:00 -> the cached PASS, reused, no QA run", async () => {
+  const d = both([failReport("2026-11-09T10:00:00Z"), rerun("2026-11-09T11:00:00Z"), passReport("2026-11-09T12:00:00Z")]);
+  assert.deepEqual(await runQaBeforeMerge(REPO, 5, SHA, d, logger), { kind: "pass", reused: true });
+  assert.equal(d.runs, 0);
+});
+
+test("EM re-run: with both markers and a re-run newer than both, QA runs", async () => {
+  const d = both([failReport("2026-11-09T10:00:00Z"), passReport("2026-11-09T10:30:00Z"), rerun("2026-11-09T11:00:00Z")]);
+  assert.equal((await runQaBeforeMerge(REPO, 5, SHA, d, logger)).reused, false);
+  assert.equal(d.runs, 1);
+});
