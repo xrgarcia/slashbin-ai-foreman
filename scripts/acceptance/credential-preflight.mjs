@@ -60,7 +60,7 @@ function run(cfg, env) {
     cwd: tmp, encoding: "utf-8", timeout: 60_000,
     env: { ...base, PATH: `${bin}:${process.env.PATH}`, ...env },
   });
-  return { code: r.status, out: `${r.stdout}\n${r.stderr}`, secs: (Date.now() - started) / 1000, gh: readCalls() };
+  return { code: r.status, out: `${r.stdout}\n${r.stderr}`, err: r.stderr, secs: (Date.now() - started) / 1000, gh: readCalls() };
 }
 const readCalls = () => { try { return spawnSync("cat", [calls], { encoding: "utf-8" }).stdout.trim().split("\n").filter(Boolean); } catch { return []; } };
 
@@ -73,8 +73,9 @@ const cycleRan = (r) => r.gh.some((c) => !c.startsWith("api user"));
 {
   const r = run(plain, { FAKE_GH: "ok" });
   assert.equal(r.code, 78, r.out);
-  assert.match(r.out, /Refusing to start: missing required GitHub token: FOREMAN_GITHUB_TOKEN\b/);
-  assert.match(r.out, /no fallback to gh's own login/);
+  assert.match(r.err, /Refusing to start: missing required GitHub token: FOREMAN_GITHUB_TOKEN\b/, "on stderr");
+  assert.match(r.err, /service unit, which supplies the tokens/);
+  assert.match(r.err, /no fallback to gh's own login/);
   assert.ok(!cycleRan(r), "no cycle");
   assert.ok(r.secs < 15, `took ${r.secs}s`);
   assert.ok(!r.gh.some((c) => c.startsWith("api user")), "GitHub not asked");
@@ -85,7 +86,7 @@ const cycleRan = (r) => r.gh.some((c) => !c.startsWith("api user"));
 {
   const r = run(withEm, { FAKE_GH: "ok", FOREMAN_GITHUB_TOKEN: DUMMY });
   assert.equal(r.code, 78, r.out);
-  assert.match(r.out, /missing required GitHub token: EM_GITHUB_TOKEN\b/);
+  assert.match(r.err, /missing required GitHub token: EM_GITHUB_TOKEN\b/, "on stderr");
   assert.doesNotMatch(r.out, /FOREMAN_GITHUB_TOKEN/);
   ok("unstick on, missing EM_GITHUB_TOKEN: exit 78, named");
 }
@@ -103,7 +104,7 @@ const cycleRan = (r) => r.gh.some((c) => !c.startsWith("api user"));
 {
   const r = run(withEm, { FAKE_GH: "rejected", FOREMAN_GITHUB_TOKEN: DUMMY, EM_GITHUB_TOKEN: DUMMY });
   assert.equal(r.code, 78, r.out);
-  assert.match(r.out, /GitHub rejected FOREMAN_GITHUB_TOKEN, EM_GITHUB_TOKEN \(HTTP 401/);
+  assert.match(r.err, /GitHub rejected FOREMAN_GITHUB_TOKEN, EM_GITHUB_TOKEN \(HTTP 401/, "on stderr");
   assert.ok(!cycleRan(r), "no cycle");
   assert.ok(r.gh.every((c) => c.startsWith("api user")), `only the probe ran: ${r.gh.join(" | ")}`);
   ok("rejected token: exit 78, 'GitHub rejected', only `gh api user` ran");

@@ -44,7 +44,8 @@ export async function checkCredentials(
     return {
       refusal:
         `missing required GitHub token${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}. ` +
-        `Set ${missing.length > 1 ? "them" : "it"} in the daemon's environment (docs/setup.md, "GitHub tokens"); ` +
+        `Start the daemon through its service unit, which supplies the tokens, or set ` +
+        `${missing.length > 1 ? "them" : "it"} in its environment (docs/setup.md, "GitHub tokens"); ` +
         `there is no fallback to gh's own login.`,
       unverified: [],
     };

@@ -178,7 +178,8 @@ async function main(rt: ForemanRuntime): Promise<void> {
   // process looked healthy. 78 (EX_CONFIG): a restart cannot supply a token.
   const creds = await checkCredentials(config, (token) => codeHost().probeToken(token));
   if (creds.refusal) {
-    logger.error(`Refusing to start: ${creds.refusal}`);
+    // stderr, like the config refusals above: the operator who started it by hand reads it there.
+    console.error(`Refusing to start: ${creds.refusal}`);
     process.exit(78);
   }
   if (creds.unverified.length) {
