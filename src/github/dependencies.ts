@@ -211,7 +211,11 @@ export function describeDependencyPR(number: number, title: string, body?: strin
 export function packagesMentionedInBody(body: string): string[] {
   const names: string[] = [];
   for (const m of body.matchAll(/Updates\s+`?\[?([^\s`\]\[]+)\]?`?(?:\([^)]*\))?(?=\s+from\b|[ \t]*$)/gm)) names.push(m[1]);
-  for (const m of body.matchAll(/Bumps\s+\[([^\]]+)\]\([^)]*\)/g)) names.push(m[1]);
+  // "Bumps [a](u) from 1 to 2" and the group summary "Bumps the x group with 2 updates in the / directory: [a](u) and [b](u)."
+  for (const line of body.split("\n")) {
+    if (!/^\s*Bumps\b/.test(line)) continue;
+    for (const m of line.matchAll(/\[([^\]]+)\]\([^)]*\)/g)) names.push(m[1]);
+  }
   for (const line of body.split("\n")) {
     const row = /^\|\s*\[([^\]]+)\]\([^)]*\)\s*\|/.exec(line.trim());
     if (row) names.push(row[1]);

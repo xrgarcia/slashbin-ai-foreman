@@ -283,3 +283,14 @@ test("a mixed batch reports the known major and the unknown ones in the anchor s
   assert.match(title, /\(1 major\) \(1 unknown\)/);
   assert.match(body, /\*\*1 of these is a major version change\.\*\*.*A further 1 is grouped with versions the PR does not state/);
 });
+
+test("a group summary line ('Bumps the x group ...: [qs](u) and [express](u)') keeps express in the inventory even when only qs states versions", () => {
+  const body = "Bumps the npm_and_yarn group with 2 updates in the / directory: [qs](u) and [express](u).\n\nUpdates `qs` from 6.11.0 to 6.14.0";
+  const c = describeDependencyPR(315, "chore(deps): bump the npm_and_yarn group with 2 updates", body);
+  assert.deepEqual(c.packages.map((p) => p.toLowerCase()).sort(), ["express", "qs"]);
+  assert.equal(c.major, null);
+  const { title, body: issue } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(title, /\(1 unknown\)/);
+  assert.doesNotMatch(issue, /None of these crosses a major version/);
+  assert.match(issue, /\| unknown \|/);
+});
