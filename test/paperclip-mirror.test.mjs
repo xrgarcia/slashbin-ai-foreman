@@ -1920,3 +1920,57 @@ test("a failed verify without resumeAt still says it did not pass", async () => 
   await mirror.onSession(verifySession("failed", { detail: "boom" }), logger());
   assert.ok(fake.comments.r1283.at(-1).includes("**Dev verification did not pass** — PR #1291: boom"));
 });
+
+// --- Customer label on service-repo cards (Foreman #179) ---------------------------
+
+/** A registry that answers repo_identity as unknown and list_customers with these GitHub labels (or fails). */
+function customerRegistry(names, state = { down: false }) {
+  const f = async (url, init) => {
+    const msg = init.body ? JSON.parse(init.body) : {};
+    const json = (obj, headers = {}) => new Response(JSON.stringify(obj), { status: 200, headers: { "content-type": "application/json", ...headers } });
+    if (msg.method === "initialize") return json({ jsonrpc: "2.0", id: msg.id, result: {} }, { "mcp-session-id": "s1" });
+    if (msg.method === "notifications/initialized") return new Response(null, { status: 202 });
+    if (msg.params.name === "list_customers") {
+      f.listed++;
+      if (state.down) return new Response("down", { status: 503 });
+      return json({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify({ customers: names.map((n) => ({ key: n, systems: { github_label: n } })).concat([{ key: "x", systems: {} }]) }) }] } });
+    }
+    return json({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify({ kind: "unknown" }) }] } });
+  };
+  f.listed = 0;
+  return createRepoIdentity({ url: "http://registry.test/mcp", fetch: f });
+}
+const customerOf = (fake, r) => labelName(fake, r).filter((n) => n !== "bug");
+
+test("customer label: the issue's registry label lands on the card in the card's one PATCH, a foreign label kept, nothing rewritten after", async () => {
+  const fake = fakePaperclip([ownedRow("backlog", { labelIds: ["keep-me"] })], [], [{ id: "keep-me", name: "bug" }]);
+  const { mirror } = mirrorOn(fake, OWNED, customerRegistry(["jerky-com", "slashbin-ai"]));
+  const cards = [card(7, { labels: ["bug", "jerky-com"] })];
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
+  assert.deepEqual(labelName(fake, fake.rows[0]), ["bug", "jerky-com"]);
+  assert.equal(hasIssue(fake, fake.rows[0]), true);
+  assert.equal(writesTo(fake, "r7").length, 1, "issue and customer label in one PATCH");
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
+  assert.equal(writesTo(fake, "r7").length, 1);
+  // The issue moves to another customer, then loses it.
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["slashbin-ai"] })] }, logger());
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["slashbin-ai"]);
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["S3", "approved"] })] }, logger());
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["no customer label"]);
+});
+
+test("customer label: undefined labels, no registry client and a registry outage write no customer or marker label; the outage warns once", async () => {
+  const none = fakePaperclip([ownedRow("backlog")]);
+  const a = mirrorOn(none, OWNED, customerRegistry(["jerky-com"]));
+  await a.mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
+  const b = fakePaperclip([ownedRow("backlog")]);
+  await mirrorOn(b, OWNED).mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["jerky-com"] })] }, logger());
+  const c = fakePaperclip([ownedRow("backlog"), ownedRow("backlog", { id: "r8", description: "source: example/r#8\nGitHub: open · not approved" })]);
+  const out = mirrorOn(c, OWNED, customerRegistry(["jerky-com"], { down: true }));
+  await out.mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["jerky-com"] }), card(8, { labels: ["jerky-com"] })] }, logger());
+  for (const fk of [none, b, c]) {
+    assert.deepEqual(fk.labels.map((l) => l.name).filter((n) => n === "jerky-com" || n === "no customer label"), []);
+    assert.deepEqual(labelName(fk, fk.rows[0]), []);
+  }
+  assert.equal(out.log.lines.filter(([l, m]) => l === "warn" && /registry customer labels unavailable/.test(m)).length, 1);
+});
