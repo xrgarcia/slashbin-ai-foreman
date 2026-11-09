@@ -20,6 +20,7 @@ import { BackoffTracker } from "../backoff.js";
 import * as reviewFreshness from "../github/review-freshness.js";
 import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
+import * as corrections from "../github/corrections.js";
 import { ghAsync } from "../github/gh.js";
 import { probeToken } from "../github/token-probe.js";
 import { fleetState } from "../github-state.js";
@@ -127,6 +128,7 @@ export function githubCodeHost(
     updatePromotionPR: promotion.updatePromotionPR,
     readIssueBody: readiness.readIssueBody,
     readIssueState: readiness.readIssueState,
+    relationsOf: corrections.relationsOf,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),
