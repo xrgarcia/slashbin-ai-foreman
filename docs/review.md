@@ -5,6 +5,8 @@
 ## Contents
 
 - [When a PR is reviewed](#when-a-pr-is-reviewed)
+- [The CI gate](#the-ci-gate)
+- [QA before the merge](#qa-before-the-merge)
 - [Outcome-label reconciliation](#outcome-label-reconciliation)
 - [Declaring a deliberate hold](#declaring-a-deliberate-hold)
 - [Review config](#review-config)
@@ -42,8 +44,37 @@ it has an open Foreman-owned PR into `baseBranch`, and there is no review by
 `reviewerLogin` newer than the PR's latest commit (a freshness guard against
 re-review loops).
 
+The EM's `blocked` label on the PR's issue pauses review: the Tech Lead is not offered the PR
+until the label is lifted. A PR that was merged or closed since the Foreman last read GitHub is
+not reviewed; the snapshot is dropped and the next pass starts clean. A PR that already has a
+current changes-requested review whose label never followed is sent to revise without a new review.
+
 Every review run's full turn-by-turn interaction (`--output-format stream-json`) is
 written verbatim to `logs/review/<repo>-cycle<N>-<timestamp>.log` for debugging.
+
+## The CI gate
+
+A review session is never spent on a PR its own CI already rejects. Before the Tech Lead is
+called, the Foreman reads the PR's checks (`src/github/ci-gate.ts`):
+
+- **Pending** (any check queued or running): the review waits for CI.
+- **Failing** (a check name with no passing run; cancelled, skipped and neutral runs do not
+  count): the PR goes back to the builder with a comment naming the red checks, and its issue moves to
+  `pr pending actions`. This is allowed `backoff.maxCiBounces` times (default 2) since the last review;
+  after that the PR is reviewed anyway, so a reviewer sees it.
+- **Green, or no checks**: review proceeds.
+
+## QA before the merge
+
+With `qaBeforeMerge: true` on a `qaRepos` repo, the Tech Lead is asked to approve with `--no-merge`
+and the merge waits for QA (`src/phases/qa-before-merge.ts`). The `blocked` pause and a CI gate
+apply here too, but a head still red after `maxCiBounces` is not booted: QA waits. QA runs `check
+--local` on the approved head. A PASS has the Tech Lead merge that exact head on its existing approval
+(a head pushed since, or no approval of it, merges nothing). A FAIL counts as a review round and goes
+to revise. A run with no verdict leaves the PR approved but unmerged and the card Blocked: a tooling
+hold retries after `backoff.agentUnavailable` and charges nothing, any other hold counts toward
+`backoff.repoFailure`. The Tech Lead is not offered the PR again meanwhile. Description of the rest:
+[pipeline.md](pipeline.md#the-stages) (Verify, QA).
 
 ## Outcome-label reconciliation
 

@@ -22,9 +22,10 @@ from self-approving its own work.
 
 | Env Var | Description |
 |---|---|
-| `FOREMAN_GITHUB_TOKEN` | The Foreman's own account: opens PRs, moves labels. Unset, gh's logged-in account is used |
+| `FOREMAN_GITHUB_TOKEN` | The Foreman's own account: opens PRs, moves labels. Required: unset, every Foreman GitHub call fails (no fallback to gh's login) |
 | `TECHLEAD_GITHUB_KEY` | The reviewer's account: reviews and merges PRs, and merges sync PRs. Required when review is on |
 | `SRE_GITHUB_KEY` | The verifier's account. Required when `srePath` is set |
+| `EM_GITHUB_TOKEN` | The Engineering Manager's account, for the `unstick` session only. Required when unstick runs |
 
 Where to put them: [setup.md](setup.md#1-before-setup). Never paste a token into a
 chat or into the config file.
@@ -35,10 +36,11 @@ Sessions run with `--dangerously-skip-permissions`. Each receives one GitHub tok
 `GH_TOKEN` — the Foreman token for implement, revise and custom stages, the Tech Lead
 its own `TECHLEAD_GITHUB_KEY` — plus `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
 `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TERM`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK` when
-set, `FOREMAN_TRIGGER_LABEL`, `FOREMAN_LIFECYCLE_LABELS`, a custom stage's
-`FOREMAN_STAGE_*`, and the names in the top-level `sessionEnv` list. `sessionEnv` may
-not name a GitHub token. Values of `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`,
-`SRE_GITHUB_KEY` and `sessionEnv` names (8+ characters) are replaced by
+set, `FOREMAN_TRIGGER_LABEL`, `FOREMAN_LIFECYCLE_LABELS`, `FOREMAN_BLOCKED_LABEL`,
+`FOREMAN_PRIORITY_LABELS`, an implement session's branch variables
+(`FOREMAN_BRANCHES` and related), a custom stage's `FOREMAN_STAGE_*`, and the names in the top-level `sessionEnv` list. `sessionEnv` may
+not name a GitHub token. Values of `FOREMAN_GITHUB_TOKEN`, `EM_GITHUB_TOKEN`,
+`TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY` and `sessionEnv` names (8+ characters) are replaced by
 `[REDACTED:<NAME>]` in the Foreman's own transcripts under `logs/`, its log lines and
 the errors it returns. The Claude CLI's own session log under `~/.claude/projects/` is
 not touched — that is where the 2026-10-01 leak landed, and the allowlist is what keeps
@@ -47,7 +49,7 @@ stop a session reading what `HOME` grants (`~/.ssh`, the Doppler CLI login,
 `~/.claude`).
 
 The Tech Lead hand-off gets the same essentials and `sessionEnv` names,
-`TECHLEAD_GITHUB_KEY`, its own `TECH_LEAD_*` settings and the two label vars — never
+`TECHLEAD_GITHUB_KEY`, its own `TECH_LEAD_*` settings and the four label vars — never
 `FOREMAN_GITHUB_TOKEN` or `GH_TOKEN`.
 
 Code: `src/session/env.ts`, `src/redact.ts`.
