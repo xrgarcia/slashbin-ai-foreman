@@ -122,3 +122,8 @@ test("sessions: a valid v1 line decides skip, landed and no-commit; waiting_on c
   // Legacy only: unchanged.
   assert.equal(detectDeclaredSkip('FOREMAN_RESULT: skipped issue=5 reason="spec unusable"').issue, 5);
 });
+
+test("verify: an invalid verifier line is an ordinary charged hold, never the visual-QA rework path", async () => {
+  const { verifyHoldPlan } = await import("../dist/phases/verify.js");
+  assert.deepEqual(verifyHoldPlan("contract-invalid-result"), { kind: "charge" });
+});
