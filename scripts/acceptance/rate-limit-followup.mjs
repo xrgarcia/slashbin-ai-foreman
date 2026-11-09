@@ -54,6 +54,7 @@ const check = (name, ok, detail = "") => {
 const tmp = mkdtempSync(join(tmpdir(), "foreman-ratelimit-"));
 const binDir = join(tmp, "bin");
 mkdirSync(binDir);
+writeFileSync(join(binDir, "package.json"), '{"type":"commonjs"}'); // fakes are CJS; a stray ancestor type:module package.json must not make them ESM
 const fakeGh = join(binDir, "gh");
 // Fake gh. Logs "<ms> <GH_TOKEN> <args>" to $FAKE_GH_LOG (tokens are dummies).
 //   gh api rate_limit → $FAKE_GH_RATE
@@ -108,8 +109,9 @@ function runCase(name, body, timeoutMs = 20_000) {
     const K = await import(${JSON.stringify(url("backoff.js"))});
     K.configureBackoff({ ...K.DEFAULT_BACKOFF, upstream: { ...K.DEFAULT_BACKOFF.upstream, baseMs: 300, capMs: 2400 } });
     B.configureUpstreamBackoff({ notify: (t) => notes.push(t), logger });
-    const trip = (stderr) => { writeFileSync(F.err, stderr);
-      try { G.gh(["issue", "list", "--repo", "example/acceptance"], CWD); } catch {} writeFileSync(F.err, ""); };
+    // ghAsync is the Foreman-token runner the daemon uses (the sync gh() is gone).
+    const trip = async (stderr) => { writeFileSync(F.err, stderr);
+      try { await G.ghAsync(["issue", "list", "--repo", "example/acceptance"], CWD); } catch {} writeFileSync(F.err, ""); };
   `;
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", `${prelude}\n${body}`], {
     env: {
@@ -141,17 +143,18 @@ try {
     const cfg = { name: "acceptance", githubRepo: repo, repoPath: CWD, triggerLabel: "approved",
       baseBranch: "develop", featureBranch: "features", lifecycleLabels: C.defaultLifecycleLabels() };
     writeFileSync(F.rate, JSON.stringify({ resources: { core: { remaining: 0, reset: nowSec() + 3600 }, graphql: { remaining: 0, reset: nowSec() + 3600 } } }));
-    trip(${JSON.stringify(GQL_LIMIT)});
+    await trip(${JSON.stringify(GQL_LIMIT)});
     const blocked = B.isUpstreamBlocked("github");
     const before = lines.length;
-    const run = async (label, fn) => { const s = lines.length; try { await fn(); } catch {}
-      return { label, loud: lines.slice(s).filter((l) => l.lvl === "error" || l.lvl === "warn").map((l) => l.lvl + " " + l.msg) }; };
+    // A lookup that THROWS (a wrong signature, a missing export) would read as "quiet"; record it so the check fails.
+    const run = async (label, fn) => { const s = lines.length; let threw = null; try { await fn(); } catch (e) { threw = String(e).split("\\n")[0]; }
+      return { label, threw, loud: lines.slice(s).filter((l) => l.lvl === "error" || l.lvl === "warn").map((l) => l.lvl + " " + l.msg) }; };
     const out = [
       await run("selectWork (approved issues)", async () => new (await import(${JSON.stringify(url("github-work-source.js"))})).GitHubIssueConnector().selectWork(cfg, {}, logger)),
       await run("findPendingRevisions", () => G.findPendingRevisions(cfg, logger)),
-      await run("findPRsNeedingReview", () => G.findPRsNeedingReview(cfg, undefined, logger)),
+      await run("findPRsNeedingReview", () => G.findPRsNeedingReview(cfg, undefined, logger, new K.BackoffTracker(), () => false)),
       await run("findReadyForProdIssues", () => G.findReadyForProdIssues(repo, CWD, cfg.lifecycleLabels, logger)),
-      await run("checkBranchDrift", () => G.checkBranchDrift(repo, CWD, logger)),
+      await run("checkBranchDrift", () => G.checkBranchDrift(repo, "main", "develop", CWD, logger)),
       await run("findDependencyPRs", () => G.findDependencyPRs(repo, CWD, ["develop"], logger)),
     ];
     const spawned = calls().filter((c) => !c.args.startsWith("api rate_limit") && !c.args.startsWith("api graphql")).length;
@@ -159,7 +162,7 @@ try {
   `);
   check("A0 back-off is active before the lookups run", a.blocked === true, `got ${a.blocked ?? why(a)}`);
   for (const [i, o] of (a.out ?? []).entries()) {
-    check(`A${i + 1} ${o.label}: no error/warn line while backing off`, o.loud.length === 0, JSON.stringify(o.loud));
+    check(`A${i + 1} ${o.label}: no error/warn line while backing off`, o.loud.length === 0 && !o.threw, JSON.stringify(o.threw ?? o.loud));
   }
   if (!a.out) check("A1..A6 lookups ran", false, why(a));
   check("A7 no gh spawned for the six refused lookups", a.spawned === 1, `fake ran ${a.spawned} time(s) (1 = the trip)`);
@@ -170,7 +173,7 @@ try {
       core: { limit: 5000, remaining: 5000, reset: nowSec() + 3600 },
       graphql: { limit: 5000, remaining: 4956, reset: nowSec() + 1700 } } }));
     writeFileSync(F.gqlErr, ${JSON.stringify(GQL_LIMIT)});
-    trip(${JSON.stringify(GQL_LIMIT)});
+    await trip(${JSON.stringify(GQL_LIMIT)});
     await sleep(500);                                   // first probe at ~300ms
     const stillBlocked = B.isUpstreamBlocked("github");
     const clearedEarly = notes.filter((t) => /cleared/.test(t)).length;
@@ -194,8 +197,8 @@ try {
   const c = runCase("usage", `
     const U = await import(${JSON.stringify(url("gh-usage.js"))});
     U.configureGhUsage({ intervalMs: 400, logger });
-    for (let i = 0; i < 3; i++) G.gh(["issue", "list", "--repo", "example/acceptance"], CWD);
-    for (let i = 0; i < 2; i++) G.gh(["api", "repos/example/acceptance/compare/main...develop"], CWD);
+    for (let i = 0; i < 3; i++) await G.ghAsync(["issue", "list", "--repo", "example/acceptance"], CWD);
+    for (let i = 0; i < 2; i++) await G.ghAsync(["api", "repos/example/acceptance/compare/main...develop"], CWD);
     await sleep(600);
     const s = lines.filter((l) => l.lvl === "info" && typeof l.data?.total === "number");
     console.log(JSON.stringify({ summaries: s.map((l) => ({ msg: l.msg, total: l.data.total, graphql: l.data.graphql, core: l.data.core })) }));
