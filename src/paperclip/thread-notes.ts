@@ -7,7 +7,7 @@
 // event is sequenced here: it asks placement to move the card, the session lease
 // to hold it, and writes the note, each through a port the mirror injects.
 
-import type { SessionEvent, WorkItem } from "../adapters.js";
+import type { SessionEvent, SignoffHold, WorkItem } from "../adapters.js";
 import type { Logger } from "../logger.js";
 import { QA_BEFORE_MERGE_FALLBACK_STAGE } from "../lifecycle.js";
 import type { ReviewMilestone } from "../review-progress.js";
@@ -54,6 +54,8 @@ const EVIDENCE_CAP = 240;
 export class ThreadNotes {
   /** Task id → the PR last seen delivering its issue (a PR link, a session), for the handoff's links. */
   readonly prOf = new Map<string, { number: number; url?: string }>();
+  /** Task id -> the release PR holding it at `awaitingSignoff`, as the latest snapshot read it from GitHub (never remembered across passes). */
+  readonly signoffOf = new Map<string, SignoffHold>();
   /** Task id → the last session's outcome on it and when, the next handoff's "why"; used once. */
   private readonly evidence = new Map<string, { text: string; at: string }>();
   /** Task id → its latest comment body, read once per process and kept as notes are posted. */
@@ -217,11 +219,13 @@ export class ThreadNotes {
   }
 
   /** What a handoff to `stage` names, or null when the Foreman holds that stage. */
-  handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"], owner?: string): HandoffFacts | null {
+  handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"], owner?: string, signoff?: SignoffHold): HandoffFacts | null {
     const seat = stageSeat(this.env.cfg, stage, owner);
     if (!seat) return null;
-    const pr = id ? this.prOf.get(id) : undefined;
-    return { repo: item.repo, issueNumber: item.issueNumber, seat, ...(pr ? { pr } : {}), ...(evidence ? { evidence } : {}) };
+    // At `awaitingSignoff` the PR that matters is the release PR the sign-off status fails on, read this pass.
+    const hold = stage === "awaitingSignoff" ? signoff ?? (id ? this.signoffOf.get(id) : undefined) : undefined;
+    const pr = hold ? { number: hold.pr, url: hold.url } : id ? this.prOf.get(id) : undefined;
+    return { repo: item.repo, issueNumber: item.issueNumber, seat, ...(pr ? { pr } : {}), ...(hold ? { unsigned: hold.unsigned } : {}), ...(evidence ? { evidence } : {}) };
   }
 
   /**

@@ -99,6 +99,8 @@ export class PhaseMemory {
   readonly passHead = new Map<string, string>();
   /** `repo#pr` already found to name no issue to adopt; `repo#issue` already checked for an SRE sweep hold. */
   readonly adoptChecked = new Set<string>();
+  /** `repo#issue` the stranded-issue sweep (release.ts `sweepStranded`) already settled this process: closed, asked about, or found not stranded. */
+  readonly strandedChecked = new Set<string>();
 
   // --- Custom stages and lane passes ---
 

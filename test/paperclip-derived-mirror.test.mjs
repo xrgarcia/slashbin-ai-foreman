@@ -282,17 +282,29 @@ test("foreman#198: a releasing issue whose release PR fails the EM sign-off is i
   assert.equal(issueStage([labels.prodVerifyHeld, labels.releasePending], false, labels, "approved", undefined, true), "prodVerifyHeld", "a held prod verification still outranks it");
 });
 
-test("foreman#198: the awaitingSignoff card sits in review under its own label, with an action-needed handoff", async () => {
+test("foreman#198: the awaitingSignoff card sits Blocked on the EM under its own label, and returns to Releasing when the status clears", async () => {
   const fake = fakePaperclip([row7("in_progress")]);
   const { mirror } = mirrorOn(fake);
-  const stage = issueStage(["release pending"], false, ghRepo.lifecycleLabels, ghRepo.triggerLabel, undefined, true);
-  await onSnap(mirror, "example/r", [{ item, stage, detail: "release pending" }], logger());
-  assert.equal(fake.rows[0].status, "in_review");
+  const held = issueStage(["release pending"], false, ghRepo.lifecycleLabels, ghRepo.triggerLabel, undefined, true);
+  const signoff = { pr: 815, url: "https://github.com/example/r/pull/815", unsigned: [802, 809] };
+  await onSnap(mirror, "example/r", [{ item, stage: held, detail: "release pending", signoff }], logger());
+  assert.equal(fake.rows[0].status, "blocked", "a release stopped on a person is Blocked, not In Review");
   assert.deepEqual(labelsOf(fake, fake.rows[0]), ["Awaiting EM sign-off"]);
+  const cleared = issueStage(["release pending"], false, ghRepo.lifecycleLabels, ghRepo.triggerLabel, undefined, false);
+  await onSnap(mirror, "example/r", [{ item, stage: cleared, detail: "release pending" }], logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the pass after the status turns green, the card is Releasing again");
+  assert.equal(mirror.notes.signoffOf.size, 0, "the hold is not remembered once the status clears");
+});
+
+test("foreman#198: the handoff names the unsigned issues of the release, or the release PR when none is listed", async () => {
   const { handoffComment } = await import("../dist/paperclip/handoff.js");
-  const text = handoffComment("awaitingSignoff", { repo: "example/r", issueNumber: 7, seat: "Foreman" });
-  assert.match(text, /action needed/);
-  assert.match(text, /ready for prod release/);
+  const named = handoffComment("awaitingSignoff", { repo: "example/r", issueNumber: 7, seat: "Foreman", pr: { number: 815, url: "https://x/815" }, unsigned: [802, 809] });
+  assert.match(named, /action needed/);
+  assert.match(named, /example\/r#802, example\/r#809/);
+  assert.match(named, /ready for prod release/);
+  const empty = handoffComment("awaitingSignoff", { repo: "example/r", issueNumber: 7, seat: "Foreman", pr: { number: 815, url: "https://x/815" }, unsigned: [] });
+  assert.match(empty, /PR #815/);
+  assert.doesNotMatch(empty, /lack `ready for prod release`/, "an empty list asserts no missing label");
 });
 
 const labelsOf = (fake, r) => (r.labelIds ?? []).map((id) => fake.labels.find((l) => l.id === id)?.name).filter((n) => n && n !== "issue");

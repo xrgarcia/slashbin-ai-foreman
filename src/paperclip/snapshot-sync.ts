@@ -7,7 +7,7 @@
 // comments are on the board, who the board's GitHub logins are); the card
 // index, placement and thread notes reach it by constructor injection.
 
-import type { ItemState, SnapshotCard, SnapshotItem, WorkItem } from "../adapters.js";
+import type { ItemState, SignoffHold, SnapshotCard, SnapshotItem, WorkItem } from "../adapters.js";
 import type { Logger } from "../logger.js";
 import { assigneeFor, BACKLOG_STATUS, HOLD_PREFIX, isHoldComment, stageTarget } from "./board.js";
 import { handoffNextLine } from "./handoff.js";
@@ -83,6 +83,7 @@ export class SnapshotSync {
       }
       if (!id) continue;
       ids.push([c, id]);
+      this.learnSignoff(id, c.signoff);
       if (c.hold) this.placement.holdAction.set(id, c.hold.action);
       else this.placement.holdAction.delete(id);
     }
@@ -92,17 +93,18 @@ export class SnapshotSync {
     for (const c of cards ?? read.closed ?? []) if (c.state !== "open") closed.set(c.item.issueNumber, c.state);
     const movers: Array<{ item: WorkItem; id: string; stage: SnapshotItem["stage"]; detail: string; state: string; want: string }> = [];
     // Lifecycle issues with no card yet: each gets one at its stage once GitHub reads it open (Foreman #113).
-    const fresh: Array<{ item: WorkItem; stage: PaperclipStage; detail: string }> = [];
+    const fresh: Array<{ item: WorkItem; stage: PaperclipStage; detail: string; signoff?: SignoffHold }> = [];
     // Needs-ruling blocks whose write never landed: delivered once GitHub reads the issue open.
     const rulings: Array<{ item: WorkItem; id: string; stage: PaperclipStage }> = [];
-    for (const { item, stage, detail, verifyHeld, foremanHeld } of items) {
+    for (const { item, stage, detail, verifyHeld, foremanHeld, signoff } of items) {
       if (closed.has(item.issueNumber)) continue;
       const id = await this.index.resolve(item, false);
       if (!id) {
-        if (stage !== "done") fresh.push({ item, stage, detail });
+        if (stage !== "done") fresh.push({ item, stage, detail, ...(signoff ? { signoff } : {}) });
         continue;
       }
       this.placement.ghStage.set(id, stage);
+      this.learnSignoff(id, signoff);
       const state = this.index.rowState.get(id);
       if (this.holds.has(id)) {
         await this.placement.placeHeld(id);
@@ -203,7 +205,7 @@ export class SnapshotSync {
       const text = this.placement.blockedReason.get(id);
       if (text) await this.notes.note(id, text, { event: "blocked", handoff: handoffTo(step.stage, item) });
     }
-    for (const { item, stage, detail } of fresh) {
+    for (const { item, stage, detail, signoff } of fresh) {
       if (live.get(item.issueNumber) !== "open") continue;
       if (budget.left <= 0) break;
       const c = owned?.find((x) => x.item.issueNumber === item.issueNumber && x.item.repo === item.repo);
@@ -211,6 +213,7 @@ export class SnapshotSync {
       if (!id) continue;
       budget.left--;
       this.placement.ghStage.set(id, stage);
+      this.learnSignoff(id, signoff);
       if (c) ids.push([c, id]);
       if (!(await this.placement.move(id, stage, false, true))) continue;
       if (stage === "blocked") this.placement.labelBlocked.add(id);
@@ -289,6 +292,12 @@ export class SnapshotSync {
     }
   }
 
+  /** The sign-off hold this pass read for a card, or none: replaced every pass, so a restart and a cleared status both read true. */
+  private learnSignoff(id: string, signoff: SignoffHold | undefined): void {
+    if (signoff) this.notes.signoffOf.set(id, signoff);
+    else this.notes.signoffOf.delete(id);
+  }
+
   /** True when syncing an open, unapproved issue's card would move it to backlog. */
   private wouldBacklog(id: string): boolean {
     if (this.holds.has(id)) return false;
@@ -336,7 +345,7 @@ export class SnapshotSync {
   private cardContent(c: SnapshotCard, id: string | null = null): { title: string; description: string } {
     const [owner = "", name = ""] = c.item.repo.split("/");
     const line = c.state !== "open" ? `GitHub: closed ${c.state}` : `GitHub: open · ${c.stage ? `stage ${c.stage}` : "not approved"}`;
-    const facts = c.state === "open" && c.stage && c.stage !== "done" ? this.notes.handoffFacts(id, c.stage, c.item) : null;
+    const facts = c.state === "open" && c.stage && c.stage !== "done" ? this.notes.handoffFacts(id, c.stage, c.item, undefined, undefined, c.signoff) : null;
     const next = facts && c.stage && c.stage !== "done" ? `\n${handoffNextLine(c.stage, facts, this.env.labels)}` : "";
     const out = {
       title: fill(PAPERCLIP_OWNED_TITLE_FORMAT, { repo: c.item.repo, owner, name, N: String(c.item.issueNumber), title: c.title }),

@@ -8,7 +8,7 @@
 import type { WorkEvent, WorkItem } from "../adapters.js";
 import type { PaperclipStage } from "./config.js";
 import type { Duplicate, NoteOpts, PaperclipStepMove, RowContent, CardContent } from "./steps.js";
-import type { SessionEvent } from "../adapters.js";
+import type { SessionEvent, SignoffHold } from "../adapters.js";
 import type { HandoffFacts } from "./handoff.js";
 
 /** The card index: which task is the card for which issue, and what each card shows. */
@@ -83,7 +83,9 @@ export interface LeasePort {
 /** Thread notes: what the card's comment thread says. */
 export interface NotesPort {
   readonly lastNote: Map<string, string>;
+  /** Task id -> the release PR's sign-off hold this pass read for it; absent when none (recomputed every snapshot). */
+  readonly signoffOf: Map<string, SignoffHold>;
   note(id: string, text: string, opts: NoteOpts): Promise<void>;
   latestComment(id: string): Promise<string | undefined>;
-  handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"], owner?: string): HandoffFacts | null;
+  handoffFacts(id: string | null, stage: PaperclipStage, item: WorkItem, evidence?: HandoffFacts["evidence"], owner?: string, signoff?: SignoffHold): HandoffFacts | null;
 }

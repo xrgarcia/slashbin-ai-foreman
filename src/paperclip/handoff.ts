@@ -148,9 +148,9 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
   },
   awaitingSignoff: {
     act: true,
-    todo: "The release PR that carries {issue} is held: its EM sign-off status is failing because an issue in it lacks `{readyForProd}`. Read the status on the release PR for the issue numbers, run the EM release gate (`/deliver-to-prod` step 3a) for each and apply `{readyForProd}`, or take it out of the release. The Tech Lead's approval and the SRE's deploy do not start until then.",
-    next: "sign off the issues the release PR carrying {issue} is held for, or take them out",
-    why: "the release PR's EM sign-off status is failing (`{readyForProd}` missing on an issue in it)",
+    todo: "The release {pr} that carries {issue} is held: its EM sign-off status is failing. {unsignedTodo} The Tech Lead's approval and the SRE's deploy do not start until then.",
+    next: "sign off {unsignedNext} (release {pr}), or take them out of the release",
+    why: "the release {pr}'s EM sign-off status is failing ({unsignedWhy})",
     done: "the sign-off status turns green (the card returns to Releasing)",
   },
   prodVerifyHeld: {
@@ -206,6 +206,8 @@ export interface HandoffFacts {
   /** The seat that holds the card now, by name. */
   readonly seat: string;
   readonly pr?: { readonly number: number; readonly url?: string };
+  /** At `awaitingSignoff`: the unsigned issues of the release `pr` (a number list, possibly empty). */
+  readonly unsigned?: readonly number[];
   /** An ISO time the card's next step is scheduled for (the `verifyScheduled` variant). */
   readonly resumeAt?: string;
   /** The latest outcome on the card (a session's result), and when it came. */
@@ -217,8 +219,27 @@ function fill(template: string, vars: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m));
 }
 
+/** The three phrasings of what an `awaitingSignoff` hold waits for: the issues to sign, or the PR when none is named. */
+function unsignedVars(f: HandoffFacts, labels: HandoffLabels): Record<string, string> {
+  const pr = f.pr ? `PR #${f.pr.number}` : "the release PR";
+  if (f.unsigned && f.unsigned.length > 0) {
+    const list = f.unsigned.map((n) => `${f.repo}#${n}`).join(", ");
+    return {
+      unsignedTodo: `Run the EM release gate (\`/deliver-to-prod\` step 3a) for each of ${list} and apply \`${labels.readyForProd}\`, or take it out of the release.`,
+      unsignedNext: list,
+      unsignedWhy: `${list} lack \`${labels.readyForProd}\``,
+    };
+  }
+  return {
+    unsignedTodo: `No listed issue lacks a sign-off label, so read the status on ${pr} for what it holds, then sign off or take out what it names.`,
+    unsignedNext: `what ${pr} is held for`,
+    unsignedWhy: `no listed issue lacks a sign-off label; read the status on ${pr}`,
+  };
+}
+
 function varsOf(f: HandoffFacts, labels: HandoffLabels): Record<string, string> {
   return {
+    ...unsignedVars(f, labels),
     ...labels,
     issue: `${f.repo}#${f.issueNumber}`,
     repo: f.repo,
