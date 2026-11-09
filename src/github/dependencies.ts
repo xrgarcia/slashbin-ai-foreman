@@ -168,12 +168,12 @@ export const DEPENDENCY_BATCH_TITLE_PREFIX = DEFAULT_GITHUB_CONVENTIONS.dependen
  *   `chore(deps): bump qs and express`
  *   `Bump form-data from 4.0.5 to 4.0.6`
  *
- * A grouped bump carries no versions in its title, so `from`/`to` stay undefined
- * and `major` is false — deliberately understated rather than guessed. The issue
- * body says to read the PR for those, because inventing a version here would put
- * a wrong number in front of the person deciding whether to approve.
+ * A grouped bump carries no versions in its title, so they are read from the PR body when one is
+ * given (see `versionMovesFromBody`). A package whose move cannot be read keeps no version and
+ * `major` is null (unknown), never false: printing "no" for a move nobody read would tell the
+ * person deciding whether to approve that a breaking upgrade is routine.
  */
-export function describeDependencyPR(number: number, title: string): DependencyChange {
+export function describeDependencyPR(number: number, title: string, body?: string | null): DependencyChange {
   const versioned = /\bbump\s+(.+?)\s+from\s+(\S+)\s+to\s+(\S+)/i.exec(title);
   if (versioned) {
     return {
@@ -185,10 +185,67 @@ export function describeDependencyPR(number: number, title: string): DependencyC
     };
   }
   const grouped = /\bbump\s+(.+?)(?:\s+in\s+\S+)?\s*$/i.exec(title);
-  const packages = grouped
+  let packages = grouped
     ? grouped[1].split(/\s*,\s*|\s+and\s+/).map((p) => p.trim()).filter(Boolean)
     : [];
-  return { number, packages, major: false };
+  const moves = versionMovesFromBody(body ?? "");
+  // A group title ("bump the npm_and_yarn group ...") names no package; the body does.
+  if (packages.length === 0 || /\bgroup\b/i.test(grouped?.[1] ?? "")) {
+    const seen = new Map<string, string>();
+    for (const name of [...packagesMentionedInBody(body ?? ""), ...moves.map((m) => m.package)]) if (!seen.has(name.toLowerCase())) seen.set(name.toLowerCase(), name);
+    if (seen.size > 0) packages = [...seen.values()];
+  }
+  const readable = packages.length > 0 && packages.every((p) => moves.some((m) => m.package.toLowerCase() === p.toLowerCase()));
+  const relevant = moves.filter((m) => packages.some((p) => p.toLowerCase() === m.package.toLowerCase()));
+  const anyMajor = relevant.some((m) => isMajorBump(m.from, m.to));
+  const change: DependencyChange = { number, packages, major: anyMajor ? true : readable ? false : null };
+  if (relevant.length > 0) change.moves = relevant;
+  if (relevant.length === 1 && packages.length === 1) {
+    change.from = relevant[0].from;
+    change.to = relevant[0].to;
+  }
+  return change;
+}
+
+/** Every package a Dependabot PR body names, whether or not it states the versions (so an unread one stays in the inventory). */
+export function packagesMentionedInBody(body: string): string[] {
+  const names: string[] = [];
+  for (const m of body.matchAll(/Updates\s+`?\[?([^\s`\]\[]+)\]?`?(?:\([^)]*\))?(?=\s+from\b|[ \t]*$)/gm)) names.push(m[1]);
+  // "Bumps [a](u) from 1 to 2" and the group summary "Bumps the x group with 2 updates in the / directory: [a](u) and [b](u)."
+  for (const line of body.split("\n")) {
+    if (!/^\s*Bumps\b/.test(line)) continue;
+    for (const m of line.matchAll(/\[([^\]]+)\]\([^)]*\)/g)) names.push(m[1]);
+  }
+  for (const line of body.split("\n")) {
+    const row = /^\|\s*\[([^\]]+)\]\([^)]*\)\s*\|/.exec(line.trim());
+    if (row) names.push(row[1]);
+  }
+  return names;
+}
+
+/**
+ * The version moves a Dependabot PR body states, in the three forms it writes them:
+ *   `Updates \`pkg\` from 1.2.3 to 1.2.4`            (per-package section of a grouped PR)
+ *   `Bumps [pkg](url) from 1.2.3 to 1.2.4`            (single-package PR)
+ *   `| [pkg](url) | \`1.2.3\` | \`1.2.4\` |`            (the update table of a grouped PR)
+ * The first stated move of a package wins. Nothing is inferred: a package the body does not
+ * give both versions for has no entry.
+ */
+export function versionMovesFromBody(body: string): { package: string; from: string; to: string }[] {
+  const moves = new Map<string, { package: string; from: string; to: string }>();
+  const add = (pkg: string, from: string, to: string): void => {
+    const key = pkg.toLowerCase();
+    if (!pkg || !from || !to || moves.has(key)) return;
+    moves.set(key, { package: pkg, from, to });
+  };
+  const ver = "v?[0-9][^\\s`|,;)]*";
+  for (const m of body.matchAll(new RegExp(`Updates \`?([^\`\\s]+)\`? from \`?(${ver})\`? to \`?(${ver})\`?`, "g"))) add(m[1], m[2], m[3].replace(/[.]$/, ""));
+  for (const m of body.matchAll(new RegExp(`Bumps \\[([^\\]]+)\\]\\([^)]*\\) from \`?(${ver})\`? to \`?(${ver})\`?`, "g"))) add(m[1], m[2], m[3].replace(/[.]$/, ""));
+  for (const line of body.split("\n")) {
+    const row = new RegExp(`^\\|\\s*\\[([^\\]]+)\\]\\([^)]*\\)\\s*\\|\\s*\`?(${ver})\`?\\s*\\|\\s*\`?(${ver})\`?\\s*\\|`).exec(line.trim());
+    if (row) add(row[1], row[2], row[3]);
+  }
+  return [...moves.values()];
 }
 
 /**
@@ -230,16 +287,24 @@ export function buildDependencyBatchIssue(
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
   baseBranch = "develop",
 ): { title: string; body: string } {
-  const majors = changes.filter((c) => c.major);
+  const majors = changes.filter((c) => c.major === true);
+  const unknownMajors = changes.filter((c) => c.major === null);
   const n = changes.length;
   const title =
     `${conventions.dependencyBatchTitlePrefix}${n} dependency update${n === 1 ? "" : "s"} on \`${landingBranch}\`` +
-    (majors.length > 0 ? ` (${majors.length} major)` : "");
+    (majors.length > 0 ? ` (${majors.length} major)` : "") +
+    (unknownMajors.length > 0 ? ` (${unknownMajors.length} unknown)` : "");
 
   const row = (c: DependencyChange) => {
     const pkg = c.packages.length ? c.packages.join(", ") : "(see PR)";
-    const move = c.from && c.to ? `\`${c.from}\` → \`${c.to}\`` : "grouped — read the PR";
-    return `| #${c.number} | ${pkg} | ${move} | ${c.major ? "**yes**" : "no"} |`;
+    const known = new Set((c.moves ?? []).map((m) => m.package.toLowerCase()));
+    const unread = c.packages.filter((p) => !known.has(p.toLowerCase()));
+    const move = c.from && c.to
+      ? `\`${c.from}\` → \`${c.to}\``
+      : (c.moves ?? []).length > 0
+        ? [...(c.moves ?? []).map((m) => `${m.package} \`${m.from}\` → \`${m.to}\``), ...unread.map((p) => `${p} (version not stated)`)].join("; ")
+        : "grouped — read the PR";
+    return `| #${c.number} | ${pkg} | ${move} | ${c.major === null ? "unknown" : c.major ? "**yes**" : "no"} |`;
   };
 
   const body = [
@@ -251,8 +316,11 @@ export function buildDependencyBatchIssue(
     `proves the application still runs.`,
     ``,
     majors.length > 0
-      ? `**${majors.length} of these ${majors.length === 1 ? "is a" : "are"} major version change${majors.length === 1 ? "" : "s"}.** A major bump is the class most likely to break a runtime while passing every check.`
-      : `None of these crosses a major version.`,
+      ? `**${majors.length} of these ${majors.length === 1 ? "is a" : "are"} major version change${majors.length === 1 ? "" : "s"}.** A major bump is the class most likely to break a runtime while passing every check.` +
+        (unknownMajors.length > 0 ? ` A further ${unknownMajors.length} ${unknownMajors.length === 1 ? "is" : "are"} grouped with versions the PR does not state (marked unknown below): read ${unknownMajors.length === 1 ? "it" : "them"} too.` : "")
+      : unknownMajors.length > 0
+        ? `No PR here is known to cross a major version, but ${unknownMajors.length} ${unknownMajors.length === 1 ? "is" : "are"} grouped with versions the PR does not state (marked unknown below) — read ${unknownMajors.length === 1 ? "it" : "them"} before deciding.`
+        : `None of these crosses a major version.`,
     ``,
     `| PR | Package(s) | Version | Major |`,
     `|---|---|---|---|`,
