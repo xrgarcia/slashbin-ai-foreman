@@ -16,6 +16,8 @@ import { CycleEvent, activeRuns, itemOf, notifyOnce, pausedByBlockedLabel, repor
 import { reconcileReviewOutcomeLabels } from "./reconcile.js";
 import { tryQaBeforeMerge } from "./qa-before-merge.js";
 import { qaBeforeMergeApplies } from "../qa-report.js";
+import { MAX_REVIEW_ATTEMPTS_PER_HEAD } from "../step-attempts.js";
+import { rulingAnswersStalemate } from "../no-commit-streak.js";
 import { codeHost } from "../plugins/registry.js";
 import type { ForemanRuntime } from "../runtime.js";
 
@@ -144,6 +146,54 @@ async function reviewPass(
     return false;
   }
 
+  // The input this review acts on is the PR's head. A read that fails throws and fails the pass (EM#1244 f5).
+  const head = await codeHost().readPrHeadSha(repoConfig, candidate.prNumber, reviewLogger);
+
+  // An empty diff is not reviewable: the Tech Lead refuses to review nothing, so every pass would pick the PR
+  // up again and fail the same way, and revise (which reads an EM scope ruling) would never run (foreman#110).
+  // Route it to revise instead, saying why on the PR once per head; revise's no-commit streak then bounds the
+  // round trip and hands a stalemate to the EM, whose ruling resumes it.
+  if (candidate.issueNumbers.length > 0) {
+    const changed = await codeHost().prChangedFiles(repoConfig.githubRepo, candidate.prNumber, repoConfig.repoPath, reviewLogger);
+    if (changed.length === 0) {
+      const mark = `<!-- foreman-empty-diff sha=${head} -->`;
+      if (!await codeHost().hasCommentContaining(repoConfig, candidate.prNumber, mark)) {
+        await codeHost().commentOnPr(repoConfig, candidate.prNumber,
+          `${mark}\nThis PR changes no files against \`${repoConfig.baseBranch}\` at \`${head.slice(0, 12)}\`, so there is nothing to review. ` +
+          `Sent back to revise: read the newest \`**EM scope ruling\` on this PR and either land what it asks for, ` +
+          `or say why nothing can land. A revision that leaves the diff empty pushes nothing and stops, and the EM rules.`);
+      }
+      for (const n of candidate.issueNumbers) await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
+      reviewLogger.info(`PR #${candidate.prNumber} has an empty diff at ${head.slice(0, 12)} — sent to revise, no review spent`);
+      events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: empty diff — sent to revise instead of review`, level: "warn" });
+      return true;
+    }
+  }
+
+  // No step runs twice on the same input (src/step-attempts.ts): a review of this head is admitted a bounded number
+  // of times, recorded before it starts. A PR that has used them all is held for the EM, never offered again;
+  // a push (new head) or an EM scope ruling posted after the last attempt resumes it.
+  const admission = await rt.attempts.admit(repoConfig, candidate.prNumber, "review", head, MAX_REVIEW_ATTEMPTS_PER_HEAD,
+    async (since) => rulingAnswersStalemate((await codeHost().readRulingState(repoConfig.githubRepo, candidate.prNumber, repoConfig.repoPath, reviewLogger)).rulingAt, since));
+  if (admission.status === "unavailable") {
+    reviewLogger.info(`PR #${candidate.prNumber}: its review attempts cannot be recorded in the work source — no review this pass`);
+    return false;
+  }
+  if (admission.status === "held") {
+    if (admission.first) {
+      const issues = candidate.issueNumbers.map((n) => `#${n}`).join(", ");
+      const ask = `PR #${candidate.prNumber} was reviewed ${admission.count} times at the same head (${head.slice(0, 12)}) with no change in between. ` +
+        `Review is held. EM: run /rule-on-scope ${repoConfig.githubRepo} ${candidate.prNumber}${issues ? ` (issues ${issues})` : ""}, or push to the PR; either resumes it.`;
+      reviewLogger.warn(`${ask}`);
+      events?.push({ message: `\u26a0\ufe0f ${repoConfig.githubRepo} \u2014 ${ask}`, level: "warn" });
+      for (const n of candidate.issueNumbers) await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason: ask, stuck: "needs-ruling" }, repoConfig, reviewLogger);
+    } else {
+      reviewLogger.debug(`PR #${candidate.prNumber} review is held for the EM: ${admission.count} attempts at head ${head.slice(0, 12)}`);
+    }
+    return false;
+  }
+  const refund = () => rt.attempts.refund(repoConfig, candidate.prNumber, "review", head);
+
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const transcriptPath = resolve(process.cwd(), "logs", "review", `${repoName}-cycle${cycleNumber}-${ts}.log`);
 
@@ -195,6 +245,8 @@ async function reviewPass(
       reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
       // An unavailable work source is a silent tooling defer: the card is not moved to Blocked, so a blip
       // that clears on the next pass leaves no stale hold behind (foreman#180).
+      // Neither it nor the wait below reviewed anything: the attempt is given back.
+      await refund();
       if (result.unavailable) return false;
       // A wait is a Blocked card that says what clears it; the next review session moves it on.
       const why = `waiting on the Tech Lead: it could not take PR #${candidate.prNumber} (${result.reason}) — the review retries automatically in ${wait}`;
@@ -273,6 +325,7 @@ async function reviewPass(
     // After the reconciliation above, so a review that merged and then hit the
     // limit still settles its labels. The card still goes to Blocked.
     if (result.upstreamLimit || isUpstreamBlocked("github")) {
+      await refund(); // a limit refused the run: nothing was reviewed
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, isUpstreamBlocked("github"));
       for (const n of candidate.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
       return false;

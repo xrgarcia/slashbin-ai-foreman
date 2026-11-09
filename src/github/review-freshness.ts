@@ -17,7 +17,7 @@ export function byReviewer(review: { author?: { login?: string } }, reviewerLogi
 }
 
 /**
- * True when the PR already has an APPROVED/CHANGES_REQUESTED review by
+ * True when the PR already has an APPROVED/CHANGES_REQUESTED/COMMENTED review by
  * `reviewerLogin` submitted at or after the PR's latest commit (i.e. the current
  * head has already been reviewed). On any lookup failure returns false — we'd
  * rather (rarely) re-review than silently never review.
@@ -72,7 +72,9 @@ export async function readFreshReview(
   return reviews.some(
     (r) =>
       byReviewer(r, reviewerLogin) &&
-      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") &&
+      // A COMMENTED review counts: a reviewer that holds the PR without a verdict (it was withdrawn, or the
+      // question is the EM's) has looked at this head, and running it again returns the same answer (foreman#39).
+      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "COMMENTED") &&
       !!r.submittedAt &&
       new Date(r.submittedAt).getTime() >= lastCommitMs,
   );
@@ -143,7 +145,11 @@ export async function returnedToReviewSinceVerdict(
     .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
   const last = verdicts[verdicts.length - 1];
   if (!last || last.state !== "CHANGES_REQUESTED") return false;
-  const verdictMs = new Date(last.submittedAt!).getTime();
+  // The reply must follow the reviewer's LATEST review of any kind: a COMMENTED review posted after the verdict
+  // already answered the return to review, so the same relabel cannot ask for another one (foreman#39).
+  const verdictMs = (data.reviews ?? [])
+    .filter((r) => byReviewer(r, reviewerLogin) && r.submittedAt)
+    .reduce((m, r) => Math.max(m, new Date(r.submittedAt!).getTime()), new Date(last.submittedAt!).getTime());
   const label = config.lifecycleLabels.prUnderReview;
   for (const n of issueNumbers) {
     // One timestamp per line: --paginate emits one --jq result per page.
