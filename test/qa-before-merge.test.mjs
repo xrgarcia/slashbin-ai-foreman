@@ -277,3 +277,48 @@ test("F3: runQaReport, applyQaGate and runQaBeforeMerge share one run helper; a 
   assert.equal(code.split("mkdirSync(out, { recursive: true })").length - 1, 1, "cache setup exists once (the helper)");
   assert.equal(code.split("await deps.run(").length - 1, 1, "deps.run is called once (the helper)");
 });
+
+// The EM's `**EM QA re-run` on an open PR voids a reused verdict for that head (QA's own defect; Slashbin-io-docs#645).
+const failReport = (at) => ({ at, body: `## QA Report\n${qaVerdictMarker(SHA, "FAIL")}\n**Verdict: FAIL**` });
+const rerun = (at, body = "**EM QA re-run: slashbin_ai_qa#36 fixed the CDN abort") => ({ at, body });
+const withComments = (comments, outcome = ran("PASS", 0)) => {
+  const d = deps(outcome, { comments: async () => comments });
+  d.markers.add(qaVerdictMarker(SHA, "FAIL"));
+  return d;
+};
+
+test("EM re-run: a FAIL with no re-run comment still stands and does not run QA", async () => {
+  const d = withComments([failReport("2026-11-09T02:30:00Z")]);
+  assert.deepEqual(await runQaBeforeMerge(REPO, 5, SHA, d, logger), { kind: "fail", summary: "QA already failed this head; see its QA Report on the PR.", reused: true });
+  assert.equal(d.runs, 0);
+});
+
+test("EM re-run: a re-run comment newer than the QA Report voids the FAIL and QA runs again", async () => {
+  const d = withComments([failReport("2026-11-09T02:30:00Z"), rerun("2026-11-09T17:00:00Z")]);
+  assert.deepEqual(await runQaBeforeMerge(REPO, 5, SHA, d, logger), { kind: "pass", reused: false });
+  assert.equal(d.runs, 1);
+});
+
+test("EM re-run: a re-run comment older than the QA Report does not void it", async () => {
+  const d = withComments([rerun("2026-11-09T01:00:00Z"), failReport("2026-11-09T02:30:00Z")]);
+  assert.equal((await runQaBeforeMerge(REPO, 5, SHA, d, logger)).reused, true);
+  assert.equal(d.runs, 0);
+});
+
+test("EM re-run: a comment that does not open with the marker does not void it", async () => {
+  const d = withComments([failReport("2026-11-09T02:30:00Z"), rerun("2026-11-09T17:00:00Z", "please do an **EM QA re-run")]);
+  assert.equal((await runQaBeforeMerge(REPO, 5, SHA, d, logger)).reused, true);
+  assert.equal(d.runs, 0);
+});
+
+test("EM re-run: it runs once per comment; a fresh FAIL after it stands again and the comment is not a review round", async () => {
+  const d = withComments([failReport("2026-11-09T02:30:00Z"), rerun("2026-11-09T17:00:00Z"), failReport("2026-11-09T17:05:00Z")]);
+  assert.equal((await runQaBeforeMerge(REPO, 5, SHA, d, logger)).reused, true, "the request is spent once a newer report exists");
+  assert.equal(rulingState([], [{ at: "2026-11-09T17:00:00Z", head: rerun("x").body.slice(0, 140) }]).roundsSinceRuling, 0);
+});
+
+test("EM re-run: the void is one pure predicate in qa-report.ts, built on the one re-run pattern", () => {
+  const code = src("qa-report.ts");
+  assert.equal(code.split("EM_QA_RERUN_PATTERN.test(").length - 1, 1, "one use of the pattern: newestRequest");
+  assert.match(code, /export function rerunVoidsVerdict/);
+});
