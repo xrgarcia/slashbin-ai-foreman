@@ -486,6 +486,7 @@ export interface CodeHost {
     body: string;
 }>>;
   hasCommentContaining(config: RepoConfig, num: number, mark: string): Promise<boolean>;
+  reopenedSince(config: RepoConfig, num: number, sinceIso: string): Promise<boolean>;
   hasCommentStartingWith(config: RepoConfig, num: number, heading: string): Promise<boolean>;
 
   // Feature PRs.
