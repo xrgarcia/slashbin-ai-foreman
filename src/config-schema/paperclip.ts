@@ -136,8 +136,8 @@ export const paperclipConfigSchema = z.object({
   // cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an
   // item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own
   // key (exact string comparison), and no registry call is made. Set, each open card also
-  // carries its GitHub issue's customer label: the issue label whose name matches a registry
-  // customer's `github_label` (list_customers), or `no customer label` when none does. Unset:
+  // carries its GitHub issue's customer labels: every issue label whose name matches a registry
+  // customer's `github_label` (list_customers), in name order, or `no customer label` alone when none does. Unset:
   // no customer label is written, and the mirror works the same otherwise.
   registryUrl: z.url().optional(),
   // The bearer credential the registry's router requires. Set it from the environment; it is a

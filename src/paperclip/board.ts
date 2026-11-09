@@ -180,17 +180,16 @@ export function withIssueLabel(labelIds: readonly string[], issueLabelId: string
 export const NO_CUSTOMER_LABEL = { name: "no customer label", color: "#9ca3af" } as const;
 const CUSTOMER_COLOR = "#6366f1";
 
-/** The registry customer label among `issueLabels` (exact name match; the lexicographically smallest of several), or null. */
-export function customerLabelOf(issueLabels: readonly string[], registryNames: readonly string[]): string | null {
+/** Every registry customer label among `issueLabels` (exact name match), once each, ascending; empty when none. */
+export function customerLabelsOf(issueLabels: readonly string[], registryNames: readonly string[]): string[] {
   const known = new Set(registryNames);
-  const hits = issueLabels.filter((l) => known.has(l)).sort();
-  return hits[0] ?? null;
+  return [...new Set(issueLabels.filter((l) => known.has(l)))].sort();
 }
 
-/** `labelIds` without any customer or marker id (`customerIds`), then `wantId` appended; every other id kept in order. */
-export function withCustomerLabel(labelIds: readonly string[], customerIds: ReadonlySet<string> | readonly string[], wantId: string): string[] {
+/** `labelIds` without any customer or marker id (`customerIds`), then `wantIds` appended; every other id kept in order. */
+export function withCustomerLabels(labelIds: readonly string[], customerIds: ReadonlySet<string> | readonly string[], wantIds: readonly string[]): string[] {
   const drop = new Set(customerIds);
-  return [...labelIds.filter((id) => !drop.has(id)), wantId];
+  return [...labelIds.filter((id) => !drop.has(id)), ...wantIds];
 }
 
 /**
