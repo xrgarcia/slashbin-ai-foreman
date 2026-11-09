@@ -51,6 +51,7 @@ const tmp = mkdtempSync(join(tmpdir(), "foreman-425-ws-"));
 const bin = join(tmp, "bin");
 const capture = join(tmp, "claude-capture.json");
 mkdirSync(bin);
+writeFileSync(join(bin, "package.json"), '{"type":"commonjs"}'); // the fakes are CJS; a stray ancestor package.json (type:module) must not turn them ESM
 const board = [
   { number: 1, title: "ready", labels: [{ name: "approved" }] },
   { number: 2, title: "blocked", labels: [{ name: "approved" }, { name: "blocked" }] },

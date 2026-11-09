@@ -143,23 +143,23 @@ const cwd = ${j(repoPath)};
 const G = repo.githubRepo;
 const STAGES = {
   implement: { move: "implemented", pre: [repo.triggerLabel], to: [repo.triggerLabel, L.prUnderReview],
-    reads: () => { branch.getRemoteBranchSha(G, "features", cwd, quiet); branch.checkPRHasChanges(G, "features", "develop", cwd, quiet); } },
+    reads: async () => { await branch.getRemoteBranchSha(G, "features", cwd, quiet); await branch.checkPRHasChanges(G, "features", "develop", cwd, quiet); } },
   review: { move: "reviewApproved", pre: [L.prUnderReview], to: [L.prApproved],
-    reads: () => { fresh.readPrState(repo, 5, quiet); fresh.readFreshReview(repo, 5, "tl", quiet); } },
+    reads: async () => { await fresh.readPrState(repo, 5, quiet); await fresh.readFreshReview(repo, 5, "tl", quiet); } },
   revise: { move: "revised", pre: [L.prPendingActions], to: [L.prUnderReview],
-    reads: () => { fresh.readPrHeadSha(repo, 5, quiet); reports.readRulingState(G, 5, cwd, quiet); } },
+    reads: async () => { await fresh.readPrHeadSha(repo, 5, quiet); await reports.readRulingState(G, 5, cwd, quiet); } },
   verify: { move: "verifyPassed", pre: [L.prMerged], to: [L.prApproved],
-    reads: () => { reports.prChangedFiles(G, 5, cwd, quiet); } },
+    reads: async () => { await reports.prChangedFiles(G, 5, cwd, quiet); } },
   release: { move: "releaseQueued", pre: [L.readyForProd, L.prApproved], to: [L.releasePending],
-    reads: () => { promotion.findOpenPromotionPR(G, "main", "develop", cwd, quiet); } },
+    reads: async () => { await promotion.findOpenPromotionPR(G, "main", "develop", cwd, quiet); } },
 };
 const readS = () => JSON.parse(readFileSync(P, "utf8"));
 const setS = (patch) => writeFileSync(P, JSON.stringify({ ...readS(), ...patch }));
 const sameSet = (x, y) => JSON.stringify([...x].sort()) === JSON.stringify([...y].sort());
 
-/** One lifecycle-stage pass: its reads (a throw fails the pass closed), then its write. */
+/** One lifecycle-stage pass: its reads (a throw or rejection fails the pass closed), then its write. */
 async function pass(stage, n) {
-  try { stage.reads(); } catch { return "failed-closed"; }
+  try { await stage.reads(); } catch { return "failed-closed"; }
   const ok = await advance(rt, { issueNumber: n, repo: G }, stage.move, repo, quiet);
   return ok ? "moved" : "write-failed";
 }

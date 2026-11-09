@@ -58,6 +58,7 @@ const check = (name, ok, detail = "") => {
 const tmp = mkdtempSync(join(tmpdir(), "foreman-backoff-"));
 const binDir = join(tmp, "bin");
 spawnSync("mkdir", ["-p", binDir]);
+writeFileSync(join(binDir, "package.json"), '{"type":"commonjs"}'); // fakes are CJS; a stray ancestor type:module package.json must not make them ESM
 const fakeGh = join(binDir, "gh");
 // Fake gh: logs "<ms> <args>" to $FAKE_GH_LOG. `gh api rate_limit` prints
 // $FAKE_GH_RATE; anything else exits 1 with $FAKE_GH_ERR when non-empty, else prints [].
@@ -96,8 +97,8 @@ function runCase(name, body, timeoutMs = 20_000) {
     const notes = [];
     const B = await import(${JSON.stringify(url("upstream-backoff.js"))});
     const G = await import(${JSON.stringify(url("github.js"))});
-    // A REST call: the probe now reads the bucket that tripped (github/gh.ts probeGitHub), and a REST trip probes "api rate_limit".
-    const call = () => { try { G.gh(["api", "repos/example/acceptance/issues"], CWD); return "ok"; }
+    // A REST call (gh() was the sync runner and is gone; ghAsync is the Foreman-token entry point the daemon uses): the probe now reads the bucket that tripped (github/gh.ts probeGitHub), and a REST trip probes "api rate_limit".
+    const call = async () => { try { await G.ghAsync(["api", "repos/example/acceptance/issues"], CWD); return "ok"; }
       catch (e) { return e instanceof B.UpstreamBackoffError ? "backoff" : "error"; } };
     // The windows are the daemon-wide backoff.upstream setting (src/backoff.ts), no longer a configure option.
     const K = await import(${JSON.stringify(url("backoff.js"))});
@@ -130,9 +131,9 @@ try {
   const ep = runCase("episode", `
     writeFileSync(F.err, "HTTP 403: API rate limit exceeded for user ID 1.");
     rate(0, nowSec());
-    const first = call();
+    const first = await call();
     const afterFirst = work().length, notesAfterFirst = notes.map((n) => n.t);
-    const refused = [call(), call(), call(), call(), call()];
+    const refused = []; for (let i = 0; i < 5; i++) refused.push(await call());
     const afterRefused = work().length;
     writeFileSync(F.err, "");
     await sleep(450);                       // first probe at ~300ms → still limited
@@ -140,7 +141,7 @@ try {
     rate(5000, nowSec() + 3600);
     await sleep(900);                       // second probe at ~300+600ms → clear
     const p = probes().map((c) => c.ts);
-    const resumed = call();
+    const resumed = await call();
     console.log(JSON.stringify({ first, afterFirst, notesAfterFirst, refused, afterRefused,
       extendNotes, probeTs: p, allNotes: notes.map((n) => n.t), resumed, workAfter: work().length }));
   `);
@@ -163,7 +164,7 @@ try {
     writeFileSync(F.err, "HTTP 403: API rate limit exceeded for user ID 1.");
     const resetSec = nowSec() + 3;
     rate(0, resetSec);
-    call();
+    await call();
     await sleep(400);                       // first probe sees reset in ~2.6s
     rate(5000, nowSec() + 3600);
     await sleep(3400);
@@ -176,7 +177,7 @@ try {
   const a6 = runCase("cap", `
     writeFileSync(F.err, "HTTP 403: API rate limit exceeded for user ID 1.");
     rate(0, nowSec());
-    call();
+    await call();
     await sleep(300 + 600 + 1200 + 2400 + 2400 + 400);
     const p = probes().map((c) => c.ts);
     console.log(JSON.stringify({ gaps: p.slice(1).map((t, i) => t - p[i]), n: p.length }));
@@ -192,7 +193,7 @@ try {
     const r = runCase("classify", `
       writeFileSync(F.err, ${JSON.stringify(text)});
       rate(0, nowSec() + 3600);
-      call();
+      await call();
       console.log(JSON.stringify({ blocked: B.isUpstreamBlocked("github") }));
     `);
     check(`A7 ${label} ${expect ? "enters" : "does not enter"} back-off`, r.blocked === expect, `got ${r.blocked ?? why(r)}`);
