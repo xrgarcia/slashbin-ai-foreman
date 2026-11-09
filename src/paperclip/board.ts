@@ -176,6 +176,23 @@ export function withIssueLabel(labelIds: readonly string[], issueLabelId: string
   return labelIds.includes(issueLabelId) ? [...labelIds] : [...labelIds, issueLabelId];
 }
 
+/** The marker a service-repo card carries when its GitHub issue names no registry customer. */
+export const NO_CUSTOMER_LABEL = { name: "no customer label", color: "#9ca3af" } as const;
+const CUSTOMER_COLOR = "#6366f1";
+
+/** The registry customer label among `issueLabels` (exact name match; the lexicographically smallest of several), or null. */
+export function customerLabelOf(issueLabels: readonly string[], registryNames: readonly string[]): string | null {
+  const known = new Set(registryNames);
+  const hits = issueLabels.filter((l) => known.has(l)).sort();
+  return hits[0] ?? null;
+}
+
+/** `labelIds` without any customer or marker id (`customerIds`), then `wantId` appended; every other id kept in order. */
+export function withCustomerLabel(labelIds: readonly string[], customerIds: ReadonlySet<string> | readonly string[], wantId: string): string[] {
+  const drop = new Set(customerIds);
+  return [...labelIds.filter((id) => !drop.has(id)), wantId];
+}
+
 /**
  * A card's label ids with exactly one stage label: `key`'s, or none when `key`
  * is null. Every other label the card carries is kept, in order.
@@ -225,4 +242,11 @@ export async function ensureStageLabels(client: LabelClient, cfg: BoardConfig): 
 /** The id of the company's `issue` label, created when missing (same 409 handling). Throws on failure. */
 export async function ensureIssueLabel(client: LabelClient): Promise<string | undefined> {
   return (await ensureNamed(client, [ISSUE_LABEL])).get(ISSUE_LABEL.name);
+}
+
+/** Name -> id for each registry customer label and the `no customer label` marker, creating the missing ones (same 409 handling). Throws on failure. */
+export async function ensureCustomerLabels(client: LabelClient, names: readonly string[]): Promise<Map<string, string>> {
+  const want = [...names, NO_CUSTOMER_LABEL.name].map((name) => ({ name, color: name === NO_CUSTOMER_LABEL.name ? NO_CUSTOMER_LABEL.color : CUSTOMER_COLOR }));
+  const have = await ensureNamed(client, want);
+  return new Map(want.flatMap((l) => (have.has(l.name) ? [[l.name, have.get(l.name)!] as [string, string]] : [])));
 }

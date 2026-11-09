@@ -383,6 +383,8 @@ export class SnapshotSync {
     const body: Record<string, unknown> = {};
     if (have?.title !== want.title) body.title = want.title;
     if (have?.description !== want.description) body.description = want.description;
+    // The registry customer label of the issue's labels (open cards only; a closed card's labels are unknown).
+    const customer = c.state === "open" ? await this.placement.wantedCustomer(c.labels) : undefined;
     const free = !this.holds.has(id) && !state.startsWith("waiting\n");
     // The receiver's entry text on a Foreman-held card reads as a waiting hold; it is GitHub's hold, unread.
     const entry = !this.holds.has(id) && state.startsWith("waiting\n") && RECEIVER_HOLD_ENTRY.test(state.slice(8));
@@ -404,7 +406,7 @@ export class SnapshotSync {
       const user = assigneeFor(this.env.cfg, { labels: c.labels ?? [], repo: c.item.repo })?.assigneeUserId ?? null;
       if (status !== BACKLOG_STATUS || have?.assigneeAgentId || (have?.assigneeUserId ?? null) !== user) {
         Object.assign(body, { status: BACKLOG_STATUS, assigneeAgentId: null, assigneeUserId: user });
-        const labelIds = await this.placement.labelIdsFor(id, null);
+        const labelIds = await this.placement.labelIdsFor(id, null, customer);
         if (labelIds) body.labelIds = labelIds;
       }
     } else if ((free || entry) && c.hold && status === this.env.statusName("blocked")) {
@@ -430,9 +432,9 @@ export class SnapshotSync {
         body.status ??= status;
       }
     }
-    // Backfill: a card that predates the issue label gets it once, whatever its stage.
-    if (!("labelIds" in body) && have && (await this.placement.needsIssueLabel(id, have))) {
-      const labelIds = await this.placement.labelIdsFor(id, undefined);
+    // Backfill: a card that predates the issue label, or carries another customer label than its issue's, is fixed once, whatever its stage.
+    if (!("labelIds" in body) && have && ((await this.placement.needsIssueLabel(id, have)) || (await this.placement.customerStale(have, customer)))) {
+      const labelIds = await this.placement.labelIdsFor(id, undefined, customer);
       if (labelIds) body.labelIds = labelIds;
     }
     // A closed issue's card at its terminal state is done with: forgotten, never looked for again.
