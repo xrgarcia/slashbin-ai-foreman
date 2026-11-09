@@ -146,6 +146,13 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
     why: "{issue} is in the release PR the Foreman owns (`{releasePending}`)",
     done: "prod verification passes (the issue closes, the card goes to done) or holds (`{prodVerifyHeld}`)",
   },
+  awaitingSignoff: {
+    act: true,
+    todo: "The release PR that carries {issue} is held: its EM sign-off status is failing because an issue in it lacks `{readyForProd}`. Read the status on the release PR for the issue numbers, run the EM release gate (`/deliver-to-prod` step 3a) for each and apply `{readyForProd}`, or take it out of the release. The Tech Lead's approval and the SRE's deploy do not start until then.",
+    next: "sign off the issues the release PR carrying {issue} is held for, or take them out",
+    why: "the release PR's EM sign-off status is failing (`{readyForProd}` missing on an issue in it)",
+    done: "the sign-off status turns green (the card returns to Releasing)",
+  },
   prodVerifyHeld: {
     act: true,
     todo: "Sort the hold: read the newest production-verification comment on {issue}. A wait (`wait-until-…`, no traffic yet, a soak) needs nothing, the Foreman re-verifies on a back-off. A check that could not observe the outcome is a verifier defect: file it. Production actually broken: file a new corrective issue. Never re-verify by hand.",

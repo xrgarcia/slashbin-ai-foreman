@@ -358,6 +358,9 @@ export interface FreshUnrelated {
 
 /** `label` with every regex metacharacter escaped. */
 
+/** Words on a reference line that say the epic named there is not this issue's own. */
+const NOT_OWN_EPIC = /\b(sibling|predecessor|successor|supersed\w*|split (?:from|out of)|follow-?up (?:of|to))\b/i;
+
 /**
  * The epics an issue body names as `<label> #N` (config `epicRefLabel`, the
  * `## References` convention). No label = no epic parsing: always empty.
@@ -365,7 +368,10 @@ export interface FreshUnrelated {
 export function epicRefs(body: string, label: string | undefined): number[] {
   if (!label) return [];
   const pattern = new RegExp(`\\b${escapeRegex(label)} #(\\d+)`, "gi");
-  return [...new Set([...body.matchAll(pattern)].map((m) => Number(m[1])))];
+  // A line that names the epic as another issue's sibling, predecessor or successor, or as one this was
+  // split from or supersedes, does not make it this issue's epic: asking the EM about it is noise (#249).
+  const own = body.split("\n").filter((line) => !NOT_OWN_EPIC.test(line)).join("\n");
+  return [...new Set([...own.matchAll(pattern)].map((m) => Number(m[1])))];
 }
 
 /** The alert for one error the SRE excluded as not caused by the release it verified. Pure, exported for tests. */

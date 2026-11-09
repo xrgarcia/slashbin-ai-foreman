@@ -191,6 +191,14 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
   let epics = epicRefs(await codeHost().readIssueBody(repoConfig, n), label);
   const origin = followUpOrigin(title);
   if (!epics.length && origin !== null) epics = epicRefs(await codeHost().readIssueBody(repoConfig, origin), label);
+  // An epic already closed has nothing left to be ready for. Unreadable counts as open: asking twice is cheaper than never.
+  if (repoConfig.epicRepo) {
+    const open: number[] = [];
+    for (const e of epics) {
+      if (e !== n && (await codeHost().readIssueState(repoConfig, repoConfig.epicRepo, e)) !== "closed") open.push(e);
+    }
+    epics = open;
+  }
   if ((await rt.handoffs.raiseAll(repoConfig, epics.map((epic) => epicChildClosedAlert(repoConfig.githubRepo, n, epic, label)))) > 0) {
     logger.info(`#${n} is closing in production; asking the EM whether ${label} ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
   }
@@ -207,6 +215,7 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   const at = iso(now());
   const unsaved: number[] = [];
   const saved = new Set<number>();
+  const notClosed: number[] = [];
   for (const n of rel.issues) {
     const ok = await rt.records.updateIssueRecord(repoConfig, n, (d) => {
       d.prodVerified = {
@@ -223,10 +232,20 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   const open = new Set(openIssues.map((i) => i.number));
   for (const n of (await writable(repoConfig, rel, logger)).filter((i) => open.has(i) && saved.has(i))) {
     await noteEpicClose(rt, repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
+    // Close first, comment once it is closed: a close that fails is retried next pass and must not repeat the comment.
+    if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
+      notClosed.push(n);
+      continue;
+    }
     await comment(repoConfig, n, line, logger);
-    await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger);
   }
   if (unsaved.length > 0) return;
+  // A close that did not land leaves the issue open and labelled `release pending`: the release stays at
+  // this phase and the next pass closes it, instead of soaking with an open issue nobody owns (#220).
+  if (notClosed.length > 0) {
+    logger.warn(`Release PR #${rel.pr}: could not close ${notClosed.map((n) => `#${n}`).join(", ")}; the release is verified again next pass`);
+    return;
+  }
   logger.info(`Release PR #${rel.pr} verified in production; closed ${[...saved].map((n) => `#${n}`).join(", ")}`);
   // The issues are closed and recorded; a failed save here only repeats the (idempotent) verification next pass.
   if (rel.soaked) {

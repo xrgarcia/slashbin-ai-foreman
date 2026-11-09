@@ -77,6 +77,7 @@ if (a[0] === "issue") {
     for (const l of flags("--add-label")) if (!is.labels.includes(l)) is.labels.push(l);
     save(); out("");
   }
+  if (a[1] === "close" && (st.failClose || []).includes(Number(a[2]))) fail("HTTP 502: Bad Gateway");
   if (a[1] === "close") { is.state = "CLOSED"; is.reason = flag("--reason"); save(); out(""); }
   if (a[1] === "reopen") { is.state = "OPEN"; save(); out(""); }
   if (a[1] === "comment") { comment(a[2], flag("--body")); save(); out(""); }
@@ -109,6 +110,7 @@ if (a[0] === "api") {
   if (method === "POST" && (m = /issues\\/(\\d+)\\/comments$/.exec(path))) { comment(m[1], fields().body); save(); out(""); }
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
   if (/\\/commits\\//.test(path)) out(st.prodHead);
+  if (method === "GET" && flag("--jq") === ".state" && (m = /issues\\/(\\d+)$/.exec(path))) out((st.epicStates || {})[m[1]] || "open");
   if (method === "GET" && (m = /issues\\/(\\d+)$/.exec(path))) out((st.issues[m[1]] || {}).body || "");
   if (/\\/compare\\//.test(path) && st.compareCommits && (flag("--jq") || "").includes("headline")) {
     out(st.compareCommits.map((c) => JSON.stringify(c)).join("\\n"));
@@ -367,6 +369,48 @@ test("closing an epic's child in production asks the EM whether the epic is read
   assert.match(e[0].reason, /example\/rel#5 was closed .*engineering-manager #880/);
   assert.equal(await run(2), false);
   assert.equal((await epicEntries()).length, 1, "a later cycle adds nothing");
+});
+
+const setGh = (patch) => writeFileSync(GH_STATE, JSON.stringify({ ...gh(), ...patch }));
+
+// foreman#249: an epic already closed, and an epic a body names only as a sibling or predecessor, raise no ask.
+test("a child whose epic is already closed raises no epic-ready-to-close; an open one still does", async () => {
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
+  setBodies({ 5: "## References\n- engineering-manager #880", 6: "## References\n- engineering-manager #881" });
+  setGh({ epicStates: { 880: "closed", 881: "open" } });
+  assert.equal(await run(), true);
+  assertClosedVerified(5);
+  assertClosedVerified(6);
+  const e = await epicEntries();
+  assert.equal(e.length, 1, "only the open epic");
+  assert.match(e[0].reason, /rel#6 was closed .*engineering-manager #881/);
+});
+
+test("a child whose body names another epic only as a sibling or predecessor raises no ask for it", async () => {
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
+  setBodies({ 5: "## References\n- engineering-manager #880\n- sibling epic: engineering-manager #12 (predecessor, closed)" });
+  assert.equal(await run(), true);
+  const e = await epicEntries();
+  assert.equal(e.length, 1);
+  assert.match(e[0].reason, /engineering-manager #880/);
+  assert.doesNotMatch(e[0].reason, /#12\b/);
+});
+
+// foreman#220: a close that fails leaves the issue labelled `release pending`, so the release retries it; it never soaks
+// with an open issue nobody owns, and a failed close never strips the label first.
+test("a failed close keeps the lifecycle label and the release at its phase; the next pass closes it", async () => {
+  world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
+  setGh({ failClose: [5] });
+  await run();
+  assert.equal(gh().issues[5].state, "OPEN", "the close failed");
+  assert.ok(gh().issues[5].labels.includes("release pending"), "its label stays: still the release's");
+  assert.notEqual((await prodReleases())[100]?.phase, "soaking", "the release does not soak past an open issue");
+  setGh({ failClose: [] });
+  writeFileSync(CTL, JSON.stringify({ prod: VERIFY(100) })); // the merged release is verified again
+  await run(2);
+  assertClosedVerified(5);
+  assertClosedVerified(6);
+  assert.equal((await prodReleases())[100].phase, "soaking");
 });
 
 // EM#1244 f5 review: a hand-off to the EM is saved BEFORE the event that raised it is acknowledged. Unsaved, the

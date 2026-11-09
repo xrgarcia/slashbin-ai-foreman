@@ -35,6 +35,7 @@ const stageLabelsSchema = z.object({
   releaseAuthorized: stageLabel("Release authorized", "#4f46e5"),
   awaitingRelease: stageLabel("Awaiting release", "#059669"),
   releasing: stageLabel("Releasing", "#16a34a"),
+  awaitingSignoff: stageLabel("Awaiting EM sign-off", "#ea580c"),
   prodVerifyHeld: stageLabel("Prod verification held", "#b45309"),
   needsRuling: stageLabel("Needs EM ruling", "#be185d"),
   blocked: stageLabel("Blocked", "#dc2626"),
@@ -66,6 +67,9 @@ const boardStagesSchema = z.object({
   awaitingRelease: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingRelease"),
   // In the release PR the Foreman owns (`release pending`): Tech Lead approval, SRE deploy, prod verification.
   releasing: stage(PAPERCLIP_FOREMAN_ROLE, "in_progress", "releasing"),
+  // In the release PR the Foreman owns, held by its failing EM sign-off status: an issue in it lacks
+  // `ready for prod release`. in_review, the EM's column: point `owner` at the EM's role to hand it over.
+  awaitingSignoff: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "awaitingSignoff"),
   // Merged to production, but prod verification held (`prod verification held`): re-verified on a back-off.
   // in_review, not blocked: the Foreman is still acting on it, and blocked is a person's queue.
   prodVerifyHeld: stage(PAPERCLIP_FOREMAN_ROLE, "in_review", "prodVerifyHeld"),

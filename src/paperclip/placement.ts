@@ -194,7 +194,13 @@ export class Placement {
     const gh = this.ghStage.get(id);
     if (gh === undefined || gh === stage) {
       await this.index.refreshRow(id);
-      if (this.externalHold(id) && !this.escalatedAt.has(id)) this.escalatedAt.set(id, gh ?? stage);
+      if (this.externalHold(id) && !this.escalatedAt.has(id)) {
+        const at = gh ?? stage;
+        // Anchored by the card's own stage label: a hold from an earlier stage is not this one's.
+        const placed = await this.placedLabel(id);
+        const anchored = !placed || placed === stageTarget(this.env.cfg, at).label;
+        this.escalatedAt.set(id, anchored ? at : `placed:${placed}`);
+      }
     }
     return this.holdOutranks(id, stage);
   }
@@ -352,13 +358,54 @@ export class Placement {
    * once; null when nothing changes or the labels cannot be read. `customer` is the
    * wanted customer label ids (from `wantedCustomer`, marker included); omitted leaves customer labels as they are.
    */
-  async labelIdsFor(id: string, key: string | null | undefined, customer?: readonly string[]): Promise<string[] | null> {
+  async stageLabels(): Promise<Map<string, string> | null> {
     this.stageLabelIds ??= (async () => {
       const r = await this.env.safeCall("ensure stage labels", () => ensureStageLabels(this.env.client, this.env.cfg));
       if (!r.ok) this.stageLabelIds = null;
       return r.ok ? r.value : null;
     })();
-    const ids = await this.stageLabelIds;
+    return this.stageLabelIds;
+  }
+
+  /**
+   * The stage-label key the card carries on the board: its own durable record of
+   * the stage the Foreman last placed it at. Null when it carries none; undefined
+   * when that cannot be told (labels unread, or the row has no label list).
+   */
+  async placedLabel(id: string): Promise<string | null | undefined> {
+    const have = this.index.rowContent.get(id)?.labelIds;
+    if (!Array.isArray(have)) return undefined;
+    const ids = await this.stageLabels();
+    if (!ids) return undefined;
+    for (const [key, labelId] of ids) if (have.includes(labelId)) return key;
+    return null;
+  }
+
+  /**
+   * True when a hold on `id` (a seat's escalation, a person's hold) is still the
+   * hold of GitHub stage `stage`, so the stage's own placement must not undo it.
+   * A card is recomputed from GitHub every pass, never remembered: the hold is
+   * anchored by the stage label the card carries, which survives a restart. A
+   * card that carries a stage label other than `stage`'s was held at an earlier
+   * stage, GitHub has moved on, and the hold is released. A card with no stage
+   * label to read falls back to the stage this process first saw it hold at.
+   */
+  async holdStandsAt(id: string, stage: PaperclipStage | "done"): Promise<boolean> {
+    const placed = await this.placedLabel(id);
+    if (placed) {
+      const want = stage === "done" ? null : stageTarget(this.env.cfg, stage).label;
+      if (placed !== want) return false;
+      this.escalatedAt.set(id, stage);
+      return true;
+    }
+    const seen = this.escalatedAt.get(id);
+    if (seen !== undefined && seen !== stage) return false;
+    this.escalatedAt.set(id, stage);
+    return true;
+  }
+
+  async labelIdsFor(id: string, key: string | null | undefined, customer?: readonly string[]): Promise<string[] | null> {
+    const ids = await this.stageLabels();
     if (!ids) return null;
     if (!this.issueLabelId) {
       const f = await this.env.safeCall("ensure issue label", () => ensureIssueLabel(this.env.client));

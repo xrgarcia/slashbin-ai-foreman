@@ -260,6 +260,12 @@ Type: string · Default: none
 
 The name issue bodies give the epic tracker in `<label> #N` references (the `## References` convention). When an issue closes in production, each epic it names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
 
+### `epicRepo`
+
+Type: string · Default: none
+
+The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about: the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
+
 ### `techLeadPath`
 
 Type: string · Default: none · Env: `AI_AGENT_TECH_LEAD_PATH`

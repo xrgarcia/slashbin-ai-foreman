@@ -217,7 +217,7 @@ async function publishBoard(rt: ForemanRuntime, repoConfig: RepoConfig, log: Log
   try {
     await publishSnapshot(rt, repoConfig, log);
   } catch (err) {
-    log.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

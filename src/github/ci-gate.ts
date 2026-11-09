@@ -64,6 +64,21 @@ export async function getPRCheckVerdict(config: RepoConfig, prNumber: number, lo
   }
 }
 
+/**
+ * The verdict of the one check or status named `context` on a PR: `none` when the PR carries no such entry or the
+ * read fails (never a guess). Used for the release PR's EM sign-off status.
+ */
+export async function getContextVerdict(config: RepoConfig, prNumber: number, context: string, logger: Logger): Promise<CheckVerdict> {
+  try {
+    const raw = await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "statusCheckRollup"], config.repoPath);
+    const data = JSON.parse(raw || "{}") as { statusCheckRollup?: CheckRollupEntry[] };
+    return summarizeCheckRollup((data.statusCheckRollup ?? []).filter((e) => (e.context ?? e.name) === context));
+  } catch (err) {
+    logger.debug(`${config.name}: could not read ${context} on PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return { state: "none", failing: [], pending: [] };
+  }
+}
+
 /** Marker on every CI-gate bounce comment; counted to cap the bounce loop. */
 export const CI_GATE_MARKER = "<!-- foreman-ci-gate -->";
 
