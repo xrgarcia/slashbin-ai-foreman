@@ -1,4 +1,5 @@
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
+import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { WorkEvent, WorkItem } from "../adapters.js";
@@ -29,10 +30,18 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 const CLOSED_STAGES = new Set(["done", "notPlanned"]);
 
+/**
+ * `node:sqlite` loaded on first use, not at import: Node 22.12 (the declared minimum) has it only behind
+ * a flag, and a Foreman with metrics off must start there. Throws where it is unavailable.
+ */
+export function sqlite(): typeof import("node:sqlite") {
+  return createRequire(import.meta.url)("node:sqlite");
+}
+
 /** Open the metrics database (WAL, so a reader never blocks the writer) and ensure its schema. */
 export function openMetricsDb(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
+  const db = new (sqlite().DatabaseSync)(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);

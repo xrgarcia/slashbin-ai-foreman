@@ -2,12 +2,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { DatabaseSync } from "node:sqlite";
 import type { WorkEvent, WorkObserver } from "../adapters.js";
 import type { AgentConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { stateDir } from "../state-dir.js";
-import { MetricsRecorder, openMetricsDb, readRows } from "../metrics/recorder.js";
+import { MetricsRecorder, openMetricsDb, readRows, sqlite } from "../metrics/recorder.js";
 import { aggregate, buildTimelines, formatReport } from "../metrics/report.js";
 import type { ForemanPlugin, PluginContext } from "./contract.js";
 
@@ -35,7 +34,7 @@ export async function runReport(config: AgentConfig, argv: readonly string[] = p
     console.error(`No metrics database at ${path}. Enable it with "metrics": { "enabled": true } (docs/metrics.md).`);
     return false;
   }
-  const db = new DatabaseSync(path, { readOnly: true });
+  const db = new (sqlite().DatabaseSync)(path, { readOnly: true });
   try {
     const sinceMs = Date.now() - days * 86_400_000;
     const rows = readRows(db, { sinceIso: new Date(sinceMs).toISOString(), repo: values.repo as string | undefined, issue });

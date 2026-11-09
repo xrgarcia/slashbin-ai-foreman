@@ -130,7 +130,10 @@ export function aggregate(timelines: readonly ItemTimeline[], sinceMs = 0): Aggr
   for (const t of done) {
     const sums = new Map<string, number>();
     for (const s of t.stages) if (s.hours !== null) sums.set(s.stage, (sums.get(s.stage) ?? 0) + s.hours);
-    for (const [stage, h] of sums) perStage.set(stage, [...(perStage.get(stage) ?? []), h]);
+    for (const [stage, h] of sums) {
+      const list = perStage.get(stage);
+      if (list) list.push(h); else perStage.set(stage, [h]);
+    }
   }
   const totals = done.map((t) => t.totalHours).filter((h): h is number => h !== null);
   return {
