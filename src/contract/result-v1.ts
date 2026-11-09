@@ -144,7 +144,8 @@ const LINE = new RegExp(`^[ \\t]*${RESULT_V1_TOKEN}[ \\t]+(.*?)[ \\t]*$`, "gm");
  * read as its result text.
  *
  * - No v1 line at all: `absent` (the caller reads the legacy trailer).
- * - A v1 line whose JSON does not parse, with no valid line for this role: `invalid`.
+ * - A v1 line whose JSON does not parse, or whose `role` is missing or unknown, with no line for this role: `invalid`.
+ * - A line for this role whose `pr` is not an integer is this read's (its schema rejects it), never skipped.
  * - The matching line fails its schema, or names a schema major above ours: `invalid`.
  */
 export function readResultV1<R extends ResultRole>(text: string, role: R, pr?: number): V1Read<R> {
@@ -163,8 +164,14 @@ export function readResultV1<R extends ResultRole>(text: string, role: R, pr?: n
       continue;
     }
     const o = obj as Record<string, unknown>;
+    // Only a well-formed routing field may route a line away: a missing or malformed `role` or `pr` is this
+    // read's problem, never absence (absence would let a legacy trailer stand in for an invalid result).
+    if (typeof o.role !== "string" || !(ROLES as readonly string[]).includes(o.role)) {
+      unparsable = `contract-field-invalid: role: ${o.role === undefined ? "missing" : `not a known role (${JSON.stringify(o.role)})`}`;
+      continue;
+    }
     if (o.role !== role) continue;
-    if (pr !== undefined && "pr" in o && o.pr !== pr) continue;
+    if (pr !== undefined && Number.isInteger(o.pr) && o.pr !== pr) continue;
     candidate = o;
   }
   if (!candidate) return unparsable ? { status: "invalid", problem: unparsable } : { status: "absent" };
