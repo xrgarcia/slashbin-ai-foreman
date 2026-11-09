@@ -30,6 +30,8 @@ export const slashbinProfile: ConfigProfile = {
   ],
   // Issue bodies name their epic as `engineering-manager #N` under `## References`.
   epicRefLabel: "engineering-manager",
+  // The epics live in the EM repo; one closed there is not asked about.
+  epicRepo: "xrgarcia/slashbin-engineering-manager",
   // Slashbin's Paperclip fork credits a write to an agent through this header.
   paperclip: { commentAuthorHeader: "x-slashbin-comment-author" },
 };

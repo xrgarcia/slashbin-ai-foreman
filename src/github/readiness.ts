@@ -267,6 +267,16 @@ export async function announceHold(config: RepoConfig, num: number, kind: HoldKi
   }
 }
 
+/** The state of issue `num` in `repo`, live: "open", "closed", or null when it cannot be read. */
+export async function readIssueState(config: RepoConfig, repo: string, num: number): Promise<"open" | "closed" | null> {
+  try {
+    const s = (await ghAsync(["api", `repos/${repo}/issues/${num}`, "--jq", ".state"], config.repoPath)).trim();
+    return s === "open" || s === "closed" ? s : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The issue body, live. Throws on a gh failure. */
 export async function readIssueBody(config: RepoConfig, num: number): Promise<string> {
   return await ghAsync(["api", `repos/${config.githubRepo}/issues/${num}`, "--jq", ".body // \"\""], config.repoPath);

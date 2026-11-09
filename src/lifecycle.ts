@@ -20,7 +20,7 @@ import type { PriorState, WorkState } from "./adapters.js";
 /** Where a work item can be, in the order an item meets them. */
 export const STAGES = [
   "approved", "implementing", "inReview", "reviewing", "changesRequested", "revising",
-  "merged", "verifying", "qaReviewing", "pendingVerification", "releaseAuthorized", "awaitingRelease", "releasing",
+  "merged", "verifying", "qaReviewing", "pendingVerification", "releaseAuthorized", "awaitingRelease", "releasing", "awaitingSignoff",
   "prodVerifyHeld", "needsRuling", "blocked",
 ] as const;
 export type Stage = (typeof STAGES)[number];
@@ -43,6 +43,7 @@ export const STAGE_MEANING: Readonly<Record<StageOrDone, string>> = Object.freez
   releaseAuthorized: "The EM verified it and authorized production; the promote stage puts it in a release PR next.",
   awaitingRelease: "In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran).",
   releasing: "In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production.",
+  awaitingSignoff: "In a release PR the Foreman owns, but the PR's EM sign-off status is failing: an issue in it lacks `ready for prod release`. The Tech Lead's approval and the SRE's deploy wait; the EM signs the issue off or takes it out of the release.",
   prodVerifyHeld: "Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off.",
   needsRuling: "Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue (an agent's edit or label buys one session; its comment releases nothing).",
   blocked: "Needs a person: blocked on the source, or the Foreman declined it or ran out of retries.",

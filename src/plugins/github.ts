@@ -125,6 +125,7 @@ export function githubCodeHost(
     stripReadyForProdLabel: promotion.stripReadyForProdLabel,
     updatePromotionPR: promotion.updatePromotionPR,
     readIssueBody: readiness.readIssueBody,
+    readIssueState: readiness.readIssueState,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),

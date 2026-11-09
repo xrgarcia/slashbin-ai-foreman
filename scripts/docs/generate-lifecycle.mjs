@@ -43,6 +43,7 @@ for (const l of [TRIGGER, SOURCE_BLOCKED_LABEL, ...Object.values(defaultLifecycl
   if (st) STAGE_MARK[st] = [...(STAGE_MARK[st] ?? []), `\`${l}\``];
 }
 STAGE_MARK[issueStage([], true, defaultLifecycleLabels(), TRIGGER)] = ["an open release PR names it"];
+STAGE_MARK.awaitingSignoff = [`${defaultLifecycleLabels().releasePending}` + "` while the release PR's EM sign-off status fails"].map((x) => `\`${x}`);
 STAGE_MARK.done = ["closed", ...(STAGE_MARK.done ?? [])];
 
 // --- Event kinds: the union in adapters.ts, described here ---
@@ -150,7 +151,7 @@ out(
   "",
   "On a GitHub issue each stage is one label. Where an issue carries more than one, the stage is",
   "the first that applies in `issueStage` (`src/github-work-source.ts`): `blocked`, `done`,",
-  "`prodVerifyHeld`, `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on",
+  "`prodVerifyHeld`, `awaitingSignoff` / `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on",
   "back to `approved`. The Foreman writes every label except the EM's `ready for prod release`;",
   "`pendingVerification` is the one stage waiting on the EM.",
   "",

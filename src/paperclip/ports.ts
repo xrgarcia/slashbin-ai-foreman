@@ -29,6 +29,7 @@ export interface IndexPort {
   defaultContent(item: WorkItem): CardContent;
   createTask(item: WorkItem, content: CardContent): Promise<string | null>;
   ensureRepo(repo: string, fresh?: boolean): Promise<boolean>;
+  retireDuplicates(): Promise<void>;
   forget(id: string): void;
   refreshRow(id: string): Promise<void>;
   isClosedCard(id: string): boolean;
@@ -57,6 +58,7 @@ export interface PlacementPort {
   persistBlock(id: string): void;
   clearBlock(id: string): void;
   externalHold(id: string): boolean;
+  holdStandsAt(id: string, stage: PaperclipStage | "done"): Promise<boolean>;
   holdOutranks(id: string, stage: PaperclipStage): boolean;
   rulingPending(id: string, stage: PaperclipStage): boolean;
   holderMatches(id: string, stage: PaperclipStage | "done"): boolean;

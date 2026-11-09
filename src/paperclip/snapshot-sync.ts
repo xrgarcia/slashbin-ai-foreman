@@ -66,6 +66,8 @@ export class SnapshotSync {
     }
     // This repo's cards unread: place nothing for it this pass; the next snapshot retries (other repos carry on).
     if (!(await this.index.ensureRepo(_repo))) return;
+    // A second card for an issue is retired in the pass that finds it, not left for housekeeping to reach.
+    if (this.env.cfg.ownsCards === true) await this.index.retireDuplicates();
     const blocked = `status:${this.env.statusName("blocked")}`;
     const cards = read.cards;
     // With `ownsCards`, every issue has a card before the lifecycle pass places
@@ -127,10 +129,7 @@ export class SnapshotSync {
       // resolved, or until GitHub moves the issue to another stage (Foreman #98):
       // undone each cycle, SLA-2591 went back to the EM three times in an hour.
       if (state === blocked && this.placement.externalHold(id)) {
-        if (!this.placement.escalatedAt.has(id) || this.placement.escalatedAt.get(id) === stage) {
-          this.placement.escalatedAt.set(id, stage);
-          continue;
-        }
+        if (await this.placement.holdStandsAt(id, stage)) continue;
       }
       this.placement.escalatedAt.delete(id);
       if ((state === blocked || this.placement.blockedAt.has(id)) && stage !== "blocked" && !(await this.blockedByLabel(id))) {
@@ -181,10 +180,7 @@ export class SnapshotSync {
       const nowState = this.index.rowState.get(id) ?? "";
       if (nowState.startsWith("waiting\n")) continue;
       // Only a hold new since the scan: one the cache showed was weighed above, and GitHub moving on released it.
-      if (state !== blocked && this.placement.externalHold(id)) {
-        this.placement.escalatedAt.set(id, stage);
-        continue;
-      }
+      if (state !== blocked && this.placement.externalHold(id) && (await this.placement.holdStandsAt(id, stage))) continue;
       if (nowState === want && this.placement.holderMatches(id, stage)) continue;
       // Read open live: a card closed for it before is the issue reopened.
       if (!(await this.placement.move(id, stage, false, true))) continue;

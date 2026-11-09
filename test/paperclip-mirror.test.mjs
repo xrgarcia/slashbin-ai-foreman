@@ -507,7 +507,7 @@ test("each step hands the card to its configured agent with exactly one stage la
   assert.deepEqual(at(), ["in_review", "agent-lead", ["bug", "Awaiting release"]]);
   await mirror.onRelease(release("merged", 12, [7]), logger());
   assert.deepEqual(at(), ["done", null, ["bug"]], "done is nobody's (Foreman #112) and drops the stage label");
-  assert.equal(fake.labels.length, 13, "the eleven stage labels and the issue label created once");
+  assert.equal(fake.labels.length, 14, "the twelve stage labels and the issue label created once");
   assert.equal(hasIssue(fake, r), true, "the issue label stays through done");
   assert.equal(r.labelIds.filter((id) => fake.labels.find((l) => l.id === id)?.name === "issue").length, 1, "never twice");
 });

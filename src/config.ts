@@ -288,6 +288,9 @@ export const configSchema = z.object({
   // `## References` convention). When an issue closes in production, each epic it
   // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
   epicRefLabel: z.string().min(1).optional(),
+  // The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about:
+  // the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
+  epicRepo: z.string().min(1).optional(),
   // The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each
   // review runs through it — Codex judges, its code posts and merges.
   // It exits 3 when it cannot take the review and nothing was written; the PR
@@ -544,6 +547,7 @@ export interface RepoConfig {
   github: GithubConventions;
   /** The epic label in `<label> #N` issue references — the global value; undefined = no epic parsing. */
   epicRefLabel?: string;
+  epicRepo?: string;
 }
 
 /**
@@ -593,6 +597,7 @@ export interface AgentConfig {
   unstickEscalationOwner?: string;
   /** The epic label in `<label> #N` issue references; undefined = no epic parsing. */
   epicRefLabel?: string;
+  epicRepo?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
@@ -779,6 +784,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
     epicRefLabel: fileConfig.epicRefLabel,
+    epicRepo: fileConfig.epicRepo,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
@@ -836,6 +842,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
     metrics: Object.freeze({ enabled: parsed.metrics.enabled, path: parsed.metrics.path, retentionDays: parsed.metrics.retentionDays }),
     epicRefLabel: parsed.epicRefLabel,
+    epicRepo: parsed.epicRepo,
   };
 
   let repos: RepoConfig[];
@@ -991,6 +998,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     emRepoPath,
     unstickEscalationOwner: parsed.unstickEscalationOwner,
     epicRefLabel: parsed.epicRefLabel,
+    epicRepo: parsed.epicRepo,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,

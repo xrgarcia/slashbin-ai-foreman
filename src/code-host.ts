@@ -513,6 +513,7 @@ export interface CodeHost {
 
   // Issue bodies.
   readIssueBody(config: RepoConfig, num: number): Promise<string>;
+  readIssueState(config: RepoConfig, repo: string, num: number): Promise<"open" | "closed" | null>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;

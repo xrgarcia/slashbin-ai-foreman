@@ -17,6 +17,7 @@ export interface ConfigProfile {
   readonly qaBearerKey?: string;
   readonly reviewAllowedTools?: readonly string[];
   readonly epicRefLabel?: string;
+  readonly epicRepo?: string;
   readonly paperclip?: { readonly commentAuthorHeader?: string };
 }
 

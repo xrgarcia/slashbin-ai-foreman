@@ -94,8 +94,8 @@ test("ensureStageLabels: creates only the missing labels; a lost race (409) re-l
   const m = await ensureStageLabels(client, { agentId: "fm" });
   assert.equal(m.get("inReview"), "e1");
   assert.equal(m.get("changesRequested"), "race");
-  assert.equal(created.length, 9);
-  assert.equal(m.size, 11);
+  assert.equal(created.length, 10);
+  assert.equal(m.size, 12);
 });
 
 const REG = ["cmneb", "jerky-com", "slashbin-ai", "slashbin-io"];
