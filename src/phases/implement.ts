@@ -39,15 +39,56 @@ import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
  * Unknown stays deny: a PR the snapshot cannot vouch for keeps the back-off.
  */
 export async function isResolvedTransientSkip(
-  reason: string,
+  entry: { reason: string; waitingOn?: string },
   repoConfig: RepoConfig,
   logger: Logger,
 ): Promise<boolean> {
-  const prNumber = prBlockingSkip(reason);
+  // A typed wait decides alone: the prose reason is never read (agent contract step 4a).
+  if (entry.waitingOn) {
+    const pr = await readWaitingPr(entry, repoConfig, logger);
+    return pr !== null && !pr.open;
+  }
+  // No waitingOn (legacy agent, entry already in state): the prose fallback. Step 4b deletes it.
+  const prNumber = prBlockingSkip(entry.reason);
   if (prNumber !== null) {
     return await codeHost().isPrOpen(repoConfig.githubRepo, prNumber, repoConfig.repoPath) === false;
   }
   return false;
+}
+
+/** The PR a skip's stored `waitingOn` names, with its own repo, and whether it is still open; null when it names an issue, nothing, or the read fails. */
+async function readWaitingPr(
+  entry: { waitingOn?: string },
+  repoConfig: RepoConfig,
+  logger?: Logger,
+): Promise<{ repo: string; number: number; open: boolean } | null> {
+  const ref = codeHost().parseWaitingOn(entry.waitingOn, repoConfig.githubRepo);
+  if (!ref) return null;
+  try {
+    const s = await codeHost().refState(ref, repoConfig.repoPath);
+    return s.isPr ? { repo: ref.repo, number: ref.number, open: s.open } : null;
+  } catch (err) {
+    logger?.debug(`Could not read ${ref.repo}#${ref.number}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * The PR a skip's typed `waitingOn` names, in its own repo, or null when it names an issue,
+ * nothing, or a read that fails. The typed wait, read the way `holdStatus` reads it.
+ */
+export async function waitingPr(
+  entry: { waitingOn?: string },
+  repo: string,
+  refState: (ref: { repo: string; number: number }) => Promise<{ open: boolean; isPr: boolean }>,
+): Promise<{ repo: string; number: number } | null> {
+  const ref = codeHost().parseWaitingOn(entry.waitingOn, repo);
+  if (!ref) return null;
+  try {
+    return (await refState(ref)).isPr ? { repo: ref.repo, number: ref.number } : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -289,8 +330,15 @@ export async function tryBatchImplementation(
     const entry = skippedMap[n];
     if (!entry) { admitted.push(n); continue; }
     // A skip on the open feature PR is the queue gate's to hold, not a skip's.
-    const transientCleared = async () =>
-      (featurePr !== null && prBlockingSkip(entry.reason) === featurePr.number) || await isResolvedTransientSkip(entry.reason, repoConfig, repoLogger);
+    const transientCleared = async () => {
+      if (featurePr !== null) {
+        if (entry.waitingOn) {
+          const pr = await waitingPr(entry, repoConfig.githubRepo, (ref) => codeHost().refState(ref, repoConfig.repoPath));
+          if (pr && pr.repo === repoConfig.githubRepo && pr.number === featurePr.number) return true;
+        } else if (prBlockingSkip(entry.reason) === featurePr.number) return true;
+      }
+      return await isResolvedTransientSkip(entry, repoConfig, repoLogger);
+    };
     if (skip.hold) {
       const gate = await codeHost().skipGate(entry, repoConfig.githubRepo, skip.maxAttempts, {
         refState: async (ref) => await codeHost().refState(ref, repoConfig.repoPath),
@@ -664,7 +712,7 @@ export async function tryBatchImplementation(
       // is a PR (one read, for the blocked reason's wording only).
       const waitingOn = codeHost().parseWaitingOn(result.waitingOn, repoConfig.githubRepo);
       let waitingOnIsPr: boolean | undefined;
-      if (waitingOn && skip.hold) {
+      if (waitingOn) {
         try {
           waitingOnIsPr = (await codeHost().refState(waitingOn, repoConfig.repoPath)).isPr;
         } catch (err) {
@@ -710,7 +758,9 @@ export async function tryBatchImplementation(
       }
       // A stop that holds other issues up says so to them (dead-blocker.ts).
       // A skip naming an open PR on the branch clears when that PR leaves (isResolvedTransientSkip): never a dead blocker.
-      if (codeHost().isDeadBlockerReason(reason) && prBlockingSkip(reason) === null) await tellDependents(rt, skippedSet, reason, repoName, repoConfig, config.allRepos ?? config.repos, repoLogger);
+      // A typed wait decides alone: a PR (or an unreadable ref) is not a dead blocker, an issue is; the reason is read only with no waitingOn.
+      const waitsOnPr = waitingOn ? waitingOnIsPr !== false : prBlockingSkip(reason) !== null;
+      if (codeHost().isDeadBlockerReason(reason) && !waitsOnPr) await tellDependents(rt, skippedSet, reason, repoName, repoConfig, config.allRepos ?? config.repos, repoLogger);
       // Reset the failure counter — an explicit skip is not a failure.
       rt.memory.failureCount.set(repoName, 0);
       rt.memory.lastFailureReason.delete(repoName);

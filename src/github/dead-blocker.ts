@@ -49,8 +49,9 @@ export function dependentRef(d: Dependent, own: string): string {
 /**
  * A skip is a dead blocker only when its cause is outside the build and will not
  * clear by itself. A diverged feature branch resolves on its own. The other
- * transient wait, an open PR occupying the branch, is recognised by the caller
- * with `prBlockingSkip` (phases/implement.ts), which owns that wording.
+ * transient wait, an open PR occupying the branch, is recognised by the caller:
+ * from the typed `waitingOn` when the skip has one, else (legacy) by `prBlockingSkip`
+ * (phases/implement.ts), which owns that wording.
  */
 export function isDeadBlockerReason(reason: string): boolean {
   return true;
