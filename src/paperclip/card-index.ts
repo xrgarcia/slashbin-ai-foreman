@@ -51,6 +51,9 @@ export function pickCard<T extends { status: string; createdAt?: string }>(rows:
   return ranked[0]?.r;
 }
 
+/** A repo read this recently is fresh enough to create a card against. */
+const CREATE_FRESH_MS = 30_000;
+
 export class CardIndex {
   /** Identity key → Paperclip task id, for every task this mirror has resolved. */
   private readonly taskUuidCache = new Map<string, string>();
@@ -267,6 +270,16 @@ export class CardIndex {
     // An explicit project wins; the Unplaced lookup files nothing until it finds one.
     const key = await this.indexKey(item);
     if (!key) return null;
+    // Find-or-create keyed by the issue's identity: a card already indexed for it is the card, never a second one.
+    const have = this.index.get(key) ?? this.taskUuidCache.get(key);
+    if (have) return have;
+    // The index may be stale (a scan that missed the card, a restart): read the repo fresh once before creating.
+    const readAt = this.readAt.get(this.keyNow(item.repo));
+    if (readAt === undefined || Date.now() - readAt > CREATE_FRESH_MS) {
+      if (!(await this.ensureRepo(item.repo, true))) return null;
+      const found = this.index.get(key);
+      if (found) return found;
+    }
     // A repo of this name whose registry lookup failed may hold this issue's card under another owner's spelling: create nothing until it resolves.
     const name = (r: string) => r.split("/").pop()!.toLowerCase();
     if ([...this.staleRepos].some((r) => name(r) === name(item.repo))) {
@@ -453,7 +466,7 @@ export class CardIndex {
     const cancelled = this.env.statusName("cancelled");
     let left = RETIRES_PER_PASS;
     for (const d of this.duplicates) {
-      if (left-- <= 0) break;
+      if (left-- <= 0) break; // the rest stay listed and retire on a later pass
       if (!this.mirroredKey(d.repo)) continue;
       const tag = `[duplicate of ${d.winner}] `;
       const r = await this.env.safeCall("retire duplicate", () => this.env.client.updateIssue(d.id, {
@@ -464,9 +477,13 @@ export class CardIndex {
         description: `duplicate of ${d.winner} (${d.key})`,
         comment: fill(DUPLICATE_NOTE, { key: d.key, winner: d.winner }),
       }, this.env.ownComment()), d.id);
-      if (r.ok) this.env.log("info", `Paperclip mirror: retired a second card for ${d.key}; ${d.winner} stays`);
+      if (r.ok) {
+        this.env.log("info", `Paperclip mirror: retired a second card for ${d.key}; ${d.winner} stays`);
+        // Only a retired duplicate leaves the list: a failed or capped one persists until it is done.
+        const list = this.dupsByRepo.get(d.repo);
+        if (list) this.dupsByRepo.set(d.repo, list.filter((x) => x.id !== d.id));
+      }
     }
-    this.dupsByRepo.clear();
   }
 
   /**

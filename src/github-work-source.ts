@@ -2,7 +2,7 @@
 // translates the core lifecycle (lifecycle.ts) into issue labels and back,
 // and is the only module that knows which label means which stage.
 
-import type { ItemRecord, ItemState, RecordKey, RecordLoad, SnapshotCard, WaitingItem, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
+import type { ItemRecord, ItemState, RecordKey, RecordLoad, SignoffHold, SnapshotCard, WaitingItem, SnapshotClosed, SnapshotItem, WorkEvent, WorkItem, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, LifecycleLabels, RepoConfig } from "./config.js";
 import {
   closedPrVersion, dropIssueSnapshot, extractImplementedIssues, findOpenPrs, getOpenIssues, getOpenPrs, ghKeyed, hasLabel,
@@ -20,6 +20,10 @@ import { announceHold, parseReadiness, type HoldKind, readIssueBody, unmetReadin
 import { CardReads, issueStates } from "./github/cards.js";
 import { GitHubRecordStore } from "./github/record-store.js";
 import { ghAsync } from "./github/gh.js";
+import { findOpenPromotionPR } from "./github/promotion.js";
+import { getContextVerdict } from "./github/ci-gate.js";
+import { unsignedIssues } from "./github/release-signoff.js";
+import { releaseIssues } from "./release-tracker.js";
 import { ForemanIdentity } from "./github/skip-hold.js";
 
 /** The default label that blocks an issue (the Foreman never picks one up); `github.blockedLabel` renames it. */
@@ -32,7 +36,8 @@ export const SOURCE_BLOCKED_LABEL = DEFAULT_GITHUB_CONVENTIONS.blockedLabel;
  * issue is not in the Foreman's lifecycle at all. `inRelease` = an open release
  * PR names it: it places an issue only when no release label does, because the
  * release labels say more (the EM authorized it; the Foreman owns its release;
- * its prod verification held).
+ * its prod verification held). `signoffHeld`: the release PR's EM sign-off status is failing, so a
+ * `release pending` issue waits on the EM, not on the release.
  */
 export function issueStage(
   labels: readonly string[],
@@ -40,12 +45,13 @@ export function issueStage(
   lifecycle: LifecycleLabels,
   triggerLabel: string,
   blockedLabel: string = SOURCE_BLOCKED_LABEL,
+  signoffHeld = false,
 ): StageOrDone | null {
   const has = (l: string) => labels.includes(l);
   if (has(blockedLabel)) return "blocked";
   if (has(lifecycle.readyToClose)) return "done";
   if (has(lifecycle.prodVerifyHeld)) return "prodVerifyHeld";
-  if (has(lifecycle.releasePending)) return "releasing";
+  if (has(lifecycle.releasePending)) return signoffHeld ? "awaitingSignoff" : "releasing";
   if (has(lifecycle.readyForProd)) return "releaseAuthorized";
   if (inRelease) return "awaitingRelease";
   if (has(lifecycle.prApproved)) return "pendingVerification";
@@ -200,18 +206,21 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     }
     const open = await getOpenIssues(repo, repoConfig.repoPath, logger);
     const labelsOf = (i: { labels: { name: string }[] }) => i.labels.map((l) => l.name);
+    const signoff = await this.signoffHeld(repoConfig, open.some((i) => labelsOf(i).includes(repoConfig.lifecycleLabels.releasePending)), logger);
     const holds = await this.cardReads.holdReasons(repo, repoConfig.repoPath, blockedLabel,
       open.filter((i) => labelsOf(i).includes(blockedLabel)).map((i) => i.number), logger);
     const out: SnapshotCard[] = open.map((i) => {
       const hold = holds.get(i.number);
+      const stage = issueStage(labelsOf(i), release.has(i.number), repoConfig.lifecycleLabels, repoConfig.triggerLabel, blockedLabel, signoff !== null);
       return {
         item: { issueNumber: i.number, repo },
         title: i.title,
         url: url(i.number),
         state: "open" as const,
-        stage: issueStage(labelsOf(i), release.has(i.number), repoConfig.lifecycleLabels, repoConfig.triggerLabel, blockedLabel),
+        stage,
         ...(hold ? { hold } : {}),
         labels: labelsOf(i),
+        ...(stage === "awaitingSignoff" && signoff ? { signoff } : {}),
       };
     });
     const closed = (await this.cardReads.recentlyClosed(repo, repoConfig.repoPath, logger))
@@ -231,12 +240,34 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     return issueStates(repoConfig.githubRepo, repoConfig.repoPath, issueNumbers, logger);
   }
 
+  /**
+   * The open release PR that holds `release pending` issues, when its EM sign-off status is failing, read live: its
+   * number and link, and the listed open issues that carry no sign-off label. Asked only while an issue carries
+   * `release pending`; recomputed every pass from GitHub, never remembered, so it survives a restart. No release PR,
+   * no such status, or a failed read answers null: the card stays at Releasing, as before.
+   */
+  private async signoffHeld(config: RepoConfig, anyReleasing: boolean, logger: Logger): Promise<SignoffHold | null> {
+    if (!anyReleasing) return null;
+    try {
+      const pr = await findOpenPromotionPR(config.githubRepo, config.productionBranch, config.baseBranch, config.repoPath, logger);
+      if (!pr) return null;
+      if ((await getContextVerdict(config, pr.number, config.github.signoffStatusContext, logger)).state !== "failing") return null;
+      const unsigned = await unsignedIssues(await getOpenIssues(config.githubRepo, config.repoPath, logger), new Set(releaseIssues(pr.body)), config.lifecycleLabels);
+      return { pr: pr.number, url: pr.url, unsigned };
+    } catch (err) {
+      logger.debug(`${config.name}: release sign-off status not read: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
   async snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]> {
     const out: SnapshotItem[] = [];
-    for (const { number, labels } of await openIssueLabels(repoConfig, logger)) {
-      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel, repoConfig.github.blockedLabel);
+    const issues = await openIssueLabels(repoConfig, logger);
+    const signoff = await this.signoffHeld(repoConfig, issues.some((i) => i.labels.includes(repoConfig.lifecycleLabels.releasePending)), logger);
+    for (const { number, labels } of issues) {
+      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel, repoConfig.github.blockedLabel, signoff !== null);
       if (stage === null) continue;
-      out.push({ item: { issueNumber: number, repo: repoConfig.githubRepo }, stage, detail: labels.join(", ") || "none" });
+      out.push({ item: { issueNumber: number, repo: repoConfig.githubRepo }, stage, detail: labels.join(", ") || "none", ...(stage === "awaitingSignoff" && signoff ? { signoff } : {}) });
     }
     return out;
   }
@@ -562,13 +593,21 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       const issue = await viewIssue(config, num);
       if (!issue) return false;
       const strip = Object.values(config.lifecycleLabels).filter((l) => issue.labels.includes(l));
+      // Close FIRST, strip after: a close that fails leaves the lifecycle labels on, so the issue is still
+      // the release's and the next pass retries it. Stripped first, a failed close left an open issue
+      // nobody owned (jerky_shipping #618/#620, 2026-10-10).
+      if (issue.state === "OPEN") {
+        await ghAsync(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
+      }
       if (strip.length > 0) {
         const args = ["issue", "edit", String(num), "--repo", config.githubRepo];
         for (const l of strip) args.push("--remove-label", l);
-        await ghAsync(args, config.repoPath);
-      }
-      if (issue.state === "OPEN") {
-        await ghAsync(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
+        try {
+          await ghAsync(args, config.repoPath);
+        } catch (err) {
+          // Closed already: a stale label on a closed issue is the lesser fault, and the close stands.
+          logger.warn(`Closed #${num} but could not remove ${strip.map((l) => `"${l}"`).join(", ")}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
       logger.info(`Closed issue #${num} after prod verification (removed ${strip.map((l) => `"${l}"`).join(", ") || "no labels"})`);
       return strip.length > 0 || issue.state === "OPEN";

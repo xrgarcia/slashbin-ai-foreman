@@ -44,7 +44,7 @@ test("no paperclip block: mirror off, every default applied", () => {
   const { board, stageLabels, roles, ...rest } = paperclip;
   assert.deepEqual(roles, {}, "no roles: the Foreman holds every card");
   assert.ok(Object.values(board).every((s) => s.owner === "foreman"));
-  assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "blocked", "changesRequested", "inReview", "merged", "needsRuling", "pendingVerification", "prodVerifyHeld", "qaReviewing", "releaseAuthorized", "releasing"]);
+  assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "awaitingSignoff", "blocked", "changesRequested", "inReview", "merged", "needsRuling", "pendingVerification", "prodVerifyHeld", "qaReviewing", "releaseAuthorized", "releasing"]);
   assert.deepEqual({ ...rest }, {
     liveLeaseMinutes: 15,
     publishConfig: true,
@@ -321,7 +321,7 @@ test("listIssues sends the status filter and q, and counts GETs and rows read", 
   const got = [];
   for await (const r of c.listIssues({ q: "jerky ops", statuses: ["todo", "in_review"] })) got.push(r.id);
   assert.deepEqual(got, ["a", "b"]);
-  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&status=todo,in_review&q=jerky%20ops"));
+  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&status=todo,in_review&q=jerky%20ops&sortField=id&sortDir=asc"));
   assert.deepEqual({ ...c.reads }, { calls: 1, rows: 2 });
 });
 

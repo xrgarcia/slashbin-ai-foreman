@@ -20,6 +20,10 @@
 // promotion-verify sweep blocked ("**Production release check needs a
 // person.**"). Those skip steps 1 and 2.
 //
+// And it recovers what the lifecycle lost (#220): an open issue with no lifecycle label that nothing carries is
+// closed on its recorded production verification, or, when only its merge is known, one request asks the EM for the
+// sign-off (`sweepStranded`). Never closed without a recorded verification.
+//
 // No Discord message on any outcome (owner direction, 2026-10-10): a pass is
 // the closing comment on the issue, a hold or STOP is a comment and a label on
 // each issue, which moves its Paperclip card. Everything else is the log.
@@ -56,6 +60,12 @@ export const SOAK_DELAY_MS = 30 * 60_000;
 export const ADOPT_WINDOW_MS = 48 * 3_600_000;
 /** How often a repo is scanned for releases to adopt: one `gh pr list` each time. */
 export const ADOPT_SCAN_MS = 10 * 60_000;
+
+/** How many unlabeled open issues one scan looks at for the stranded sweep (their records are read, one call each). */
+export const STRANDED_SCAN_CAP = 25;
+const STRANDED_RECHECK_MS = 60 * 60_000;
+/** Marks the one request the stranded sweep leaves on an issue whose work merged but that nothing carries. */
+export const STRANDED_MARK = "<!-- foreman:stranded-issue";
 
 /** Spacing of those head reads: one `commits/<branch>` call per repo per minute while a release is held. */
 export const HEAD_PROBE_MS = 60_000;
@@ -191,6 +201,14 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
   let epics = epicRefs(await codeHost().readIssueBody(repoConfig, n), label);
   const origin = followUpOrigin(title);
   if (!epics.length && origin !== null) epics = epicRefs(await codeHost().readIssueBody(repoConfig, origin), label);
+  // An epic already closed has nothing left to be ready for. Unreadable counts as open: asking twice is cheaper than never.
+  if (repoConfig.epicRepo) {
+    const open: number[] = [];
+    for (const e of epics) {
+      if (e !== n && (await codeHost().readIssueState(repoConfig, repoConfig.epicRepo, e)) !== "closed") open.push(e);
+    }
+    epics = open;
+  }
   if ((await rt.handoffs.raiseAll(repoConfig, epics.map((epic) => epicChildClosedAlert(repoConfig.githubRepo, n, epic, label)))) > 0) {
     logger.info(`#${n} is closing in production; asking the EM whether ${label} ${epics.map((e) => `#${e}`).join(", ")} is ready to close`);
   }
@@ -207,6 +225,7 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   const at = iso(now());
   const unsaved: number[] = [];
   const saved = new Set<number>();
+  const notClosed: number[] = [];
   for (const n of rel.issues) {
     const ok = await rt.records.updateIssueRecord(repoConfig, n, (d) => {
       d.prodVerified = {
@@ -223,10 +242,20 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   const open = new Set(openIssues.map((i) => i.number));
   for (const n of (await writable(repoConfig, rel, logger)).filter((i) => open.has(i) && saved.has(i))) {
     await noteEpicClose(rt, repoConfig, n, openIssues.find((i) => i.number === n)?.title ?? "", logger);
+    // Close first, comment once it is closed: a close that fails is retried next pass and must not repeat the comment.
+    if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
+      notClosed.push(n);
+      continue;
+    }
     await comment(repoConfig, n, line, logger);
-    await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger);
   }
   if (unsaved.length > 0) return;
+  // A close that did not land leaves the issue open and labelled `release pending`: the release stays at
+  // this phase and the next pass closes it, instead of soaking with an open issue nobody owns (#220).
+  if (notClosed.length > 0) {
+    logger.warn(`Release PR #${rel.pr}: could not close ${notClosed.map((n) => `#${n}`).join(", ")}; the release is verified again next pass`);
+    return;
+  }
   logger.info(`Release PR #${rel.pr} verified in production; closed ${[...saved].map((n) => `#${n}`).join(", ")}`);
   // The issues are closed and recorded; a failed save here only repeats the (idempotent) verification next pass.
   if (rel.soaked) {
@@ -473,6 +502,86 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, releases
     `no release carries this issue: its work is already on \`${repoConfig.productionBranch}\`, but no release PR merged in the last ` +
     "48 hours lists it, so there is no release to verify it by. Check production by hand and close it, or move it back to " +
     `\`${repoConfig.lifecycleLabels.readyForProd}\` once a release can carry it`, undefined, logger);
+}
+
+/**
+ * Open issues the lifecycle lost, found from GitHub every scan and not from the labels (#220).
+ *
+ * `passRelease` used to strip an issue's lifecycle labels before closing it; a close that failed left it open,
+ * unlabelled and carried by nothing (jerky_shipping #618 and #620, 2026-10-10), and no later pass looked at an
+ * issue with no label. Closing first (`closeReleased`) stops new ones; this recovers the ones already there, and
+ * any that never carried a label (#396, #680). An open issue with no lifecycle or blocked label that no release
+ * carries (it may still carry the trigger label: closing strips only lifecycle labels) is one of two things:
+ *   - its record holds a passed production verification: it was verified, the close did not land. It is closed
+ *     now with that evidence;
+ *   - its work merged to the base branch (a PR that says it closes it) and nothing records it verified: it is not
+ *     closed, one comment asks the EM for the sign-off that lets the release stage carry and verify it.
+ * Anything else is an ordinary unapproved issue and is left alone. An issue is never closed without a recorded
+ * production verification, and never one reopened after it (a person reopening it is the signal it is being worked
+ * again). Delivery evidence is a merged PR that closes it or a Foreman skip record (a no-code delivery); with neither
+ * the issue is looked at again in an hour, never settled on a miss. A request is made once (marked, so across
+ * restarts too), at most STRANDED_SCAN_CAP are read per scan, and one whose record or events cannot be read waits.
+ */
+async function sweepStranded(rt: ForemanRuntime, repoConfig: RepoConfig, releases: readonly ProdRelease[], logger: Logger): Promise<void> {
+  const tracked = new Set(releases.flatMap((r) => r.issues));
+  const skip = [...Object.values(repoConfig.lifecycleLabels), repoConfig.github.blockedLabel];
+  const key = (n: number) => `${repoConfig.githubRepo}#${n}`;
+  const settle = (n: number) => rt.memory.strandedChecked.set(key(n), Infinity);
+  const later = (n: number) => rt.memory.strandedChecked.set(key(n), now() + STRANDED_RECHECK_MS);
+  const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
+  const candidates = open
+    .filter((i) => !skip.some((l) => codeHost().hasLabel(i, l)) && !tracked.has(i.number) && (rt.memory.strandedChecked.get(key(i.number)) ?? 0) <= now())
+    .slice(0, STRANDED_SCAN_CAP);
+  if (candidates.length === 0) return;
+  const { records, unavailable } = await rt.records.loadIssueRecords(repoConfig, candidates.map((i) => i.number));
+  const unrecorded: number[] = [];
+  for (const i of candidates) {
+    if (unavailable.has(i.number)) continue;
+    const verified = records.get(i.number)?.prodVerified;
+    if (!verified) { unrecorded.push(i.number); continue; }
+    // Closing keeps the trigger label, so a person reopening the issue after its verification is the signal that it is being worked again.
+    let reopened: boolean;
+    try {
+      reopened = await codeHost().reopenedSince(repoConfig, i.number, verified.at ?? "");
+    } catch (err) {
+      logger.debug(`Could not read #${i.number}'s events: ${errText(err)}`);
+      continue;
+    }
+    if (reopened) { settle(i.number); continue; }
+    if (!(await advance(rt, itemOf(repoConfig, i.number), "prodVerified", repoConfig, logger))) continue;  // retried next scan
+    settle(i.number);
+    await comment(repoConfig, i.number,
+      `**Verified in production.** Release PR #${verified.pr}${verified.mergeSha ? ` (\`${short(verified.mergeSha)}\`)` : ""} passed its production verification` +
+      `${verified.at ? ` at ${verified.at}` : ""}${verified.tag ? `, tagged \`${verified.tag}\`` : ""}, but this issue stayed open with no lifecycle label: ` +
+      `the close did not land. Closed now on that record. Evidence: ${verified.evidence ?? "the SRE's verification on the release PR"}.`, logger);
+    logger.info(`Closed #${i.number} on its recorded production verification (release PR #${verified.pr}); the release's close had not landed`);
+  }
+  if (unrecorded.length === 0) return;
+  const merged = await codeHost().findIssuesMergedToBase(repoConfig, unrecorded, logger);
+  const shipped = new Map(merged.map((m) => [m.issueNumber, m]));
+  const ask = async (n: number, because: string, pr?: number): Promise<void> => {
+    try {
+      if (await codeHost().hasCommentContaining(repoConfig, n, STRANDED_MARK)) { settle(n); return; }
+    } catch (err) {
+      logger.debug(`Could not read #${n}'s comments: ${errText(err)}`);
+      return;
+    }
+    settle(n);
+    await comment(repoConfig, n,
+      `${STRANDED_MARK}${pr ? ` pr=${pr}` : ""} -->\n**Open and carried by no release.** ${because} This issue has no lifecycle label and no production verification is ` +
+      `recorded for it, so no release will carry it and it is not closed. **EM: needs the production sign-off record.** Apply ` +
+      `\`${repoConfig.lifecycleLabels.readyForProd}\` if the work should ship: the release stage then carries it, the SRE verifies it in production, and the ` +
+      "release closes it on a pass. Otherwise close it by hand.", logger);
+    logger.info(`#${n} is open, unlabelled and carried by no release; asked the EM for the production sign-off`);
+  };
+  for (const n of unrecorded) {
+    const ref = shipped.get(n);
+    if (ref) { await ask(n, `Its work merged to \`${repoConfig.baseBranch}\` in PR #${ref.prNumber} (${ref.prUrl}).`, ref.prNumber); continue; }
+    // No merged PR in the lookup's window is not a verdict. A Foreman skip record is a no-code delivery.
+    const skipped = records.get(n)?.skipped;
+    if (skipped && !skipped.waitingOn) { await ask(n, `The Foreman skipped it (${skipped.reason}) and no recent merged PR closes it, so it may have been delivered without code.`); continue; }
+    later(n);
+  }
 }
 
 /**
@@ -820,7 +929,10 @@ export async function tryRelease(
     // joined to another release or blocked as an orphan until every record reads, and nothing needs unblocking after.
     if (!reloaded) rlog.info("Release orphans: the release PRs cannot be listed; no issue is joined or blocked this scan");
     else if (reloaded.unreadable.size > 0) rlog.info(`Release orphans: release PR(s) ${[...reloaded.unreadable].map((n) => `#${n}`).join(", ")} cannot be read from the work source; no issue is joined or blocked this scan`);
-    else await blockOrphans(rt, repoConfig, releases, rlog);
+    else {
+      await blockOrphans(rt, repoConfig, releases, rlog);
+      await sweepStranded(rt, repoConfig, releases, rlog);
+    }
     releases = (await rt.releases.loadReleases(repoConfig, rlog))?.releases ?? releases;
   }
 

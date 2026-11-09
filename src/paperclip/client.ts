@@ -188,7 +188,7 @@ export class PaperclipClient {
    */
   async *listIssues(opts: { q?: string; statuses: readonly string[] }): AsyncIterableIterator<PaperclipIssue> {
     if (!opts.statuses?.length) throw new Error("listIssues needs a status filter: the plugin never reads terminal cards");
-    const filter = `&status=${opts.statuses.map(encodeURIComponent).join(",")}${opts.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`;
+    const filter = `&status=${opts.statuses.map(encodeURIComponent).join(",")}${opts.q ? `&q=${encodeURIComponent(opts.q)}` : ""}&sortField=id&sortDir=asc`; // a stable order: an offset page never skips or repeats a row when cards change between pages
     for (let offset = 0; ; offset += PAPERCLIP_PAGE_SIZE) {
       const page = await this.request<PaperclipIssue[]>(
         "GET",
