@@ -23,6 +23,7 @@ import {
   DEPENDENCY_BATCH_TITLE_PREFIX,
   dependencyBatchIssueCreateArgs,
 } from "../dist/github.js";
+import { versionMovesFromBody } from "../dist/github/dependencies.js";
 
 // --- Title parsing. All four shapes were observed live on 2026-09-07. --------
 
@@ -47,7 +48,75 @@ test("a grouped bump lists its packages and claims NO version", () => {
   assert.deepEqual(c.packages, ["qs", "express"]);
   assert.equal(c.from, undefined);
   assert.equal(c.to, undefined);
-  assert.equal(c.major, false, "unknown versions must not be reported as a major");
+  assert.equal(c.major, null, "unreadable versions are unknown: never reported as 'not a major'");
+});
+
+// A grouped Dependabot PR states its versions in the BODY (slashbin-ai-foreman#118).
+const GROUPED_BODY = [
+  "Bumps the npm_and_yarn group with 2 updates in the / directory: [qs](https://github.com/ljharb/qs) and [express](https://github.com/expressjs/express).",
+  "",
+  "Updates `qs` from 6.11.0 to 6.14.0",
+  "<details><summary>Release notes</summary></details>",
+  "",
+  "Updates `express` from 4.21.2 to 5.2.1",
+].join("\n");
+
+test("a grouped bump reads each package's versions from the PR body and flags a major", () => {
+  const c = describeDependencyPR(315, "chore(deps): bump qs and express", GROUPED_BODY);
+  assert.deepEqual(c.packages, ["qs", "express"]);
+  assert.deepEqual(c.moves, [
+    { package: "qs", from: "6.11.0", to: "6.14.0" },
+    { package: "express", from: "4.21.2", to: "5.2.1" },
+  ]);
+  assert.equal(c.major, true, "express 4 -> 5 is a major even though the title says nothing");
+  assert.equal(c.from, undefined, "no single from/to for a multi-package PR");
+});
+
+test("a grouped bump whose every move is read and none is major is 'no'", () => {
+  const body = "Updates `qs` from 6.11.0 to 6.11.2\n\nUpdates `express` from 4.21.1 to 4.21.2";
+  assert.equal(describeDependencyPR(1, "chore(deps): bump qs and express", body).major, false);
+});
+
+test("a group title that names no package takes the packages from the body table", () => {
+  const body = [
+    "Bumps the npm_and_yarn group with 2 updates.", "",
+    "| Package | From | To |", "| --- | --- | --- |",
+    "| [vite](https://github.com/vitejs/vite) | `5.4.21` | `8.2.2` |",
+    "| [form-data](https://github.com/form-data/form-data) | `4.0.5` | `4.0.6` |",
+  ].join("\n");
+  const c = describeDependencyPR(9, "chore(deps): bump the npm_and_yarn group across 1 directory with 2 updates", body);
+  assert.deepEqual(c.packages, ["vite", "form-data"]);
+  assert.equal(c.major, true);
+});
+
+test("one package unread among read ones: a known major still shows, otherwise unknown", () => {
+  const body = "Updates `qs` from 6.11.0 to 6.11.2";
+  assert.equal(describeDependencyPR(2, "chore(deps): bump qs and express", body).major, null, "express is unread: unknown, not no");
+  const withMajor = "Updates `qs` from 1.0.0 to 2.0.0";
+  assert.equal(describeDependencyPR(3, "chore(deps): bump qs and express", withMajor).major, true);
+});
+
+test("versionMovesFromBody reads the three Dependabot forms and invents nothing", () => {
+  assert.deepEqual(versionMovesFromBody("Bumps [vite](https://x/y) from 5.4.21 to 8.2.2.\n"), [{ package: "vite", from: "5.4.21", to: "8.2.2" }]);
+  assert.deepEqual(versionMovesFromBody("Updates `esbuild` from 0.25.12 to 0.28.1"), [{ package: "esbuild", from: "0.25.12", to: "0.28.1" }]);
+  assert.deepEqual(versionMovesFromBody("Bumps the group with 2 updates: [a](u) and [b](u)."), []);
+  assert.deepEqual(versionMovesFromBody(""), []);
+});
+
+test("an unknown major prints 'unknown' in the batch issue, never 'no'", () => {
+  const c = describeDependencyPR(315, "chore(deps): bump qs and express");
+  const { title, body } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(body, /\| #315 \| qs, express \| grouped — read the PR \| unknown \|/);
+  assert.match(body, /grouped with versions the PR does not state/);
+  assert.doesNotMatch(body, /None of these crosses a major version/);
+  assert.match(title, /\(1 unknown\)/);
+});
+
+test("a grouped PR with readable versions renders each move in the issue", () => {
+  const c = describeDependencyPR(315, "chore(deps): bump qs and express", GROUPED_BODY);
+  const { title, body } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(body, /qs `6\.11\.0` → `6\.14\.0`; express `4\.21\.2` → `5\.2\.1` \| \*\*yes\*\* \|/);
+  assert.match(title, /\(1 major\)/);
 });
 
 test("a grouped bump drops the trailing directory qualifier", () => {
