@@ -111,7 +111,8 @@ export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wai
     const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z`);
     if (Number.isFinite(t)) return { kind: "wait", retryAt: new Date(t).toISOString() };
   }
-  if (reason === "visual-qa-failed") return { kind: "decide" };
+  // A result that failed its contract schema: a person reads it, never a retry that buys another run (agent contract v1).
+  if (reason === "visual-qa-failed" || reason === "contract-invalid-result") return { kind: "decide" };
   return { kind: "charge" };
 }
 /**

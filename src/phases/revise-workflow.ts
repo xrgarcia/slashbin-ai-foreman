@@ -5,6 +5,8 @@ import type { ClaudeTrust } from "../claude-trust.js";
 import { codeHost } from "../plugins/registry.js";
 import { describeSpawnFailure, phaseTranscriptPath, spawnClaude } from "../session/runner.js";
 import { REVISION_NO_COMMIT, extractStreamResult, type RevisionResult } from "../session/protocol.js";
+import { declaredNoCommitV1, sessionResultV1 } from "../session/result-v1.js";
+import { recordContractPath } from "../contract/usage.js";
 import { IMAGE_HANDLING_INSTRUCTIONS, readOverlay, skillInstruction } from "./workflow-prompt.js";
 
 /**
@@ -89,6 +91,12 @@ Work autonomously. Do not ask questions.`;
   logger.info(`Transcript: ${transcriptPath}`);
   const result = await spawnClaude(trust, prompt, config, logger, abortSignal, transcriptPath);
 
+  {
+    const v1 = sessionResultV1(result.stdout, "reviser");
+    if (v1.status === "invalid") logger.warn(`contract: the reviser session's FOREMAN_RESULT_V1 line is invalid (${v1.problem}); reading its legacy trailer`);
+    recordContractPath("revise-session", "reviser", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger.info(m));
+  }
+
   if (result.timedOut) {
     return { success: false, error: "timed out" };
   }
@@ -114,7 +122,8 @@ Work autonomously. Do not ask questions.`;
     // and said so on the trailer. That is a real outcome, not a misfire, and it
     // must return success — otherwise the orchestrator never transitions the
     // labels back to `pr under review` and the PR is unreviewable forever.
-    const declared = REVISION_NO_COMMIT.exec(result.stdout);
+    const v1NoCommit = declaredNoCommitV1(result.stdout);
+    const declared: readonly string[] | null = v1NoCommit !== null ? ["", v1NoCommit] : REVISION_NO_COMMIT.exec(result.stdout);
     if (declared) {
       const reason = declared[1].trim().slice(0, 300);
       logger.info(

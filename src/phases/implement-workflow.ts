@@ -10,6 +10,8 @@ import {
   detectDeclaredLanded, detectDeclaredSkip, detectSkipSignal, extractStreamResult,
   type ImplementationResult,
 } from "../session/protocol.js";
+import { declaredLandedV1, declaredSkipV1, sessionResultV1 } from "../session/result-v1.js";
+import { recordContractPath } from "../contract/usage.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { IMAGE_HANDLING_INSTRUCTIONS, readOverlay, skillInstruction } from "./workflow-prompt.js";
 
@@ -159,6 +161,12 @@ Work autonomously. Do not ask questions.`;
   // The session may have opened a PR the cached list predates.
   codeHost().forgetOpenPrs(config.githubRepo);
 
+  {
+    const v1 = sessionResultV1(result.stdout, "implementer");
+    if (v1.status === "invalid") logger.warn(`contract: the implementer session's FOREMAN_RESULT_V1 line is invalid (${v1.problem}); reading its legacy trailer`);
+    recordContractPath("implement-session", "implementer", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger.info(m));
+  }
+
   if (result.timedOut) {
     return { success: false, error: "timed out" };
   }
@@ -189,7 +197,7 @@ Work autonomously. Do not ask questions.`;
   // A declared LANDED is the same kind of declaration, with the same SHA guard:
   // "nothing to land" is only believable when the branch did not move. It names
   // its issue and the orchestrator closes only an issue in the batch.
-  const declaredLanded = detectDeclaredLanded(result.stdout);
+  const declaredLanded = declaredLandedV1(result.stdout) ?? detectDeclaredLanded(result.stdout);
   if (declaredLanded.landed) {
     const moved = await movedBranch();
     if (moved) {
@@ -210,7 +218,7 @@ Work autonomously. Do not ask questions.`;
     }
   }
 
-  const declaredSkip = detectDeclaredSkip(result.stdout);
+  const declaredSkip = declaredSkipV1(result.stdout) ?? detectDeclaredSkip(result.stdout);
   if (declaredSkip.skipped) {
     const moved = await movedBranch();
     if (moved) {
