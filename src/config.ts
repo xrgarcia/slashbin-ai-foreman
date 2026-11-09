@@ -454,11 +454,28 @@ export const configSchema = z.object({
     // to batch every Dependabot PR, as before.
     securityOnly: z.boolean().default(true),
   }).prefault({}),
+
+  // --- Metrics ---
+  // The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle
+  // stage advances in a local SQLite file, read back with `npm run metrics:report`.
+  // Global. Off unless `enabled`.
+  metrics: z.object({
+    // Record lifecycle events. Off by default.
+    enabled: z.boolean().default(false),
+    // The SQLite file. Omitted: `foreman-metrics.db` in the Foreman's state directory.
+    // A leading `~` is expanded.
+    path: z.string().min(1).optional(),
+    // Days of events kept; older rows are deleted at start and at most hourly after.
+    retentionDays: z.number().int().min(1).default(90),
+  }).prefault({}),
 });
 
 // --- Types ---
 
 export interface DependabotConfig { readonly securityOnly: boolean }
+
+/** The metrics observer's settings (`metrics` block). */
+export interface MetricsConfig { readonly enabled: boolean; readonly path?: string; readonly retentionDays: number }
 
 
 /** Configured names of the lifecycle labels. See `lifecycleLabelsSchema`. */
@@ -515,6 +532,8 @@ export interface RepoConfig {
   dependencyPreApproved: boolean;
   /** The fleet-wide Dependabot selection — the global value. */
   dependabot: DependabotConfig;
+  /** The metrics observer's settings — the global value. */
+  metrics: MetricsConfig;
   /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
   skillSyncSkills?: readonly string[];
   /** Sync-only (human lane): only the `skill-deliver` stage runs here; see the repo schema. */
@@ -613,6 +632,8 @@ export interface AgentConfig {
   skillSync: SkillSyncConfig;
   /** The Dependabot stage's selection (`dependabot` block). */
   dependabot: DependabotConfig;
+  /** The metrics observer's settings (`metrics` block). */
+  metrics: MetricsConfig;
 }
 
 // --- Helpers ---
@@ -783,6 +804,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     paperclip: leniencyForDisabled(mergePaperclip(fileConfig.paperclip)),
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
+    metrics: fileConfig.metrics,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -812,6 +834,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
+    metrics: Object.freeze({ enabled: parsed.metrics.enabled, path: parsed.metrics.path, retentionDays: parsed.metrics.retentionDays }),
     epicRefLabel: parsed.epicRefLabel,
   };
 
@@ -992,5 +1015,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     paperclip,
     skillSync: resolveSkillSync(parsed.skillSync),
     dependabot: globals.dependabot,
+    metrics: globals.metrics,
   });
 }
