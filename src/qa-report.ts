@@ -118,17 +118,22 @@ export class QaReports {
   }
 }
 
-/** Whether an enabled QA plugin covers `repoConfig` on this install. */
-export function qaApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
-  return qaFor(repoConfig, agentConfig) !== undefined;
+/**
+ * Whether an enabled QA plugin covers `repoConfig` on this install; `"unknown"` when QA could not say
+ * (EM#794 C). "unknown" is truthy: compare with `=== true`, and hold on `"unknown"` without charging.
+ */
+export async function qaApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): Promise<boolean | "unknown"> {
+  const qa = await qaFor(repoConfig, agentConfig);
+  return qa === "unknown" ? "unknown" : qa !== undefined;
 }
 
 /**
  * Whether QA runs BEFORE the merge for `repoConfig` (config.qaBeforeMerge): the flag, a QA repo, and the
  * reviewer that does the merge. When true the post-merge QA (gate and report-only) does not run for it.
  */
-export function qaBeforeMergeApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): boolean {
-  return agentConfig.qaBeforeMerge && roleFor("reviewer", agentConfig) !== undefined && qaApplies(repoConfig, agentConfig);
+export async function qaBeforeMergeApplies(repoConfig: RepoConfig, agentConfig: AgentConfig): Promise<boolean | "unknown"> {
+  if (!agentConfig.qaBeforeMerge || roleFor("reviewer", agentConfig) === undefined) return false;
+  return qaApplies(repoConfig, agentConfig);
 }
 
 /** The real edges: the PR's comments and files on the code host, and the QA plugin covering the repo, on dev. */
@@ -138,9 +143,10 @@ export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, log
     hasReport: (pr) => codeHost().hasCommentStartingWith(repoConfig, pr, QA_HEADING),
     post: (pr, body) => codeHost().commentOnPr(repoConfig, pr, body),
     comments: (pr) => codeHost().commentsWithTimes(repoConfig, pr),
-    changedFiles: async (pr) => codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
+    changedFiles: async (pr) => await codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
     async run({ repo, pr, out }) {
-      const qa = qaFor(repoConfig, agentConfig);
+      const qa = await qaFor(repoConfig, agentConfig);
+      if (qa === "unknown") return { kind: "errored", detail: `QA could not say whether it covers ${repo}` };
       if (!qa) return { kind: "errored", detail: `no enabled QA plugin covers ${repo}` };
       return qa.check(repoConfig, agentConfig, { repo, pr, out, local }, logger);
     },

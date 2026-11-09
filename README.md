@@ -154,9 +154,8 @@ You need Node.js **22.12+**, a logged-in Claude Code CLI, the GitHub CLI, and a 
 checkout of the repo Foreman will edit. That repo needs the configured base
 and production branches; the defaults are `develop` and `main`. Each issue gets its own `foreman/…` branch.
 
-Set `FOREMAN_GITHUB_TOKEN` in the daemon's environment to use a dedicated GitHub
-account with write access. Without it, Foreman uses the account logged into `gh`.
-Keep tokens out of the config file.
+Set `FOREMAN_GITHUB_TOKEN` in the daemon's environment: a dedicated GitHub account with
+write access. The daemon needs it and refuses GitHub calls without it. Keep tokens out of the config file.
 
 ```bash
 git clone https://github.com/xrgarcia/slashbin-ai-foreman.git
@@ -265,6 +264,7 @@ that names one. The core never imports GitHub or Paperclip code and never runs `
 |---|---|---|---|
 | GitHub | `workSource`, `codeHost` | [`src/plugins/github.ts`](src/plugins/github.ts) | `workSource` / `codeHost` is `github` (the default) |
 | Paperclip | `observer` | [`src/plugins/paperclip.ts`](src/plugins/paperclip.ts) | `paperclip.enabled`, with `companyId` and `agentId` |
+| Metrics | `observer` | [`src/plugins/metrics.ts`](src/plugins/metrics.ts) | `metrics.enabled` ([docs](docs/metrics.md)) |
 | Tech Lead | `reviewer` | [`src/plugins/tech-lead.ts`](src/plugins/tech-lead.ts) | `techLeadPath` is set |
 | SRE | `verifier`, `deployer` | [`src/plugins/sre.ts`](src/plugins/sre.ts) | `srePath` is set |
 | QA | `qa` | [`src/plugins/qa.ts`](src/plugins/qa.ts) | `qaPath` is set (covers `qaRepos`) |
@@ -274,7 +274,10 @@ A stage whose role no plugin fills does not run: with no reviewer, a person merg
 no work source or code host, startup refuses. An operator's own values (logins, repo
 names, MCP tool lists) live in a profile under `src/profiles/`, selected with
 `"profile"`; each key resolves as neutral default, then profile, then `.ai-agent.json`,
-then env ([profiles](docs/config-guide.md#profiles)).
+then env ([profiles](docs/config-guide.md#profiles)). Foreman keeps no local state file:
+what it must remember across restarts is stored as records in the work source (on GitHub, a
+marker comment per issue and PR), so a restart resumes where it left off
+([where state lives](docs/architecture.md#where-state-lives)).
 
 ## Why we built it
 
@@ -332,8 +335,13 @@ For code changes, the repository checks are:
 npm install
 npm run build
 npm test
+npm run acceptance
 npm run docs:check
 ```
+
+`npm run acceptance` runs every script in `scripts/acceptance/` (built `dist/`, fake `gh`, temp
+directories; no credentials). Put the last line of both `npm test` and `npm run acceptance` in a PR's
+Run evidence.
 
 The package and CLI executable are named `slashbin-ai-agent`; this repository is
 `slashbin-ai-foreman`. Generated references are maintained through the prose templates

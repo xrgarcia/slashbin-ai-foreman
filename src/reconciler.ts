@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { git as runGit } from "./git-exec.js";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import { codeHost } from "./plugins/registry.js";
@@ -41,13 +41,15 @@ interface OrphanedCommit {
 
 const GIT_TIMEOUT_MS = 30_000;
 
-export function git(args: string[], cwd: string): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: GIT_TIMEOUT_MS,
-  }).trim();
+/**
+ * `git` without blocking the event loop (a synchronous one froze every lane and observer for the
+ * whole timeout of a remote that was not answering, 2026-11-06, `spawnSync git ETIMEDOUT`).
+ *
+ * A timeout rejects with the code `ETIMEDOUT`, which `formatGitError` reads as a timeout; a
+ * SIGTERM from systemd is not Node's kill, so it still reads as cancelled.
+ */
+export function gitAsync(args: string[], cwd: string): Promise<string> {
+  return runGit(args, cwd, { timeoutMs: GIT_TIMEOUT_MS });
 }
 
 /**
@@ -102,11 +104,11 @@ export function formatGitError(err: unknown): GitFailure {
  * featureBranch (exact name only, so `features-x` by a person is not swept in). Every candidate goes
  * through the one ownership test, so a human-named head is never scanned, reconciled or deleted.
  */
-function getRemoteOwnedBranches(config: RepoConfig): string[] {
+async function getRemoteOwnedBranches(config: RepoConfig): Promise<string[]> {
   try {
     const patterns = [`origin/${branchPrefixOf(config)}*`];
     if (config.featureBranch && config.featureBranch !== config.baseBranch) patterns.push(`origin/${config.featureBranch}`);
-    const output = git(["branch", "-r", "--list", ...patterns], config.repoPath);
+    const output = await gitAsync(["branch", "-r", "--list", ...patterns], config.repoPath);
     if (!output) return [];
     return [...new Set(output
       .split("\n")
@@ -131,19 +133,19 @@ function extractIssueNumbers(commits: OrphanedCommit[]): number[] {
   return [...issueNums].sort((a, b) => a - b);
 }
 
-function hasOpenPR(
+async function hasOpenPR(
   githubRepo: string,
   featureBranch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string } | null | "unknown" {
+): Promise<{ number: number; url: string } | null | "unknown"> {
   try {
     // Every cycle, for every branch with commits waiting on review, this asks
     // whether the PR is still open — and almost always it is. The fleet state
     // answers that without a request; only "not known open" goes to GitHub.
-    const known = codeHost().knownOpenPr(githubRepo, featureBranch, baseBranch);
+    const known = await codeHost().knownOpenPr(githubRepo, featureBranch, baseBranch);
     if (known) return { number: known.number, url: known.url };
-    const prs = codeHost().openPrsForBranch(githubRepo, featureBranch, baseBranch, cwd);
+    const prs = await codeHost().openPrsForBranch(githubRepo, featureBranch, baseBranch, cwd);
     return prs.length > 0 ? prs[0] : null;
   } catch {
     // Unknown, never "no open PR". Read as null, a failed lookup made the
@@ -168,14 +170,14 @@ function hasOpenPR(
  * PR carried: a branch still sitting at that head (squash merges leave its commits "ahead" of
  * base forever) has nothing new to propose, so it is neither reconciled nor a rejection.
  */
-function readClosedPrs(
+async function readClosedPrs(
   githubRepo: string,
   branch: string,
   baseBranch: string,
   cwd: string,
-): { rejected: { number: number; url: string; headSha: string } | null; deliveredShas: string[] } | "unknown" {
+): Promise<{ rejected: { number: number; url: string; headSha: string } | null; deliveredShas: string[] } | "unknown"> {
   try {
-    const prs = codeHost().closedPrsForBranch(githubRepo, branch, baseBranch, cwd);
+    const prs = await codeHost().closedPrsForBranch(githubRepo, branch, baseBranch, cwd);
     const unmerged = prs
       .filter((p) => !p.mergedAt && p.headRefOid)
       .sort((a, b) => String(b.closedAt ?? "").localeCompare(String(a.closedAt ?? "")));
@@ -196,18 +198,18 @@ function readClosedPrs(
  * legacy featureBranch, never a human head), no open PR, and still exactly at the head a merged PR
  * delivered, so nothing unmerged is lost. Returns the branches deleted. Best effort per branch.
  */
-export function pruneMergedBranches(config: RepoConfig, logger: Logger, branches: string[]): string[] {
+export async function pruneMergedBranches(config: RepoConfig, logger: Logger, branches: string[]): Promise<string[]> {
   const deleted: string[] = [];
   for (const branch of branches) {
     if (!branch.startsWith(branchPrefixOf(config))) continue;
     try {
-      const open = hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+      const open = await hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
       if (open !== null) continue; // open, or unknown: delete nothing
-      const closed = readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
+      const closed = await readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
       if (closed === "unknown") continue;
-      const sha = git(["rev-parse", `origin/${branch}`], config.repoPath);
+      const sha = await gitAsync(["rev-parse", `origin/${branch}`], config.repoPath);
       if (!closed.deliveredShas.includes(sha)) continue;
-      if (codeHost().deleteMergedBranch(config, branch)) {
+      if (await codeHost().deleteMergedBranch(config, branch)) {
         deleted.push(branch);
         logger.info(`Deleted merged branch ${branch}`);
       }
@@ -218,13 +220,13 @@ export function pruneMergedBranches(config: RepoConfig, logger: Logger, branches
   return deleted;
 }
 
-function createReconciliationPR(
+async function createReconciliationPR(
   config: RepoConfig,
   headBranch: string,
   issueNumbers: number[],
   commitCount: number,
   logger: Logger,
-): string | null {
+): Promise<string | null> {
   const issueList = issueNumbers.length > 0
     ? issueNumbers.map((n) => `- Related to #${n}`).join("\n")
     : "_No linked issues found in commit messages_";
@@ -245,7 +247,7 @@ ${issueList}
 ${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``, config.github, " (reconciler)");
 
   try {
-    const result = codeHost().createPr(config, { base: config.baseBranch, head: headBranch, title, body });
+    const result = await codeHost().createPr(config, { base: config.baseBranch, head: headBranch, title, body });
 
     const match = result.match(/https:\/\/github\.com\/[^\s]+/);
     return match ? match[0] : null;
@@ -257,13 +259,13 @@ ${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``
   }
 }
 
-export function reconcileRepo(
+export async function reconcileRepo(
   config: RepoConfig,
   logger: Logger,
-): ReconciliationResult {
+): Promise<ReconciliationResult> {
   // Fetch all refs first. --prune drops remote-tracking refs of branches deleted after their merge.
   try {
-    git(["fetch", "origin", "--prune"], config.repoPath);
+    await gitAsync(["fetch", "origin", "--prune"], config.repoPath);
   } catch (err) {
     const failure = formatGitError(err);
     if (failure.timedOut) {
@@ -281,14 +283,14 @@ export function reconcileRepo(
   }
 
   // Only Foreman-owned heads are scanned (per-issue branches, plus the legacy shared one).
-  const featureBranches = getRemoteOwnedBranches(config);
+  const featureBranches = await getRemoteOwnedBranches(config);
   if (featureBranches.length === 0) {
     return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
 
   // Merged work leaves no branch behind: delete it before scanning, so a squash-merged branch
   // never reads as orphaned commits.
-  const pruned = pruneMergedBranches(config, logger, featureBranches);
+  const pruned = await pruneMergedBranches(config, logger, featureBranches);
   for (const b of pruned) featureBranches.splice(featureBranches.indexOf(b), 1);
 
   // Branches whose commits stand rejected. Collected rather than returned early:
@@ -300,7 +302,7 @@ export function reconcileRepo(
   for (const branch of featureBranches) {
     let commits: OrphanedCommit[];
     try {
-      const log = git(
+      const log = await gitAsync(
         ["log", `origin/${config.baseBranch}..origin/${branch}`, "--format=%H %s"],
         config.repoPath,
       );
@@ -318,7 +320,7 @@ export function reconcileRepo(
     logger.info(`Found ${commits.length} commit(s) on ${branch} ahead of ${config.baseBranch}`);
 
     // Check if PR already exists for this specific branch
-    const existingPR = hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    const existingPR = await hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
     if (existingPR === "unknown") {
       logger.warn(`Could not read the open PRs for ${branch} — skipping reconciliation this pass rather than risk a duplicate PR`);
       continue;
@@ -331,7 +333,7 @@ export function reconcileRepo(
     // Rejection guard: a PR is also "not open" when a human closed it unmerged.
     // If the branch has not moved since that rejection, recreating the PR would
     // re-propose the exact diff that was just refused.
-    const closedPrs = readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    const closedPrs = await readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
     if (closedPrs === "unknown") {
       logger.warn(`Could not read the closed PRs for ${branch} — skipping reconciliation this pass rather than re-propose refused work`);
       continue;
@@ -375,7 +377,7 @@ export function reconcileRepo(
     const issueNumbers = extractIssueNumbers(commits);
     logger.info(`Extracted issue numbers from ${branch}: ${issueNumbers.join(", ") || "none"}`);
 
-    const prUrl = createReconciliationPR(config, branch, issueNumbers, commits.length, logger);
+    const prUrl = await createReconciliationPR(config, branch, issueNumbers, commits.length, logger);
     if (!prUrl) {
       return {
         reconciled: false, issueNumbers, commitCount: commits.length,
@@ -383,7 +385,7 @@ export function reconcileRepo(
       };
     }
 
-    const verified = codeHost().verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath, logger);
+    const verified = await codeHost().verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath, logger);
     if (!verified) {
       logger.warn("PR URL returned but verification failed — PR may not exist");
       return {

@@ -83,15 +83,15 @@ test("a PR whose state cannot be read fails the pass: no review is spent", async
   assert.equal(existsSync(ranMarker), false);
 });
 
-test("readPrState reads the live state from gh and throws when gh fails", () => {
+test("readPrState reads the live state from gh and throws when gh fails", async () => {
   mkdirSync(join(tmp, "bin"), { recursive: true });
   const gh = (body) => { writeFileSync(join(tmp, "bin/gh"), `#!/bin/sh\n${body}\n`); chmodSync(join(tmp, "bin/gh"), 0o755); };
   process.env.PATH = `${join(tmp, "bin")}:${saved.PATH}`;
   gh('echo \'{"state":"MERGED"}\'');
-  assert.equal(readPrState(repo, 7, quiet), "MERGED");
+  assert.equal(await readPrState(repo, 7, quiet), "MERGED");
   gh('echo \'{"state":"OPEN"}\'');
-  assert.equal(readPrState(repo, 7, quiet), "OPEN");
+  assert.equal(await readPrState(repo, 7, quiet), "OPEN");
   gh('echo "TLS handshake timeout" >&2; exit 1');
-  assert.throws(() => readPrState(repo, 7, quiet));
+  await assert.rejects(readPrState(repo, 7, quiet));
   process.env.PATH = saved.PATH;
 });

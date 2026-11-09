@@ -222,9 +222,10 @@ test("(a) a build session in flight on repo A does not hold repo A's release lan
   const pass = runRepoPass(rt, config.repos[0], config, logger);
   await until(() => starts().length === 1, "the build session to start");
   await until(promoteRan, "promote to run beside the build");
+  // The lane's reads are async now: it finishes a few ticks after promote ran.
+  await until(() => !getActiveLanePasses().includes("lanes-a/release"), "the release lane to finish beside the build");
   assert.ok(!claudeEvents().some((e) => e.event === "end"), "the build session was still running when promote ran");
   assert.ok(getActiveLanePasses().includes("lanes-a/build"));
-  assert.ok(!getActiveLanePasses().includes("lanes-a/release"), "the release lane finished while the build ran");
   release();
   await pass;
 });

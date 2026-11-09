@@ -85,8 +85,11 @@ export interface GitHubStateOptions {
   issueLimit?: number;
   /** Where the state is persisted; omit to keep it in memory only. */
   persistPath?: string;
-  /** Run `gh` with the Foreman token. Injected so this module has no gh of its own. */
-  run: (args: string[]) => string;
+  /**
+   * Run `gh` with the Foreman token, without blocking the event loop. Injected so this
+   * module has no gh of its own.
+   */
+  runAsync: (args: string[]) => Promise<string>;
   logger: Logger;
   now?: () => number;
 }
@@ -123,6 +126,11 @@ export class GitHubState {
   /** GraphQL points the state's own queries spent, as GitHub reported them. */
   private pointsSpent = 0;
   private queriesRun = 0;
+  /** The async refresh in flight, shared by every concurrent `warm`. */
+  private inFlight: Promise<void> | null = null;
+  /** Bumped on every write mark; per repo, the value at its last mark. */
+  private writeSeq = 0;
+  private readonly wroteAt = new Map<string, number>();
 
   private now(): number {
     return this.opts?.now ? this.opts.now() : Date.now();
@@ -138,6 +146,7 @@ export class GitHubState {
     this.activity = {};
     this.lastRefreshAt = 0;
     this.lastFailure = null;
+    this.inFlight = null;
     this.dirty.clear();
     this.unreachable.clear();
     if (o.persistPath) {
@@ -169,28 +178,39 @@ export class GitHubState {
 
   /** A write the Foreman made (or a session it ran may have made) to this repo. */
   markRepoDirty(repo: string): void {
-    if (this.opts?.repos.includes(repo)) this.dirty.add(repo);
+    if (!this.opts?.repos.includes(repo)) return;
+    this.dirty.add(repo);
+    this.wroteAt.set(repo, ++this.writeSeq);
   }
 
   markAllDirty(): void {
-    for (const r of this.opts?.repos ?? []) this.dirty.add(r);
+    for (const r of this.opts?.repos ?? []) this.markRepoDirty(r);
+  }
+
+  /**
+   * A write landed on `repo` after a refresh that started at `seq` sent its query:
+   * that answer may predate the write, so it is not applied and the repo stays dirty.
+   * Only an async refresh can interleave with a write.
+   */
+  private wroteSince(repo: string, seq: number): boolean {
+    return (this.wroteAt.get(repo) ?? 0) > seq;
   }
 
   /** Every open issue in `repo`, refreshing first if stale. */
-  openIssues(repo: string): StateIssue[] {
-    this.ensureFresh(repo);
+  async openIssues(repo: string): Promise<StateIssue[]> {
+    await this.ensureFresh(repo);
     return this.views.get(repo)?.issues ?? [];
   }
 
   /** Every open PR in `repo`, refreshing first if stale. */
-  openPrs(repo: string): StatePr[] {
-    this.ensureFresh(repo);
+  async openPrs(repo: string): Promise<StatePr[]> {
+    await this.ensureFresh(repo);
     return this.views.get(repo)?.prs ?? [];
   }
 
   /** Changes whenever a PR in `repo` was seen merged or closed — a cache key for merged/closed PR reads. */
-  closedVersion(repo: string): number {
-    this.ensureFresh(repo);
+  async closedVersion(repo: string): Promise<number> {
+    await this.ensureFresh(repo);
     return this.views.get(repo)?.closedVersion ?? 0;
   }
 
@@ -232,13 +252,53 @@ export class GitHubState {
   }
 
   /** Refresh every configured repo in one pass. */
-  refreshAll(): void {
+  async refreshAll(): Promise<void> {
     if (!this.opts) return;
-    this.refresh(this.opts.repos);
+    await this.driveAsync(this.refresh(this.opts.repos), this.opts.runAsync);
     this.lastRefreshAt = this.now();
   }
 
-  private ensureFresh(repo: string): void {
+  /**
+   * Bring the view up to date without blocking the event loop: the stale state
+   * (every repo) or the dirty repos, through `runAsync`. The daemon awaits it
+   * before each lane pass, so the pass's synchronous reads find a fresh view.
+   * Concurrent calls share one in-flight refresh.
+   *
+   * 2026-11-06: GitHub answered with TLS handshake timeouts for 20 minutes, and
+   * the synchronous bulk query inside a read froze every lane and every observer
+   * with it; the board went blank while Paperclip was up.
+   */
+  warm(): Promise<void> {
+    const o = this.opts;
+    if (!o) return Promise.resolve();
+    if (this.inFlight) return this.inFlight;
+    const t = this.now();
+    const stale = t - this.lastRefreshAt >= o.refreshMs || o.repos.some((r) => !this.views.has(r));
+    if (!stale && this.dirty.size === 0) return Promise.resolve();
+    if (this.lastFailure && t - this.lastFailure.at < FAILURE_COOLDOWN_MS) return Promise.reject(this.lastFailure.err);
+    const run = (async () => {
+      try {
+        await this.driveAsync(this.refresh(stale ? o.repos : [...this.dirty]), o.runAsync);
+        if (stale) this.lastRefreshAt = this.now();
+        this.lastFailure = null;
+      } catch (err) {
+        this.lastFailure = { at: this.now(), err };
+        throw err;
+      } finally {
+        this.inFlight = null;
+      }
+    })();
+    this.inFlight = run;
+    return run;
+  }
+
+  /**
+   * Bring `repo`'s view up to date before a read, through the async runner: the event
+   * loop keeps turning while GitHub answers (or does not). A merely stale view is
+   * served as it is while a refresh is already in flight; a repo this process wrote
+   * to waits for it (read your writes).
+   */
+  private async ensureFresh(repo: string): Promise<void> {
     if (!this.opts || !this.opts.repos.includes(repo)) return;
     const t = this.now();
     // A repo GitHub cannot resolve fails its own reads only, and is not re-queried until its retry time.
@@ -246,22 +306,43 @@ export class GitHubState {
     if (bad && t < bad.retryAt) throw unreachableError(repo, bad);
     const stale = t - this.lastRefreshAt >= this.opts.refreshMs || !this.views.has(repo);
     if (!stale && !this.dirty.has(repo)) return;
+    // An async refresh is already bringing the view up to date: a merely stale
+    // view is served as it is rather than waiting on a second query. A write this
+    // repo saw still refreshes (read your writes).
+    if (this.inFlight && this.views.has(repo) && !this.dirty.has(repo)) return;
     // A failed bulk query fails every repo's read at once. Without this, each of
     // the 20 repo loops would re-run the whole fleet query to fail again.
     if (this.lastFailure && t - this.lastFailure.at < FAILURE_COOLDOWN_MS) throw this.lastFailure.err;
-    try {
-      if (stale) this.refreshAll();
-      else this.refresh([...this.dirty]);
-      this.lastFailure = null;
-    } catch (err) {
-      this.lastFailure = { at: t, err };
-      throw err;
-    }
+    // `warm` shares the refresh in flight and records a failure for the cooldown above.
+    // An in-flight refresh may have started before the write that dirtied this repo
+    // (its answer is then not applied), so a still-dirty repo gets one more pass.
+    await this.warm();
+    if (this.dirty.has(repo)) await this.warm();
     const still = this.unreachable.get(repo);
     if (still) throw unreachableError(repo, still);
   }
 
-  private refresh(repos: string[]): void {
+  /** Run a refresh's queries through the async runner: the event loop keeps turning. */
+  private async driveAsync(steps: RefreshSteps, runAsync: (args: string[]) => Promise<string>): Promise<void> {
+    let r = steps.next();
+    while (!r.done) {
+      const query = r.value;
+      let out: string;
+      try {
+        out = await graphqlBodyAsync(() => runAsync(graphqlArgs(query)));
+      } catch (err) {
+        r = steps.throw(err);
+        continue;
+      }
+      r = steps.next(out);
+    }
+  }
+
+  /**
+   * One refresh, as a sequence of GraphQL queries: it yields each query and is
+   * resumed with the response body, so the sync and async drivers share it.
+   */
+  private *refresh(repos: string[]): RefreshSteps {
     if (!this.opts) return;
     const o = this.opts;
     const t = this.now();
@@ -279,6 +360,7 @@ export class GitHubState {
       else delta.push(r);
     }
     const startedAt = new Date(t).toISOString();
+    const startSeq = this.writeSeq;
     const overflow: string[] = [];
 
     // One query for every repo — full blocks and delta blocks side by side.
@@ -292,8 +374,9 @@ export class GitHubState {
     });
     if (blocks.length === 0) return;
 
-    const { data, errors } = this.graphql(`query { ${blocks.join("\n")} }`);
+    const { data, errors } = this.parseGraphql(yield `query { ${blocks.join("\n")} }`);
     for (const [alias, { repo, kind }] of aliases) {
+      if (this.wroteSince(repo, startSeq)) continue;
       const node = data[alias] as RepoNode | null | undefined;
       if (!node) {
         // GitHub names the alias in each error's path: that repo failed, the others did not.
@@ -308,38 +391,26 @@ export class GitHubState {
       }
       this.clearUnreachable(repo);
       if (kind === "full") {
-        this.applyFull(repo, node, startedAt);
+        yield* this.applyFull(repo, node, startedAt, startSeq);
       } else if (!this.applyDelta(repo, node, startedAt)) {
         overflow.push(repo);
       }
-      this.dirty.delete(repo);
+      if (!this.wroteSince(repo, startSeq)) this.dirty.delete(repo);
     }
 
     // More than DELTA_WINDOW changes since the last sync: read that repo whole.
     if (overflow.length > 0) {
       const fb = overflow.map((repo, i) => repoBlock(`r${i}`, repo, "full"));
-      const d2 = this.graphql(`query { ${fb.join("\n")} }`).data;
-      overflow.forEach((repo, i) => {
+      const d2 = this.parseGraphql(yield `query { ${fb.join("\n")} }`).data;
+      for (const [i, repo] of overflow.entries()) {
         const node = d2[`r${i}`] as RepoNode | null | undefined;
-        if (node) this.applyFull(repo, node, startedAt);
-      });
+        if (node && !this.wroteSince(repo, startSeq)) yield* this.applyFull(repo, node, startedAt, startSeq);
+      }
     }
     this.persist();
   }
 
-  private graphql(query: string): { data: Record<string, unknown>; errors: GraphqlError[] } {
-    let out: string;
-    try {
-      out = this.opts!.run(["api", "graphql", "-f", `query=${query.replace(/^query \{/, "query { rateLimit { cost } ")}`]);
-    } catch (err) {
-      // `gh api graphql` exits non-zero when any alias errored, but still prints the JSON body
-      // (partial `data` plus `errors`). Use that body; a failure with no data is a real failure.
-      const body = (err as { stdout?: Buffer | string } | null)?.stdout;
-      out = typeof body === "string" ? body : body?.toString() ?? "";
-      let usable = false;
-      try { usable = !!(JSON.parse(out) as { data?: unknown }).data; } catch { /* not JSON */ }
-      if (!usable) throw err;
-    }
+  private parseGraphql(out: string): { data: Record<string, unknown>; errors: GraphqlError[] } {
     const parsed = JSON.parse(out || "{}") as { data?: Record<string, unknown>; errors?: GraphqlError[] };
     // A repo that does not resolve comes back as a null block plus an error with that alias in its
     // path; the rest of the response is still good, so only an empty `data` is fatal.
@@ -373,14 +444,14 @@ export class GitHubState {
     if (this.unreachable.delete(repo)) this.opts!.logger.info("github-state: repo reachable again", { repo });
   }
 
-  private applyFull(repo: string, node: RepoNode, startedAt: string): void {
+  private *applyFull(repo: string, node: RepoNode, startedAt: string, startSeq: number): RefreshSteps {
     const o = this.opts!;
     const limit = o.issueLimit ?? 500;
     const issues = (node.issues?.nodes ?? []).map(toIssue);
     let page = node.issues?.pageInfo;
     // Past 100 open issues: page this one repo until done or at the limit.
     while (page?.hasNextPage && page.endCursor && issues.length < limit) {
-      const d = this.graphql(`query { ${repoBlock("r0", repo, "full", undefined, page.endCursor)} }`).data;
+      const d = this.parseGraphql(yield `query { ${repoBlock("r0", repo, "full", undefined, page.endCursor)} }`).data;
       const n = d.r0 as RepoNode | null;
       issues.push(...(n?.issues?.nodes ?? []).map(toIssue));
       page = n?.issues?.pageInfo;
@@ -391,6 +462,8 @@ export class GitHubState {
     if (node.pullRequests?.pageInfo?.hasNextPage) {
       o.logger.warn("github-state: more than 100 open PRs — only the 100 most recently updated are tracked", { repo });
     }
+    // A write landed while the pages were read: keep the repo dirty for the next refresh.
+    if (this.wroteSince(repo, startSeq)) return;
     const prior = this.views.get(repo);
     this.views.set(repo, {
       issues: byNumberDesc(issues.slice(0, limit)),
@@ -443,6 +516,30 @@ export class GitHubState {
       // Best-effort — the next refresh rebuilds it.
     }
   }
+}
+
+/** A refresh: yields each GraphQL query, resumed with its response body. */
+type RefreshSteps = Generator<string, void, string>;
+
+function graphqlArgs(query: string): string[] {
+  return ["api", "graphql", "-f", `query=${query.replace(/^query \{/, "query { rateLimit { cost } ")}`];
+}
+
+/**
+ * `gh api graphql` exits non-zero when any alias errored, but still prints the JSON body
+ * (partial `data` plus `errors`). Use that body; a failure with no data is a real failure.
+ */
+function bodyFromFailure(err: unknown): string {
+  const body = (err as { stdout?: Buffer | string } | null)?.stdout;
+  const out = typeof body === "string" ? body : body?.toString() ?? "";
+  let usable = false;
+  try { usable = !!(JSON.parse(out) as { data?: unknown }).data; } catch { /* not JSON */ }
+  if (!usable) throw err;
+  return out;
+}
+
+async function graphqlBodyAsync(run: () => Promise<string>): Promise<string> {
+  try { return await run(); } catch (err) { return bodyFromFailure(err); }
 }
 
 function unreachableError(repo: string, bad: Unreachable): Error {

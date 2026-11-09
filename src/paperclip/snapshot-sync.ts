@@ -92,7 +92,7 @@ export class SnapshotSync {
     // Lifecycle issues with no card yet: each gets one at its stage once GitHub reads it open (Foreman #113).
     const fresh: Array<{ item: WorkItem; stage: PaperclipStage; detail: string }> = [];
     // Needs-ruling blocks whose write never landed: delivered once GitHub reads the issue open.
-    const rulings: Array<{ item: WorkItem; id: string }> = [];
+    const rulings: Array<{ item: WorkItem; id: string; stage: PaperclipStage }> = [];
     for (const { item, stage, detail, verifyHeld, foremanHeld } of items) {
       if (closed.has(item.issueNumber)) continue;
       const id = await this.index.resolve(item, false);
@@ -111,7 +111,7 @@ export class SnapshotSync {
       // A needs-ruling block lost to an outage outranks the stage's own placement,
       // however well the card matches it: it sat on the Foreman or the Tech Lead.
       if (stage !== "done" && this.placement.rulingPending(id, stage)) {
-        rulings.push({ item, id });
+        rulings.push({ item, id, stage });
         continue;
       }
       const want = `status:${this.env.statusName(stage === "done" ? "done" : stageTarget(this.env.cfg, stage).bucket)}`;
@@ -195,8 +195,12 @@ export class SnapshotSync {
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} card ${state.slice(7)} → ${want.slice(7)}${state === want ? ", re-assigned" : ""} to match GitHub`);
       await this.notes.note(id, fill(PAPERCLIP_STEPS.synced.note, { detail }), { event: "progress", handoff: handoffTo(stage, item) });
     }
-    for (const { item, id } of rulings) {
+    for (const { item, id, stage } of rulings) {
       if (live.get(item.issueNumber) !== "open") continue;
+      // Read live before re-delivering: a write that waited (an outage, a run in
+      // flight) is older than a hold put on the card since, and must not replace it.
+      await this.index.refreshRow(id);
+      if (!this.placement.rulingPending(id, stage)) continue;
       const step = PAPERCLIP_STEPS.escalated;
       if (!(await this.placement.move(id, step.stage, false, true))) continue;
       logger.info(`Paperclip: ${item.repo}#${item.issueNumber} needs-ruling block delivered: its first write did not land`);
@@ -379,6 +383,8 @@ export class SnapshotSync {
     const body: Record<string, unknown> = {};
     if (have?.title !== want.title) body.title = want.title;
     if (have?.description !== want.description) body.description = want.description;
+    // The registry customer labels of the issue's labels (open cards only; a closed card's labels are unknown).
+    const customer = c.state === "open" ? await this.placement.wantedCustomer(c.labels) : undefined;
     const free = !this.holds.has(id) && !state.startsWith("waiting\n");
     // The receiver's entry text on a Foreman-held card reads as a waiting hold; it is GitHub's hold, unread.
     const entry = !this.holds.has(id) && state.startsWith("waiting\n") && RECEIVER_HOLD_ENTRY.test(state.slice(8));
@@ -400,7 +406,7 @@ export class SnapshotSync {
       const user = assigneeFor(this.env.cfg, { labels: c.labels ?? [], repo: c.item.repo })?.assigneeUserId ?? null;
       if (status !== BACKLOG_STATUS || have?.assigneeAgentId || (have?.assigneeUserId ?? null) !== user) {
         Object.assign(body, { status: BACKLOG_STATUS, assigneeAgentId: null, assigneeUserId: user });
-        const labelIds = await this.placement.labelIdsFor(id, null);
+        const labelIds = await this.placement.labelIdsFor(id, null, customer);
         if (labelIds) body.labelIds = labelIds;
       }
     } else if ((free || entry) && c.hold && status === this.env.statusName("blocked")) {
@@ -426,9 +432,9 @@ export class SnapshotSync {
         body.status ??= status;
       }
     }
-    // Backfill: a card that predates the issue label gets it once, whatever its stage.
-    if (!("labelIds" in body) && have && (await this.placement.needsIssueLabel(id, have))) {
-      const labelIds = await this.placement.labelIdsFor(id, undefined);
+    // Backfill: a card that predates the issue label, or carries another customer label set than its issue's, is fixed once, whatever its stage.
+    if (!("labelIds" in body) && have && ((await this.placement.needsIssueLabel(id, have)) || (await this.placement.customerStale(have, customer)))) {
+      const labelIds = await this.placement.labelIdsFor(id, undefined, customer);
       if (labelIds) body.labelIds = labelIds;
     }
     // A closed issue's card at its terminal state is done with: forgotten, never looked for again.

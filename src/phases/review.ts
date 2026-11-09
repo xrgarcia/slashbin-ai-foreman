@@ -16,6 +16,8 @@ import { CycleEvent, activeRuns, itemOf, notifyOnce, pausedByBlockedLabel, repor
 import { reconcileReviewOutcomeLabels } from "./reconcile.js";
 import { tryQaBeforeMerge } from "./qa-before-merge.js";
 import { qaBeforeMergeApplies } from "../qa-report.js";
+import { MAX_REVIEW_ATTEMPTS_PER_HEAD } from "../step-attempts.js";
+import { rulingAnswersStalemate } from "../no-commit-streak.js";
 import { codeHost } from "../plugins/registry.js";
 import type { ForemanRuntime } from "../runtime.js";
 
@@ -30,7 +32,14 @@ export async function tryReview(
   // QA before the merge (config.qaBeforeMerge): the Tech Lead approves without merging, QA runs on the
   // approved head, and only a PASS merges. An approved PR waiting on QA is QA's, never offered to the
   // Tech Lead again; and the QA that follows an approval runs in the same pass.
-  const qaFirst = qaBeforeMergeApplies(repoConfig, config) && repoConfig.reviewEnabled && !rt.memory.reviewDefer.waiting(repoConfig.name);
+  const qaPre = repoConfig.reviewEnabled ? await qaBeforeMergeApplies(repoConfig, config) : false;
+  if (qaPre === "unknown") {
+    // QA could not say whether it covers this repo (its registry is unavailable): reviewing could merge a PR
+    // QA must check first, so nothing is reviewed or merged until it answers. Nothing is charged.
+    logger.warn(`Review of ${repoConfig.name} waits: QA could not say whether it covers the repo (coverage unknown)`);
+    return false;
+  }
+  const qaFirst = qaPre && repoConfig.reviewEnabled && !rt.memory.reviewDefer.waiting(repoConfig.name);
   if (qaFirst) {
     const waiting = await tryQaBeforeMerge(rt, repoConfig, config, logger, cycleNumber, events);
     if (waiting === "handled") return true;
@@ -61,7 +70,7 @@ async function reviewPass(
   // could not take a PR the repo waits (backoff.agentUnavailable).
   const agent = roleFor("reviewer", config);
   if (!agent) {
-    const open = codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
+    const open = await codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
     const key = open ? `${repoName}#${open.prNumber}` : "";
     if (open && !rt.memory.leftForHuman.has(key)) {
       rt.memory.leftForHuman.add(key);
@@ -84,13 +93,13 @@ async function reviewPass(
   }
 
   // Gate: is there an open feature PR awaiting EM review?
-  const candidate = codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
+  const candidate = await codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger);
   if (!candidate) {
     if (failures > 0) rt.memory.reviewFailureCount.set(repoName, 0);
     return false;
   }
   // The EM's `blocked` label on the PR's issue pauses review (docs/em-coordination.md §1).
-  if (pausedByBlockedLabel(rt, repoConfig, "review", candidate.prNumber, candidate.issueNumbers, reviewLogger)) return false;
+  if (await pausedByBlockedLabel(rt, repoConfig, "review", candidate.prNumber, candidate.issueNumbers, reviewLogger)) return false;
   // Stranded behind a verdict: the review already ran and asked for changes;
   // only its label move is missing. Make it, so the revise phase picks them up.
   if (candidate.stranded) {
@@ -107,16 +116,16 @@ async function reviewPass(
   }
 
   // CI gate: never spend a review session on a PR its own CI already rejects.
-  const checks = codeHost().getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
+  const checks = await codeHost().getPRCheckVerdict(repoConfig, candidate.prNumber, reviewLogger);
   if (checks.state === "pending") {
     reviewLogger.info(`PR #${candidate.prNumber} CI still running (${checks.pending.join(", ")}) — review waits for it`);
     return false;
   }
   if (checks.state === "failing") {
-    const bounces = codeHost().countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
+    const bounces = await codeHost().countCiBouncesSinceReview(repoConfig, candidate.prNumber, repoConfig.reviewerLogin, reviewLogger);
     if (bounces < maxCiBounces) {
       const names = checks.failing.map((f) => f.name).join(", ");
-      codeHost().bounceForRedCI(repoConfig, candidate.prNumber, checks);
+      await codeHost().bounceForRedCI(repoConfig, candidate.prNumber, checks);
       for (const n of candidate.issueNumbers) {
         await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
       }
@@ -129,13 +138,61 @@ async function reviewPass(
 
   // The candidate came from a snapshot that can be a refresh old; a PR merged or closed since is not
   // reviewed (foreman#180). Unknown (GitHub cannot say) waits a pass rather than spend a review.
-  const prState = codeHost().readPrState(repoConfig, candidate.prNumber, reviewLogger);
+  const prState = await codeHost().readPrState(repoConfig, candidate.prNumber, reviewLogger);
   // A read that fails throws and fails the pass (EM#1244 f5); it is never a state.
   if (prState !== "OPEN") {
     codeHost().forgetOpenPrs(repoConfig.githubRepo);
     reviewLogger.info(`PR #${candidate.prNumber} is already ${prState.toLowerCase()} — no review started; the snapshot is dropped`);
     return false;
   }
+
+  // The input this review acts on is the PR's head. A read that fails throws and fails the pass (EM#1244 f5).
+  const head = await codeHost().readPrHeadSha(repoConfig, candidate.prNumber, reviewLogger);
+
+  // An empty diff is not reviewable: the Tech Lead refuses to review nothing, so every pass would pick the PR
+  // up again and fail the same way, and revise (which reads an EM scope ruling) would never run (foreman#110).
+  // Route it to revise instead, saying why on the PR once per head; revise's no-commit streak then bounds the
+  // round trip and hands a stalemate to the EM, whose ruling resumes it.
+  if (candidate.issueNumbers.length > 0) {
+    const changed = await codeHost().prChangedFiles(repoConfig.githubRepo, candidate.prNumber, repoConfig.repoPath, reviewLogger);
+    if (changed.length === 0) {
+      const mark = `<!-- foreman-empty-diff sha=${head} -->`;
+      if (!await codeHost().hasCommentContaining(repoConfig, candidate.prNumber, mark)) {
+        await codeHost().commentOnPr(repoConfig, candidate.prNumber,
+          `${mark}\nThis PR changes no files against \`${repoConfig.baseBranch}\` at \`${head.slice(0, 12)}\`, so there is nothing to review. ` +
+          `Sent back to revise: read the newest \`**EM scope ruling\` on this PR and either land what it asks for, ` +
+          `or say why nothing can land. A revision that leaves the diff empty pushes nothing and stops, and the EM rules.`);
+      }
+      for (const n of candidate.issueNumbers) await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, reviewLogger);
+      reviewLogger.info(`PR #${candidate.prNumber} has an empty diff at ${head.slice(0, 12)} — sent to revise, no review spent`);
+      events?.push({ message: `${repoConfig.githubRepo} PR #${candidate.prNumber}: empty diff — sent to revise instead of review`, level: "warn" });
+      return true;
+    }
+  }
+
+  // No step runs twice on the same input (src/step-attempts.ts): a review of this head is admitted a bounded number
+  // of times, recorded before it starts. A PR that has used them all is held for the EM, never offered again;
+  // a push (new head) or an EM scope ruling posted after the last attempt resumes it.
+  const admission = await rt.attempts.admit(repoConfig, candidate.prNumber, "review", head, MAX_REVIEW_ATTEMPTS_PER_HEAD,
+    async (since) => rulingAnswersStalemate((await codeHost().readRulingState(repoConfig.githubRepo, candidate.prNumber, repoConfig.repoPath, reviewLogger)).rulingAt, since));
+  if (admission.status === "unavailable") {
+    reviewLogger.info(`PR #${candidate.prNumber}: its review attempts cannot be recorded in the work source — no review this pass`);
+    return false;
+  }
+  if (admission.status === "held") {
+    if (admission.first) {
+      const issues = candidate.issueNumbers.map((n) => `#${n}`).join(", ");
+      const ask = `PR #${candidate.prNumber} was reviewed ${admission.count} times at the same head (${head.slice(0, 12)}) with no change in between. ` +
+        `Review is held. EM: run /rule-on-scope ${repoConfig.githubRepo} ${candidate.prNumber}${issues ? ` (issues ${issues})` : ""}, or push to the PR; either resumes it.`;
+      reviewLogger.warn(`${ask}`);
+      events?.push({ message: `\u26a0\ufe0f ${repoConfig.githubRepo} \u2014 ${ask}`, level: "warn" });
+      for (const n of candidate.issueNumbers) await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason: ask, stuck: "needs-ruling" }, repoConfig, reviewLogger);
+    } else {
+      reviewLogger.debug(`PR #${candidate.prNumber} review is held for the EM: ${admission.count} attempts at head ${head.slice(0, 12)}`);
+    }
+    return false;
+  }
+  const refund = () => rt.attempts.refund(repoConfig, candidate.prNumber, "review", head);
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const transcriptPath = resolve(process.cwd(), "logs", "review", `${repoName}-cycle${cycleNumber}-${ts}.log`);
@@ -150,7 +207,7 @@ async function reviewPass(
   // The session reads the code from here rather than cloning one for itself.
   // Prepared before the run so it is warm on arrival; see review-checkout.ts
   // for why an unmanaged clone per review took the whole box down.
-  const checkoutPath = prepareReviewCheckout(config, repoConfig, reviewLogger);
+  const checkoutPath = await prepareReviewCheckout(config, repoConfig, reviewLogger);
 
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
@@ -188,6 +245,8 @@ async function reviewPass(
       reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
       // An unavailable work source is a silent tooling defer: the card is not moved to Blocked, so a blip
       // that clears on the next pass leaves no stale hold behind (foreman#180).
+      // Neither it nor the wait below reviewed anything: the attempt is given back.
+      await refund();
       if (result.unavailable) return false;
       // A wait is a Blocked card that says what clears it; the next review session moves it on.
       const why = `waiting on the Tech Lead: it could not take PR #${candidate.prNumber} (${result.reason}) — the review retries automatically in ${wait}`;
@@ -196,7 +255,7 @@ async function reviewPass(
     }
     rt.memory.reviewDefer.clear(repoName);
     if (wantsSessionReports()) {
-      report = reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
+      report = await reviewReport(repoConfig, candidate.prNumber, result.trailers ?? [], result.summary, reviewSince, reviewLogger);
     }
 
     if (result.success) {
@@ -221,10 +280,10 @@ async function reviewPass(
     // Ask GitHub, not the trailer: a run killed at the wall may never have
     // emitted one. `planFailedReviewOutcome` holds the rule and the incident
     // behind it (#41).
-    const mergedRefs = codeHost().findIssuesMergedToBase(repoConfig, candidate.issueNumbers, reviewLogger);
+    const mergedRefs = await codeHost().findIssuesMergedToBase(repoConfig, candidate.issueNumbers, reviewLogger);
     const plan = codeHost().planFailedReviewOutcome(
       mergedRefs,
-      codeHost().findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
+      await codeHost().findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
     );
 
     ended = { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
@@ -266,6 +325,7 @@ async function reviewPass(
     // After the reconciliation above, so a review that merged and then hit the
     // limit still settles its labels. The card still goes to Blocked.
     if (result.upstreamLimit || isUpstreamBlocked("github")) {
+      await refund(); // a limit refused the run: nothing was reviewed
       const why = stoppedReason(`Review of PR #${candidate.prNumber}`, result, isUpstreamBlocked("github"));
       for (const n of candidate.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why, at: "inReview" }, repoConfig, reviewLogger);
       return false;
@@ -304,7 +364,7 @@ async function reviewPass(
     if (checkoutPath) {
       try {
         const stillApproved = (await workSourceFor(repoConfig).selectEligible?.(repoConfig, reviewLogger) ?? []).length;
-        const stillToReview = codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
+        const stillToReview = await codeHost().findPRsNeedingReview(repoConfig, repoConfig.reviewerLogin, reviewLogger) ? 1 : 0;
         releaseReviewCheckout(config, repoConfig, stillApproved + stillToReview, reviewLogger);
       } catch (err) {
         // Never let bookkeeping fail the phase. The nightly sweep is the backstop.
@@ -319,17 +379,17 @@ async function reviewPass(
     // takes ownership. When one is open the label is SUPPOSED to be gone, and
     // restoring it would fight the promotion path — so that case is checked
     // before any write, and only when something actually looks revoked.
-    const revoked = codeHost().findRevokedEmGates(
+    const revoked = await codeHost().findRevokedEmGates(
       repoConfig, candidate.issueNumbers, reviewStartedAt, reviewLogger,
     );
     const promotionOwnsIt = revoked.length > 0 &&
-      !!codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, reviewLogger);
+      !!await codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, reviewLogger);
     if (promotionOwnsIt) {
       reviewLogger.info(
         `"${repoConfig.lifecycleLabels.readyForProd}" left removed on #${revoked.join(", #")} — an open promotion PR owns it now.`,
       );
     }
-    const restored = promotionOwnsIt ? [] : codeHost().restoreEmGate(repoConfig, revoked, reviewLogger);
+    const restored = promotionOwnsIt ? [] : await codeHost().restoreEmGate(repoConfig, revoked, reviewLogger);
     if (restored.length > 0) {
       events?.push({
         message: `⚠️ ${repoConfig.githubRepo} — the review run removed "${repoConfig.lifecycleLabels.readyForProd}" from issue(s) ${restored.map((n) => `#${n}`).join(", ")}; restored. Promotion would otherwise have stalled silently.`,
@@ -376,7 +436,7 @@ export async function settleReviewOutcome(
     await notifyOnce(rt, "merged", repoConfig, issueNumbers, logger);
   }
   if (mergedPrs.length > 0) {
-    const stuck = codeHost().findIssuesStillUnderReview(repoConfig, issueNumbers, logger);
+    const stuck = await codeHost().findIssuesStillUnderReview(repoConfig, issueNumbers, logger);
     if (stuck.length > 0) {
       logger.warn(
         `Review post-condition: PR(s) #${mergedPrs.join(", #")} reported merged, but issue(s) #${stuck.join(", #")} are still "${repoConfig.lifecycleLabels.prUnderReview}" — the run merged without completing the label transition`,

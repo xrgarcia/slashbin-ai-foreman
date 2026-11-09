@@ -14,6 +14,7 @@ import { canonicalJson } from "./record-store.js";
 import { activeWorkSource } from "./plugins/registry.js";
 import type { UnstickEntry } from "./unstick.js";
 import type { SavedRelease } from "./release-tracker.js";
+import type { BatchHistory } from "./dependency-batch/ledger.js";
 
 /**
  * A release the release stage is carrying (EM#578), keyed by release PR. Kept
@@ -216,10 +217,24 @@ export interface PrRecord {
   noCommit?: NoCommitStreak;
   /** This PR was the last one closed unmerged on its branch, and the EM was alerted that the branch still stands at this head (was `rejectedBranches[branch]`). */
   rejectedHead?: string;
+  /** What each repeating step last acted on for this PR, and how many times on that same input (src/step-attempts.ts). */
+  attempts?: Record<string, InputAttempt>;
+}
+
+/**
+ * One repeating step's attempts on one input. `input` is what the step acted on (for review, the PR head SHA);
+ * `count` is the attempts made on exactly that input; `held` is set once the cap was reached and the owner was told.
+ */
+export interface InputAttempt {
+  input: string;
+  count: number;
+  /** When the last attempt was admitted (ISO). An EM scope ruling posted after it releases a held step. */
+  at: string;
+  held?: true;
 }
 
 export type PrField = keyof PrRecord;
-const PR_FIELDS: readonly PrField[] = ["release", "tracked", "noCommit", "rejectedHead"];
+const PR_FIELDS: readonly PrField[] = ["release", "tracked", "noCommit", "rejectedHead", "attempts"];
 
 /** What a read of several PRs found. `unavailable` is never "no record": nothing may act on those PRs this cycle. */
 export interface PrRecords {
@@ -254,10 +269,12 @@ export interface RepoRecord {
   divergenceRuled?: string[];
   /** The Paperclip card blocks of this repo's cards, by card id (was `cardBlocks`). */
   cardBlocks?: Record<string, CardBlockRecord>;
+  /** What became of each dependency batch, by batch key (PRs + head SHAs): the dependency sweep's durable memory (foreman#230). */
+  dependencyBatches?: Record<string, BatchHistory>;
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

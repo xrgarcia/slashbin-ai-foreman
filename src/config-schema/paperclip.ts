@@ -135,7 +135,10 @@ export const paperclipConfigSchema = z.object({
   // The registry's MCP endpoint (slashbin_mcp_services, `repo_identity`). The mirror compares
   // cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an
   // item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own
-  // key (exact string comparison), and no registry call is made.
+  // key (exact string comparison), and no registry call is made. Set, each open card also
+  // carries its GitHub issue's customer labels: every issue label whose name matches a registry
+  // customer's `github_label` (list_customers), in name order, or `no customer label` alone when none does. Unset:
+  // no customer label is written, and the mirror works the same otherwise.
   registryUrl: z.url().optional(),
   // The bearer credential the registry's router requires. Set it from the environment; it is a
   // secret and is redacted from the mirror's logs. Unset sends no authorization header.
@@ -184,7 +187,7 @@ export const paperclipConfigSchema = z.object({
   agentReportsTo: z.string().min(1).optional(),
   // Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none).
   board: boardStagesSchema,
-  // The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched.
+  // The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched, except the customer label (registryUrl).
   stageLabels: stageLabelsSchema,
   // Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way.
   liveLeaseMinutes: z.number().int().positive().default(15),

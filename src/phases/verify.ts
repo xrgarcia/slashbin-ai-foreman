@@ -33,8 +33,8 @@ export function isDeployFailureHold(reason: string): boolean {
 }
 
 /** The files a PR touched, for the EM's call; an unreadable list throws and fails the pass (EM#1244 f5). */
-function prFilesTouched(repoConfig: RepoConfig, pr: number, vlog: Logger): string[] {
-  return codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog).slice(0, 40);
+async function prFilesTouched(repoConfig: RepoConfig, pr: number, vlog: Logger): Promise<string[]> {
+  return (await codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog)).slice(0, 40);
 }
 
 export function reopensOnBaseAdvance(reason: string): boolean {
@@ -69,11 +69,14 @@ export const SRE_TOOLING_HOLDS: readonly string[] = [
  */
 export const FOREMAN_TOOLING_HOLDS: readonly string[] = [
   "qa-errored",
+  "qa-coverage-unknown",
   "qa-held-dev-unreachable",
   "qa-held-sign-in-failed",
   "qa-held-review-unavailable",
   "qa-held-pr-unreadable",
   "qa-held-baseline-unreadable",
+  // QA's own registry read failed (slashbin_ai_qa#32: hold `registry-unavailable`, derived as `qa-held-<hold>`).
+  "qa-held-registry-unavailable",
   // QA before the merge (`check --local`): QA's own boot failed, the Console's seed is missing, or the
   // data QA reads was unreachable. None is a verdict on the PR (qa-local-seed-missing is the Console's to fix).
   "qa-held-qa-local-boot-failed",
@@ -216,12 +219,12 @@ export function pickVerifyTarget(
  */
 async function takeQaRerunRequests(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, vlog: Logger): Promise<void> {
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
-  const approved = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)
+  const approved = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog))
     .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, readyForProd)).map((i) => i.number);
   if (approved.length === 0) return;
   const deps = realQaDeps(repoConfig, config, vlog);
   const byPr = new Map<number, number[]>();
-  for (const r of codeHost().findIssuesMergedToBase(repoConfig, approved, vlog)) byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
+  for (const r of await codeHost().findIssuesMergedToBase(repoConfig, approved, vlog)) byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
   for (const [pr, issues] of byPr) {
     try {
       if (!postMergeQaState(await deps.comments!(pr), []).rerunRequested) continue;
@@ -261,13 +264,13 @@ export async function tryVerify(
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
-  if (qaApplies(repoConfig, config)) await takeQaRerunRequests(rt, repoConfig, config, vlog);
-  const awaiting = codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
+  if ((await qaApplies(repoConfig, config)) === true) await takeQaRerunRequests(rt, repoConfig, config, vlog);
+  const awaiting = await codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
   // The holds of the issues this pass looks at: the ones awaiting verification, and the repo's other open
   // issues, whose holds are stale. An issue whose record cannot be read is left alone, not read as unheld.
   let openNumbers: number[] = [];
   try {
-    openNumbers = codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog).map((i) => i.number);
+    openNumbers = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, vlog)).map((i) => i.number);
   } catch (err) {
     vlog.debug(`Open issues unreadable — stale holds are not pruned this pass: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -293,7 +296,7 @@ export async function tryVerify(
   }
   if (waiting.length === 0) return false;
 
-  const refs = codeHost().findIssuesMergedToBase(repoConfig, waiting, vlog);
+  const refs = await codeHost().findIssuesMergedToBase(repoConfig, waiting, vlog);
   // The blocked verify holds, re-checked: a merged PR now closes a
   // "no merged PR" hold; an edited spec reopens any failed one at once, with a
   // fresh attempt count, because retrying an unchanged spec cannot pass; new
@@ -306,8 +309,8 @@ export async function tryVerify(
     if (h.rework && !h.rework.landed && !exhausted) {
       // Waiting on the Foreman's fix: it landed once its issue's PR merged (or, with none filed, base moved).
       const landed = h.rework.issue !== null
-        ? codeHost().findIssuesMergedToBase(repoConfig, [h.rework.issue], vlog).length > 0
-        : baseAdvancedSince(repoConfig, h.heldAt) === true;
+        ? (await codeHost().findIssuesMergedToBase(repoConfig, [h.rework.issue], vlog)).length > 0
+        : (await baseAdvancedSince(repoConfig, h.heldAt)) === true;
       if (landed) {
         held[n] = { ...h, rework: { ...h.rework, landed: true } };
         vlog.info(`#${n}: the visual QA rework ${h.rework.issue !== null ? `#${h.rework.issue} ` : ""}landed — re-verifying`);
@@ -319,8 +322,8 @@ export async function tryVerify(
     const ok = noPr
       ? await releaseIfResolved(rt, "verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
       : await releaseIfResolved(rt, kind, {
-        specEdited: issueEditedSince(repoConfig, n, h.heldAt),
-        ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: baseAdvancedSince(repoConfig, h.heldAt) } : {}),
+        specEdited: await issueEditedSince(repoConfig, n, h.heldAt),
+        ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: await baseAdvancedSince(repoConfig, h.heldAt) } : {}),
         // Exhausted on a reason that no longer charges (it joined TOOLING_HOLDS after the
         // attempts were spent): those attempts were never verdicts, so it reopens.
         ...(exhausted ? { holdNoLongerCharged: isToolingHold(h.reason) } : {}),
@@ -347,6 +350,7 @@ export async function tryVerify(
   activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
   const session: Omit<SessionEvent, "status"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE" };
+  let scheduled: { resumeAt: string; waitReason: string } | undefined;
   let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the verification ended without a result" };
   const issues = target.issueNumbers.map((n) => `#${n}`).join(", ");
   vlog.info(`Verifying ${repoName} PR #${target.prNumber} in dev (issues: ${issues}), transcript: ${transcriptPath}`);
@@ -359,16 +363,22 @@ export async function tryVerify(
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
     // Held in memory until the record has them; the gate runs on EVERY result, so a clean re-verification cannot advance past an unsaved report.
     const subject = handoffSubject(repoConfig.githubRepo, target.prNumber);
-    if (sre.kind === "verdict" && sre.unrelated) await rt.handoffs.noteUnrelated(repoConfig, sre.unrelated, `${repoConfig.githubRepo} PR #${target.prNumber} (dev)`, subject);
-    else await rt.handoffs.settleHandoffs(repoConfig, subject);
+    await rt.handoffs.settleHandoffs(repoConfig, subject,
+      sre.kind === "verdict" && sre.unrelated ? { seen: sre.unrelated, seenOn: `${repoConfig.githubRepo} PR #${target.prNumber} (dev)` } : undefined);
     // The QA gate (config.qaGate): QA runs on an SRE pass BEFORE the advance, and a FAIL, HELD or
     // crash turns the pass into a hold. Gate off, or not a QA repo: the SRE's result is unchanged.
     // qaBeforeMerge: QA already passed this head before the merge, so it does not run again here.
-    const qaBeforeMerge = qaBeforeMergeApplies(repoConfig, config);
+    const qaPre = await qaBeforeMergeApplies(repoConfig, config);
+    const qaBeforeMerge = qaPre === true;
+    // Asked only on a pass, and only when QA could matter; "unknown" is a no-charge hold below, never an advance.
+    const qaCovers = sre.kind === "verdict" && sre.pass ? (qaPre === "unknown" ? "unknown" : await qaApplies(repoConfig, config)) : false;
     // qaBeforeMerge, but no real PASS since the EM's last re-run request (none, or a void 0-shot one): the gate runs here.
     const qaAgain = sre.kind === "verdict" && sre.pass && qaBeforeMerge && await postMergeQaNeeded(target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
     let r: VerifyResult = sre;
-    if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) || qaAgain)) {
+    if (sre.kind === "verdict" && sre.pass && qaCovers === "unknown") {
+      vlog.warn(`QA could not say whether it covers ${repoConfig.githubRepo}; PR #${target.prNumber} is held, not advanced`);
+      r = { ...sre, pass: false, reason: "qa-coverage-unknown", summary: "QA could not say whether it covers this repo (its registry was unavailable or the question timed out)", by: "QA" };
+    } else if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaCovers === true) || qaAgain)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
       const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
       await emit(rt, { kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
@@ -385,7 +395,7 @@ export async function tryVerify(
       }
       await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
-      if (!config.qaGate && !qaBeforeMerge && qaApplies(repoConfig, config)) {
+      if (!config.qaGate && !qaBeforeMerge && qaCovers === true) {
         void rt.qaReports.run(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
       ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
@@ -396,7 +406,9 @@ export async function tryVerify(
     const reason = r.kind === "verdict" ? (r.reason ?? "held") : r.error;
     const plan = r.kind === "verdict" ? verifyHoldPlan(reason) : { kind: "charge" as const };
     if (plan.kind === "defer") {
-      const wait = formatWait(rt.memory.verifyDefer.start(repoName, agentUnavailable));
+      const waitMs = rt.memory.verifyDefer.start(repoName, agentUnavailable);
+      const wait = formatWait(waitMs);
+      scheduled = { resumeAt: new Date(Date.now() + waitMs).toISOString(), waitReason: `the SRE could not run (${reason})` };
       ended = { status: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
       vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
       const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
@@ -410,6 +422,7 @@ export async function tryVerify(
         kept[n] = { heldAt: new Date().toISOString(), prNumber: target.prNumber, reason, attempts: kept[n]?.attempts ?? 0, retryAt: plan.retryAt };
       }
       await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
+      scheduled = { resumeAt: plan.retryAt, waitReason: reason };
       ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
       vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
       events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
@@ -429,7 +442,7 @@ export async function tryVerify(
     const summary = r.kind === "verdict" ? r.summary : "";
     const decision = r.kind === "verdict" && !isDeployFailureHold(reason)
       // The PR link leads: the QA Report and the SRE's evidence comments are on it even when the output names no URL.
-      ? { files: prFilesTouched(repoConfig, target.prNumber, vlog), evidence: [`https://github.com/${repoConfig.githubRepo}/pull/${target.prNumber}`, ...evidenceLinks(summary)].slice(0, 8), verdict: summary.trim().slice(-600) }
+      ? { files: await prFilesTouched(repoConfig, target.prNumber, vlog), evidence: [`https://github.com/${repoConfig.githubRepo}/pull/${target.prNumber}`, ...evidenceLinks(summary)].slice(0, 8), verdict: summary.trim().slice(-600) }
       : undefined;
     for (const n of target.issueNumbers) {
       // The same failure keeps its first evidence, so a retry that fails the same way is not a new question for the EM.
@@ -448,7 +461,7 @@ export async function tryVerify(
     return false;
   } finally {
     activeRuns.delete(runAbort);
-    await emit(rt, { kind: "session", session: { ...session, ...ended } }, null, vlog);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(scheduled ?? {}) } }, null, vlog);
   }
 }
 

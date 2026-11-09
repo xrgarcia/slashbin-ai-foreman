@@ -23,7 +23,7 @@ and runs setup. This page is the same thing by hand.
 
 | Tool | Check |
 |---|---|
-| Node.js 22.12 or newer (the handoff-contract client is an ES module loaded with `require`) | `node --version` |
+| Node.js 22.12 or newer (the handoff-contract client is an ES module loaded with `require`). The optional metrics log also needs `node:sqlite`, which Node 22.12 ships only behind a flag; without it the daemon still starts and logs a warning ([metrics.md](metrics.md#requirements)) | `node --version` |
 | Claude Code, logged in | `claude --version` |
 | GitHub CLI | `gh --version` |
 
@@ -44,9 +44,14 @@ token into a chat or into the config file.
 
 | Variable | Needed when | What it is |
 |---|---|---|
-| `FOREMAN_GITHUB_TOKEN` | Always (recommended) | The Foreman's own account: it opens PRs and moves labels. Needs write access to every repo. Unset, the Foreman acts as whoever `gh` is logged in as. |
+| `FOREMAN_GITHUB_TOKEN` | Always | The Foreman's own account: it opens PRs and moves labels. Needs write access to every repo. Unset or rejected by GitHub (401), the daemon refuses to start (exit 78): there is no fallback to `gh`'s login. |
 | `TECHLEAD_GITHUB_KEY` | Review is on, or you want sync PRs merged automatically | A second account that reviews and merges, so the Foreman never approves its own work. |
 | `SRE_GITHUB_KEY` | `srePath` is set | The account that verifies merged work in dev. |
+| `EM_GITHUB_TOKEN` | The `unstick` stage runs (see [pipeline.md](pipeline.md)) | The Engineering Manager's account, handed to the unstick session. Also needs `emRepoPath` (the EM checkout). Required once `emRepoPath` is set: unset or rejected, the daemon refuses to start. |
+
+The Foreman's token also writes its records: one comment per issue or PR, and one closed
+bookkeeping issue per repo, created on first use. It needs permission to comment on and
+open issues in every managed repo. See [upgrading.md](upgrading.md#what-happens-to-existing-state-on-first-start).
 
 ## 2. The config
 
@@ -59,6 +64,10 @@ implementation, revision, and orphan-PR recovery. The example below leaves
 `stages` unset, so it uses the default pipeline: branch sync, dependency batches,
 and promotion are included; automated review, verification, and release require
 the additional configuration described in [pipeline.md](pipeline.md).
+
+The core ships neutral. Slashbin's own deployment defaults (who an unstick give-up
+mentions, the QA repo, the review MCP tools) come from `"profile": "slashbin"`; see
+[Profiles](config-guide.md#profiles). Other deployments leave `profile` unset.
 
 The smallest working config using those defaults:
 

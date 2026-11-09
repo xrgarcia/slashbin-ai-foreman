@@ -1,6 +1,6 @@
 // The unstick stage (foreman#103): what is stuck, and the EM call. Run with
-// `npm test`. The whole-pass behaviour is proved by the EM's acceptance script
-// (scripts/slashbin-ai/foreman-103-unstick-acceptance.mjs); these pin the parts.
+// `npm test`. These pin the parts; the EM's side of the call is covered by the EM's
+// own `bin/em.mjs unstick` acceptance (slashbin-engineering-manager).
 import test from "node:test";
 import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
@@ -29,6 +29,7 @@ test("the kinds are the EM contract, verbatim", () => {
     "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate", "rework-decision",
     "unrelated-error",
     "epic-ready-to-close",
+    "dependency-batch-loop",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
   assert.equal(emUnstickMaxDurationMs("skip"), 20 * 60_000);

@@ -1,8 +1,7 @@
 import { z } from "zod";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
 import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
 import { enabledFor } from "./plugins/registry.js";
 import {
@@ -26,6 +25,15 @@ import { applyProfile, profileNamed } from "./profiles/index.js";
 // reads what implement wrote, revise reads what review wrote — so two repos with
 // different names would be one fleet speaking two protocols. `triggerLabel` stays
 // separate for the opposite reason: it selects work, and it does cascade per repo.
+/**
+ * The production grant label, `deliver-to-prod`: the EM's release gate reads it on a standalone
+ * issue as the owner's authorization to ship that issue to production. Deliberately NOT in
+ * `lifecycleLabels` (those are stripped as an issue moves through the pipeline; a grant must stay),
+ * and the Foreman never acts on it: it only files dependency batches carrying it on a
+ * `dependencyPreApproved` repo (owner decision 2026-11-06).
+ */
+export const PROD_GRANT_LABEL = "deliver-to-prod";
+
 const lifecycleLabelsSchema = z.object({
   // Implement/revise opened or updated a PR; the review phase picks it up.
   prUnderReview: z.string().min(1).default("pr under review"),
@@ -84,7 +92,9 @@ const repoEntrySchema = z.object({
   // Per-repo reviewer identity; falls back to the global value.
   reviewerLogin: z.string().optional(),
   // Owner standing authorization: file this repo's dependency batch issue
-  // already carrying the trigger label. Opt-in per repo, default OFF — owner
+  // already carrying the trigger label and the production grant label
+  // `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for
+  // prod release` per issue). Opt-in per repo, default OFF — owner
   // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
   // the batch unapproved, as before, and nothing builds until a human approves.
   dependencyPreApproved: z.boolean().optional(),
@@ -291,14 +301,20 @@ export const configSchema = z.object({
   // passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the
   // result is posted on the PR as "## QA Report (report-only)". It never gates:
   // the card moves to prApproved first and nothing waits on QA. Unset = no QA.
-  // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY).
+  // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry
+  // bearer, `qaBearerKey`).
   qaPath: z.string().optional(),
-  // GitHub repos (owner/name) QA applies to. Default none.
+  // GitHub repos (owner/name) QA applies to. Default none. Override: covered even when QA says no.
+  // Any other repo is covered when `bin/qa.mjs covers --repo R` exits 0 (EM#794).
   qaRepos: z.array(z.string()).default([]),
   // The script in the EM checkout (relative to emRepoPath) that runs QA's dev check
-  // with its one secret, DEV_SESSION_MINT_KEY, handed to that child alone. Unset =
-  // the dev check reports `errored` instead of running; the local check needs none.
+  // with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (`qaBearerKey`), handed to
+  // that child alone. The local check and the `covers`
+  // question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
   qaSecretsRunner: z.string().min(1).optional(),
+  // The registry bearer's key for the runner's --keys, as `NAME` or `NAME@project` (a pin lists
+  // that one Doppler project instead of every one). It lives only in `prd`.
+  qaBearerKey: z.string().min(1).default("EM_SLASHBIN_MCP_ROUTER_BEARER"),
   // Whether QA gates delivery. false (default) = report-only: the card advances on the
   // SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances,
   // FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card
@@ -306,7 +322,7 @@ export const configSchema = z.object({
   qaGate: z.boolean().default(false),
   // QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA
   // fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs
-  // `bin/qa.mjs check --local` on the approved head (it boots the PR itself, no secret), and only
+  // `bin/qa.mjs check --local` on the approved head (it boots the PR itself; only the registry bearer), and only
   // a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder.
   // Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged.
   // Needs `qaPath` and `techLeadPath`. A config flip, reversible.
@@ -384,7 +400,7 @@ export const configSchema = z.object({
   // (src/lanes.ts): revise+implement form the `build` lane, promote+release the
   // `release` lane, every other built-in a lane of its own, and each (repo, lane)
   // pair polls on its own loop. Order matters only inside a lane. Omitted, it is
-  // the ten built-ins in order; `release` runs only when both srePath and
+  // the eleven built-ins in order; `release` runs only when both srePath and
   // techLeadPath are set and is skipped with a startup warning otherwise. Listing
   // `release` explicitly without both is refused at startup. A custom stage is
   // `{ id, skillPath }`: one Claude session on that skill, in the lane of the
@@ -437,11 +453,28 @@ export const configSchema = z.object({
     // to batch every Dependabot PR, as before.
     securityOnly: z.boolean().default(true),
   }).prefault({}),
+
+  // --- Metrics ---
+  // The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle
+  // stage advances in a local SQLite file, read back with `npm run metrics:report`.
+  // Global. Off unless `enabled`.
+  metrics: z.object({
+    // Record lifecycle events. Off by default.
+    enabled: z.boolean().default(false),
+    // The SQLite file. Omitted: `foreman-metrics.db` in the Foreman's state directory.
+    // A leading `~` is expanded.
+    path: z.string().min(1).optional(),
+    // Days of events kept; older rows are deleted at start and at most hourly after.
+    retentionDays: z.number().int().min(1).default(90),
+  }).prefault({}),
 });
 
 // --- Types ---
 
 export interface DependabotConfig { readonly securityOnly: boolean }
+
+/** The metrics observer's settings (`metrics` block). */
+export interface MetricsConfig { readonly enabled: boolean; readonly path?: string; readonly retentionDays: number }
 
 
 /** Configured names of the lifecycle labels. See `lifecycleLabelsSchema`. */
@@ -498,6 +531,8 @@ export interface RepoConfig {
   dependencyPreApproved: boolean;
   /** The fleet-wide Dependabot selection — the global value. */
   dependabot: DependabotConfig;
+  /** The metrics observer's settings — the global value. */
+  metrics: MetricsConfig;
   /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
   skillSyncSkills?: readonly string[];
   /** Sync-only (human lane): only the `skill-deliver` stage runs here; see the repo schema. */
@@ -566,6 +601,8 @@ export interface AgentConfig {
   qaRepos: string[];
   /** EM-checkout-relative script that runs QA's dev check with its secret; undefined = the dev check errors. */
   qaSecretsRunner?: string;
+  /** The registry bearer's runner key, `NAME` or `NAME@project` (see configSchema). */
+  qaBearerKey: string;
   /** QA gates the advance to prApproved (see configSchema). */
   qaGate: boolean;
   /** QA runs on the PR head before the Tech Lead merges it (see configSchema). */
@@ -594,6 +631,8 @@ export interface AgentConfig {
   skillSync: SkillSyncConfig;
   /** The Dependabot stage's selection (`dependabot` block). */
   dependabot: DependabotConfig;
+  /** The metrics observer's settings (`metrics` block). */
+  metrics: MetricsConfig;
 }
 
 // --- Helpers ---
@@ -607,13 +646,38 @@ const SESSION_ENV_FORBIDDEN: readonly string[] = [
   "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY",
 ];
 
+/**
+ * The `origin` URL of a checkout, read from its git config files rather than by running `git remote
+ * get-url` (config loading is synchronous, and a subprocess here would hold the event loop on every
+ * reload; slashbin-ai-foreman#253). A linked worktree's `.git` is a file naming its gitdir, whose
+ * `commondir` points at the config. Undefined when there is none.
+ */
+function originUrlOf(repoPath: string): string | undefined {
+  const root = resolve(repoPath);
+  let gitDir = resolve(root, ".git");
+  if (statSync(gitDir).isFile()) {
+    const m = readFileSync(gitDir, "utf-8").match(/^gitdir:\s*(.+)$/m);
+    if (!m) return undefined;
+    gitDir = resolve(root, m[1].trim());
+  }
+  const commonFile = resolve(gitDir, "commondir");
+  const common = existsSync(commonFile) ? readFileSync(commonFile, "utf-8").trim() : "";
+  const configDir = common ? (isAbsolute(common) ? common : resolve(gitDir, common)) : gitDir;
+  let inOrigin = false;
+  for (const raw of readFileSync(resolve(configDir, "config"), "utf-8").split("\n")) {
+    const line = raw.trim();
+    const section = line.match(/^\[\s*(\S+)(?:\s+"([^"]*)")?\s*\]/);
+    if (section) { inOrigin = section[1].toLowerCase() === "remote" && section[2] === "origin"; continue; }
+    const kv = inOrigin ? line.match(/^url\s*=\s*(.+)$/i) : null;
+    if (kv) return kv[1].trim();
+  }
+  return undefined;
+}
+
 function inferGithubRepo(repoPath: string): string | undefined {
   try {
-    const remote = execSync("git remote get-url origin", {
-      cwd: resolve(repoPath),
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    const remote = originUrlOf(repoPath);
+    if (!remote) return undefined;
     const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/);
     return match?.[1];
   } catch {
@@ -627,8 +691,11 @@ function inferGithubRepo(repoPath: string): string | undefined {
  * label. The one selection rule — onboarding, `npm run labels:install` and
  * `npm run doctor` all read it from here.
  */
-export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github">): string[] {
-  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
+export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github"> & { dependencyPreApproved?: boolean }): string[] {
+  // The production grant label is not a lifecycle label (lifecycle labels get stripped as an issue moves);
+  // a pre-approved repo files its dependency batches carrying it, and gh refuses a label that does not exist.
+  const grant = repo.dependencyPreApproved ? [PROD_GRANT_LABEL] : [];
+  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel, ...grant])];
 }
 
 /** True when the unstick stage can run: an enabled unstick plugin (the EM: `emRepoPath`). Independent of `paperclip.enabled`. */
@@ -741,6 +808,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
     qaRepos: fileConfig.qaRepos,
     qaSecretsRunner: fileConfig.qaSecretsRunner,
+    qaBearerKey: fileConfig.qaBearerKey,
     qaGate: fileConfig.qaGate,
     qaBeforeMerge: fileConfig.qaBeforeMerge,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
@@ -760,6 +828,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     paperclip: leniencyForDisabled(mergePaperclip(fileConfig.paperclip)),
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
+    metrics: fileConfig.metrics,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -789,6 +858,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
+    metrics: Object.freeze({ enabled: parsed.metrics.enabled, path: parsed.metrics.path, retentionDays: parsed.metrics.retentionDays }),
     epicRefLabel: parsed.epicRefLabel,
   };
 
@@ -950,6 +1020,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaRepos: [...parsed.qaRepos],
     qaSecretsRunner: parsed.qaSecretsRunner,
+    qaBearerKey: parsed.qaBearerKey,
     qaGate: parsed.qaGate,
     qaBeforeMerge: parsed.qaBeforeMerge,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
@@ -968,5 +1039,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     paperclip,
     skillSync: resolveSkillSync(parsed.skillSync),
     dependabot: globals.dependabot,
+    metrics: globals.metrics,
   });
 }

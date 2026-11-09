@@ -54,11 +54,24 @@ whether you pushed.
    PR's own CI is red. The checklist is: make each named failing check pass. Read
    `.github/workflows/` for the exact command each check runs, reproduce it locally, fix
    the code (never the test), and confirm it passes before pushing.
-5. **Build to the required outcome, not the suggested route.** If a finding states the
+5. **A comment starting `<!-- foreman-empty-diff sha=<sha> -->` is current only while it
+   matches the PR.** Compare its `sha=` with the PR's head now (`gh pr view --json
+   headRefOid,files`). When they differ, or the PR now changes files, the comment is
+   history: ignore it and work the checklist from the review. When it matches and the PR
+   still changes no files, there is nothing to review, so the review sent it here. Read the
+   newest comment starting `**EM scope ruling` and land exactly what it asks. With no
+   ruling, or a ruling that asks for nothing, push nothing: end with the no-commit trailer
+   and comment why nothing can land. Never invent a change to give the PR a diff.
+6. **Prefer a revert; fix only what this PR introduced.** When a finding is about a change
+   this PR made and the change is not needed, undo it (revert the commit or delete the hunk)
+   instead of patching around it. Fix only defects this PR introduced. A defect that was
+   already in the base branch is not this PR's to fix: note it in the PR comment and leave
+   it, because widening the diff to chase it is what keeps a revision from converging.
+7. **Build to the required outcome, not the suggested route.** If a finding states the
    result the next review checks, aim at that result. A suggested route the reviewer did
    not verify is a hint — if the code shows it would not produce the outcome, reach the
    outcome another way and say why in your PR comment.
-6. **Fix the class, not the instance.** For each finding, grep the repository for every
+8. **Fix the class, not the instance.** For each finding, grep the repository for every
    other site with the same defect and fix them all in this revision.
 
 ## Phase 2: Implement Fixes

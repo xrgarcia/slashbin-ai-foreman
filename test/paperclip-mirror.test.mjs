@@ -1534,6 +1534,77 @@ test("no run on the card: the move is not deferred; a move that leaves it in_pro
   assert.equal(fake.rows[0].assigneeAgentId, AGENT, "and it was written through the run");
 });
 
+// --- A deferred move is decided again when retried, not replayed (SLA-4308, SLA-4311, 2026-11-06) ---
+
+test("a deferred move never undoes the escalation the run it waited for made (SLA-4308)", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "release gate missing", repoConfig, logger());
+  Object.assign(fake.rows[0], { status: "in_progress", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onState(item, "approved", "inReview", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the move is deferred while the EM seat's run is in flight");
+  // The EM seat's run escalates to Ray and ends: Blocked, on the EM, with the hop's descriptor.
+  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_ray_action): Ray card: SLA-4310" };
+  Object.assign(fake.rows[0], { status: "blocked", assigneeAgentId: "em-agent", unblockDescriptor: hop, executionRunId: null, checkoutRunId: null });
+  const before = statusPatches(fake).length;
+  await onSnap(mirror, "example/r", [], logger());
+  assert.equal(statusPatches(fake).length, before, "the deferred move was replayed over the escalation");
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.deepEqual(fake.rows[0].unblockDescriptor, hop);
+  // And it is dropped, not kept for a later pass.
+  await onSnap(mirror, "example/r", [], logger());
+  assert.equal(fake.rows[0].status, "blocked");
+});
+
+test("a deferred move GitHub has since moved past is dropped; the snapshot places the card (SLA-4311)", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await mirror.onClaim(item, repoConfig, logger());
+  await mirror.onBlocked(item, "x", repoConfig, logger());
+  Object.assign(fake.rows[0], { status: "in_progress", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onState(item, "inReview", "queued", repoConfig, logger());
+  // The run ends with the card in review, where GitHub is.
+  Object.assign(fake.rows[0], { status: "in_review", assigneeAgentId: AGENT, executionRunId: null, checkoutRunId: null });
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  assert.equal(fake.rows[0].status, "in_review", "a stale deferred move took the card back to To Do");
+});
+
+const escalateDuringRun = (row) => {
+  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_ray_action): Ray card: SLA-4310" };
+  Object.assign(row, { status: "blocked", assigneeAgentId: "em-agent", unblockDescriptor: hop, executionRunId: null, checkoutRunId: null });
+  return hop;
+};
+
+test("a deferred Foreman block never overwrites the escalation the awaited run made", async () => {
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board: raceBoard() });
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  Object.assign(fake.rows[0], { status: "in_progress", assigneeAgentId: "tl-agent", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onBlocked(item, "required checks not green", repoConfig, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the block is deferred while the run is in flight");
+  const hop = escalateDuringRun(fake.rows[0]);
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr under review"] }]), logger());
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+  assert.deepEqual(fake.rows[0].unblockDescriptor, hop, "the deferred block replaced the escalation");
+});
+
+test("a deferred ruling block never overwrites the escalation the awaited run made", async () => {
+  const fake = fakePaperclip();
+  const board = { ...raceBoard(), needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: raceRoles, board });
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+  Object.assign(fake.rows[0], { status: "in_progress", assigneeAgentId: "tl-agent", executionRunId: "run-1", checkoutRunId: "run-1" });
+  await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 has been sent back 4 times. EM: run /rule-on-scope" }, logger());
+  assert.equal(fake.rows[0].status, "in_progress", "the ruling block is deferred while the run is in flight");
+  const hop = escalateDuringRun(fake.rows[0]);
+  for (let i = 0; i < 2; i++) {
+    await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved", "pr pending actions"] }]), logger());
+    assert.deepEqual(fake.rows[0].unblockDescriptor, hop, `pass ${i + 1}: the deferred ruling replaced the escalation`);
+  }
+});
+
 // --- QA review stage (EM#923): the QA gate has its own column and seat inside the verify session ---
 
 test("qa stage: the QA gate moves the held card to qaReviewing's seat, and a pass leaves it at EM verification", async () => {
@@ -1826,4 +1897,100 @@ test("a review-failure block stays while GitHub still reads the issue at inRevie
   await mirror.onEvent({ kind: "blocked", item, reason: "review of PR #8 failed", at: "inReview" }, logger());
   await snap();
   assert.equal(fake.rows[0].status, "blocked");
+});
+
+test("a timed verify hold reads as a scheduled wait in Central time, with a handoff that names the resume time, never 'did not pass'", async () => {
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: "agent-sre", description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const { mirror } = mirrorOn(fake, { ...SEATS, ...rich() });
+  await mirror.onSession(verifySession("started"), logger());
+  await mirror.onSession(verifySession("failed", {
+    detail: "waiting — PR #1291 is observable from 2026-11-09T16:59:00.000Z",
+    resumeAt: "2026-11-09T16:59:00.000Z", waitReason: "acceptance needs a 24h log window",
+  }), logger());
+  const note = fake.comments.r1283.at(-1);
+  assert.ok(note.includes("**Dev verification scheduled** — PR #1291 resumes Mon Nov 9, 10:59 am CT: acceptance needs a 24h log window"), note);
+  assert.doesNotMatch(note, /did not pass|next verify pass/);
+  assert.ok(note.includes("**Do:** Nothing to do from this card: dev verification of PR #1291 is scheduled and resumes Mon Nov 9, 10:59 am CT."), note);
+});
+
+test("a failed verify without resumeAt still says it did not pass", async () => {
+  const fake = fakePaperclip([{ id: "r1283", status: "in_review", assigneeAgentId: "agent-sre", description: "source: xrgarcia/Slashbin-console#1283" }]);
+  const { mirror } = mirrorOn(fake, { ...SEATS, ...rich() });
+  await mirror.onSession(verifySession("started"), logger());
+  await mirror.onSession(verifySession("failed", { detail: "boom" }), logger());
+  assert.ok(fake.comments.r1283.at(-1).includes("**Dev verification did not pass** — PR #1291: boom"));
+});
+
+// --- Customer label on service-repo cards (Foreman #179) ---------------------------
+
+/** A registry that answers repo_identity as unknown and list_customers with these GitHub labels (or fails). */
+function customerRegistry(names, state = { down: false }) {
+  const f = async (url, init) => {
+    const msg = init.body ? JSON.parse(init.body) : {};
+    const json = (obj, headers = {}) => new Response(JSON.stringify(obj), { status: 200, headers: { "content-type": "application/json", ...headers } });
+    if (msg.method === "initialize") return json({ jsonrpc: "2.0", id: msg.id, result: {} }, { "mcp-session-id": "s1" });
+    if (msg.method === "notifications/initialized") return new Response(null, { status: 202 });
+    if (msg.params.name === "list_customers") {
+      f.listed++;
+      if (state.down) return new Response("down", { status: 503 });
+      return json({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify({ customers: names.map((n) => ({ key: n, systems: { github_label: n } })).concat([{ key: "x", systems: {} }]) }) }] } });
+    }
+    return json({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify({ kind: "unknown" }) }] } });
+  };
+  f.listed = 0;
+  return createRepoIdentity({ url: "http://registry.test/mcp", fetch: f });
+}
+const customerOf = (fake, r) => labelName(fake, r).filter((n) => n !== "bug");
+
+test("customer label: the issue's registry label lands on the card in the card's one PATCH, a foreign label kept, nothing rewritten after", async () => {
+  const fake = fakePaperclip([ownedRow("backlog", { labelIds: ["keep-me"] })], [], [{ id: "keep-me", name: "bug" }]);
+  const { mirror } = mirrorOn(fake, OWNED, customerRegistry(["jerky-com", "slashbin-ai"]));
+  const cards = [card(7, { labels: ["bug", "jerky-com"] })];
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
+  assert.deepEqual(labelName(fake, fake.rows[0]), ["bug", "jerky-com"]);
+  assert.equal(hasIssue(fake, fake.rows[0]), true);
+  assert.equal(writesTo(fake, "r7").length, 1, "issue and customer label in one PATCH");
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards }, logger());
+  assert.equal(writesTo(fake, "r7").length, 1);
+  // The issue moves to another customer, then loses it.
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["slashbin-ai"] })] }, logger());
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["slashbin-ai"]);
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["S3", "approved"] })] }, logger());
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["no customer label"]);
+});
+
+test("customer label: two issue labels put both ids on the card in name order, in one PATCH; the set follows the issue as labels are added and removed", async () => {
+  const fake = fakePaperclip([ownedRow("backlog", { labelIds: ["keep-me"] })], [], [{ id: "keep-me", name: "bug" }]);
+  const { mirror } = mirrorOn(fake, OWNED, customerRegistry(["jerky-com", "slashbin-ai", "slashbin-io"]));
+  const snap = (labels) => mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels })] }, logger());
+  await snap(["slashbin-io", "bug", "slashbin-ai"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["slashbin-ai", "slashbin-io"]);
+  assert.equal(labelName(fake, fake.rows[0]).includes("bug"), true);
+  assert.equal(writesTo(fake, "r7").length, 1, "issue and both customer labels in one PATCH");
+  await snap(["slashbin-io", "slashbin-ai"]);
+  assert.equal(writesTo(fake, "r7").length, 1, "an unchanged second snapshot writes nothing");
+  await snap(["slashbin-io"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["slashbin-io"]);
+  await snap(["jerky-com", "slashbin-io"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["jerky-com", "slashbin-io"]);
+  await snap([]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["no customer label"]);
+  await snap(["slashbin-ai", "jerky-com"]);
+  assert.deepEqual(customerOf(fake, fake.rows[0]), ["jerky-com", "slashbin-ai"], "the marker never sits beside a real label");
+});
+
+test("customer label: undefined labels, no registry client and a registry outage write no customer or marker label; the outage warns once", async () => {
+  const none = fakePaperclip([ownedRow("backlog")]);
+  const a = mirrorOn(none, OWNED, customerRegistry(["jerky-com"]));
+  await a.mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7)] }, logger());
+  const b = fakePaperclip([ownedRow("backlog")]);
+  await mirrorOn(b, OWNED).mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["jerky-com"] })] }, logger());
+  const c = fakePaperclip([ownedRow("backlog"), ownedRow("backlog", { id: "r8", description: "source: example/r#8\nGitHub: open · not approved" })]);
+  const out = mirrorOn(c, OWNED, customerRegistry(["jerky-com"], { down: true }));
+  await out.mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { labels: ["jerky-com"] }), card(8, { labels: ["jerky-com"] })] }, logger());
+  for (const fk of [none, b, c]) {
+    assert.deepEqual(fk.labels.map((l) => l.name).filter((n) => n === "jerky-com" || n === "no customer label"), []);
+    assert.deepEqual(labelName(fk, fk.rows[0]), []);
+  }
+  assert.equal(out.log.lines.filter(([l, m]) => l === "warn" && /registry customer labels unavailable/.test(m)).length, 1);
 });

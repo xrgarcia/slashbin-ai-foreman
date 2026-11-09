@@ -6,7 +6,7 @@
 // stage labels. It owns those blocks and the label ids. The card index's state
 // and the session holds reach it by constructor injection, never by import.
 
-import { ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, SESSION_STAGE, stageTarget, withIssueLabel, withStage, type PaperclipBucket } from "./board.js";
+import { customerLabelsOf, ensureCustomerLabels, ensureIssueLabel, ensureStageLabels, FOREMAN_BLOCKED_PREFIX, NO_CUSTOMER_LABEL, SESSION_STAGE, stageTarget, withCustomerLabels, withIssueLabel, withStage, type PaperclipBucket } from "./board.js";
 import type { PaperclipStage } from "./config.js";
 import type { PaperclipEnv } from "./env.js";
 import type { IndexPort } from "./ports.js";
@@ -51,6 +51,11 @@ export class Placement {
   readonly holdAction = new Map<string, string>();
   /** Stage label key → the company's label id, or the lookup in flight; dropped on failure. */
   private stageLabelIds: Promise<Map<string, string> | null> | null = null;
+  /** Customer label name (and the marker) -> id, or the lookup in flight; dropped on failure and on a reload. */
+  private customerLabelIds: Promise<Map<string, string> | null> | null = null;
+  private customerLabelKey = "";
+  /** The registry failure last warned about, so one outage warns once. */
+  private customerWarned: unknown;
   /** The company's `issue` label id, once ensured (undefined until a label write needed it). */
   private issueLabelId: string | undefined;
   /** Cards confirmed to carry the issue label, so a sync reads and writes each once. */
@@ -68,6 +73,7 @@ export class Placement {
   /** A reloaded config may rename the labels: look them up again. */
   resetLabels(): void {
     this.stageLabelIds = null;
+    this.customerLabelIds = null;
     this.issueLabelId = undefined;
   }
 
@@ -174,6 +180,23 @@ export class Placement {
   holdOutranks(id: string, stage: PaperclipStage): boolean {
     if (this.rulingHeld.has(id) && this.blockedAt.get(id) === stage) return true;
     return this.externalHold(id) && (this.escalatedAt.get(id) ?? this.ghStage.get(id)) === stage;
+  }
+
+  /**
+   * The hold check an event-driven stage move makes first, read live. At the
+   * GitHub stage the card was last placed for, the board is read now: a seat's
+   * escalation or a person's hold made since the last scan is not in the cache,
+   * and the move took the card back from the PO (Foreman #98). True when a hold
+   * outranks the move to `stage`. The Foreman's stage events and its deferred
+   * moves both pass through here, so neither moves a card past a hold.
+   */
+  async holdOutranksLive(id: string, stage: PaperclipStage): Promise<boolean> {
+    const gh = this.ghStage.get(id);
+    if (gh === undefined || gh === stage) {
+      await this.index.refreshRow(id);
+      if (this.externalHold(id) && !this.escalatedAt.has(id)) this.escalatedAt.set(id, gh ?? stage);
+    }
+    return this.holdOutranks(id, stage);
   }
 
   /**
@@ -288,20 +311,48 @@ export class Placement {
     return ok;
   }
 
-  /** Retry the moves a run in flight deferred; the last one asked for wins. */
+  /**
+   * Retry the moves a run in flight deferred; the last one asked for wins. A
+   * retry is decided again now, not replayed: the run it waited for is the one
+   * most likely to have changed the card. Replayed blind, a move deferred during
+   * the EM seat's run undid the escalation that run made (SLA-4308 left Blocked
+   * for in_review) and put a card back in a column GitHub had left (SLA-4311 to
+   * To Do from review), 2026-11-06.
+   */
   async retryDeferredMoves(): Promise<void> {
     for (const [id, to] of [...this.deferredMoves]) {
-      if (this.holds.has(id) || this.index.closedCards.has(id)) { this.deferredMoves.delete(id); continue; }
+      if (this.holds.has(id) || this.index.closedCards.has(id) || !(await this.stillWanted(id, to))) { this.deferredMoves.delete(id); continue; }
       await this.move(id, to);
     }
   }
 
   /**
+   * A deferred move still stands. The card is read live first, whatever the
+   * move: a seat's escalation or a person's hold on it now was made while the
+   * move waited, so it is newer and wins, the Foreman's own block or ruling
+   * included (it would overwrite the hold's holder and descriptor). A stage move
+   * also stands only while GitHub is at that stage (the snapshot running the
+   * retry has just placed a card GitHub moved on) and no hold outranks it. The
+   * Foreman's blocks (`blocked`, `needsRuling`) are made at whatever stage
+   * GitHub is at, and a close (`done`) is not a stage, so neither is compared.
+   */
+  private async stillWanted(id: string, to: PaperclipStepMove): Promise<boolean> {
+    if (to === null || to === "waiting" || to === "done") return true;
+    const own = to === "blocked" || to === "needsRuling";
+    const gh = this.ghStage.get(id);
+    if (!own && gh !== undefined && gh !== to) return false;
+    await this.index.refreshRow(id);
+    if (this.externalHold(id)) return false;
+    return own || !this.holdOutranks(id, to);
+  }
+
+  /**
    * The card's label ids with `key`'s stage label as its only one (`key`
    * undefined: the stage labels as they are) and the issue label present
-   * once; null when nothing changes or the labels cannot be read.
+   * once; null when nothing changes or the labels cannot be read. `customer` is the
+   * wanted customer label ids (from `wantedCustomer`, marker included); omitted leaves customer labels as they are.
    */
-  async labelIdsFor(id: string, key: string | null | undefined): Promise<string[] | null> {
+  async labelIdsFor(id: string, key: string | null | undefined, customer?: readonly string[]): Promise<string[] | null> {
     this.stageLabelIds ??= (async () => {
       const r = await this.env.safeCall("ensure stage labels", () => ensureStageLabels(this.env.client, this.env.cfg));
       if (!r.ok) this.stageLabelIds = null;
@@ -318,8 +369,57 @@ export class Placement {
     const current = Array.isArray(row.value?.labelIds) ? row.value.labelIds : [];
     let next = key === undefined ? [...current] : withStage(current, ids, key);
     if (this.issueLabelId) next = withIssueLabel(next, this.issueLabelId);
+    if (customer !== undefined) {
+      const known = await this.customerLabelIds;
+      if (known && customer.length > 0) next = withCustomerLabels(next, [...known.values()], customer);
+    }
     if (this.issueLabelId && current.includes(this.issueLabelId)) this.issueLabelled.add(id);
     return next.length === current.length && next.every((x, i) => x === current[i]) ? null : next;
+  }
+
+  /**
+   * The customer label ids a card of an issue with `issueLabels` should carry, in name order: every
+   * registry match, or the `no customer label` marker alone when none matches; never empty. Undefined
+   * when the step is off (labels unread, no registry, registry or board unavailable).
+   */
+  async wantedCustomer(issueLabels: readonly string[] | undefined): Promise<readonly string[] | undefined> {
+    const identity = this.env.identity;
+    if (!identity || issueLabels === undefined) return undefined;
+    let names: string[];
+    try {
+      names = await identity.customerLabels();
+    } catch (err) {
+      if (this.customerWarned !== err) {
+        this.customerWarned = err;
+        this.env.log("warn", `Paperclip mirror: registry customer labels unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return undefined;
+    }
+    const key = [...names].sort().join("\n");
+    if (key !== this.customerLabelKey) this.customerLabelIds = null;
+    this.customerLabelKey = key;
+    this.customerLabelIds ??= (async () => {
+      const r = await this.env.safeCall("ensure customer labels", () => ensureCustomerLabels(this.env.client, names));
+      if (!r.ok) this.customerLabelIds = null;
+      return r.ok ? r.value : null;
+    })();
+    const ids = await this.customerLabelIds;
+    if (!ids) return undefined;
+    const want = customerLabelsOf(issueLabels, names).map((n) => ids.get(n));
+    if (want.some((x) => x === undefined)) return undefined;
+    if (want.length > 0) return want as string[];
+    const marker = ids.get(NO_CUSTOMER_LABEL.name);
+    return marker ? [marker] : undefined;
+  }
+
+  /** True when `have` does not carry exactly the wanted customer label set (from `wantedCustomer`; undefined: nothing wanted). */
+  async customerStale(have: RowContent | undefined, want: readonly string[] | undefined): Promise<boolean> {
+    if (want === undefined) return false;
+    const known = await this.customerLabelIds;
+    if (!known) return false;
+    const ids = new Set(known.values());
+    const carried = (have?.labelIds ?? []).filter((id) => ids.has(id));
+    return carried.length !== want.length || !want.every((id) => carried.includes(id));
   }
 
   /** True when the card is not yet known to carry the issue label (so a sync should write it). */

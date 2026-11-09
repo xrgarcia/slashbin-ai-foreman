@@ -51,7 +51,7 @@ For a single repo, set fields at the root level:
 | `branchPrefix` | `AI_AGENT_BRANCH_PREFIX` | `foreman/` | Prefix of each issue's own branch (`<prefix><issue>-<slug>`) |
 | `featureBranch` | `AI_AGENT_FEATURE_BRANCH` | `features` | Legacy shared branch: never pushed to; a PR from it is still Foreman-owned |
 | `maxTurns` | `AI_AGENT_MAX_TURNS` | `30` | Max agent turns per issue |
-| `maxDurationMs` | `AI_AGENT_MAX_DURATION_MS` | `1800000` (30 min) | Max implementation time |
+| `maxDurationMs` | `AI_AGENT_MAX_DURATION_MS` | `3600000` (1 h) | Max implementation time |
 | `model` | `AI_AGENT_MODEL` | CLI default | Model for implement/revise. Cascades to every repo that sets no `model` of its own |
 | `allowedTools` | — | `["Read","Write","Edit","Bash","Glob","Grep"]` | Tools the CLI can use |
 | `sessionEnv` | — | `[]` | Daemon env var names every Claude session inherits, on top of the essentials. Top-level only. May not name a GitHub token. See [security.md](security.md#token-isolation-and-redaction) |
@@ -59,8 +59,15 @@ For a single repo, set fields at the root level:
 | `logLevel` | `AI_AGENT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `lifecycleLabels` | — | see below | Names of the labels that move a PR through its lifecycle. Top-level only — every repo shares one set |
 | `github` | — | today's names (see [configuration.md](configuration.md#github-conventions-github)) | Every other GitHub name the Foreman reads or writes: `blockedLabel`, `priorityLabels` (the tiers the implement skill picks by), `dependencyBranchPrefixes` (`["renovate/"]` for Renovate), the promotion, sync, dependency-batch and reconcile titles, and the PR-body `signature`. Set any subset; the rest keep their defaults. Sessions get `FOREMAN_BLOCKED_LABEL` and `FOREMAN_PRIORITY_LABELS`. Top-level only |
+| `profile` | — | none (neutral) | Named bundle of deployment defaults. See [Profiles](#profiles). An unknown name stops startup |
+| `workSource`, `codeHost` | — | `github` | Which plugin supplies work and hosts code. Any other value stops the daemon at start (exit 78) |
+| `runner` | — | see [configuration.md](configuration.md) | The agent CLI's name and how it signals a refusal (`refusalPatterns`, `refusalExitCodes`, `resetPattern`): a refusal pauses that runner daemon-wide instead of burning a retry |
+| `metrics` | — | `enabled: false`, `retentionDays: 90`, `path` unset | Lifecycle log in a local SQLite file. See [metrics.md](metrics.md) |
+| `qaPath`, `qaRepos`, `qaGate`, `qaBeforeMerge`, `qaSecretsRunner`, `qaBearerKey` | `AI_AGENT_QA_PATH` (`qaPath` only) | unset / `[]` / `false` / `false` | The QA stage: the checkout it runs from, the repos it covers, and whether it holds or precedes the merge. `qaGate` and `qaBeforeMerge` need `qaPath` |
+| `epicRefLabel` | — | none (profile-supplied) | Label an issue body's `## References` names its epic by. Unset: bodies are not read for an epic |
+| `dependabot.securityOnly` | — | `true` | Only security Dependabot PRs are batched |
 | `onboarding` | `AI_AGENT_ONBOARDING` | `true` | Create a repo's missing labels before its first piece of work ([onboarding.md](onboarding.md)) |
-| `paperclip` | `AI_AGENT_PAPERCLIP_ENABLED`, `_URL`, `_COMPANY_ID`, `_AGENT_NAME`, `_AGENT_ID`, `_API_KEY`, `_IDENTITY_KEY_FORMAT`, `_TASK_TITLE_FORMAT`, `_PROJECT_ID` | `enabled: false`, `url: "http://127.0.0.1:3100"`, `agentName: "Foreman"`, `identityKeyFormat: "source: {repo}#{N}"`, `taskTitleFormat: "{repo}#{N}"`, `projects: false` | Optional [Paperclip](https://github.com/paperclipai/paperclip) mirror. Off unless `enabled`; `companyId` is required once enabled. `{repo}` is the full `owner/name`. `projectId` files every new task in one project; `repos` limits the mirror to some repos; `board`, `roles`, `stageLabels` and `comments` set who holds each card, its column and label, and what its thread says — every key in [paperclip.md](paperclip.md). `statusMap` (no env var) renames any of the buckets `todo`, `in_progress`, `in_review`, `done`, `cancelled`. Top-level only. `npm run build && npm run paperclip:register [-- config-path]` registers the agent with every wake path off and writes `agentId` back into the file; `npm run paperclip:doctor [-- --config config-path]` then checks the integration read-only (health, company, agent-registered, wake-on-demand, heartbeat-enabled, config-complete) and exits non-zero on any FAIL |
+| `paperclip` | `AI_AGENT_PAPERCLIP_ENABLED`, `_URL`, `_COMPANY_ID`, `_AGENT_NAME`, `_AGENT_ID`, `_API_KEY`, `_IDENTITY_KEY_FORMAT`, `_TASK_TITLE_FORMAT`, `_PROJECT_ID`, `_REGISTRY_URL`, `_REGISTRY_API_KEY`, `_COMMENT_AUTHOR_HEADER` | `enabled: false`, `url: "http://127.0.0.1:3100"`, `agentName: "Foreman"`, `identityKeyFormat: "source: {repo}#{N}"`, `taskTitleFormat: "{repo}#{N}"`, `projects: false` | Optional [Paperclip](https://github.com/paperclipai/paperclip) mirror. Off unless `enabled`; `companyId` is required once enabled. `{repo}` is the full `owner/name`. `projectId` files every new task in one project; `repos` limits the mirror to some repos; `board`, `roles`, `stageLabels` and `comments` set who holds each card, its column and label, and what its thread says — every key in [paperclip.md](paperclip.md). `statusMap` (no env var) renames any of the buckets `todo`, `in_progress`, `in_review`, `done`, `cancelled`. Top-level only. `npm run build && npm run paperclip:register [-- config-path]` registers the agent with every wake path off and writes `agentId` back into the file; `npm run paperclip:doctor [-- --config config-path]` then checks the integration read-only (health, company, agent-registered, wake-on-demand, heartbeat-enabled, config-complete) and exits non-zero on any FAIL |
 
 ## Lifecycle labels
 
@@ -103,8 +110,11 @@ What each label means and what moves an issue between them: [lifecycle.md](lifec
 
 Use the `repos` array to manage multiple repos in a single daemon. Each repo entry may
 override any of: `triggerLabel`, `baseBranch`, `featureBranch`, `productionBranch`,
-`skillPath`, `revisionSkillPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs` (every
-per-repo key: [configuration.md](configuration.md#per-repo-entries-repos)). The
+`branchPrefix`, `skillPath`, `revisionSkillPath`, `skillOverlayPath`,
+`revisionSkillOverlayPath`, `prompt`, `model`, `maxTurns`, `maxDurationMs`. A repo entry
+also takes keys that have no top-level value: `reviewEnabled`, `reviewerLogin`,
+`dependencyPreApproved`, `skillSyncSkills` and `syncOnly` (every per-repo key:
+[configuration.md](configuration.md#per-repo-entries-repos)). The
 reference marks which fields fall back to a top-level value; other fields apply
 only to the entry that sets them.
 
@@ -138,12 +148,12 @@ only to the entry that sets them.
   "triggerLabel": "approved",
   "pollIntervalMs": 120000,
   "maxTurns": 30,
-  "maxDurationMs": 1800000
+  "maxDurationMs": 3600000
 }
 ```
 
 In the example above, `console` and `api` get the top-level `maxTurns: 30` and
-`maxDurationMs: 1800000`. `big-feature-repo` overrides both to allow longer Claude
+`maxDurationMs: 3600000`. `big-feature-repo` overrides both to allow longer Claude
 sessions for larger features in that repo only.
 
 **Resolution order** for `maxTurns` / `maxDurationMs` (and `triggerLabel`, `baseBranch`,
@@ -180,10 +190,10 @@ What the `slashbin` profile sets, and what each falls back to without it:
 |---|---|---|
 | `unstickEscalationOwner` | `xrgarcia` | none: a give-up is logged and nobody is mentioned |
 | `epicRefLabel` | `engineering-manager` | none: issue bodies are not read for an epic, so no epic-close ask |
-| `divergenceRulerLogin` | `slashbin-engineering-manager` | none: no divergence ruling is looked for |
 | `paperclip.commentAuthorHeader` | `x-slashbin-comment-author` | none: no credit header is sent |
 | `qaRepos` | `["xrgarcia/Slashbin-console"]` | `[]` |
 | `qaSecretsRunner` | `scripts/secrets/doppler-run.mjs` | none: a dev QA run reports errored |
+| `qaBearerKey` | `EM_SLASHBIN_MCP_ROUTER_BEARER@xrgarcia/slashbin-engineering-manager` | `EM_SLASHBIN_MCP_ROUTER_BEARER`, unpinned to a Doppler project |
 | `reviewAllowedTools` | the base tools plus GitHub, Postgres, Redis, Railway and knowledge MCPs | `Read, Write, Edit, Bash, Glob, Grep, WebFetch` |
 
 To add a deployment, add `src/profiles/<name>.ts` and register it in

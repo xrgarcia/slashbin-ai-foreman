@@ -63,7 +63,9 @@ export interface PlacementPort {
   placeHeld(id: string): Promise<void>;
   move(id: string, to: PaperclipStepMove, held?: boolean, liveOpen?: boolean): Promise<boolean>;
   retryDeferredMoves(): Promise<void>;
-  labelIdsFor(id: string, key: string | null | undefined): Promise<string[] | null>;
+  labelIdsFor(id: string, key: string | null | undefined, customer?: readonly string[]): Promise<string[] | null>;
+  wantedCustomer(issueLabels: readonly string[] | undefined): Promise<readonly string[] | undefined>;
+  customerStale(have: RowContent | undefined, want: readonly string[] | undefined): Promise<boolean>;
   needsIssueLabel(id: string, have: RowContent | undefined): Promise<boolean>;
   patch(id: string, body: Record<string, unknown>, commentAuthor?: string | null): Promise<boolean>;
 }

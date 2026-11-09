@@ -3,7 +3,7 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { fleetState } from "../github-state.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import { isForemanOwnedHead } from "../foreman-branch.js";
 import type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
 export type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
@@ -143,22 +143,22 @@ export function dropIssueSnapshot(repo: string): void {
  * read. What observers mirror the board from: GitHub is the record, so a card
  * that drifted from it is put back on the next cycle.
  */
-export function openIssueLabels(config: RepoConfig, logger: Logger): Array<{ number: number; labels: string[] }> {
-  return getOpenIssues(config.githubRepo, config.repoPath, logger).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+export async function openIssueLabels(config: RepoConfig, logger: Logger): Promise<Array<{ number: number; labels: string[] }>> {
+  return (await getOpenIssues(config.githubRepo, config.repoPath, logger)).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
 }
 
 /** Every open issue in the repo, from cache when warm. */
-export function getOpenIssues(repo: string, cwd: string, logger: Logger): IssueSnapshot[] {
+export async function getOpenIssues(repo: string, cwd: string, logger: Logger): Promise<IssueSnapshot[]> {
   // The fleet-wide state (github-state.ts) answers for every configured repo
   // from one bulk query. `issueCacheTtlMs: 0` still means "always live".
-  if (reads.ttlMs > 0 && fleetState.isEnabled(repo)) return fleetState.openIssues(repo);
+  if (reads.ttlMs > 0 && fleetState.isEnabled(repo)) return await fleetState.openIssues(repo);
 
   const cached = reads.issues.get(repo);
   if (cached && reads.ttlMs > 0 && Date.now() - cached.fetchedAt < reads.ttlMs) {
     return cached.issues;
   }
 
-  const json = gh([
+  const json = await ghAsync([
     "issue", "list",
     "--repo", repo,
     "--state", "open",
@@ -208,7 +208,7 @@ export function hasLabel(issue: IssueSnapshot, name: string): boolean {
 /**
  * Drop what the Foreman holds about `repo`'s open PRs, so the next read asks
  * GitHub. A session runs `gh pr create` in its own process, which the
- * mutation hook in `gh()` never sees: without this, the check that the
+ * mutation hook in `ghAsync()` never sees: without this, the check that the
  * session's PR exists read the list cached before it, found nothing, and
  * booked a built PR as "PR creation could not be verified"
  * (slashbin_mcp_services PR #240, 2026-10-09).
@@ -219,19 +219,19 @@ export function forgetOpenPrs(repo: string): void {
 }
 
 /** Every open PR in the repo, from cache when warm. */
-export function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
-  if (reads.ttlMs > 0 && fleetState.isEnabled(repo)) return fleetState.openPrs(repo);
+export async function getOpenPrs(repo: string, cwd: string): Promise<PrSnapshot[]> {
+  if (reads.ttlMs > 0 && fleetState.isEnabled(repo)) return await fleetState.openPrs(repo);
 
   const cached = reads.prs.get(repo);
   if (cached && reads.ttlMs > 0 && Date.now() - cached.fetchedAt < reads.ttlMs) {
     return cached.prs;
   }
 
-  const json = gh([
+  const json = await ghAsync([
     "pr", "list",
     "--repo", repo,
     "--state", "open",
-    "--json", "number,url,title,body,headRefName,baseRefName",
+    "--json", "number,url,title,body,headRefName,baseRefName,headRefOid",
     "--limit", "100",
   ], cwd);
   const prs: PrSnapshot[] = JSON.parse(json || "[]");
@@ -246,9 +246,9 @@ export function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
  * Null when it cannot say: the list failed, or it is full (`--limit 100`), where
  * a missing PR may just be past the page.
  */
-export function isPrOpen(repo: string, prNumber: number, cwd: string): boolean | null {
+export async function isPrOpen(repo: string, prNumber: number, cwd: string): Promise<boolean | null> {
   try {
-    const prs = getOpenPrs(repo, cwd);
+    const prs = await getOpenPrs(repo, cwd);
     if (prs.some((p) => p.number === prNumber)) return true;
     return prs.length >= 100 ? null : false;
   } catch {
@@ -260,12 +260,12 @@ export function isPrOpen(repo: string, prNumber: number, cwd: string): boolean |
  * Open PRs matching a head/base pair, newest first — the shape the old
  * `--head X --base Y --limit N` calls returned.
  */
-export function findOpenPrs(
+export async function findOpenPrs(
   repo: string,
   cwd: string,
   opts: { head?: string; base?: string; limit?: number },
-): PrSnapshot[] {
-  const matches = getOpenPrs(repo, cwd).filter(
+): Promise<PrSnapshot[]> {
+  const matches = (await getOpenPrs(repo, cwd)).filter(
     (p) =>
       (opts.head === undefined || p.headRefName === opts.head) &&
       (opts.base === undefined || p.baseRefName === opts.base),
@@ -278,26 +278,26 @@ export function findOpenPrs(
  * featureBranch), newest first. The ONE way the Foreman finds its own PRs (#208): a human-named
  * head never appears here, so nothing downstream can revise, reconcile or push to it.
  */
-export function findOpenForemanPrs(config: RepoConfig, limit?: number): PrSnapshot[] {
-  const matches = getOpenPrs(config.githubRepo, config.repoPath)
+export async function findOpenForemanPrs(config: RepoConfig, limit?: number): Promise<PrSnapshot[]> {
+  const matches = (await getOpenPrs(config.githubRepo, config.repoPath))
     .filter((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
   return limit === undefined ? matches : matches.slice(0, limit);
 }
 
 /** The first open Foreman-owned PR the fleet state knows about; undefined is "ask GitHub", never "no PR" (see knownOpenPr). */
-export function knownOpenForemanPr(
+export async function knownOpenForemanPr(
   config: RepoConfig,
-): { number: number; url: string; headRefOid: string; headRefName: string } | undefined {
+): Promise<{ number: number; url: string; headRefOid: string; headRefName: string } | undefined> {
   if (reads.ttlMs <= 0 || !fleetState.isEnabled(config.githubRepo)) return undefined;
-  const pr = fleetState.openPrs(config.githubRepo)
+  const pr = (await fleetState.openPrs(config.githubRepo))
     .find((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
   return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid, headRefName: pr.headRefName } : undefined;
 }
 
 /** The first open Foreman-owned PR's head commit and last update, or null when the state cannot say. */
-export function openForemanPrVersion(config: RepoConfig): string | null {
+export async function openForemanPrVersion(config: RepoConfig): Promise<string | null> {
   if (reads.ttlMs <= 0 || !fleetState.isEnabled(config.githubRepo)) return null;
-  const pr = fleetState.openPrs(config.githubRepo)
+  const pr = (await fleetState.openPrs(config.githubRepo))
     .find((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
   return pr ? `${pr.number}:${pr.headRefOid}@${pr.updatedAt}` : null;
 }
@@ -308,13 +308,13 @@ export function openForemanPrVersion(config: RepoConfig): string | null {
  * a session the Foreman just ran may have opened one the state has not seen yet,
  * and a caller that reads absence as "no PR" would open a duplicate.
  */
-export function knownOpenPr(
+export async function knownOpenPr(
   repo: string,
   head: string,
   base: string,
-): { number: number; url: string; headRefOid: string } | undefined {
+): Promise<{ number: number; url: string; headRefOid: string } | undefined> {
   if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return undefined;
-  const pr = fleetState.openPrs(repo).find((p) => p.headRefName === head && p.baseRefName === base);
+  const pr = (await fleetState.openPrs(repo)).find((p) => p.headRefName === head && p.baseRefName === base);
   return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid } : undefined;
 }
 
@@ -323,29 +323,29 @@ export function knownOpenPr(
  * only when the thing they read can have changed. `key` returns null when the
  * state cannot vouch (off, or the PR is not in it) — then the read is live.
  */
-export function ghKeyed(id: string, key: () => string | null, args: string[], cwd: string): string {
+export async function ghKeyed(id: string, key: () => string | null | Promise<string | null>, args: string[], cwd: string): Promise<string> {
   let k: string | null = null;
-  try { k = key(); } catch { k = null; }
+  try { k = await key(); } catch { k = null; }
   if (k !== null) {
     const hit = reads.deep.get(id);
     if (hit && hit.key === k) return hit.json;
   }
-  const json = gh(args, cwd);
+  const json = await ghAsync(args, cwd);
   if (k !== null) reads.deep.set(id, { key: k, json });
   return json;
 }
 
 /** The open `head → base` PR's head commit and last update, or null when the state cannot say. */
-export function openPrVersion(repo: string, head: string, base: string): string | null {
+export async function openPrVersion(repo: string, head: string, base: string): Promise<string | null> {
   if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return null;
-  const pr = fleetState.openPrs(repo).find((p) => p.headRefName === head && p.baseRefName === base);
+  const pr = (await fleetState.openPrs(repo)).find((p) => p.headRefName === head && p.baseRefName === base);
   return pr ? `${pr.number}:${pr.headRefOid}@${pr.updatedAt}` : null;
 }
 
 /** Changes whenever a PR in the repo was seen merged or closed, or null when the state is off. */
-export function closedPrVersion(repo: string): string | null {
+export async function closedPrVersion(repo: string): Promise<string | null> {
   if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return null;
-  return String(fleetState.closedVersion(repo));
+  return String(await fleetState.closedVersion(repo));
 }
 
 export function formatGhError(err: unknown): GhFailure {

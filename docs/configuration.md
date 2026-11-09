@@ -21,8 +21,9 @@ Every setting the Foreman reads, with its default, its environment override and 
 
 - **Where it lives.** `.ai-agent.json` (or `ai-agent.config.json`) in the daemon's working directory,
   or the file named by `--config <path>`. Start from `.ai-agent.example.json`.
-- **Precedence.** An environment variable beats the file; the file beats the default. Every key is
-  optional except `repos[].name` and `repos[].repoPath`.
+- **Precedence.** An environment variable beats the file; the file beats the selected `profile`; the profile
+  beats the neutral default ([profiles](config-guide.md#profiles)). Every key is optional except
+  `repos[].name` and `repos[].repoPath`.
 - **Validation.** The whole file is checked when it loads. A wrong type or out-of-range value stops
   the daemon at start with the key named, never mid-run.
 - **Hot reload.** The daemon re-reads the file at the start of every cycle, so an edit takes effect
@@ -275,19 +276,25 @@ The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issu
 
 Type: string · Default: none · Env: `AI_AGENT_QA_PATH`
 
-The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY).
+The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry bearer, `qaBearerKey`).
 
 ### `qaRepos`
 
 Type: string[] · Default: `[]`
 
-GitHub repos (owner/name) QA applies to. Default none.
+GitHub repos (owner/name) QA applies to. Default none. Override: covered even when QA says no. Any other repo is covered when `bin/qa.mjs covers --repo R` exits 0 (EM#794).
 
 ### `qaSecretsRunner`
 
 Type: string · Default: none
 
-The script in the EM checkout (relative to emRepoPath) that runs QA's dev check with its one secret, DEV_SESSION_MINT_KEY, handed to that child alone. Unset = the dev check reports `errored` instead of running; the local check needs none.
+The script in the EM checkout (relative to emRepoPath) that runs QA's dev check with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (`qaBearerKey`), handed to that child alone. The local check and the `covers` question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
+
+### `qaBearerKey`
+
+Type: string · Default: `"EM_SLASHBIN_MCP_ROUTER_BEARER"`
+
+The registry bearer's key for the runner's --keys, as `NAME` or `NAME@project` (a pin lists that one Doppler project instead of every one). It lives only in `prd`.
 
 ### `qaGate`
 
@@ -299,7 +306,7 @@ Whether QA gates delivery. false (default) = report-only: the card advances on t
 
 Type: boolean · Default: `false`
 
-QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs `bin/qa.mjs check --local` on the approved head (it boots the PR itself, no secret), and only a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder. Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged. Needs `qaPath` and `techLeadPath`. A config flip, reversible.
+QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs `bin/qa.mjs check --local` on the approved head (it boots the PR itself; only the registry bearer), and only a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder. Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged. Needs `qaPath` and `techLeadPath`. A config flip, reversible.
 
 ### `sreDeployMaxDurationMs`
 
@@ -375,7 +382,7 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick` → `skill-deliver`
 
-The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the ten built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the eleven built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 
@@ -415,12 +422,20 @@ Type: object · Default: `{"securityOnly":true}`
 
 The Dependabot stage's selection. Global, like `github`. `securityOnly` (default true) batches and lands only security updates: a Dependabot PR is one iff a package it bumps has an OPEN Dependabot alert on the repo. Other version-update PRs are left alone (not batched, merged or closed). When the alerts API cannot be read (404 with alerts disabled, a network error) the cycle batches nothing. Set `{ "securityOnly": false }` to batch every Dependabot PR.
 
+## Metrics
+
+### `metrics`
+
+Type: object · Default: `{"enabled":false,"retentionDays":90}`
+
+The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle stage advances in a local SQLite file, read back with `npm run metrics:report`. Global. Off unless `enabled`.
+
 ## Per-repo entries (`repos[]`)
 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
 
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
-- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
+- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label and the production grant label `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for prod release` per issue). Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
 - `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
 - `syncOnly`: A human-lane repo (registry lane `human`): the Foreman does not implement, review, revise, release or label anything there. It only delivers the golden skills, per `approved-for-human` issue, as a `feature/<N>-<slug>` branch the person's direct-mode session resumes. Needs skillSync.
 
@@ -689,4 +704,14 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 - `stages`: the stage list and custom stages, [pipeline.md](pipeline.md#pipeline-stages-stages) and `src/stages.ts`.
 - `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).
 - `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).
+- `metrics`: [metrics.md](metrics.md).
 - The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).
+
+## Environment-only variables
+
+Read from the daemon's environment, with no config key:
+
+- `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY`, `EM_GITHUB_TOKEN`: the GitHub accounts ([security.md](security.md#two-github-identities)).
+- `FOREMAN_STATE_DIR`: where the state files (`.github-state.json`, the legacy `.agent-state.json`, the default metrics database) live. Default: the daemon's working directory.
+- `AI_AGENT_SHUTDOWN_DRAIN_MS`: the graceful-stop drain window. Default: the longest `maxDurationMs` or `reviewMaxDurationMs`.
+- `FOREMAN_SYSTEMD_UNIT`: the user unit `npm start`, `stop` and `restart` drive. Default: `slashbin-foreman.service`.

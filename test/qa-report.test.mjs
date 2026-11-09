@@ -31,11 +31,11 @@ function deps(over = {}) {
   return d;
 }
 
-test("QA applies only to a configured repo on an install with a QA checkout", () => {
+test("QA applies only to a configured repo on an install with a QA checkout", async () => {
   const agent = { qaPath: "/qa", qaRepos: [CONSOLE] };
-  assert.equal(qaApplies({ githubRepo: CONSOLE }, agent), true);
-  assert.equal(qaApplies({ githubRepo: "xrgarcia/jerky_ops" }, agent), false, "a non-Console repo does not trigger it");
-  assert.equal(qaApplies({ githubRepo: CONSOLE }, { qaRepos: [CONSOLE] }), false, "no qaPath: no QA");
+  assert.equal(await qaApplies({ githubRepo: CONSOLE }, agent), true);
+  assert.equal(await qaApplies({ githubRepo: "xrgarcia/jerky_ops" }, agent), false, "a non-Console repo does not trigger it");
+  assert.equal(await qaApplies({ githubRepo: CONSOLE }, { qaRepos: [CONSOLE] }), false, "no qaPath: no QA");
 });
 
 test("a pass on Console runs QA once and posts the report under its heading", async () => {
@@ -108,7 +108,7 @@ test("verify wiring: the card advances first, QA is started after and never awai
   const qaAt = src.indexOf("rt.qaReports.run(");
   assert.ok(advanceAt > 0 && qaAt > advanceAt, "QA starts after the advance to pr approved");
   assert.ok(!/await\s+rt\.qaReports\.run/.test(src), "nothing waits on QA");
-  assert.match(src.slice(qaAt - 200, qaAt), /qaApplies\(/, "gated on the QA repo list");
+  assert.match(src.slice(qaAt - 200, qaAt), /qaCovers === true/, "gated on the QA repo list");
   assert.equal((src.match(/qaReports\.run\(/g) ?? []).length, 1, "only the pass path runs QA");
 });
 

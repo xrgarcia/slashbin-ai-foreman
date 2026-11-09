@@ -44,7 +44,7 @@ export async function tryRevision(
   // implement is gated on "no pending revision", so #412 could not build either.
   // Clearing `pr pending actions` for one pass now resets it, as the comment on
   // `rt.memory.revisionEscalated` always claimed.
-  const pending = codeHost().findPendingRevisions(repoConfig, revLogger);
+  const pending = await codeHost().findPendingRevisions(repoConfig, revLogger);
   if (!pending) {
     if (failures > 0) rt.memory.revisionFailureCount.set(repoName, 0);
     rt.memory.revisionEscalated.delete(repoName);
@@ -61,10 +61,10 @@ export async function tryRevision(
   }
 
   // The EM's `blocked` label on the PR's issue pauses revise (docs/em-coordination.md §1).
-  if (pausedByBlockedLabel(rt, repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
+  if (await pausedByBlockedLabel(rt, repoConfig, "revise", prNumber, pending.issueNumbers, revLogger)) return null;
 
   // The head the no-commit streak is keyed on. An unreadable head throws and fails the pass (EM#1244 f5).
-  const head = pending.pr.headRefOid ?? codeHost().readPrHeadSha(repoConfig, prNumber, revLogger);
+  const head = pending.pr.headRefOid ?? await codeHost().readPrHeadSha(repoConfig, prNumber, revLogger);
 
   // A stopped revision resumes when someone pushes to the PR out of band.
   // Read once, up front: a streak that cannot be read is not "no streak", and a paid session is not started on a guess.
@@ -83,7 +83,7 @@ export async function tryRevision(
     // and with no review either, any ruling answers it.
     let rulingPosted: boolean | undefined;
     if (kind === "revision-stalemate" && streak) {
-      const r = codeHost().readRulingState(repoConfig.githubRepo, prNumber, repoConfig.repoPath, revLogger);
+      const r = await codeHost().readRulingState(repoConfig.githubRepo, prNumber, repoConfig.repoPath, revLogger);
       const since = streak.at ?? r.latestReviewAt;
       rulingPosted = rulingAnswersStalemate(r.rulingAt, since);
     }
@@ -119,7 +119,7 @@ export async function tryRevision(
   // its review (TECH_LEAD_ESCALATE_MARKER). jerky_service PR #125 went 13
   // rounds (2026-10-13) because each fix answered the last finding and the
   // spec question underneath reached no one who owned the spec.
-  const ruling = codeHost().readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
+  const ruling = await codeHost().readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);
   if (ruling.roundsSinceRuling >= REVIEW_ROUNDS_ALERT || ruling.escalateRequested) {
     const roundsKey = `${repoConfig.githubRepo}#${pending.pr.number}@${ruling.latestReviewId ?? "none"}`;
     if (!rt.memory.reviewRoundsAlerted.has(roundsKey)) {
@@ -146,7 +146,7 @@ export async function tryRevision(
   // the head unchanged (below). A marker left by a pass that failed after this is of unknown outcome: neither
   // counted nor consumed, and the next admission replaces it, so at most one is ever outstanding per PR.
   const prior = streak;
-  const beforeSha = codeHost().getRemoteBranchSha(repoConfig.githubRepo, headBranch, repoConfig.repoPath, revLogger);
+  const beforeSha = await codeHost().getRemoteBranchSha(repoConfig.githubRepo, headBranch, repoConfig.repoPath, revLogger);
   if (isUnconfirmed(prior, head)) {
     // An earlier attempt on this head has no confirming read, and this pass could read the branch: settle it
     // (neither counted nor consumed) and pay for nothing this pass. One unconfirmed attempt per head, then a free pass.
@@ -175,7 +175,7 @@ export async function tryRevision(
     // the marker saved at admission stays as it is (outcome unknown), and nothing is written to take back.
     await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, revLogger);
     // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
-    const qaFeedback = qaBeforeMergeApplies(repoConfig, config) ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
+    const qaFeedback = (await qaBeforeMergeApplies(repoConfig, config)) === true ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
     const result = await revisePRFeedback(
       rt.trust, repoConfig, revLogger, runAbort.signal,
       pending.pr.number, pending.issueNumbers, qaFeedback, beforeSha, headBranch,
@@ -185,7 +185,7 @@ export async function tryRevision(
       ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
       : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (wantsSessionReports() && result.success) {
-      const pr = prReport(repoConfig, pending.pr.number, revLogger);
+      const pr = await prReport(repoConfig, pending.pr.number, revLogger);
       report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
     }
 
@@ -298,7 +298,7 @@ export async function tryRevision(
 /** A closed or merged PR's no-commit streak is over: forget every one whose PR is no longer open. */
 async function forgetClosedPrStreaks(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
   for (const pr of rt.streaks.prsWithStreak(repoConfig)) {
-    const open = codeHost().isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
+    const open = await codeHost().isPrOpen(repoConfig.githubRepo, pr, repoConfig.repoPath);
     if (open === false) await rt.streaks.clear(repoConfig, pr);
     else if (open === null) logger.debug(`PR #${pr}: no-commit streak kept, GitHub could not say whether it is open`);
   }

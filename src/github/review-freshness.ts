@@ -4,7 +4,7 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { fleetState } from "../github-state.js";
 import { reads } from "./cache.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 
 
 /**
@@ -17,22 +17,22 @@ export function byReviewer(review: { author?: { login?: string } }, reviewerLogi
 }
 
 /**
- * True when the PR already has an APPROVED/CHANGES_REQUESTED review by
+ * True when the PR already has an APPROVED/CHANGES_REQUESTED/COMMENTED review by
  * `reviewerLogin` submitted at or after the PR's latest commit (i.e. the current
  * head has already been reviewed). On any lookup failure returns false — we'd
  * rather (rarely) re-review than silently never review.
  */
-export function hasFreshReview(
+export async function hasFreshReview(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): boolean {
+): Promise<boolean> {
   let cacheKey: string | null = null;
   const id = `${config.githubRepo}#${prNumber}`;
   try {
     if (reads.ttlMs > 0 && fleetState.isEnabled(config.githubRepo)) {
-      const pr = fleetState.openPrs(config.githubRepo).find((p) => p.number === prNumber);
+      const pr = (await fleetState.openPrs(config.githubRepo)).find((p) => p.number === prNumber);
       if (pr) {
         cacheKey = `${pr.headRefOid}@${pr.updatedAt}@${reviewerLogin ?? ""}`;
         const hit = reads.freshReviews.get(id);
@@ -40,19 +40,19 @@ export function hasFreshReview(
       }
     }
   } catch { /* state unavailable — read live */ }
-  const fresh = readFreshReview(config, prNumber, reviewerLogin, logger);
+  const fresh = await readFreshReview(config, prNumber, reviewerLogin, logger);
   if (cacheKey) reads.freshReviews.set(id, { key: cacheKey, fresh });
   return fresh;
 }
 
 /** Throws when the read fails (EM#1244 f5): a failed read is never "no fresh review". */
-export function readFreshReview(
+export async function readFreshReview(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): boolean {
-  const json = gh([
+): Promise<boolean> {
+  const json = await ghAsync([
     "pr", "view", String(prNumber),
     "--repo", config.githubRepo,
     "--json", "reviews,commits",
@@ -72,7 +72,9 @@ export function readFreshReview(
   return reviews.some(
     (r) =>
       byReviewer(r, reviewerLogin) &&
-      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") &&
+      // A COMMENTED review counts: a reviewer that holds the PR without a verdict (it was withdrawn, or the
+      // question is the EM's) has looked at this head, and running it again returns the same answer (foreman#39).
+      (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "COMMENTED") &&
       !!r.submittedAt &&
       new Date(r.submittedAt).getTime() >= lastCommitMs,
   );
@@ -83,32 +85,34 @@ export function readFreshReview(
  * only once the verdict is known to be current and not answered by a return to
  * review, so a true here means the verdict's label move never happened. A failed read throws, never a spurious revise.
  */
-export function currentVerdictRequestsChanges(
+export async function currentVerdictRequestsChanges(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): boolean {
-  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+): Promise<boolean> {
+  const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
     reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
   };
-  const verdicts = (data.reviews ?? [])
-    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED") && r.submittedAt)
+  // The reviewer's latest review of any kind: a COMMENTED review after the verdict holds the head, so the
+  // verdict is answered and the labels are not stranded (foreman#39).
+  const latest = (data.reviews ?? [])
+    .filter((r) => byReviewer(r, reviewerLogin) && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "COMMENTED") && r.submittedAt)
     .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
-  return verdicts[verdicts.length - 1]?.state === "CHANGES_REQUESTED";
+  return latest[latest.length - 1]?.state === "CHANGES_REQUESTED";
 }
 
 /**
  * When the reviewer's latest verdict on the PR is APPROVED, the time it was
  * submitted (ms); otherwise null. A failed read throws (EM#1244 f5).
  */
-export function currentApprovalMs(
+export async function currentApprovalMs(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): number | null {
-  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+): Promise<number | null> {
+  const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
     reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
   };
   const verdicts = (data.reviews ?? [])
@@ -128,14 +132,14 @@ export function currentApprovalMs(
  * runs only in the stuck state it exists for. A failed read throws, so it
  * is never a spurious review.
  */
-export function returnedToReviewSinceVerdict(
+export async function returnedToReviewSinceVerdict(
   config: RepoConfig,
   prNumber: number,
   issueNumbers: number[],
   reviewerLogin: string | undefined,
   logger: Logger,
-): boolean {
-  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
+): Promise<boolean> {
+  const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "reviews"], config.repoPath) || "{}") as {
     reviews?: { author?: { login?: string }; state?: string; submittedAt?: string }[];
   };
   const verdicts = (data.reviews ?? [])
@@ -143,14 +147,19 @@ export function returnedToReviewSinceVerdict(
     .sort((a, b) => new Date(a.submittedAt!).getTime() - new Date(b.submittedAt!).getTime());
   const last = verdicts[verdicts.length - 1];
   if (!last || last.state !== "CHANGES_REQUESTED") return false;
+  // A COMMENTED review after the verdict holds the head: a relabel with no commit never reopens it (foreman#39).
+  const commentedAfter = (data.reviews ?? []).some(
+    (r) => byReviewer(r, reviewerLogin) && r.state === "COMMENTED" && r.submittedAt && new Date(r.submittedAt).getTime() >= new Date(last.submittedAt!).getTime(),
+  );
+  if (commentedAfter) return false;
   const verdictMs = new Date(last.submittedAt!).getTime();
   const label = config.lifecycleLabels.prUnderReview;
   for (const n of issueNumbers) {
     // One timestamp per line: --paginate emits one --jq result per page.
-    const times = gh([
+    const times = (await ghAsync([
       "api", `repos/${config.githubRepo}/issues/${n}/events`, "--paginate",
       "--jq", `.[] | select(.event == "labeled" and .label.name == ${JSON.stringify(label)}) | .created_at`,
-    ], config.repoPath).split("\n").filter(Boolean);
+    ], config.repoPath)).split("\n").filter(Boolean);
     if (times.some((t) => new Date(t).getTime() > verdictMs)) return true;
   }
   return false;
@@ -160,15 +169,15 @@ export function returnedToReviewSinceVerdict(
  * The PR's state read live (never from a snapshot): OPEN, MERGED or CLOSED, or throws when GitHub
  * cannot say. The review phase asks before it starts a review (foreman#180).
  */
-export function readPrState(config: RepoConfig, prNumber: number, logger: Logger): "OPEN" | "MERGED" | "CLOSED" {
-  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "state"], config.repoPath) || "{}") as { state?: string };
+export async function readPrState(config: RepoConfig, prNumber: number, logger: Logger): Promise<"OPEN" | "MERGED" | "CLOSED"> {
+  const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "state"], config.repoPath) || "{}") as { state?: string };
   if (data.state === "OPEN" || data.state === "MERGED" || data.state === "CLOSED") return data.state;
   throw new Error(`PR #${prNumber}: GitHub returned no state`);
 }
 
 /** The PR's head commit sha, or throws when GitHub cannot say. */
-export function readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): string {
-  const data = JSON.parse(gh(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "headRefOid"], config.repoPath) || "{}") as { headRefOid?: string };
+export async function readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): Promise<string> {
+  const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "headRefOid"], config.repoPath) || "{}") as { headRefOid?: string };
   if (!data.headRefOid) throw new Error(`PR #${prNumber}: GitHub returned no head sha`);
   return data.headRefOid;
 }

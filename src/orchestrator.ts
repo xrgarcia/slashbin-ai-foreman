@@ -359,7 +359,7 @@ async function runStage(
     //    drift is cleared even when no ready-for-prod issues exist. ---
     case "branch-sync":
       if (!(repoConfig.baseBranch === repoConfig.productionBranch)) {
-        if (trySyncDrift(repoConfig, base, cycleNumber)) {
+        if (await trySyncDrift(repoConfig, base, cycleNumber)) {
           events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged`, level: "info" });
           processed++;
         }
@@ -375,11 +375,11 @@ async function runStage(
     //    the queue with no human step; bare everywhere else. ---
     case "dependabot":
       if (repoConfig.baseBranch !== repoConfig.productionBranch) {
-        const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
+        const filed = await tryFileDependencyBatchIssue(rt, repoConfig, base, cycleNumber);
         if (filed) {
           events.push({
             message: repoConfig.dependencyPreApproved
-              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved with the production grant — queued to build and deliver to prod`
               : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
             level: "info",
           });
