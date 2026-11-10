@@ -584,11 +584,13 @@ export interface CodeHost {
     url: string;
 } | null>;
   productionHead(config: RepoConfig): Promise<string>;
+  netZeroOffProduction(config: RepoConfig, issues: number[], logger: Logger): Promise<Map<number, { pr: number; url: string }>>;
   readPvResult(body: string): {
     pass: true;
 } | {
     pass: false;
     hold: string;
+    rows?: import("./plugins/contract.js").IssueAcceptance[];
 } | null;
   recentMergedReleasePrs(config: RepoConfig, sinceIso?: string, limit?: number): Promise<ReleasePrView[]>;
   removeBlockedLabel(config: RepoConfig, num: number): Promise<void>;

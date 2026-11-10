@@ -166,6 +166,8 @@ export interface IssueRecord {
   /** The EM questions asked about this issue, by `unstickKey` (src/unstick.ts). */
   unstick?: Record<string, UnstickEntry>;
   prodVerified?: ProdVerified;
+  /** Closed as a net-zero issue whose merge never reached production: no release carries it (foreman#117). */
+  noopClosed?: { pr: number; at: string };
   /** The promote stage already commented on this issue's promotion stall (EM#578). */
   promotionStallNoted?: true;
   /**
@@ -185,7 +187,7 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "promotionStallNoted", "divergenceTold"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
 
 /** A repo's own record is addressed with this number; no issue or PR is 0. */
 const REPO_RECORD_NUMBER = 0;

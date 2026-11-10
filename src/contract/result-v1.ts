@@ -65,6 +65,15 @@ const unrelatedError = z.looseObject({
   evidence: z.string().url().optional(),
 });
 
+/**
+ * One issue's grade on its own acceptance rows (prod and soak). A malformed list reads as absent (`catch`), so the
+ * release is graded as a whole, never rejected and never read as a pass (foreman#117).
+ */
+const issueAcceptance = z.array(z.object({
+  issue: posInt,
+  state: z.enum(["PASS", "FAIL", "NOT-VERIFIED"]),
+})).optional().catch(undefined);
+
 const verifier = z.looseObject({
   ...envelope,
   role: z.literal("verifier"),
@@ -79,6 +88,8 @@ const verifier = z.looseObject({
   gap_reason: z.string().optional(),
   /** Soak mode only: the soak's own verdict, apart from the acceptance row's. */
   soak_result: z.enum(["PASS", "FAIL", "NOT-VERIFIED"]).optional(),
+  /** Prod and soak: each issue the release names, graded on its own rows, so one failing issue holds only itself. */
+  issue_acceptance: issueAcceptance,
 }).superRefine((v, ctx) => {
   if (v.outcome === "hold" && !v.hold) ctx.addIssue({ code: "custom", path: ["hold"], message: "required when outcome is hold" });
   if (v.hold === "wait-until" && !v.eligible_at) ctx.addIssue({ code: "custom", path: ["eligible_at"], message: "required when hold is wait-until" });
@@ -96,6 +107,8 @@ const deployer = z.looseObject({
   hold_class: z.enum(HOLD_CLASSES).nullable().optional(),
   eligible_at: isoTime.nullable().optional(),
   unrelated_errors: z.array(unrelatedError).optional(),
+  /** The prod verify's per-issue grades, present when it did not pass (foreman#117). */
+  issue_acceptance: issueAcceptance,
 }).superRefine((v, ctx) => {
   if (v.hold && !v.hold_class) ctx.addIssue({ code: "custom", path: ["hold_class"], message: "required when hold is set" });
   if (v.hold_class === "time" && !v.eligible_at) ctx.addIssue({ code: "custom", path: ["eligible_at"], message: "required when hold_class is time" });
