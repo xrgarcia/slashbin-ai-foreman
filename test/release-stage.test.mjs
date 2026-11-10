@@ -2140,3 +2140,38 @@ test("#117: a failed merged-PR lookup leaves the issue unjoined and untouched", 
   assert.deepEqual(commentsOn(9), []);
   assert.doesNotMatch(gh().prs[100].body, /#9/, "never joined on a lookup that did not answer");
 });
+
+test("#117: an aggregate Acceptance FAIL row beside per-issue rows is not a failure of its own: only #6 holds; an independent failing row holds all", () => {
+  const t = (...r) => `## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n${r.join("\n")}`;
+  const ok = readPvResult(t("| **Acceptance** | FAIL | one issue |", "| **Acceptance #5** | PASS | ok |", "| **Acceptance #6** | FAIL | 500 |", "| **Grafana** | CLEAN | |"));
+  assert.equal(ok.hold, "acceptance-failed");
+  assert.deepEqual(ok.rows.filter((r) => r.state === "FAIL").map((r) => r.issue), [6]);
+  const bad = readPvResult(t("| **Acceptance** | FAIL | one issue |", "| **Acceptance #5** | PASS | ok |", "| **Acceptance #6** | FAIL | 500 |", "| **Grafana** | REGRESSIONS | p95 |"));
+  assert.equal(bad.hold, "prod-verify-failed", "a Grafana regression belongs to the whole release");
+});
+
+test("#117: a passing issue GitHub already closed is still recorded verified when another issue's row fails", async () => {
+  const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance #5** | PASS | ok |\n| **Acceptance #6** | FAIL | 500s |";
+  world({
+    issues: [{ ...issue(5), state: "CLOSED" }, issue(6, "pr approved")], prs: [mergedPr(90, "- #5\n- #6", MERGE, 60)],
+    comments: { 90: [{ url: "https://github.com/example/rel/pull/90#issuecomment-1", body: pv, at: "2026-10-10T00:00:00Z" }] },
+  });
+  await run();
+  assert.equal((await recordOf(rt, repo, 5)).prodVerified?.mergeSha, MERGE, "the closed passing issue is recorded verified");
+  assertHeld(6, "acceptance-failed");
+});
+
+test("#117: a net-zero issue closed with a no-op note keeps a terminal record; a later release naming it never adopts or verifies it", async () => {
+  netZeroWorld([]);
+  await seedHeadRelease();
+  await run();
+  assert.equal(gh().issues[9].state, "CLOSED");
+  assert.equal((await recordOf(rt, repo, 9)).noopClosed?.pr, 300, "the no-op close is recorded");
+  const st = gh();
+  st.prs[91] = mergedPr(91, "- #9", MERGE, 30);
+  writeFileSync(GH_STATE, JSON.stringify(st));
+  rescan();
+  await run();
+  assert.equal((await recordOf(rt, repo, 9)).prodVerified, undefined, "never recorded verified");
+  assert.ok(!Object.values(await prodReleases()).some((r) => r.issues.includes(9)), "no release carries it");
+});
