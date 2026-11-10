@@ -114,7 +114,7 @@ link and the next pass builds the fix first.
 **An orphan feature PR the Tech Lead asked changes of** (foreman#135). A feature PR that names no issue (a commit a person
 pushed straight to the base branch, which the reconciler turned into a PR) holds the build queue, and no stage revises it: revise is
 issue-driven. While it is under review the Tech Lead decides it and the queued issues wait. Once its current review verdict is
-CHANGES_REQUESTED, the Foreman blocks each queued issue with the PR, its author and the verdict, once per head, and hands it to
+CHANGES_REQUESTED, the Foreman holds each queued issue Blocked (escalated at `approved`, so a lost first write is re-delivered) with the PR, its author and the verdict, once per head, and hands it to
 you as the unstick kind `needs-ruling` (no new kind). Fix the PR by hand, close it, or rule on it: closing or merging it, or a new
 head, lifts the block and the queue builds.
 
