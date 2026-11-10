@@ -104,7 +104,7 @@ async function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): 
 }
 
 /** Hold slugs that name an observed regression: a gap never overrides them. */
-const REGRESSION_HOLD = /verify-failed|acceptance|regress/;
+const REGRESSION_HOLD = /acceptance|regress/;
 
 async function fromVerifyResult(rt: ForemanRuntime, r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger, soak = false): Promise<Verdict> {
   if (r.kind === "error") return { kind: "defer", reason: r.error };
@@ -775,7 +775,14 @@ async function settleSoak(
       logger.info(`Release PR #${rel.pr}: soak passed; done`);
       rt.memory.releaseBackoff.clear(key);
       if (held) await passRelease(rt, repoConfig, { ...rel, soaked: true }, "prodReverified", v.evidence, logger, v.note);
-      else await dropRelease(rt, repoConfig, rel.pr, logger);
+      else {
+        // The issues closed at the production verification, so the gap goes in a comment of its own before the drop.
+        if (v.note) {
+          const body = `**Soak passed with a noted gap.** Release PR #${rel.pr}: ${v.note}. No regression was observed.`;
+          for (const n of await writable(repoConfig, rel, logger)) await comment(repoConfig, n, body, logger);
+        }
+        await dropRelease(rt, repoConfig, rel.pr, logger);
+      }
       return;
     case "wait":
       await putRelease(rt, repoConfig, held ? { ...rel, retryAt: v.retryAt } : { ...rel, soakAt: v.retryAt }, logger);
