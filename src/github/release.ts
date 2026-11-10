@@ -8,6 +8,8 @@
 // desktop build. See `github.releaseTagFormat`.
 
 import type { RepoConfig } from "../config.js";
+import type { Logger } from "../logger.js";
+import { findIssuesMergedToBase } from "./lifecycle-scan.js";
 import { ghAsync } from "./gh.js";
 import type { IssueView, ReleasePrView } from "../code-host.js";
 export type { IssueView, ReleasePrView } from "../code-host.js";
@@ -166,6 +168,28 @@ export async function findReleaseStop(config: RepoConfig, num: number): Promise<
 /** The SHA of the production branch's head. Throws on a failed read. */
 export async function productionHead(config: RepoConfig): Promise<string> {
   return (await ghAsync(["api", `repos/${config.githubRepo}/commits/${config.productionBranch}`, "--jq", ".sha"], config.repoPath)).trim();
+}
+
+/**
+ * Of `issues`, those whose own merged PR changed nothing (an empty net diff) and whose merge commit is not on the
+ * production branch (foreman#117: Slashbin-io-docs#547, a net-zero PR on `develop` that no release carries). Nothing
+ * shipped for them, so a release at production's head does not carry them and has no verdict that is theirs. An
+ * issue with no merged PR found, a PR with a diff, or a merge already on production is not in the map. Throws on a
+ * failed read: the caller leaves the issues alone rather than guess.
+ */
+export async function netZeroOffProduction(config: RepoConfig, issues: number[], logger: Logger): Promise<Map<number, { pr: number; url: string }>> {
+  const out = new Map<number, { pr: number; url: string }>();
+  for (const ref of await findIssuesMergedToBase(config, issues, logger)) {
+    const raw = await ghAsync(["pr", "view", String(ref.prNumber), "--repo", config.githubRepo, "--json", "files,mergeCommit"], config.repoPath);
+    const pr = JSON.parse(raw || "{}") as { files?: unknown[]; mergeCommit?: { oid?: string } | null };
+    const oid = pr.mergeCommit?.oid;
+    if (!Array.isArray(pr.files) || pr.files.length > 0 || !oid) continue;
+    const status = (await ghAsync(["api", `repos/${config.githubRepo}/compare/${oid}...${config.productionBranch}`, "--jq", ".status"], config.repoPath)).trim();
+    // The production branch ahead of the merge, or at it, holds the merge; behind or diverged does not.
+    if (status === "ahead" || status === "identical") continue;
+    out.set(ref.issueNumber, { pr: ref.prNumber, url: ref.prUrl });
+  }
+  return out;
 }
 
 /** How many existing tags `ensureReleaseTag` dereferences when looking for one at the SHA. */

@@ -147,6 +147,7 @@ export function githubCodeHost(
     findReleaseStop: release.findReleaseStop,
     findSreSweepHold: release.findSreSweepHold,
     productionHead: release.productionHead,
+    netZeroOffProduction: release.netZeroOffProduction,
     readPvResult: release.readPvResult,
     recentMergedReleasePrs: release.recentMergedReleasePrs,
     removeBlockedLabel: release.removeBlockedLabel,

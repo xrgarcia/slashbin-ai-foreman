@@ -89,7 +89,8 @@ function readVerify(r: CliRun, repoConfig: RepoConfig, prNumber: number, what: s
   const gapClass = v1.status === "ok" ? v1.result.gap_class : undefined;
   const gap = gapClass && gapClass !== "none" ? { class: gapClass, ...(v1.status === "ok" && v1.result.gap_reason ? { reason: v1.result.gap_reason } : {}) } : undefined;
   const soak = v1.status === "ok" ? v1.result.soak_result : undefined;
-  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}), ...(gap ? { gap } : {}), ...(soak ? { soak } : {}) };
+  const issues = v1.status === "ok" ? v1.result.issue_acceptance : undefined;
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}), ...(gap ? { gap } : {}), ...(soak ? { soak } : {}), ...(issues?.length ? { issues } : {}) };
 }
 
 /**
@@ -158,6 +159,7 @@ export function deployTrailerFromV1(d: RoleResult<"deployer">): DeployTrailer {
     ...(d.hold_class === "time" && d.eligible_at ? { hold: waitUntilSlug(d.eligible_at) } : d.hold ? { hold: d.hold } : {}),
     ...(d.evidence?.length ? { evidence: d.evidence[0] } : {}),
     ...(d.hold_class ? { holdClass: d.hold_class } : {}),
+    ...(d.issue_acceptance?.length ? { issues: d.issue_acceptance } : {}),
     ...(d.reason_text || (d.hold_class === "time" && d.hold) ? { holdReason: [d.hold_class === "time" ? d.hold : null, d.reason_text].filter(Boolean).join(": ") } : {}),
   };
 }

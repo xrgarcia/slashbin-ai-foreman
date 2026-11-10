@@ -584,6 +584,7 @@ export interface CodeHost {
     url: string;
 } | null>;
   productionHead(config: RepoConfig): Promise<string>;
+  netZeroOffProduction(config: RepoConfig, issues: number[], logger: Logger): Promise<Map<number, { pr: number; url: string }>>;
   readPvResult(body: string): {
     pass: true;
 } | {
