@@ -86,7 +86,10 @@ function readVerify(r: CliRun, repoConfig: RepoConfig, prNumber: number, what: s
   const v = verifyVerdict(trailer);
   logger.info(`SRE ${what} of ${repoConfig.githubRepo} PR #${prNumber}: ${v.pass ? "PASS" : `HOLD (${v.reason})`}`);
   const unrelated = v1.status === "ok" ? unrelatedFromV1(v1.result.unrelated_errors) : parseUnrelatedErrors(r.stdout);
-  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}) };
+  const gapClass = v1.status === "ok" ? v1.result.gap_class : undefined;
+  const gap = gapClass && gapClass !== "none" ? { class: gapClass, ...(v1.status === "ok" && v1.result.gap_reason ? { reason: v1.result.gap_reason } : {}) } : undefined;
+  const soak = v1.status === "ok" ? v1.result.soak_result : undefined;
+  return { kind: "verdict", pass: v.pass, trailer, ...(v.reason ? { reason: v.reason } : {}), summary: r.stdout.trim().slice(-SUMMARY_DISPLAY_LIMIT), ...(unrelated ? { unrelated } : {}), ...(gap ? { gap } : {}), ...(soak ? { soak } : {}) };
 }
 
 /**
@@ -239,6 +242,7 @@ export async function verifyProdViaSre(
   abortSignal?: AbortSignal,
   transcriptPath?: string,
   mode: "prod" | "soak" = "prod",
+  recheck = false,
 ): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
   const sre = agentConfig.srePath;
   if (!sre) return { kind: "error", error: "srePath not configured" };
@@ -246,7 +250,7 @@ export async function verifyProdViaSre(
   const what = mode === "soak" ? "30-minute soak" : "prod verification";
   logger.info(`Handing release PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for its ${what}`);
   const r = await runAgentCli(sre, "bin/sre.mjs",
-    ["verify", "--mode", mode, "--repo", repoConfig.githubRepo, "--pr", String(prNumber)],
+    ["verify", "--mode", mode, ...(recheck && mode === "soak" ? ["--recheck"] : []), "--repo", repoConfig.githubRepo, "--pr", String(prNumber)],
     buildSreEnv(agentConfig, repoConfig), agentConfig, SRE_VERIFY_MAX_DURATION_MS, abortSignal, transcriptPath);
   if (r.timedOut) return { kind: "error", error: `SRE ${what} timed out` };
   if (mode === "soak" && r.code === 1) return { kind: "nothing", reason: cliTail(r) || "nothing to soak" };

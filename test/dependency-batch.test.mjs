@@ -181,12 +181,34 @@ test("every PR appears in the table and in References", () => {
   }
 });
 
-test("the body demands the app be STARTED, not merely built", () => {
-  // This is the whole point of the change. A body that only says "build" would
-  // reproduce the CI-rollup gate the issue exists to replace.
+test("boot and health sit under dev verification; no in-session step needs a datastore", () => {
+  // foreman#115: the implement session has no Postgres, Redis or Docker, so a step that boots the app dropped every update.
   const { body } = buildDependencyBatchIssue("develop", changes);
-  assert.match(body, /Start the application and confirm it serves/);
-  assert.match(body, /Exercise the flows/);
+  const required = body.slice(body.indexOf("## Required Changes"), body.indexOf("## Acceptance"));
+  const steps = required.split("\n").filter((l) => /^\d+\. /.test(l));
+  assert.equal(steps.length, 5);
+  assert.match(steps[1], /lockfile/);
+  assert.match(steps[2], /Build/);
+  assert.match(steps[3], /test suite/);
+  assert.match(steps[4], /bundle/);
+  for (const step of steps) assert.doesNotMatch(step, /\b(start|boot|serves?|health|postgres|redis|docker|database)\b/i, `a datastore step in the session: ${step}`);
+  assert.doesNotMatch(body, /Start the application and confirm it serves/);
+
+  const dev = body.slice(body.indexOf("### Dev verification"), body.indexOf("### Human validation"));
+  assert.ok(dev.length > 0, "a Dev verification section");
+  assert.match(dev, /SRE/);
+  assert.match(dev, /boots/);
+  assert.match(dev, /health route/);
+  const automated = body.slice(body.indexOf("### Automated checks"), body.indexOf("### Dev verification"));
+  assert.doesNotMatch(automated, /starts|health/i, "the session's automated checks do not claim a boot");
+});
+
+test("an environment gap is not an update failure: a PR is dropped only when a step that can run here fails", () => {
+  const { body } = buildDependencyBatchIssue("develop", changes);
+  assert.match(body, /environment gap, not an update failure/);
+  assert.match(body, /Never drop an update because the app would not start here/);
+  assert.match(body, /only when a step that can run\s+here/);
+  assert.match(body, /Exercise|dev verification/i);
 });
 
 test("the body carries the flight-gate sections the approval gate requires", () => {

@@ -110,6 +110,20 @@
     },
     "acceptance": {
       "type": "string"
+    },
+    "gap_class": {
+      "type": "string"
+    },
+    "gap_reason": {
+      "type": "string"
+    },
+    "soak_result": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT-VERIFIED"
+      ]
     }
   },
   "required": [
