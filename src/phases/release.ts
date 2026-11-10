@@ -57,6 +57,8 @@ import type { ForemanRuntime } from "../runtime.js";
 
 /** The SRE's soak window: it runs once this long after the merge. */
 export const SOAK_DELAY_MS = 30 * 60_000;
+/** How long after a follow-up passes its soak a held release it corrects is re-verified (foreman#186). */
+export const REARM_SETTLE_MS = 10 * 60_000;
 /** How far back the release stage adopts merged releases it did not deploy. */
 export const ADOPT_WINDOW_MS = 48 * 3_600_000;
 /** How often a repo is scanned for releases to adopt: one `gh pr list` each time. */
@@ -141,6 +143,27 @@ async function dropRelease(rt: ForemanRuntime, repoConfig: RepoConfig, pr: numbe
   const ok = await rt.releases.dropRelease(repoConfig, pr);
   if (!ok) logger.warn(`Release PR #${pr}: its record could not be cleared; it is looked at again next pass`);
   return ok;
+}
+
+/**
+ * A release ended healthy (its soak passed, or there was none left to run): the corrective change is live and proven.
+ * Every held release that carries an issue this one corrects is due `REARM_SETTLE_MS` from now with its attempts
+ * cleared, so a failed re-verify retries in minutes instead of on the back-off it had grown to (foreman#186,
+ * slashbin_data_receiver#189 held 6 h past the fix of #192). Never called at a production-verification pass.
+ */
+async function rearmHeld(rt: ForemanRuntime, repoConfig: RepoConfig, from: ProdRelease, followUpOf: readonly number[] | undefined, logger: Logger): Promise<void> {
+  if (!followUpOf?.length) return;
+  const loaded = await rt.releases.loadReleases(repoConfig, logger);
+  if (!loaded) return;
+  for (const held of loaded.releases) {
+    if (held.pr === from.pr || held.phase !== "held" || !held.issues.some((n) => followUpOf.includes(n))) continue;
+    const retryAt = iso(now() + REARM_SETTLE_MS);
+    // The head is recorded too, so the head-moved probe does not push the re-arm out to a soak window.
+    const head = rt.memory.passHead.get(repoConfig.name);
+    if (await putRelease(rt, repoConfig, { ...held, retryAt, attempts: 0, ...(head ? { verifiedHead: head } : {}) }, logger)) {
+      logger.info(`Release PR #${held.pr}: its follow-up (release PR #${from.pr}) passed its soak; re-verifying at ${retryAt}`);
+    }
+  }
 }
 
 async function comment(repoConfig: RepoConfig, n: number, body: string, logger: Logger): Promise<void> {
@@ -250,6 +273,11 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
     if (ok) saved.add(n);
     else unsaved.push(n);
   }
+  // What these issues correct, read while they are open (a closed issue's title is gone): the release's healthy end
+  // re-arms the held releases carrying them. An unreadable link throws: nothing is closed and the next pass retries.
+  const relations = await codeHost().relationsOf(repoConfig, rel.issues, logger);
+  const followUpOf = [...new Set(rel.issues.flatMap((n) => relations.get(n)?.corrects ?? []))].filter((n) => !rel.issues.includes(n));
+  rel = { ...rel, ...(followUpOf.length > 0 ? { followUpOf } : {}) };
   if (unsaved.length > 0) logger.warn(`Release PR #${rel.pr}: the production verification of ${unsaved.map((n) => `#${n}`).join(", ")} could not be recorded; nothing is closed for them, the release is verified again next pass`);
   // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
   const openIssues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
@@ -273,7 +301,7 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   logger.info(`Release PR #${rel.pr} verified in production; closed ${[...saved].map((n) => `#${n}`).join(", ")}`);
   // The issues are closed and recorded; a failed save here only repeats the (idempotent) verification next pass.
   if (rel.soaked) {
-    await dropRelease(rt, repoConfig, rel.pr, logger);
+    if (await dropRelease(rt, repoConfig, rel.pr, logger)) await rearmHeld(rt, repoConfig, rel, rel.followUpOf, logger);
     return;
   }
   const mergedAt = Date.parse(rel.mergedAt ?? "") || now();
@@ -331,6 +359,12 @@ async function holdRelease(
       await comment(repoConfig, n, body, logger);
       await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger);
     }
+  } else {
+    // Same slug again: the reason lives only in the SRE's edited comment, so say it on the issues (foreman#186).
+    const evidence = v.evidence?.trim().replace(/\.+$/, "");
+    const body = `**Re-verified, still held: \`${v.hold}\`.** Release PR #${rel.pr}, attempt ${attempts}.` +
+      `${evidence ? ` ${evidence}.` : ""} Next re-verify: ${formatWait(Date.parse(retryAt) - now())}.`;
+    for (const n of await writable(repoConfig, rel, logger)) await comment(repoConfig, n, body, logger);
   }
   logger.warn(`Release PR #${rel.pr}: prod verification held (${v.hold}), attempt ${attempts}; re-verify at ${retryAt}`);
 }
@@ -766,7 +800,7 @@ async function settleSoak(
       await passRelease(rt, repoConfig, { ...rel, soaked: true }, "prodReverified", undefined, logger, `no soak was left to run (${r.reason})`);
       return;
     }
-    await dropRelease(rt, repoConfig, rel.pr, logger);
+    if (await dropRelease(rt, repoConfig, rel.pr, logger)) await rearmHeld(rt, repoConfig, rel, rel.followUpOf, logger);
     return;
   }
   const v = await fromVerifyResult(rt, r, repoConfig, rel.pr, logger, true);
@@ -781,7 +815,7 @@ async function settleSoak(
           const body = `**Soak passed with a noted gap.** Release PR #${rel.pr}: ${v.note}. No regression was observed.`;
           for (const n of await writable(repoConfig, rel, logger)) await comment(repoConfig, n, body, logger);
         }
-        await dropRelease(rt, repoConfig, rel.pr, logger);
+        if (await dropRelease(rt, repoConfig, rel.pr, logger)) await rearmHeld(rt, repoConfig, rel, rel.followUpOf, logger);
       }
       return;
     case "wait":
@@ -1046,7 +1080,8 @@ export async function tryRelease(
   }
 
   // A held release waits out its back-off, but a new production head (the blocker's fix
-  // shipping in another release) makes it due now, once per head (#1477, 2026-10-29: held
+  // shipping in another release) makes it due one soak window later (the deploy may not have settled yet, and an early
+  // re-verify burns the back-off: foreman#186), once per head (#1477, 2026-10-29: held
   // 5 h 20 m past a fix that landed). Reuses `productionHead`, read at most once a minute.
   const waiting = view().filter((r) => r.phase === "held" && !due(r.retryAt));
   if (waiting.length > 0 && t - (rt.memory.lastHeadProbe.get(repoConfig.name) ?? 0) >= HEAD_PROBE_MS) {
@@ -1059,11 +1094,11 @@ export async function tryRelease(
         // A hold recorded before heads were stored has no head to compare: verify it once now.
         const ok = await rt.records.updatePrRecord(repoConfig, rel.pr, (d) => {
           if (!d.release) return;
-          d.release = { ...d.release, verifiedHead: head, retryAt: iso(t) };
+          d.release = { ...d.release, verifiedHead: head, retryAt: iso(t + SOAK_DELAY_MS), attempts: 0 };
         });
         if (ok) {
-          follow({ ...rel, verifiedHead: head, retryAt: iso(t) });
-          rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} ${rel.verifiedHead ? "moved" : "head unrecorded"} at ${short(head)} since its last prod verification; re-verifying now`);
+          follow({ ...rel, verifiedHead: head, retryAt: iso(t + SOAK_DELAY_MS), attempts: 0 });
+          rlog.info(`Release PR #${rel.pr}: ${repoConfig.productionBranch} ${rel.verifiedHead ? "moved" : "head unrecorded"} at ${short(head)} since its last prod verification; re-verifying in ${formatWait(SOAK_DELAY_MS)}`);
         }
       }
     } catch (err) {
