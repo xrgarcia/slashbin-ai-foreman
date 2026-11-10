@@ -72,7 +72,7 @@ export const STRANDED_MARK = "<!-- foreman:stranded-issue";
 export const HEAD_PROBE_MS = 60_000;
 
 type Verdict =
-  | { kind: "pass"; evidence?: string }
+  | { kind: "pass"; evidence?: string; /** What the verifier could not check, passed anyway: named in the close comment. */ note?: string }
   | { kind: "hold"; hold: string; evidence?: string }
   /** Not a failure: the SRE named the time the rest becomes observable. */
   | { kind: "wait"; retryAt: string; hold: string }
@@ -88,9 +88,9 @@ function holdVerdict(hold: string, evidence?: string): Verdict {
 }
 
 /** Production verification (or the soak) by the enabled verifier; an error result when none is enabled. */
-function verifyProd(repoConfig: RepoConfig, config: AgentConfig, pr: number, logger: Logger, signal: AbortSignal, path: string, mode: "prod" | "soak"): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
+function verifyProd(repoConfig: RepoConfig, config: AgentConfig, pr: number, logger: Logger, signal: AbortSignal, path: string, mode: "prod" | "soak", recheck = false): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
   const v = roleFor("verifier", config);
-  return v ? v.verifyProd(repoConfig, config, pr, logger, signal, path, mode) : Promise.resolve({ kind: "error", error: "no verifier is enabled" });
+  return v ? v.verifyProd(repoConfig, config, pr, logger, signal, path, mode, recheck) : Promise.resolve({ kind: "error", error: "no verifier is enabled" });
 }
 
 /** The evidence link for a verification the SRE just posted: its latest Production Verification comment. */
@@ -103,12 +103,21 @@ async function evidenceFor(repoConfig: RepoConfig, pr: number, logger: Logger): 
   }
 }
 
-async function fromVerifyResult(rt: ForemanRuntime, r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger): Promise<Verdict> {
+/** Hold slugs that name an observed regression: a gap never overrides them. */
+const REGRESSION_HOLD = /verify-failed|acceptance|regress/;
+
+async function fromVerifyResult(rt: ForemanRuntime, r: VerifyResult, repoConfig: RepoConfig, pr: number, logger: Logger, soak = false): Promise<Verdict> {
   if (r.kind === "error") return { kind: "defer", reason: r.error };
   // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
   if (r.unrelated) await rt.handoffs.settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, pr), { seen: r.unrelated, seenOn: `${repoConfig.githubRepo} PR #${pr} (prod)` });
   const evidence = await evidenceFor(repoConfig, pr, logger);
-  if (r.pass) return { kind: "pass", ...(evidence ? { evidence } : {}) };
+  const gapNote = r.gap && r.gap.class !== "none" ? `the SRE could not check part of it (gap: \`${r.gap.class}\`${r.gap.reason ? `, ${r.gap.reason}` : ""})` : undefined;
+  if (r.pass) return { kind: "pass", ...(evidence ? { evidence } : {}), ...(gapNote ? { note: gapNote } : {}) };
+  // A soak that could not be verified for want of an instrument, with no regression observed, is a pass
+  // with the gap named, never a hold: a hold here waits on something no re-run can change (foreman#80).
+  if (soak && r.soak === "NOT-VERIFIED" && r.gap?.class === "tooling-gap" && !REGRESSION_HOLD.test(r.reason ?? "")) {
+    return { kind: "pass", ...(evidence ? { evidence } : {}), note: gapNote ?? "the SRE could not check part of it (gap: `tooling-gap`)" };
+  }
   return holdVerdict(r.reason ?? "prod-verify-held", evidence);
 }
 
@@ -219,11 +228,12 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
 }
 
 /** A pass: close every issue with one line of evidence, record it, and queue the soak. */
-async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, move: Move, evidence: string | undefined, logger: Logger): Promise<void> {
+async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, move: Move, evidence: string | undefined, logger: Logger, note?: string): Promise<void> {
   await tagRelease(repoConfig, rel, logger);
   const line =
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
-    `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.`;
+    `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.` +
+    `${note ? ` Passed with a noted gap: ${note}.` : ""}`;
   // Record first, then act: an issue is commented on and closed only once its verification is saved, so a failed
   // save can never leave it closed with no record. An unrecorded issue is left for the next pass of this release.
   const at = iso(now());
@@ -714,7 +724,7 @@ async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   switch (v.kind) {
     case "pass":
       rt.memory.releaseBackoff.clear(key);
-      await passRelease(rt, repoConfig, rel, rel.phase === "held" ? "prodReverified" : "prodVerified", v.evidence, logger);
+      await passRelease(rt, repoConfig, rel, rel.phase === "held" ? "prodReverified" : "prodVerified", v.evidence, logger, v.note);
       return;
     case "hold":
       rt.memory.releaseBackoff.clear(key);
@@ -732,30 +742,43 @@ async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   }
 }
 
-/** The 30-minute soak, once per release. */
-async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, logger: Logger, cycleNumber: number): Promise<void> {
+/** Whether a release is held by its soak, not by its production verification: its re-verify is a soak. */
+const soakHeld = (rel: ProdRelease): boolean => rel.phase === "held" && (rel.soaked === true || (rel.hold ?? "").startsWith("soak:"));
+
+/**
+ * Act on a soak's result. `held` is a release already held by its soak, re-soaked: the issues were reopened,
+ * so a pass (or "nothing left to soak") closes them through passRelease, which drops the release because it
+ * is soaked. A first soak's pass just drops it: its issues closed at the production verification.
+ */
+async function settleSoak(
+  rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease,
+  r: VerifyResult | { kind: "nothing"; reason: string }, logger: Logger, held: boolean,
+): Promise<void> {
   const key = `${repoConfig.githubRepo}#${rel.pr}`;
-  const path = transcript(repoConfig, `soak-pr${rel.pr}`, cycleNumber);
-  logger.info(`Release PR #${rel.pr}: SRE 30-minute soak, transcript: ${path}`);
-  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "soak"));
   // The gate: neither a clean soak nor "no soak to run" drops the release while a report for this PR is unsaved. This
   // result's own reports are buffered BEFORE the drain, so a new error B survives a drain still failing on an earlier A.
   await rt.handoffs.settleHandoffs(repoConfig, handoffSubject(repoConfig.githubRepo, rel.pr),
     r.kind !== "error" && r.kind !== "nothing" && r.unrelated ? { seen: r.unrelated, seenOn: `${repoConfig.githubRepo} PR #${rel.pr} (prod)` } : undefined);
   if (r.kind === "nothing") {
     logger.info(`Release PR #${rel.pr}: no soak to run (${r.reason}); done`);
+    if (held) {
+      rt.memory.releaseBackoff.clear(key);
+      await passRelease(rt, repoConfig, { ...rel, soaked: true }, "prodReverified", undefined, logger, `no soak was left to run (${r.reason})`);
+      return;
+    }
     await dropRelease(rt, repoConfig, rel.pr, logger);
     return;
   }
-  const v = await fromVerifyResult(rt, r, repoConfig, rel.pr, logger);
+  const v = await fromVerifyResult(rt, r, repoConfig, rel.pr, logger, true);
   switch (v.kind) {
     case "pass":
       logger.info(`Release PR #${rel.pr}: soak passed; done`);
       rt.memory.releaseBackoff.clear(key);
-      await dropRelease(rt, repoConfig, rel.pr, logger);
+      if (held) await passRelease(rt, repoConfig, { ...rel, soaked: true }, "prodReverified", v.evidence, logger, v.note);
+      else await dropRelease(rt, repoConfig, rel.pr, logger);
       return;
     case "wait":
-      await putRelease(rt, repoConfig, { ...rel, soakAt: v.retryAt }, logger);
+      await putRelease(rt, repoConfig, held ? { ...rel, retryAt: v.retryAt } : { ...rel, soakAt: v.retryAt }, logger);
       return;
     case "defer": {
       const ms = rt.memory.releaseBackoff.start(key, config.backoff.releaseRetry);
@@ -764,12 +787,25 @@ async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentCon
     }
     case "hold": {
       rt.memory.releaseBackoff.clear(key);
+      const hold = { hold: `soak:${v.hold}`, ...(v.evidence ? { evidence: v.evidence } : {}) };
+      if (held) {
+        // Still held by its soak: keep the attempt count, so the re-verify backs off.
+        await holdRelease(rt, repoConfig, config, { ...rel, soaked: true }, hold, "soakHeld", logger);
+        return;
+      }
       for (const n of rel.issues) await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
-      await holdRelease(rt, repoConfig, config, { ...rel, soaked: true, attempts: 0, phase: "soaking", hold: undefined },
-        { hold: `soak:${v.hold}`, ...(v.evidence ? { evidence: v.evidence } : {}) }, "soakHeld", logger);
+      await holdRelease(rt, repoConfig, config, { ...rel, soaked: true, attempts: 0, phase: "soaking", hold: undefined }, hold, "soakHeld", logger);
       return;
     }
   }
+}
+
+/** The 30-minute soak, once per release. */
+async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, logger: Logger, cycleNumber: number): Promise<void> {
+  const path = transcript(repoConfig, `soak-pr${rel.pr}`, cycleNumber);
+  logger.info(`Release PR #${rel.pr}: SRE 30-minute soak, transcript: ${path}`);
+  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "soak"));
+  await settleSoak(rt, repoConfig, config, rel, r, logger, false);
 }
 
 /**
@@ -1060,6 +1096,14 @@ export async function tryRelease(
   const held = current.find((r) => r.phase === "held" && ready(r) && due(r.retryAt));
   if (held) {
     const path = transcript(repoConfig, `verify-pr${held.pr}`, cycleNumber);
+    // A release held by its soak is cleared by a fresh soak, never by a production pass: the soak is what
+    // held it, and a prod pass would close the reopened issues with the soak's finding unanswered (foreman#80).
+    if (soakHeld(held)) {
+      rlog.info(`Release PR #${held.pr}: re-soaking after ${held.hold ?? "a soak hold"}, transcript: ${path}`);
+      const sr = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held.pr, rlog, signal, path, "soak", true));
+      await settleSoak(rt, repoConfig, config, held, sr, rlog, true);
+      return true;
+    }
     rlog.info(`Release PR #${held.pr}: re-verifying production after ${held.hold ?? "a hold"}, transcript: ${path}`);
     const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held.pr, rlog, signal, path, "prod"));
     const v: Verdict = r.kind === "nothing" ? { kind: "defer", reason: r.reason } : await fromVerifyResult(rt, r, repoConfig, held.pr, rlog);
