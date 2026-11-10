@@ -112,7 +112,22 @@ whether you pushed.
    gh pr comment <number> --body "Addressed review feedback: <summary>"
    ```
 
-3. **If no code change is needed** — the review asked for none, or the branch already
+3. **Keep the PR description true to the branch (foreman#116).** If this revision drops or
+   reverts anything the PR body claims delivered (a bump, a file, a table row marked
+   "Landed"), rewrite the body so it matches the branch's final diff, and only then say the
+   body is current:
+
+   ```
+   gh pr view <number> --json body --jq .body > /tmp/pr-body.md   # edit it: remove or strike the dropped claims
+   gh pr edit <number> --body-file /tmp/pr-body.md
+   ```
+
+   If `gh pr edit` fails (it can fail on a Projects-classic error), use
+   `gh api --method PATCH repos/{owner}/{repo}/pulls/<number> -F body=@/tmp/pr-body.md`.
+   Report `"pr_body_stale":false` only after the body was rewritten. Otherwise report
+   `"outcome":"reverted"` with `"pr_body_stale":true` and `"reverted_items"` naming each dropped
+   claim; the Foreman then strikes those lines and adds a `## Reverted in revision` section itself.
+4. **If no code change is needed** — the review asked for none, or the branch already
    satisfies every finding — do not invent one. End your output with the no-commit
    trailer the prompt describes. Without it, a run that pushes nothing is treated as a
    failed revision.
@@ -142,7 +157,7 @@ in `reason_text` and decides nothing. Examples:
 ```
 FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"pushed","changed":["code","tests"]}
 FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"no-commit","reason_text":"the branch already satisfies every finding"}
-FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"reverted","changed":["revert"],"reverted_findings":[2],"pr_body_stale":true}
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"reverted","changed":["revert"],"reverted_findings":[2],"reverted_items":["#696"],"pr_body_stale":true}
 ```
 
 `no-commit` requires `reason_text`. The schema is `schemas/reviser.v1.json` in the Foreman package.

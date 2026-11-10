@@ -7,6 +7,7 @@ import { describeSpawnFailure, phaseTranscriptPath, spawnClaude } from "../sessi
 import { REVISION_NO_COMMIT, extractStreamResult, type RevisionResult } from "../session/protocol.js";
 import { declaredNoCommitV1, sessionResultV1 } from "../session/result-v1.js";
 import { recordContractPath } from "../contract/usage.js";
+import { amendRevisedPrBody, revisionLeavesBodyStale } from "../pr-body.js";
 import { IMAGE_HANDLING_INSTRUCTIONS, readOverlay, skillInstruction } from "./workflow-prompt.js";
 
 /**
@@ -139,6 +140,22 @@ Work autonomously. Do not ask questions.`;
     }
     logger.error(`PR revision completed (exit 0) but no commits were pushed to ${headBranch} (SHA unchanged at ${beforeSha.slice(0, 10)}) and no FOREMAN_REVISION no-commit trailer was given — marking as failed`);
     return { success: false, error: "no commits pushed — revision was a no-op" };
+  }
+
+  // A revision that dropped or reverted what the PR description claims must not hand the PR back to
+  // review with that description (foreman#116: the SRE graded the stale claim against the deployed code
+  // and failed dev verification). The skill tells the reviser to rewrite the body; this is the backstop
+  // for when it did not. A failed amend fails the pass: never hand back a body known to be stale.
+  const v1Body = sessionResultV1(result.stdout, "reviser");
+  if (prNumber && v1Body.status === "ok" && revisionLeavesBodyStale(v1Body.result)) {
+    try {
+      const amended = await amendRevisedPrBody(config, prNumber, v1Body.result, logger);
+      logger.info(amended ? `PR #${prNumber} description amended: the revision reverted what it claimed` : `PR #${prNumber} description already records the revision's reverts`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`PR revision pushed, but PR #${prNumber}'s description could not be amended (${msg}); not handing a stale description back to review`);
+      return { success: false, error: `PR description amend failed after a reverting revision: ${msg}` };
+    }
   }
 
   logger.info(`PR revision completed successfully for ${config.name}`);

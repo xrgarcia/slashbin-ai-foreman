@@ -1,0 +1,16 @@
+// PR description read and write (foreman#116). REST, never `gh pr edit`: GraphQL requests the
+// sunset Projects-classic field and the edit does not apply (see promotion.ts).
+import type { RepoConfig } from "../config.js";
+import { ghAsync } from "./gh.js";
+
+/**
+ * Rewrite PR `pr`'s description: `rewrite` gets the current body and returns the new one, or null for
+ * no change. True when a new body was written. Throws when GitHub cannot read or write it.
+ */
+export async function editPrBody(config: RepoConfig, pr: number, rewrite: (current: string) => string | null): Promise<boolean> {
+  const out = await ghAsync(["api", `repos/${config.githubRepo}/pulls/${pr}`, "--jq", ".body // \"\" | @json"], config.repoPath);
+  const next = rewrite(JSON.parse(out.trim()) as string);
+  if (next === null) return false;
+  await ghAsync(["api", "--method", "PATCH", `repos/${config.githubRepo}/pulls/${pr}`, "-f", `body=${next}`, "--silent"], config.repoPath);
+  return true;
+}
