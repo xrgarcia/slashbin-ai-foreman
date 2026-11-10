@@ -95,8 +95,9 @@ const ACCEPTANCE_HOLD = /acceptance/;
 /**
  * Which of a release's issues a failing verdict holds, and which it passes (foreman#117). The verifier grades each
  * issue on its own acceptance rows; one issue's failing row must not hold the issues whose rows passed. Split only
- * on an acceptance hold where EVERY issue has a row, at least one FAIL and at least one PASS: anything less (no
- * rows, a missing row, all failing, a deploy or release-level hold) is the release's verdict as a whole. An issue
+ * on an acceptance hold where EVERY tracked issue has a row, some row is a FAIL (any issue's) and a tracked issue
+ * PASSed: anything less (no rows, a missing row, all failing, a deploy or release-level hold) is the release's
+ * verdict as a whole. An issue
  * graded NOT-VERIFIED is not passed: it stays held with the failing ones. Pure, exported for tests.
  */
 export function splitByIssueRows(issues: readonly number[], hold: string, rows: readonly IssueAcceptance[] | undefined): { passing: number[]; held: number[] } | undefined {
@@ -106,7 +107,9 @@ export function splitByIssueRows(issues: readonly number[], hold: string, rows: 
   if (!issues.every((n) => state.has(n))) return undefined;
   const passing = issues.filter((n) => state.get(n) === "PASS");
   const held = issues.filter((n) => state.get(n) !== "PASS");
-  if (passing.length === 0 || !issues.some((n) => state.get(n) === "FAIL")) return undefined;
+  // The failing row may belong to an issue this record no longer tracks (a re-tracked joined issue): the evidence
+  // still names a failure, and the tracked issue's own row passed. Without any FAIL row the hold is the release's.
+  if (passing.length === 0 || !rows.some((r) => r.state === "FAIL")) return undefined;
   return { passing, held };
 }
 
@@ -360,7 +363,14 @@ async function holdFailing(
     await holdRelease(rt, repoConfig, config, rel, v, move, logger);
     return;
   }
-  logger.info(`Release PR #${rel.pr}: held for ${split.held.map((n) => `#${n}`).join(", ")} on its own acceptance rows; ${split.passing.map((n) => `#${n}`).join(", ")} passed`);
+  logger.info(`Release PR #${rel.pr}: ${split.held.length > 0 ? `held for ${split.held.map((n) => `#${n}`).join(", ")} on its own acceptance rows; ` : ""}${split.passing.map((n) => `#${n}`).join(", ")} passed`);
+  if (split.held.length === 0) {
+    // Every tracked issue passed its own row; the failure is another issue's, which this record does not hold.
+    const note = `its own acceptance row passed; another issue's row failed (\`${v.hold}\`)`;
+    if (closeMove) await passRelease(rt, repoConfig, { ...rel, issues: split.passing }, closeMove, v.evidence, logger, note);
+    else await dropRelease(rt, repoConfig, rel.pr, logger);
+    return;
+  }
   if (!(await holdRelease(rt, repoConfig, config, { ...rel, issues: split.held }, v, move, logger))) return;
   if (!closeMove) return;
   const open = new Set((await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)).map((i) => i.number));
@@ -612,7 +622,46 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
  * production without a release the Foreman can verify them by, so they need a
  * person; closing them would be closing unverified.
  */
+/** The terminal outcome of a net-zero issue whose merge is not on production: closed with a note, never graded by a release. */
+async function closeNetZero(rt: ForemanRuntime, repoConfig: RepoConfig, n: number, w: { pr: number; url: string }, move: Move, logger: Logger): Promise<boolean> {
+  if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) return false;  // retried next scan
+  await comment(repoConfig, n,
+    `**Closed: nothing to verify in production.** This issue's PR #${w.pr} (${w.url}) merged to \`${repoConfig.baseBranch}\` with an empty net diff, ` +
+    `so no change shipped and no release carries it. It was not joined to a release: a release's verdict is about the changes it shipped, ` +
+    "and none of them are this issue's. Reopen it if there is work left.", logger);
+  logger.info(`Closed #${n}: its PR #${w.pr} is net-zero and not on ${repoConfig.productionBranch}; nothing to verify`);
+  return true;
+}
+
+/**
+ * An issue joined to a held release before it was known to be net-zero (foreman#117): it stops being carried. It is
+ * closed with the no-op note and leaves the release's record; the release stays held for the issues that remain.
+ */
+async function closeHeldNetZero(rt: ForemanRuntime, repoConfig: RepoConfig, releases: readonly ProdRelease[], logger: Logger): Promise<void> {
+  const held = releases.filter((r) => r.phase === "held" && r.issues.length > 0);
+  if (held.length === 0) return;
+  const open = new Set((await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)).map((i) => i.number));
+  for (const rel of held) {
+    const candidates = rel.issues.filter((n) => open.has(n));
+    if (candidates.length === 0) continue;
+    let noop: Map<number, { pr: number; url: string }>;
+    try {
+      noop = await codeHost().netZeroOffProduction(repoConfig, candidates, logger);
+    } catch (err) {
+      logger.warn(`Release PR #${rel.pr}: could not tell whether ${candidates.map((n) => `#${n}`).join(", ")} changed anything; left alone this scan: ${errText(err)}`);
+      continue;
+    }
+    const closed: number[] = [];
+    for (const [n, w] of noop) if (await closeNetZero(rt, repoConfig, n, w, "prodReverified", logger)) closed.push(n);
+    if (closed.length === 0) continue;
+    const rest = rel.issues.filter((n) => !closed.includes(n));
+    if (rest.length === 0) await dropRelease(rt, repoConfig, rel.pr, logger);
+    else await putRelease(rt, repoConfig, { ...rel, issues: rest }, logger);
+  }
+}
+
 async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, releases: readonly ProdRelease[], logger: Logger): Promise<void> {
+  await closeHeldNetZero(rt, repoConfig, releases, logger);
   const { releasePending } = repoConfig.lifecycleLabels;
   const tracked = new Set(releases.flatMap((r) => r.issues));
   const orphans = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
@@ -635,14 +684,7 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, releases
     logger.warn(`Release orphans: could not tell whether ${ok.map((n) => `#${n}`).join(", ")} changed anything; left alone this scan: ${errText(err)}`);
     return;
   }
-  for (const [n, w] of noop) {
-    if (!(await advance(rt, itemOf(repoConfig, n), "prodVerified", repoConfig, logger))) continue;  // retried next scan
-    await comment(repoConfig, n,
-      `**Closed: nothing to verify in production.** This issue's PR #${w.pr} (${w.url}) merged to \`${repoConfig.baseBranch}\` with an empty net diff, ` +
-      `so no change shipped and no release carries it. It was not joined to a release: a release's verdict is about the changes it shipped, ` +
-      "and none of them are this issue's. Reopen it if there is work left.", logger);
-    logger.info(`Closed #${n}: its PR #${w.pr} is net-zero and not on ${repoConfig.productionBranch}; nothing to verify`);
-  }
+  for (const [n, w] of noop) await closeNetZero(rt, repoConfig, n, w, "prodVerified", logger);
   const carried = ok.filter((n) => !noop.has(n));
   if (carried.length === 0) return;
   const joined = await joinCarryingRelease(rt, repoConfig, releases, carried, logger);
@@ -814,7 +856,7 @@ async function mergedVerdict(rt: ForemanRuntime, repoConfig: RepoConfig, config:
       const read = pv ? codeHost().readPvResult(pv.body) : null;
       if (pv && read) {
         logger.info(`Release PR #${rel.pr}: reading its existing Production Verification (${pv.url})`);
-        return read.pass ? { kind: "pass", evidence: pv.url } : holdVerdict(read.hold, pv.url);
+        return read.pass ? { kind: "pass", evidence: pv.url } : holdVerdict(read.hold, pv.url, read.rows);
       }
     } catch (err) {
       logger.debug(`Could not read release PR #${rel.pr}'s Production Verification: ${errText(err)}`);

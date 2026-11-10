@@ -84,6 +84,7 @@ if (a[0] === "issue") {
 }
 if (a[0] === "pr") {
   if (a[1] === "list") {
+    if (st.mergedListFail && flag("--state") === "merged" && flag("--limit") === "100") fail("HTTP 502: Bad Gateway");
     const want = flag("--state") === "merged" ? "MERGED" : flag("--state") === "all" ? null : "OPEN";
     let l = Object.values(st.prs).filter((p) => want === null || p.state === want);
     if (flag("--base")) l = l.filter((p) => p.baseRefName === flag("--base"));
@@ -2089,4 +2090,53 @@ test("#117: when GitHub cannot say whether the merge is on production, the issue
   assert.deepEqual(gh().issues[9].labels, ["approved", "release pending"]);
   assert.deepEqual(commentsOn(9), []);
   assert.doesNotMatch(gh().prs[100].body, /#9/);
+});
+
+test("#117: an adopted release whose Production Verification grades #5 PASS and #6 FAIL closes #5 and holds only #6", async () => {
+  const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance #5** | PASS | ok |\n| **Acceptance #6** | FAIL | 500s |\n| **Grafana** | CLEAN | |";
+  world({
+    issues: [issue(5, "pr approved"), issue(6, "pr approved")], prs: [mergedPr(90, "- #5\n- #6", MERGE, 60)],
+    comments: { 90: [{ url: "https://github.com/example/rel/pull/90#issuecomment-1", body: pv, at: "2026-10-10T00:00:00Z" }] },
+  });
+  await run();
+  assert.deepEqual(agentCalls(), [], "no SRE run: the existing evidence is read");
+  assertClosedVerified(5, { evidence: "https://github.com/example/rel/pull/90#issuecomment-1" });
+  assertHeld(6, "acceptance-failed");
+  assert.deepEqual((await releaseOf(rt, repo, 90)).issues, [6]);
+});
+
+test("#117: a re-tracked joined issue whose own row passed closes although another issue's row failed", async () => {
+  await splitWorld({ prod: ACC(ROWS([5, "FAIL"], [9, "PASS"])) }, [9]);
+  await run();
+  assertClosedVerified(9);
+  assert.ok(!commentsOn(9).some((b) => b.startsWith("**Production verification held")));
+  assert.equal((await recordOf(rt, repo, 9)).prodVerified.mergeSha, MERGE);
+});
+
+test("#117: a net-zero issue already joined to a held release ends on its own and leaves the release's record", async () => {
+  world({
+    issues: [issue(5, "prod verification held"), issue(9, "prod verification held")],
+    prs: [
+      mergedPr(100, "### Issues included\n- #5: Issue 5\n- #9: Issue 9\n\n---\nsigned", MERGE, 20),
+      mergedFeature(300, "docs: nothing", "Closes #9", { files: [], mergeCommit: { oid: NZ_SHA }, commits: [] }),
+    ],
+    compareFiles: 0, prodHead: MERGE,
+  });
+  await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5, 9], phase: "held", mergeSha: MERGE, mergedAt: new Date().toISOString(),
+    attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() });
+  await run();
+  assert.equal(gh().issues[9].state, "CLOSED");
+  assert.match(commentsOn(9).at(-1), /^\*\*Closed: nothing to verify in production\.\*\*/);
+  assert.equal(gh().issues[5].state, "OPEN", "the real issue stays held");
+  assert.deepEqual((await prodReleases())[100].issues, [5]);
+});
+
+test("#117: a failed merged-PR lookup leaves the issue unjoined and untouched", async () => {
+  netZeroWorld([]);
+  const st = gh(); st.mergedListFail = true; writeFileSync(GH_STATE, JSON.stringify(st));
+  await seedHeadRelease();
+  await run();
+  assert.equal(gh().issues[9].state, "OPEN");
+  assert.deepEqual(commentsOn(9), []);
+  assert.doesNotMatch(gh().prs[100].body, /#9/, "never joined on a lookup that did not answer");
 });
