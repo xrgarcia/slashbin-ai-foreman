@@ -8,6 +8,7 @@ import * as dependencies from "../github/dependencies.js";
 import * as discovery from "../github/discovery.js";
 import * as lifecycleScan from "../github/lifecycle-scan.js";
 import * as prComments from "../github/pr-comments.js";
+import * as prBody from "../github/pr-body.js";
 import * as prs from "../github/pr.js";
 import * as promotion from "../github/promotion.js";
 import * as readiness from "../github/readiness.js";
@@ -112,6 +113,8 @@ export function githubCodeHost(
     restoreEmGate: lifecycleScan.restoreEmGate,
     commentBodies: prComments.commentBodies,
     commentOnPr: prComments.commentOnPr,
+    editPrBody: prBody.editPrBody,
+    commitSubjects: prBody.commitSubjects,
     commentsWithTimes: prComments.commentsWithTimes,
     hasCommentContaining: prComments.hasCommentContaining,
     reopenedSince: prComments.reopenedSince,

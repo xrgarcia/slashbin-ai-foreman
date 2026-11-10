@@ -118,6 +118,8 @@ const reviser = z.looseObject({
   changed: z.array(z.enum(["code", "tests", "docs", "revert"])).optional(),
   reverted_findings: z.array(posInt).optional(),
   pr_body_stale: z.boolean().optional(),
+  /** What the revision dropped that the PR description claims (an issue ref like `#696`, a package, a file): the Foreman strikes the description lines naming each. */
+  reverted_items: z.array(z.string().min(3).max(120)).max(20).optional(),
   head_sha: sha40.nullable().optional(),
 }).superRefine((v, ctx) => {
   if (v.outcome === "no-commit" && !v.reason_text) ctx.addIssue({ code: "custom", path: ["reason_text"], message: "required when outcome is no-commit" });
