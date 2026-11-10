@@ -937,6 +937,19 @@ test("escalated: the card parks Blocked in the EM's hands until revision resumes
   assert.equal(r.assigneeAgentId, AGENT);
 });
 
+test("escalated: an issue with no card yet gets one, parked Blocked with the EM (foreman#135)", async () => {
+  const fake = fakePaperclip([]);
+  const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
+  await mirror.onEvent({ kind: "escalated", item, reason: "PR #3 by someone has no linked issue and CHANGES_REQUESTED", at: "approved" }, logger());
+  assert.equal(fake.rows.length, 1, "the hold is not lost to a missing card");
+  assert.equal(fake.rows[0].status, "blocked");
+  assert.equal(fake.rows[0].assigneeAgentId, "em-agent");
+  await onSnap(mirror, "example/r", snap([{ number: 7, labels: ["approved"] }]), logger());
+  assert.equal(fake.rows.length, 1);
+  assert.equal(fake.rows[0].status, "blocked", "the snapshot keeps it Blocked");
+});
+
 test("escalated: a snapshot taken before the review that tipped it does not release the hold", async () => {
   const fake = fakePaperclip([row7("todo")]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
