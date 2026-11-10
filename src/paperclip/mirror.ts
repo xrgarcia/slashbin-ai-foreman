@@ -315,7 +315,11 @@ export class PaperclipMirror implements WorkObserver {
     // not exist yet (an orphan feature PR holds an approved issue before any session claimed
     // it, foreman#135): the card is created so the hold lands where the EM looks. A plain
     // Blocked still waits for its card.
-    const id = await this.resolve(item, step === PAPERCLIP_STEPS.escalated);
+    // Resolve from the cached index first, then create through createTask, which re-reads the repo
+    // only when its last read is old: resolve(create) forces a fresh scan per call, quadratic over a
+    // queue of held issues.
+    let id = await this.resolve(item, false);
+    if (!id && step === PAPERCLIP_STEPS.escalated) id = await this.cardIndex.createTask(item, this.cardIndex.defaultContent(item));
     if (!id || this.closedCards.has(id)) return;
     const text = fill(step.note, { reason: this.clean(reason) });
     this.blockedReason.set(id, text);
