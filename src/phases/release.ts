@@ -280,7 +280,7 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
  */
 async function closeIssues(
   rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, issues: readonly number[], move: Move,
-  evidence: string | undefined, logger: Logger, note?: string, reconcileClosed = false,
+  evidence: string | undefined, logger: Logger, note?: string,
 ): Promise<boolean> {
   const line =
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
@@ -292,10 +292,8 @@ async function closeIssues(
   const unsaved: number[] = [];
   const saved = new Set<number>();
   const notClosed: number[] = [];
-  const fresh = new Set<number>();  // first verification of this issue: no earlier pass has reconciled it
   for (const n of issues) {
     const ok = await rt.records.updateIssueRecord(repoConfig, n, (d) => {
-      if (!d.prodVerified) fresh.add(n);
       d.prodVerified = {
         pr: rel.pr, mergeSha: rel.mergeSha ?? "", at,
         ...(rel.tag ? { tag: rel.tag } : {}), ...(evidence ? { evidence } : {}),
@@ -309,21 +307,6 @@ async function closeIssues(
   const openIssues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const open = new Set(openIssues.map((i) => i.number));
   const writableNow = await writable(repoConfig, { ...rel, issues: [...issues] }, logger);
-  // On a split: an issue GitHub closed before its first verification (a person closed it) still carries its lifecycle label and
-  // has no evidence comment: reconcile it now, and undo its record when that fails so the next pass retries it.
-  for (const n of writableNow.filter((i) => reconcileClosed && !open.has(i) && saved.has(i) && fresh.has(i))) {
-    // advance answers false both for a failed write and for "already terminal, nothing to change": read the issue to tell them apart.
-    if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
-      const now_ = await codeHost().viewIssue(repoConfig, n).catch(() => null);
-      const stuck = !now_ || Object.values(repoConfig.lifecycleLabels).some((l) => now_.labels.includes(l));
-      if (stuck) {
-        await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
-        notClosed.push(n);
-        continue;
-      }
-    }
-    await comment(repoConfig, n, line, logger);
-  }
   for (const n of writableNow.filter((i) => open.has(i) && saved.has(i))) {
     await noteEpicClose(rt, repoConfig, n, logger);
     // Close first, comment once it is closed: a close that fails is retried next pass and must not repeat the comment.
@@ -392,7 +375,7 @@ async function holdFailing(
   if (!(await holdRelease(rt, repoConfig, config, { ...rel, issues: split.held }, v, move, logger))) return;
   if (!closeMove) return;
   // Every passing issue is recorded verified, an issue GitHub already closed too; closeIssues closes only the open ones.
-  await closeIssues(rt, repoConfig, rel, split.passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`, true);
+  await closeIssues(rt, repoConfig, rel, split.passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`);
 }
 
 /**
