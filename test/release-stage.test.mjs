@@ -2178,3 +2178,16 @@ test("#117: a net-zero issue closed with a no-op note keeps a terminal record; a
   assert.equal((await recordOf(rt, repo, 9)).prodVerified, undefined, "never recorded verified");
   assert.ok(!Object.values(await prodReleases()).some((r) => r.issues.includes(9)), "no release carries it");
 });
+
+test("#117: a passing issue closed with no lifecycle label keeps its verification and gets its evidence comment", async () => {
+  const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance #5** | PASS | ok |\n| **Acceptance #6** | FAIL | 500s |";
+  world({
+    issues: [{ ...issue(5), state: "CLOSED" }, issue(6, "pr approved")], prs: [mergedPr(90, "- #5\n- #6", MERGE, 60)],
+    comments: { 90: [{ url: "https://github.com/example/rel/pull/90#issuecomment-1", body: pv, at: "2026-10-10T00:00:00Z" }] },
+  });
+  await run();
+  assert.equal((await recordOf(rt, repo, 5)).prodVerified?.mergeSha, MERGE, "verification is kept");
+  assert.equal(commentsOn(5).filter((b) => b.startsWith("**Verified in production.**")).length, 1, "one evidence comment");
+  assertHeld(6, "acceptance-failed");
+  assert.deepEqual((await releaseOf(rt, repo, 90)).issues, [6]);
+});
