@@ -14,3 +14,9 @@ export async function editPrBody(config: RepoConfig, pr: number, rewrite: (curre
   await ghAsync(["api", "--method", "PATCH", `repos/${config.githubRepo}/pulls/${pr}`, "-f", `body=${next}`, "--silent"], config.repoPath);
   return true;
 }
+
+/** The first-line subjects of the commits in `base..head`, oldest first. Throws on a failed read. */
+export async function commitSubjects(repo: string, base: string, head: string, cwd: string): Promise<string[]> {
+  const out = await ghAsync(["api", `repos/${repo}/compare/${base}...${head}`, "--jq", ".commits[] | (.commit.message | split(\"\\n\")[0]) | @json"], cwd);
+  return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as string);
+}

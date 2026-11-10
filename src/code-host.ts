@@ -419,6 +419,8 @@ export interface CodeHost {
   createSyncPR(repo: string, productionBranch: string, baseBranch: string, behindBy: number, cwd: string, logger?: Logger, conventions?: GithubConventions): Promise<string | null>;
   findOpenSyncPR(repo: string, productionBranch: string, baseBranch: string, cwd: string, logger?: Logger): Promise<OpenPromotionPR | null>;
   getRemoteBranchSha(repo: string, branch: string, cwd: string, logger: Logger): Promise<string | null>;
+  /** The first-line subjects of the commits in `base..head`, oldest first. Throws on a failed read. */
+  commitSubjects(repo: string, base: string, head: string, cwd: string): Promise<string[]>;
   productionDriftFiles(drift: BranchDrift): number;
   tryMergeSyncPR(repo: string, prNumber: number, cwd: string, logger?: Logger, productionBranch?: string): Promise<boolean>;
 
