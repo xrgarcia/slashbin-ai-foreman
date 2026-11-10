@@ -132,6 +132,63 @@ async function escalateSkips(rt: ForemanRuntime, items: { n: number; reason: str
   }
 }
 
+const orphanKey = (repoConfig: RepoConfig, pr: number, head: string, n: number): string => `${repoConfig.githubRepo}:${pr}:${head}:${n}`;
+
+/**
+ * Lifts the block an orphan PR put on queued issues once the PR is gone or has a new head: the issue builds (PR merged
+ * or closed) or is judged again on the new head, so the stuck hand-off recorded for it must not outlive its cause.
+ */
+export async function releaseOrphanBlocks(
+  rt: ForemanRuntime, repoConfig: RepoConfig, pr: { number: number; headSha: string; issueNumbers: readonly number[] } | null, logger: Logger,
+): Promise<void> {
+  const prefix = `${repoConfig.githubRepo}:`;
+  for (const key of [...rt.memory.orphanBlocked]) {
+    if (!key.startsWith(prefix)) continue;
+    const [prNo, head, issue] = key.slice(prefix.length).split(":");
+    if (pr && pr.issueNumbers.length === 0 && String(pr.number) === prNo && pr.headSha === head) continue;
+    rt.memory.orphanBlocked.delete(key);
+    await emit(rt, { kind: "unblocked", item: itemOf(repoConfig, Number(issue)), reason: `PR #${prNo} no longer holds the queue at ${head.slice(0, 7)}` }, repoConfig, logger);
+  }
+}
+
+/** The reason on the Blocked card of an issue queued behind an orphan PR the Tech Lead asked changes of (foreman#135). */
+export function orphanPrBlockReason(pr: number, author: string, head: string): string {
+  return `queued behind PR #${pr} (${author}), which names no issue and has a CHANGES_REQUESTED review at ${head.slice(0, 7)}: `
+    + "no stage revises it, so the build lane waits on it forever. Revise it by hand, or close it, or rule on it";
+}
+
+/**
+ * An open feature PR that names no issue holds the queue and no stage moves it. Under review the Tech Lead decides it,
+ * so the Foreman says once that it waits. After the Tech Lead requested changes nothing will (the revise stage is
+ * issue-driven; foreman#135, jerky_labor_forecaster#19 held #23 and #24 for 15 days): each queued issue is held Blocked
+ * with the PR, its author and the verdict, and the `needs-ruling` stuck kind hands it to the EM. Once per head and issue.
+ */
+export async function surfaceOrphanPr(
+  rt: ForemanRuntime, repoConfig: RepoConfig, pr: { number: number; headSha: string }, queued: readonly number[], fresh: readonly number[], logger: Logger,
+): Promise<void> {
+  let standing: { requestsChanges: boolean; author: string };
+  try {
+    standing = await codeHost().readPrStanding(repoConfig, pr.number, repoConfig.reviewerLogin, logger);
+  } catch (err) {
+    logger.debug(`PR #${pr.number}: could not read its review verdict — asked again next pass: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (!standing.requestsChanges) {
+    if (fresh.length > 0) logger.warn(`PR #${pr.number} names no issue and holds ${fresh.map((n) => `#${n}`).join(", ")} — the Tech Lead reviews it; they build once it merges or closes`);
+    return;
+  }
+  const reason = orphanPrBlockReason(pr.number, standing.author, pr.headSha);
+  for (const n of queued) {
+    const key = orphanKey(repoConfig, pr.number, pr.headSha, n);
+    if (rt.memory.orphanBlocked.has(key)) continue;
+    rt.memory.orphanBlocked.add(key);
+    logger.warn(`#${n}: ${reason}`);
+    // `escalated` at the approved stage, as a skip that ran out of attempts is: a hold whose first write
+    // could not land (the issue has no card yet) is delivered by the snapshot sync, not lost.
+    await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved", stuck: "needs-ruling" }, repoConfig, logger);
+  }
+}
+
 /** The comment on an issue that looks like the fix for held #`held` but is not linked to it (slashbin-ai-foreman#267). */
 export function unlinkedFixComment(held: number): string {
   return `This looks like the fix for #${held}; mark #${held} as blocked by this issue, or make this a sub-issue of #${held}, or it queues behind #${held}.`;
@@ -490,6 +547,7 @@ export async function tryBatchImplementation(
   // the same way; see devVerifyHolding for what frees it.
   const repoQueue = rt.memory.queuedBehind.get(repoName) ?? new Map<number, string>();
   rt.memory.queuedBehind.set(repoName, repoQueue);
+  await releaseOrphanBlocks(rt, repoConfig, featurePr, repoLogger);
   const merged = !featurePr && roleFor("verifier", config) !== undefined && config.buildWaitsForDevVerify
     ? [...labels].filter(([, names]) => names.includes(repoConfig.lifecycleLabels.prMerged)).map(([n]) => n)
     : [];
@@ -533,8 +591,9 @@ export async function tryBatchImplementation(
     // A PR that names no issue is outside the lifecycle: nothing here moves it,
     // so say once that it holds the queue (jerky_service #99 held #102 for days).
     // The review stage hands it to the Tech Lead (adoptOrphanedReviewCandidate).
-    if (featurePr && fresh.length > 0 && featurePr.issueNumbers.length === 0) {
-      repoLogger.warn(`PR #${featurePr.number} names no issue and holds ${fresh.map((n) => `#${n}`).join(", ")} — the Tech Lead reviews it; they build once it merges or closes`);
+    if (featurePr && featurePr.issueNumbers.length === 0) {
+      // Every issue waiting behind it, not only the capped build batch (buildBatchSize): each one is stuck.
+      await surfaceOrphanPr(rt, repoConfig, featurePr, handOff, fresh, repoLogger);
     }
     if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;

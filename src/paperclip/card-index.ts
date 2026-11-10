@@ -61,6 +61,8 @@ export class CardIndex {
   readonly index = new Map<string, string>();
   /** Repo identity key → when its cards were last read. */
   private readonly readAt = new Map<string, number>();
+  /** Repos this index has created a card in since their last scan: the index already holds those cards, and the scan before the first one proved it complete, so the next create reads nothing. */
+  private readonly createdSince = new Set<string>();
   /** Repo identity key → the ids its last read returned (and the cards created since), so the next read replaces them in full. */
   private readonly repoCards = new Map<string, Set<string>>();
   /** Task id → what the row shows: `waiting\n<action>` when blocked, else `status:<status>`. */
@@ -275,7 +277,7 @@ export class CardIndex {
     if (have) return have;
     // The index may be stale (a scan that missed the card, a restart): read the repo fresh once before creating.
     const readAt = this.readAt.get(this.keyNow(item.repo));
-    if (readAt === undefined || Date.now() - readAt > CREATE_FRESH_MS) {
+    if (!this.createdSince.has(this.keyNow(item.repo)) && (readAt === undefined || Date.now() - readAt > CREATE_FRESH_MS)) {
       if (!(await this.ensureRepo(item.repo, true))) return null;
       const found = this.index.get(key);
       if (found) return found;
@@ -299,6 +301,7 @@ export class CardIndex {
     this.cardLines.set(id, new Set([key]));
     const repoKey = this.keyNow(item.repo);
     this.repoCards.set(repoKey, (this.repoCards.get(repoKey) ?? new Set()).add(id));
+    this.createdSince.add(repoKey);
     this.rowRepo.set(id, repoKey);
     this.rowNumber.set(id, item.issueNumber);
     this.rowState.set(id, `status:${content.status}`);
@@ -411,6 +414,7 @@ export class CardIndex {
     for (const [id, v] of r.content) this.rowContent.set(id, v);
     this.repoCards.set(r.repoKey, now);
     this.readAt.set(r.repoKey, Date.now());
+    this.createdSince.delete(r.repoKey);
     // A key whose card the read settled on differently follows it; a card that left the read went
     // terminal (or was forgotten), so a later card for that issue is a new one.
     for (const line of oldLines.keys()) {

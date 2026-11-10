@@ -617,6 +617,8 @@ export interface CodeHost {
   blockedAmong(config: RepoConfig, issueNumbers: ReadonlyArray<number>, logger: Logger): Promise<number[]>;
   /** The PR's current head SHA. Throws when it cannot be read (EM#1244 f5). */
   readPrHeadSha(config: RepoConfig, prNumber: number, logger: Logger): Promise<string>;
+  /** Who opened the PR, and whether the reviewer's current verdict on it requests changes (foreman#135). Throws when it cannot be read. */
+  readPrStanding(config: RepoConfig, prNumber: number, reviewerLogin: string | undefined, logger: Logger): Promise<{ requestsChanges: boolean; author: string }>;
   /** The PR's state read live. Throws when GitHub cannot say (EM#1244 f5). */
   readPrState(config: RepoConfig, prNumber: number, logger: Logger): Promise<"OPEN" | "MERGED" | "CLOSED">;
   hasPendingRevisions(config: RepoConfig, logger: Logger): Promise<boolean>;
