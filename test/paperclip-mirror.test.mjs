@@ -954,12 +954,17 @@ test("escalated: many issues with no card cost one repo scan, not one each (fore
   const fake = fakePaperclip([]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
   const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
+  const realNow = Date.now; let clock = realNow();
+  Date.now = () => clock;
+  try {
   for (let n = 1; n <= 30; n++) {
+    clock += 4_000; // four seconds per escalation: the batch crosses the 30s creation-freshness window
     await mirror.onEvent({ kind: "escalated", item: { ...item, issueNumber: n }, reason: "PR #3 has no linked issue and CHANGES_REQUESTED", at: "approved" }, logger());
   }
+  } finally { Date.now = realNow; }
   assert.equal(fake.rows.length, 30, "every held issue gets its card");
   assert.ok(fake.rows.every((r) => r.status === "blocked"));
-  assert.ok(fake.lists.length <= 4, `repo scans stay constant, saw ${fake.lists.length} list requests`);
+  assert.ok(fake.lists.length <= 2, `repo scans stay constant, saw ${fake.lists.length} list requests`);
 });
 
 test("escalated: a snapshot taken before the review that tipped it does not release the hold", async () => {
