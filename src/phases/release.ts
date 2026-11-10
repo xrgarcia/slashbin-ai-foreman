@@ -292,8 +292,10 @@ async function closeIssues(
   const unsaved: number[] = [];
   const saved = new Set<number>();
   const notClosed: number[] = [];
+  const fresh = new Set<number>();  // first verification of this issue: no earlier pass has reconciled it
   for (const n of issues) {
     const ok = await rt.records.updateIssueRecord(repoConfig, n, (d) => {
+      if (!d.prodVerified) fresh.add(n);
       d.prodVerified = {
         pr: rel.pr, mergeSha: rel.mergeSha ?? "", at,
         ...(rel.tag ? { tag: rel.tag } : {}), ...(evidence ? { evidence } : {}),
@@ -306,7 +308,18 @@ async function closeIssues(
   // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
   const openIssues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const open = new Set(openIssues.map((i) => i.number));
-  for (const n of (await writable(repoConfig, { ...rel, issues: [...issues] }, logger)).filter((i) => open.has(i) && saved.has(i))) {
+  const writableNow = await writable(repoConfig, { ...rel, issues: [...issues] }, logger);
+  // An issue GitHub closed before its first verification (a person closed it) still carries its lifecycle label and
+  // has no evidence comment: reconcile it now, and undo its record when that fails so the next pass retries it.
+  for (const n of writableNow.filter((i) => !open.has(i) && saved.has(i) && fresh.has(i))) {
+    if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
+      await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
+      notClosed.push(n);
+      continue;
+    }
+    await comment(repoConfig, n, line, logger);
+  }
+  for (const n of writableNow.filter((i) => open.has(i) && saved.has(i))) {
     await noteEpicClose(rt, repoConfig, n, logger);
     // Close first, comment once it is closed: a close that fails is retried next pass and must not repeat the comment.
     if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
