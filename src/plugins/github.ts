@@ -159,6 +159,7 @@ export function githubCodeHost(
     blockedAmong: reviewQueue.blockedAmong,
     readPrHeadSha: reviewFreshness.readPrHeadSha,
     readPrState: reviewFreshness.readPrState,
+    readPrStanding: reviewFreshness.readPrStanding,
     hasPendingRevisions: reviewQueue.hasPendingRevisions,
     escalatedReason: skipHold.escalatedReason,
     foremanLogin: async (cwd) => await identity.login(cwd),

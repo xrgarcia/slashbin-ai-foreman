@@ -103,6 +103,21 @@ export async function currentVerdictRequestsChanges(
 }
 
 /**
+ * Who opened the PR and whether the reviewer's current verdict on it requests changes. An orphan PR (no linked
+ * issue) with that verdict has no stage that moves it (foreman#135). Throws when GitHub cannot say.
+ */
+export async function readPrStanding(
+  config: RepoConfig,
+  prNumber: number,
+  reviewerLogin: string | undefined,
+  logger: Logger,
+): Promise<{ requestsChanges: boolean; author: string }> {
+  const requestsChanges = await currentVerdictRequestsChanges(config, prNumber, reviewerLogin, logger);
+  const data = JSON.parse(await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "author"], config.repoPath) || "{}") as { author?: { login?: string } };
+  return { requestsChanges, author: data.author?.login ?? "unknown" };
+}
+
+/**
  * When the reviewer's latest verdict on the PR is APPROVED, the time it was
  * submitted (ms); otherwise null. A failed read throws (EM#1244 f5).
  */

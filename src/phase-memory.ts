@@ -23,6 +23,8 @@ export class PhaseMemory {
    * feature PR, or a merge awaiting dev verification). Observers hear "queued"
    * once per hold, not once per cycle.
    */
+  /** `<pr>:<head>:<issue>` already blocked for waiting behind an orphan PR whose review asked for changes (foreman#135). */
+  readonly orphanBlocked = new Set<string>();
   readonly queuedBehind = new Map<string, Map<number, string>>();
   /** `phase:owner/repo#pr` already logged as paused by the blocked label, so a standing hold logs once. */
   readonly blockedPauseNoted = new Set<string>();
