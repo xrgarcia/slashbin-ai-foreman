@@ -8,8 +8,11 @@
 // desktop build. See `github.releaseTagFormat`.
 
 import type { RepoConfig } from "../config.js";
+import type { Logger } from "../logger.js";
+import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { ghAsync } from "./gh.js";
 import type { IssueView, ReleasePrView } from "../code-host.js";
+import type { IssueAcceptance } from "../plugins/contract.js";
 export type { IssueView, ReleasePrView } from "../code-host.js";
 
 /**
@@ -89,6 +92,17 @@ export async function findPvComment(config: RepoConfig, pr: number): Promise<{ u
   return last ? { url: last.url, body: last.body } : null;
 }
 
+function issueRowsOf(rows: Array<{ check: string; result: string }>): IssueAcceptance[] {
+  const out: IssueAcceptance[] = [];
+  for (const r of rows) {
+    const m = /#(\d+)/.exec(r.check);
+    if (!m || out.some((o) => o.issue === Number(m[1]))) continue;
+    const state = /\bFAIL\b/i.test(r.result) ? "FAIL" : /^(PASS|CLEAN|N\/?A|WATCH)\b/i.test(r.result) ? "PASS" : "NOT-VERIFIED";
+    out.push({ issue: Number(m[1]), state });
+  }
+  return out;
+}
+
 /**
  * What a Production Verification comment concluded, from its result table
  * (verify-prod's format: `| **Check** | RESULT | details |`). The soak row is
@@ -100,7 +114,7 @@ export async function findPvComment(config: RepoConfig, pr: number): Promise<{ u
  * rather than holding the release (owner, 2026-10-12). Null when no row reads:
  * the caller then runs the verification rather than guess. Pure, exported for tests.
  */
-export function readPvResult(body: string): { pass: true } | { pass: false; hold: string } | null {
+export function readPvResult(body: string): { pass: true } | { pass: false; hold: string; rows?: IssueAcceptance[] } | null {
   const rows: Array<{ check: string; result: string }> = [];
   for (const line of body.split("\n")) {
     const cells = line.split("|").map((c) => c.trim());
@@ -111,7 +125,17 @@ export function readPvResult(body: string): { pass: true } | { pass: false; hold
     rows.push({ check, result });
   }
   if (rows.length === 0) return null;
-  if (rows.some((r) => /\bFAIL\b|REGRESSIONS/i.test(r.result))) return { pass: false, hold: "prod-verify-failed" };
+  // A row that names an issue ("Acceptance #5") is that issue's own grade (foreman#117); the rest are the release's.
+  const issueRows = issueRowsOf(rows);
+  const rowsOf = issueRows.length > 0 ? { rows: issueRows } : {};
+  const failing = (r: { result: string }) => /\bFAIL\b|REGRESSIONS/i.test(r.result);
+  if (rows.some(failing)) {
+    // With per-issue rows, a bare "Acceptance" row is only their aggregate: it is not a failure of its own. Any other
+    // failing row (Grafana, a deploy check) is the release's, and holds all of it.
+    const independent = rows.some((r) => failing(r) && !/#\d+/.test(r.check) && (issueRows.length === 0 || !/^acceptance\b/i.test(r.check)));
+    const acceptance = issueRows.some((r) => r.state === "FAIL") && !independent;
+    return { pass: false, hold: acceptance ? "acceptance-failed" : "prod-verify-failed", ...rowsOf };
+  }
   const wait = rows.find((r) => /NOT[ -]YET[ -]ELIGIBLE/i.test(r.result));
   if (wait) {
     const m = /(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(wait.result);
@@ -166,6 +190,42 @@ export async function findReleaseStop(config: RepoConfig, num: number): Promise<
 /** The SHA of the production branch's head. Throws on a failed read. */
 export async function productionHead(config: RepoConfig): Promise<string> {
   return (await ghAsync(["api", `repos/${config.githubRepo}/commits/${config.productionBranch}`, "--jq", ".sha"], config.repoPath)).trim();
+}
+
+/**
+ * Of `issues`, those whose own merged PR changed nothing (an empty net diff) and whose merge commit is not on the
+ * production branch (foreman#117: Slashbin-io-docs#547, a net-zero PR on `develop` that no release carries). Nothing
+ * shipped for them, so a release at production's head does not carry them and has no verdict that is theirs. An
+ * issue with no merged PR found, a PR with a diff, or a merge already on production is not in the map. Throws on a
+ * failed read: the caller leaves the issues alone rather than guess.
+ */
+export async function netZeroOffProduction(config: RepoConfig, issues: number[], logger: Logger): Promise<Map<number, { pr: number; url: string }>> {
+  const out = new Map<number, { pr: number; url: string }>();
+  if (issues.length === 0) return out;
+  // Not the shared merged-PR scan: it turns a failed read into "no PRs found", which here would read as "not net-zero"
+  // and let the issue join. This read throws, and the window is wide enough for a release's worth of merges.
+  const listed = JSON.parse((await ghAsync(["pr", "list", "--repo", config.githubRepo, "--state", "merged", "--base", config.baseBranch,
+    "--json", "number,url,title,body,commits,mergedAt", "--limit", "100"], config.repoPath)) || "[]") as
+    { number: number; url: string; title?: string; body?: string; commits?: PrCommit[]; mergedAt?: string }[];
+  const wanted = new Set(issues);
+  const refs = new Map<number, { issueNumber: number; prNumber: number; prUrl: string }>();
+  for (const p of listed) {
+    for (const n of extractImplementedIssues({ title: p.title || "", body: p.body || "", commits: p.commits ?? [], strict: true })) {
+      if (n !== p.number && wanted.has(n) && !refs.has(n) && p.mergedAt) refs.set(n, { issueNumber: n, prNumber: p.number, prUrl: p.url });  // newest first
+    }
+  }
+  void logger;
+  for (const ref of refs.values()) {
+    const raw = await ghAsync(["pr", "view", String(ref.prNumber), "--repo", config.githubRepo, "--json", "files,mergeCommit"], config.repoPath);
+    const pr = JSON.parse(raw || "{}") as { files?: unknown[]; mergeCommit?: { oid?: string } | null };
+    const oid = pr.mergeCommit?.oid;
+    if (!Array.isArray(pr.files) || pr.files.length > 0 || !oid) continue;
+    const status = (await ghAsync(["api", `repos/${config.githubRepo}/compare/${oid}...${config.productionBranch}`, "--jq", ".status"], config.repoPath)).trim();
+    // The production branch ahead of the merge, or at it, holds the merge; behind or diverged does not.
+    if (status === "ahead" || status === "identical") continue;
+    out.set(ref.issueNumber, { pr: ref.prNumber, url: ref.prUrl });
+  }
+  return out;
 }
 
 /** How many existing tags `ensureReleaseTag` dereferences when looking for one at the SHA. */
