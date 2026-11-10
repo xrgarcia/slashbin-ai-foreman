@@ -213,6 +213,10 @@ reset (or the upstream back-off window) has passed.
   A hold the soak raised (`soak:<slug>`) is re-verified by a fresh soak (`--mode soak --recheck`),
   never by prod verification: only a soak pass closes it. A soak NOT VERIFIED for a `tooling-gap`
   with no regression passes, the gap named in the close comment.
+  A held release waits out its back-off, but a follow-up (a release whose issues correct the held
+  one's) that passes its soak re-arms it: re-verified 10 minutes later, attempts reset. The
+  head-moved probe waits one soak window (30 minutes) with attempts reset. A re-verify that holds
+  for the same slug comments `Re-verified, still held`.
 
 ## 5. Self-healing limits (when "wait" stops being the answer)
 
