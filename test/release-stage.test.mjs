@@ -581,6 +581,67 @@ test("a soak hold reopens the closed issues at `prod verification held` and forg
   assert.equal((await recordOf(rt, repo, 5)).prodVerified, undefined);
 });
 
+// foreman#80: a release held by its soak is cleared by a soak, never by a prod verification.
+async function soakHeldWorld() {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100, "soak-verify-failed") });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await run(2);
+  assertHeld(5, "soak:soak-verify-failed");
+}
+const dueNow = () => editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
+const V1 = (o) => ({ exit: 0, out: `FOREMAN_RESULT_V1 ${JSON.stringify({ schema: 1, role: "verifier", pr: 100, ...o })}` });
+
+test("a soak hold re-runs the soak with --recheck, never prod: a prod pass leaves it held; only a soak pass closes it", async () => {
+  await soakHeldWorld();
+  setCtl({ prod: VERIFY(100), soak: [VERIFY(100, "soak-verify-failed"), VERIFY(100)] });
+  await dueNow();
+  await run(3);
+  const calls = agentCalls().filter((c) => c[1] === "verify");
+  assert.deepEqual(calls.at(-1), ["sre", "verify", "--mode", "soak", "--recheck", "--repo", REPO, "--pr", "100"]);
+  assert.ok(!calls.some((c) => c.includes("prod")), "prod verification never ran for a soak-held release");
+  assertHeld(5, "soak:soak-verify-failed");
+  assert.equal(gh().issues[5].state, "OPEN");
+  assert.equal((await prodReleases())[100].phase, "held");
+  assert.equal((await prodReleases())[100].attempts, 2, "a soak that holds again backs off further");
+  await dueNow();
+  await run(4);
+  for (const n of [5, 6]) {
+    assert.equal(gh().issues[n].state, "CLOSED", `#${n} closes on the soak pass`);
+    assert.ok(!gh().issues[n].labels.includes("prod verification held"));
+  }
+  assert.equal((await prodReleases())[100], undefined, "a soak pass drops the release");
+  assert.ok(!agentCalls().some((c) => c.includes("prod")), "never a prod run");
+});
+
+for (const [name, resp] of [
+  ["a hold", V1({ outcome: "hold", hold: "soak-unverified", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap", gap_reason: "no log access" })],
+  ["a pass", V1({ outcome: "pass", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap", gap_reason: "no log access" })],
+]) {
+  test(`a soak NOT-VERIFIED with a tooling-gap and no regression (${name}) closes the issue, the gap in the close comment`, async () => {
+    await soakHeldWorld();
+    setCtl({ soak: resp });
+    await dueNow();
+    await run(3);
+    for (const n of [5, 6]) {
+      assert.equal(gh().issues[n].state, "CLOSED");
+      const c = commentsOn(n).filter((b) => b.startsWith("**Verified in production.**")).at(-1);
+      assert.match(c, /tooling-gap/);
+      assert.match(c, /no log access/);
+    }
+    assert.equal((await prodReleases())[100], undefined);
+  });
+}
+
+test("a soak NOT-VERIFIED tooling-gap that is a regression hold stays held", async () => {
+  await soakHeldWorld();
+  setCtl({ soak: V1({ outcome: "hold", hold: "soak-verify-failed", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap" }) });
+  await dueNow();
+  await run(3);
+  assert.equal(gh().issues[5].state, "OPEN");
+  assert.equal((await prodReleases())[100].phase, "held");
+});
+
 test("the Tech Lead refuses (exit 4): the issues are blocked with the reason, and the SRE never runs", async () => {
   world(pending(), { approve: { exit: 4, out: "head moved since the review" } });
   assert.equal(await run(), true);
