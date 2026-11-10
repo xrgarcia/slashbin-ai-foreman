@@ -65,6 +65,15 @@
     "pr_body_stale": {
       "type": "boolean"
     },
+    "reverted_items": {
+      "maxItems": 20,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 120
+      }
+    },
     "head_sha": {
       "anyOf": [
         {
