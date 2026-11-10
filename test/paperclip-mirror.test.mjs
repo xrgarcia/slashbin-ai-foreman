@@ -950,6 +950,18 @@ test("escalated: an issue with no card yet gets one, parked Blocked with the EM 
   assert.equal(fake.rows[0].status, "blocked", "the snapshot keeps it Blocked");
 });
 
+test("escalated: many issues with no card cost one repo scan, not one each (foreman#135)", async () => {
+  const fake = fakePaperclip([]);
+  const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
+  const { mirror } = mirrorOn(fake, { agentStatus: false, roles: { em: { id: "em-agent" } }, board });
+  for (let n = 1; n <= 30; n++) {
+    await mirror.onEvent({ kind: "escalated", item: { ...item, issueNumber: n }, reason: "PR #3 has no linked issue and CHANGES_REQUESTED", at: "approved" }, logger());
+  }
+  assert.equal(fake.rows.length, 30, "every held issue gets its card");
+  assert.ok(fake.rows.every((r) => r.status === "blocked"));
+  assert.ok(fake.lists.length <= 4, `repo scans stay constant, saw ${fake.lists.length} list requests`);
+});
+
 test("escalated: a snapshot taken before the review that tipped it does not release the hold", async () => {
   const fake = fakePaperclip([row7("todo")]);
   const board = { ...paperclipBoardDefaults().board, needsRuling: { ...paperclipBoardDefaults().board.needsRuling, owner: "em" } };
