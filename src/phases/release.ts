@@ -280,7 +280,7 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
  */
 async function closeIssues(
   rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, issues: readonly number[], move: Move,
-  evidence: string | undefined, logger: Logger, note?: string,
+  evidence: string | undefined, logger: Logger, note?: string, reconcileClosed = false,
 ): Promise<boolean> {
   const line =
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
@@ -309,13 +309,18 @@ async function closeIssues(
   const openIssues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const open = new Set(openIssues.map((i) => i.number));
   const writableNow = await writable(repoConfig, { ...rel, issues: [...issues] }, logger);
-  // An issue GitHub closed before its first verification (a person closed it) still carries its lifecycle label and
+  // On a split: an issue GitHub closed before its first verification (a person closed it) still carries its lifecycle label and
   // has no evidence comment: reconcile it now, and undo its record when that fails so the next pass retries it.
-  for (const n of writableNow.filter((i) => !open.has(i) && saved.has(i) && fresh.has(i))) {
+  for (const n of writableNow.filter((i) => reconcileClosed && !open.has(i) && saved.has(i) && fresh.has(i))) {
+    // advance answers false both for a failed write and for "already terminal, nothing to change": read the issue to tell them apart.
     if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
-      await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
-      notClosed.push(n);
-      continue;
+      const now_ = await codeHost().viewIssue(repoConfig, n).catch(() => null);
+      const stuck = !now_ || Object.values(repoConfig.lifecycleLabels).some((l) => now_.labels.includes(l));
+      if (stuck) {
+        await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
+        notClosed.push(n);
+        continue;
+      }
     }
     await comment(repoConfig, n, line, logger);
   }
@@ -387,7 +392,7 @@ async function holdFailing(
   if (!(await holdRelease(rt, repoConfig, config, { ...rel, issues: split.held }, v, move, logger))) return;
   if (!closeMove) return;
   // Every passing issue is recorded verified, an issue GitHub already closed too; closeIssues closes only the open ones.
-  await closeIssues(rt, repoConfig, rel, split.passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`);
+  await closeIssues(rt, repoConfig, rel, split.passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`, true);
 }
 
 /**
