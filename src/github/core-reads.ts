@@ -4,7 +4,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { IssueTextRow } from "../code-host.js";
+import type { DeploymentView, IssueTextRow } from "../code-host.js";
 import type { RepoConfig } from "../config.js";
 import { ghAsync } from "./gh.js";
 import { branchPrefixOf, isForemanOwnedHead, isLegacyFeatureHead } from "../foreman-branch.js";
@@ -23,6 +23,23 @@ const jsonLines = (out: string) => out.split("\n").filter((l) => l.trim()).map((
 export async function issueCommentRows(repo: string, n: number, cwd: string): Promise<IssueTextRow[]> {
   return jsonLines(await ghAsync(["api", "--paginate", `repos/${repo}/issues/${n}/comments?per_page=100`, "--jq",
     `.[] | {id: ("comment:" + (.id|tostring)), issue: ${n}, author: (.user.login // ""), at: .created_at, body: (.body // "")} | @json`], cwd));
+}
+
+/**
+ * Every deployment GitHub holds for commit `sha`, each with its newest status (Railway posts both for
+ * every deploy, to `<project> / <environment>`). A deployment with no status yet reads `pending`.
+ * Throws on a failed read.
+ */
+export async function deploymentsForSha(repoConfig: RepoConfig, sha: string): Promise<DeploymentView[]> {
+  const rows = jsonLines(await ghAsync(["api", "--paginate", `repos/${repoConfig.githubRepo}/deployments?sha=${sha}&per_page=100`, "--jq",
+    ".[] | {id, environment} | @json"], repoConfig.repoPath)) as Array<{ id: number; environment: string }>;
+  const out: DeploymentView[] = [];
+  for (const d of rows) {
+    const status = jsonLines(await ghAsync(["api", `repos/${repoConfig.githubRepo}/deployments/${d.id}/statuses?per_page=1`, "--jq",
+      ".[0] // empty | {state, at: .created_at} | @json"], repoConfig.repoPath))[0] as { state: string; at: string } | undefined;
+    out.push({ environment: d.environment ?? "", state: (status?.state ?? "pending").toLowerCase(), at: status?.at ?? "" });
+  }
+  return out;
 }
 
 /** Every open issue (not PR) `creator` opened, id prefixed `issue:`. Throws on a failed read. */

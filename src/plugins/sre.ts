@@ -104,14 +104,15 @@ export async function verifyViaSre(
   logger: Logger,
   abortSignal?: AbortSignal,
   transcriptPath?: string,
+  force = false,
 ): Promise<VerifyResult> {
   const sre = agentConfig.srePath;
   if (!sre) return { kind: "error", error: "srePath not configured" };
   if (!process.env.SRE_GITHUB_KEY) {
     return { kind: "error", error: "SRE_GITHUB_KEY not set — refusing to verify without SRE-account (slashbin-sre) attribution" };
   }
-  logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification`);
-  const r = await runAgentCli(sre, "bin/sre.mjs", ["verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber)],
+  logger.info(`Handing PR #${prNumber} on ${repoConfig.githubRepo} to the SRE for dev verification${force ? " (--force: its environment was repaired)" : ""}`);
+  const r = await runAgentCli(sre, "bin/sre.mjs", ["verify", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), ...(force ? ["--force"] : [])],
     buildSreEnv(agentConfig, repoConfig), agentConfig, SRE_VERIFY_MAX_DURATION_MS, abortSignal, transcriptPath, { appendTranscript: false });
   if (r.timedOut) return { kind: "error", error: "SRE verification timed out" };
   if (r.code !== 0) return { kind: "error", error: `SRE verification failed (exit ${r.code}): ${cliTail(r)}` };

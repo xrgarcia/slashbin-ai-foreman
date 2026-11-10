@@ -59,6 +59,7 @@ export function githubCodeHost(
 
     issueLastEditedAt: coreReads.issueLastEditedAt,
     issueCommentRows: coreReads.issueCommentRows,
+    deploymentsForSha: coreReads.deploymentsForSha,
     openIssueRowsBy: coreReads.openIssueRowsBy,
     openPrsForBranch: coreReads.openPrsForBranch,
     closedPrsForBranch: coreReads.closedPrsForBranch,
