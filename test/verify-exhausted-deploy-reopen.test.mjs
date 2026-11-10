@@ -22,9 +22,9 @@ const REPO = {
 };
 const CONFIG = { qaRepos: [], stages: [], paperclip: { enabled: false }, backoff: DEFAULT_BACKOFF, qaGate: false };
 
-const evidence = (result, { at = "2026-10-20T21:28:04Z", author = SRE_LOGIN, sha = SHA } = {}) => ({
+const evidence = (result, { at = "2026-10-20T21:28:04Z", author = SRE_LOGIN } = {}) => ({
   id: "comment:1", issue: 225, author, at,
-  body: `## Dev Verification Evidence — o/r#225\n\n| Check | Result | Details |\n|---|---|---|\n| **Post-merge verification** | ${result} | Railway deployment SUCCESS on \`${sha}\` |\n`,
+  body: `## Dev Verification Evidence — o/r#225\n\n| Check | Result | Details |\n|---|---|---|\n| **Post-merge verification** | ${result} | form (b): dev health 200 |\n`,
 });
 
 /** Drive one verify pass over issue 224 (PR 225) held with `reason`, exhausted. */
@@ -116,13 +116,12 @@ test("devDeployRepaired: newest dev deployment SUCCESS after heldAt only", () =>
 });
 
 test("srePassedSince: the SRE's newest evidence for this merge, after the hold, PASS", () => {
-  assert.equal(srePassedSince([evidence("PASS")], SHA, HELD_AT), true);
-  assert.equal(srePassedSince([evidence("**PASS**")], SHA, HELD_AT), true);
-  assert.equal(srePassedSince([evidence("PASS", { at: "2026-10-20T21:00:00Z" })], SHA, HELD_AT), false, "older than the hold");
-  assert.equal(srePassedSince([evidence("PASS", { author: "xrgarcia" })], SHA, HELD_AT), false, "not the SRE");
-  assert.equal(srePassedSince([evidence("PASS", { sha: "0".repeat(40) })], SHA, HELD_AT), false, "another merge");
-  assert.equal(srePassedSince([evidence("PASS"), evidence("FAIL", { at: "2026-10-20T22:00:00Z" })], SHA, HELD_AT), false, "a later FAIL supersedes");
-  assert.equal(srePassedSince([evidence("NOT YET ELIGIBLE (2026-10-20T22:00Z)")], SHA, HELD_AT), false);
+  assert.equal(srePassedSince([evidence("PASS")], HELD_AT), true);
+  assert.equal(srePassedSince([evidence("**PASS**")], HELD_AT), true);
+  assert.equal(srePassedSince([evidence("PASS", { at: "2026-10-20T21:00:00Z" })], HELD_AT), false, "older than the hold");
+  assert.equal(srePassedSince([evidence("PASS", { author: "xrgarcia" })], HELD_AT), false, "not the SRE");
+  assert.equal(srePassedSince([evidence("PASS"), evidence("FAIL", { at: "2026-10-20T22:00:00Z" })], HELD_AT), false, "a later FAIL supersedes");
+  assert.equal(srePassedSince([evidence("NOT YET ELIGIBLE (2026-10-20T22:00Z)")], HELD_AT), false);
 });
 
 test("verify-exhausted lists both checks, each with a card note", () => {
