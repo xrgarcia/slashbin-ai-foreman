@@ -44,6 +44,10 @@ export interface BlockFacts {
   rulingPosted?: boolean;
   /** An exhausted verify hold's reason is now a tooling hold, which charges no attempt. */
   holdNoLongerCharged?: boolean;
+  /** A deploy-failure hold: the merge SHA gained a SUCCESS dev deployment after the hold, so the environment was repaired. */
+  deployRepaired?: boolean;
+  /** A deploy-failure hold: the SRE posted a passing Dev Verification Evidence for the merge after the hold. */
+  srePassedSince?: boolean;
 }
 
 export type UnblockCheck = keyof BlockFacts;
@@ -53,7 +57,7 @@ export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>
   "skip": ["transientCauseGone", "waitedOnDone", "issueChanged"],
   "verify-no-pr": ["mergedPrFound"],
   "verify-held": ["specEdited"],
-  "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged"],
+  "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged", "srePassedSince", "deployRepaired"],
   "revision-exhausted": ["prHeadMoved"],
   "revision-stalemate": ["prHeadMoved", "rulingPosted"],
 };
@@ -68,6 +72,8 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",
   prHeadMoved: "the PR received new commits since the Foreman stopped — resuming",
   rulingPosted: "the EM posted a scope ruling since the stalemate — revising once more against it",
+  deployRepaired: "the merge now has a successful dev deployment, created after the hold — verifying again with a fresh attempt count",
+  srePassedSince: "the SRE posted a passing dev verification for the merge since the hold — verifying it",
   holdNoLongerCharged: "the hold's reason means the checker could not run, which no longer spends an attempt — verifying again with a fresh attempt count",
 };
 

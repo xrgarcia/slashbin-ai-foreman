@@ -101,8 +101,8 @@ export type VerifyResult =
   | { kind: "error"; error: string };
 
 export interface Verifier {
-  /** Verify one merged PR on dev. */
-  verifyDev(repo: RepoConfig, config: AgentConfig, pr: number, logger: Logger, abortSignal?: AbortSignal, transcriptPath?: string): Promise<VerifyResult>;
+  /** Verify one merged PR on dev. `force`: run again even when the verifier holds a result for the same inputs (its environment was repaired since). */
+  verifyDev(repo: RepoConfig, config: AgentConfig, pr: number, logger: Logger, abortSignal?: AbortSignal, transcriptPath?: string, force?: boolean): Promise<VerifyResult>;
   /** Verify a merged release PR in production, or run its soak (nothing left to soak: `{ kind: "nothing" }`). */
   verifyProd(
     repo: RepoConfig, config: AgentConfig, pr: number, logger: Logger,
