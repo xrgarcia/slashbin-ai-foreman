@@ -615,7 +615,7 @@ test("a soak hold re-runs the soak with --recheck, never prod: a prod pass leave
 });
 
 for (const [name, resp] of [
-  ["a hold", V1({ outcome: "hold", hold: "soak-unverified", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap", gap_reason: "no log access" })],
+  ["a hold", V1({ outcome: "hold", hold: "soak-verify-failed", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap", gap_reason: "no log access" })],
   ["a pass", V1({ outcome: "pass", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap", gap_reason: "no log access" })],
 ]) {
   test(`a soak NOT-VERIFIED with a tooling-gap and no regression (${name}) closes the issue, the gap in the close comment`, async () => {
@@ -633,9 +633,21 @@ for (const [name, resp] of [
   });
 }
 
-test("a soak NOT-VERIFIED tooling-gap that is a regression hold stays held", async () => {
+test("the first scheduled soak NOT-VERIFIED with a tooling-gap passes and names the gap on each issue", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: V1({ outcome: "pass", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap", gap_reason: "no publisher Redis" }) });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await run(2);
+  for (const n of [5, 6]) {
+    assert.equal(gh().issues[n].state, "CLOSED");
+    assert.ok(commentsOn(n).some((b) => b.startsWith("**Soak passed with a noted gap.**") && /tooling-gap/.test(b) && /no publisher Redis/.test(b)));
+  }
+  assert.equal((await prodReleases())[100], undefined);
+});
+
+test("a soak NOT-VERIFIED tooling-gap whose hold is an acceptance failure stays held", async () => {
   await soakHeldWorld();
-  setCtl({ soak: V1({ outcome: "hold", hold: "soak-verify-failed", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap" }) });
+  setCtl({ soak: V1({ outcome: "hold", hold: "acceptance-failed", soak_result: "NOT-VERIFIED", gap_class: "tooling-gap" }) });
   await dueNow();
   await run(3);
   assert.equal(gh().issues[5].state, "OPEN");
