@@ -2153,11 +2153,14 @@ test("#117: an aggregate Acceptance FAIL row beside per-issue rows is not a fail
 test("#117: a passing issue GitHub already closed is still recorded verified when another issue's row fails", async () => {
   const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance #5** | PASS | ok |\n| **Acceptance #6** | FAIL | 500s |";
   world({
-    issues: [{ ...issue(5), state: "CLOSED" }, issue(6, "pr approved")], prs: [mergedPr(90, "- #5\n- #6", MERGE, 60)],
+    issues: [{ ...issue(5, "release pending"), state: "CLOSED" }, issue(6, "pr approved")], prs: [mergedPr(90, "- #5\n- #6", MERGE, 60)],
     comments: { 90: [{ url: "https://github.com/example/rel/pull/90#issuecomment-1", body: pv, at: "2026-10-10T00:00:00Z" }] },
   });
   await run();
   assert.equal((await recordOf(rt, repo, 5)).prodVerified?.mergeSha, MERGE, "the closed passing issue is recorded verified");
+  assert.deepEqual(gh().issues[5].labels, ["approved"], "its lifecycle label is cleared");
+  assert.equal(commentsOn(5).filter((b) => b.startsWith("**Verified in production.**")).length, 1, "it gets its evidence comment once");
+  assert.deepEqual((await releaseOf(rt, repo, 90)).issues, [6]);
   assertHeld(6, "acceptance-failed");
 });
 
