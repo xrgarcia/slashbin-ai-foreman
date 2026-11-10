@@ -200,6 +200,16 @@ export interface IssueView {
   labels: string[];
 }
 
+/** One deployment the host recorded for a commit, with the state of its latest status. */
+export interface DeploymentView {
+  /** The host's environment name, e.g. `jerky-com / development` (Railway's GitHub deployments). */
+  environment: string;
+  /** Lower-cased state of the deployment's newest status: `success`, `failure`, `in_progress`, ... */
+  state: string;
+  /** ISO time that newest status was created. */
+  at: string;
+}
+
 /** A release PR read live. */
 export interface ReleasePrView {
   number: number;
@@ -392,6 +402,8 @@ export interface CodeHost {
   issueLastEditedAt(repoConfig: RepoConfig, n: number): Promise<string | null | undefined>;
   /** Every comment on issue `n`. Throws on a failed read. */
   issueCommentRows(repo: string, n: number, cwd: string): Promise<IssueTextRow[]>;
+  /** Every deployment recorded for commit `sha`, each with its newest status. Throws on a failed read. */
+  deploymentsForSha(repoConfig: RepoConfig, sha: string): Promise<DeploymentView[]>;
   /** Every open issue (not PR) `creator` opened. Throws on a failed read. */
   openIssueRowsBy(repo: string, creator: string, cwd: string): Promise<IssueTextRow[]>;
   /** The open PR `head → base`, live (at most one). Throws on a failed read. */
