@@ -373,9 +373,8 @@ async function holdFailing(
   }
   if (!(await holdRelease(rt, repoConfig, config, { ...rel, issues: split.held }, v, move, logger))) return;
   if (!closeMove) return;
-  const open = new Set((await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)).map((i) => i.number));
-  const passing = split.passing.filter((n) => open.has(n));
-  if (passing.length > 0) await closeIssues(rt, repoConfig, rel, passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`);
+  // Every passing issue is recorded verified, an issue GitHub already closed too; closeIssues closes only the open ones.
+  await closeIssues(rt, repoConfig, rel, split.passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`);
 }
 
 /**
@@ -584,6 +583,7 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     // An issue whose record cannot be read may already be verified: not adopted this pass, looked at again the next.
     const recorded = await rt.records.loadIssueRecords(repoConfig, candidates);
     const verified = fieldTable(recorded, "prodVerified");
+    const noop = fieldTable(recorded, "noopClosed");
     const named = candidates.filter((n) => !recorded.unavailable.has(n) && !((verified[n]?.pr ?? 0) >= pr.number));
     if (named.length === 0) continue;
     // Only issues the Foreman's lifecycle owns (they carry the trigger label):
@@ -593,7 +593,9 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
       for (const n of named) {
         const v = await codeHost().viewIssue(repoConfig, n);
         // A closed issue already verified in production was delivered, whichever release verified it (foreman#86).
-        if (v?.state === "CLOSED" && verified[n]) continue;
+        if (v?.state === "CLOSED" && (verified[n] || noop[n])) continue;
+        // A net-zero issue whose merge is not on production was closed with its own outcome: no release carries it.
+        if (noop[n]) continue;
         if (v?.labels.includes(repoConfig.triggerLabel)) issues.push(n);
       }
     } catch (err) {
@@ -624,6 +626,8 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
  */
 /** The terminal outcome of a net-zero issue whose merge is not on production: closed with a note, never graded by a release. */
 async function closeNetZero(rt: ForemanRuntime, repoConfig: RepoConfig, n: number, w: { pr: number; url: string }, move: Move, logger: Logger): Promise<boolean> {
+  // Recorded first: a release that names the issue is never again allowed to adopt it, grade it or record it verified.
+  if (!(await rt.records.updateIssueRecord(repoConfig, n, (d) => { d.noopClosed = { pr: w.pr, at: iso(now()) }; }))) return false;
   if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) return false;  // retried next scan
   await comment(repoConfig, n,
     `**Closed: nothing to verify in production.** This issue's PR #${w.pr} (${w.url}) merged to \`${repoConfig.baseBranch}\` with an empty net diff, ` +

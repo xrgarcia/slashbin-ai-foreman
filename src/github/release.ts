@@ -92,17 +92,6 @@ export async function findPvComment(config: RepoConfig, pr: number): Promise<{ u
   return last ? { url: last.url, body: last.body } : null;
 }
 
-/**
- * What a Production Verification comment concluded, from its result table
- * (verify-prod's format: `| **Check** | RESULT | details |`). The soak row is
- * not read: the soak is its own step. Any FAIL or Grafana REGRESSIONS is
- * `prod-verify-failed`; NOT YET ELIGIBLE with a readable UTC time is
- * `wait-until-<UTC>` (the SRE's own window slug), without one, and any NOT
- * VERIFIED, `acceptance-not-verified`. WATCH passes: the deploy is healthy and
- * the dev proof stands, and the live outcome is left to a post-launch watch
- * rather than holding the release (owner, 2026-10-12). Null when no row reads:
- * the caller then runs the verification rather than guess. Pure, exported for tests.
- */
 function issueRowsOf(rows: Array<{ check: string; result: string }>): IssueAcceptance[] {
   const out: IssueAcceptance[] = [];
   for (const r of rows) {
@@ -114,6 +103,17 @@ function issueRowsOf(rows: Array<{ check: string; result: string }>): IssueAccep
   return out;
 }
 
+/**
+ * What a Production Verification comment concluded, from its result table
+ * (verify-prod's format: `| **Check** | RESULT | details |`). The soak row is
+ * not read: the soak is its own step. Any FAIL or Grafana REGRESSIONS is
+ * `prod-verify-failed`; NOT YET ELIGIBLE with a readable UTC time is
+ * `wait-until-<UTC>` (the SRE's own window slug), without one, and any NOT
+ * VERIFIED, `acceptance-not-verified`. WATCH passes: the deploy is healthy and
+ * the dev proof stands, and the live outcome is left to a post-launch watch
+ * rather than holding the release (owner, 2026-10-12). Null when no row reads:
+ * the caller then runs the verification rather than guess. Pure, exported for tests.
+ */
 export function readPvResult(body: string): { pass: true } | { pass: false; hold: string; rows?: IssueAcceptance[] } | null {
   const rows: Array<{ check: string; result: string }> = [];
   for (const line of body.split("\n")) {
@@ -128,8 +128,13 @@ export function readPvResult(body: string): { pass: true } | { pass: false; hold
   // A row that names an issue ("Acceptance #5") is that issue's own grade (foreman#117); the rest are the release's.
   const issueRows = issueRowsOf(rows);
   const rowsOf = issueRows.length > 0 ? { rows: issueRows } : {};
-  if (rows.some((r) => /\bFAIL\b|REGRESSIONS/i.test(r.result))) {
-    return { pass: false, hold: issueRows.some((r) => r.state === "FAIL") && !rows.some((r) => !/#\d+/.test(r.check) && /\bFAIL\b|REGRESSIONS/i.test(r.result)) ? "acceptance-failed" : "prod-verify-failed", ...rowsOf };
+  const failing = (r: { result: string }) => /\bFAIL\b|REGRESSIONS/i.test(r.result);
+  if (rows.some(failing)) {
+    // With per-issue rows, a bare "Acceptance" row is only their aggregate: it is not a failure of its own. Any other
+    // failing row (Grafana, a deploy check) is the release's, and holds all of it.
+    const independent = rows.some((r) => failing(r) && !/#\d+/.test(r.check) && (issueRows.length === 0 || !/^acceptance\b/i.test(r.check)));
+    const acceptance = issueRows.some((r) => r.state === "FAIL") && !independent;
+    return { pass: false, hold: acceptance ? "acceptance-failed" : "prod-verify-failed", ...rowsOf };
   }
   const wait = rows.find((r) => /NOT[ -]YET[ -]ELIGIBLE/i.test(r.result));
   if (wait) {
