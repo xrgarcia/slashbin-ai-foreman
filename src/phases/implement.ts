@@ -160,7 +160,7 @@ export function orphanPrBlockReason(pr: number, author: string, head: string): s
 /**
  * An open feature PR that names no issue holds the queue and no stage moves it. Under review the Tech Lead decides it,
  * so the Foreman says once that it waits. After the Tech Lead requested changes nothing will (the revise stage is
- * issue-driven; foreman#135, jerky_labor_forecaster#19 held #23 and #24 for 15 days): each queued issue is blocked
+ * issue-driven; foreman#135, jerky_labor_forecaster#19 held #23 and #24 for 15 days): each queued issue is held Blocked
  * with the PR, its author and the verdict, and the `needs-ruling` stuck kind hands it to the EM. Once per head and issue.
  */
 export async function surfaceOrphanPr(
@@ -183,7 +183,9 @@ export async function surfaceOrphanPr(
     if (rt.memory.orphanBlocked.has(key)) continue;
     rt.memory.orphanBlocked.add(key);
     logger.warn(`#${n}: ${reason}`);
-    await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason, stuck: "needs-ruling" }, repoConfig, logger);
+    // `escalated` at the approved stage, as a skip that ran out of attempts is: a hold whose first write
+    // could not land (the issue has no card yet) is delivered by the snapshot sync, not lost.
+    await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved", stuck: "needs-ruling" }, repoConfig, logger);
   }
 }
 
@@ -590,7 +592,8 @@ export async function tryBatchImplementation(
     // so say once that it holds the queue (jerky_service #99 held #102 for days).
     // The review stage hands it to the Tech Lead (adoptOrphanedReviewCandidate).
     if (featurePr && featurePr.issueNumbers.length === 0) {
-      await surfaceOrphanPr(rt, repoConfig, featurePr, queued, fresh, repoLogger);
+      // Every issue waiting behind it, not only the capped build batch (buildBatchSize): each one is stuck.
+      await surfaceOrphanPr(rt, repoConfig, featurePr, handOff, fresh, repoLogger);
     }
     if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
