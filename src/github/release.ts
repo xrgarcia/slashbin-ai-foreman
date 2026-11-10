@@ -9,9 +9,10 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { findIssuesMergedToBase } from "./lifecycle-scan.js";
+import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { ghAsync } from "./gh.js";
 import type { IssueView, ReleasePrView } from "../code-host.js";
+import type { IssueAcceptance } from "../plugins/contract.js";
 export type { IssueView, ReleasePrView } from "../code-host.js";
 
 /**
@@ -102,7 +103,18 @@ export async function findPvComment(config: RepoConfig, pr: number): Promise<{ u
  * rather than holding the release (owner, 2026-10-12). Null when no row reads:
  * the caller then runs the verification rather than guess. Pure, exported for tests.
  */
-export function readPvResult(body: string): { pass: true } | { pass: false; hold: string } | null {
+function issueRowsOf(rows: Array<{ check: string; result: string }>): IssueAcceptance[] {
+  const out: IssueAcceptance[] = [];
+  for (const r of rows) {
+    const m = /#(\d+)/.exec(r.check);
+    if (!m || out.some((o) => o.issue === Number(m[1]))) continue;
+    const state = /\bFAIL\b/i.test(r.result) ? "FAIL" : /^(PASS|CLEAN|N\/?A|WATCH)\b/i.test(r.result) ? "PASS" : "NOT-VERIFIED";
+    out.push({ issue: Number(m[1]), state });
+  }
+  return out;
+}
+
+export function readPvResult(body: string): { pass: true } | { pass: false; hold: string; rows?: IssueAcceptance[] } | null {
   const rows: Array<{ check: string; result: string }> = [];
   for (const line of body.split("\n")) {
     const cells = line.split("|").map((c) => c.trim());
@@ -113,7 +125,12 @@ export function readPvResult(body: string): { pass: true } | { pass: false; hold
     rows.push({ check, result });
   }
   if (rows.length === 0) return null;
-  if (rows.some((r) => /\bFAIL\b|REGRESSIONS/i.test(r.result))) return { pass: false, hold: "prod-verify-failed" };
+  // A row that names an issue ("Acceptance #5") is that issue's own grade (foreman#117); the rest are the release's.
+  const issueRows = issueRowsOf(rows);
+  const rowsOf = issueRows.length > 0 ? { rows: issueRows } : {};
+  if (rows.some((r) => /\bFAIL\b|REGRESSIONS/i.test(r.result))) {
+    return { pass: false, hold: issueRows.some((r) => r.state === "FAIL") && !rows.some((r) => !/#\d+/.test(r.check) && /\bFAIL\b|REGRESSIONS/i.test(r.result)) ? "acceptance-failed" : "prod-verify-failed", ...rowsOf };
+  }
   const wait = rows.find((r) => /NOT[ -]YET[ -]ELIGIBLE/i.test(r.result));
   if (wait) {
     const m = /(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(wait.result);
@@ -179,7 +196,21 @@ export async function productionHead(config: RepoConfig): Promise<string> {
  */
 export async function netZeroOffProduction(config: RepoConfig, issues: number[], logger: Logger): Promise<Map<number, { pr: number; url: string }>> {
   const out = new Map<number, { pr: number; url: string }>();
-  for (const ref of await findIssuesMergedToBase(config, issues, logger)) {
+  if (issues.length === 0) return out;
+  // Not the shared merged-PR scan: it turns a failed read into "no PRs found", which here would read as "not net-zero"
+  // and let the issue join. This read throws, and the window is wide enough for a release's worth of merges.
+  const listed = JSON.parse((await ghAsync(["pr", "list", "--repo", config.githubRepo, "--state", "merged", "--base", config.baseBranch,
+    "--json", "number,url,title,body,commits,mergedAt", "--limit", "100"], config.repoPath)) || "[]") as
+    { number: number; url: string; title?: string; body?: string; commits?: PrCommit[]; mergedAt?: string }[];
+  const wanted = new Set(issues);
+  const refs = new Map<number, { issueNumber: number; prNumber: number; prUrl: string }>();
+  for (const p of listed) {
+    for (const n of extractImplementedIssues({ title: p.title || "", body: p.body || "", commits: p.commits ?? [], strict: true })) {
+      if (n !== p.number && wanted.has(n) && !refs.has(n) && p.mergedAt) refs.set(n, { issueNumber: n, prNumber: p.number, prUrl: p.url });  // newest first
+    }
+  }
+  void logger;
+  for (const ref of refs.values()) {
     const raw = await ghAsync(["pr", "view", String(ref.prNumber), "--repo", config.githubRepo, "--json", "files,mergeCommit"], config.repoPath);
     const pr = JSON.parse(raw || "{}") as { files?: unknown[]; mergeCommit?: { oid?: string } | null };
     const oid = pr.mergeCommit?.oid;

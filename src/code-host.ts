@@ -590,6 +590,7 @@ export interface CodeHost {
 } | {
     pass: false;
     hold: string;
+    rows?: import("./plugins/contract.js").IssueAcceptance[];
 } | null;
   recentMergedReleasePrs(config: RepoConfig, sinceIso?: string, limit?: number): Promise<ReleasePrView[]>;
   removeBlockedLabel(config: RepoConfig, num: number): Promise<void>;
