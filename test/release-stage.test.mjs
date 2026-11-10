@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { tryRelease, SOAK_DELAY_MS } from "../dist/phases/release.js";
+import { tryRelease, SOAK_DELAY_MS, REARM_SETTLE_MS } from "../dist/phases/release.js";
 import { tryPromotion } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/plugins/sre.js";
@@ -107,6 +107,7 @@ if (a[0] === "api") {
   let m;
   if ((m = /issues\\/(\\d+)\\/events/.exec(path)) && (flag("--jq") || "").includes("reopened")) { if (st.eventsFail) { process.stderr.write("GraphQL: could not resolve"); process.exit(1); } out(((st.reopened || {})[m[1]] || []).map((t) => JSON.stringify(t)).join("\\n")); }
   if ((m = /issues\\/(\\d+)\\/events/.exec(path))) out(((st.events || {})[m[1]] || []).map((e) => JSON.stringify(e)).join("\\n"));
+  if ((m = /issues\\/(\\d+)\\/dependencies\\/blocking/.exec(path))) out(JSON.stringify((st.blocking || {})[m[1]] || []));
   if (method === "POST" && /\\/statuses\\//.test(path)) { (st.statuses = st.statuses || []).push({ sha: path.split("/").pop(), ...fields() }); save(); out(""); }
   if (method === "POST" && (m = /issues\\/(\\d+)\\/comments$/.exec(path))) { comment(m[1], fields().body); save(); out(""); }
   if ((m = /issues\\/(\\d+)\\/comments/.exec(path))) out((st.comments[m[1]] || []).map((c) => JSON.stringify(c)).join("\\n"));
@@ -773,15 +774,22 @@ test("a held release is due now once the production head moves, then the back-of
 
   setHead("f".repeat(40));
   rt = withFreshMemory(rt);
-  assert.equal(await run(3), true, "head changed: due now");
+  assert.equal(await run(3), false, "head changed: the probe waits out the soak window, it does not run now");
+  const probed = (await prodReleases())[100];
+  assert.equal(probed.attempts, 0, "the probe resets the attempts: a failed run lands on the base delay");
+  const wait = Date.parse(probed.retryAt) - Date.now();
+  assert.ok(wait > SOAK_DELAY_MS - 60_000 && wait <= SOAK_DELAY_MS, "due one soak window on");
+  await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
+  rt = withFreshMemory(rt);
+  assert.equal(await run(4), true, "the soak window passed: due");
   assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
   const rel = (await prodReleases())[100];
-  assert.equal(rel.attempts, 2);
+  assert.equal(rel.attempts, 1);
   assert.equal(rel.verifiedHead, "f".repeat(40));
-  assert.ok(Date.parse(rel.retryAt) - Date.now() >= DEFAULT_BACKOFF.prodVerifyRetry.baseMs, "back-off resumes");
+  assert.ok(Date.parse(rel.retryAt) - Date.now() >= DEFAULT_BACKOFF.prodVerifyRetry.baseMs - 5_000, "back-off resumes from the base delay");
 
   rt = withFreshMemory(rt);
-  assert.equal(await run(4), false, "same head: once per head");
+  assert.equal(await run(5), false, "same head: once per head");
 });
 
 test("a hold persisted before heads were recorded is due on the first probe, then waits per head", async () => {
@@ -792,12 +800,18 @@ test("a hold persisted before heads were recorded is due on the first probe, the
     r.retryAt = new Date(Date.now() + 6 * 3_600_000).toISOString();
   });
   rt = withFreshMemory(rt);
-  assert.equal(await run(2), true, "no recorded head: verified on the first probe, not after six hours");
+  assert.equal(await run(2), false, "no recorded head: re-armed on the first probe to the soak window, not six hours");
+  const probed = (await prodReleases())[100];
+  assert.equal(probed.verifiedHead, MERGE, "the head is recorded");
+  assert.equal(probed.attempts, 0);
+  assert.ok(Date.parse(probed.retryAt) - Date.now() <= SOAK_DELAY_MS);
+  await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
+  rt = withFreshMemory(rt);
+  assert.equal(await run(3), true, "due after the soak window");
   assert.deepEqual(agentCalls().at(-1), ["sre", "verify", "--mode", "prod", "--repo", REPO, "--pr", "100"]);
-  assert.equal((await prodReleases())[100].verifiedHead, MERGE, "the head is recorded");
 
   rt = withFreshMemory(rt);
-  assert.equal(await run(3), false, "same head on the next probe: the back-off holds");
+  assert.equal(await run(4), false, "same head on the next probe: the back-off holds");
 });
 
 test("a head change across many held releases is one head read; a hold in that pass adds no read", async () => {
@@ -810,7 +824,7 @@ test("a head change across many held releases is one head read; a hold in that p
   rt = withFreshMemory(rt);
   const reads = () => ghCalls().filter((c) => c.some((x) => /\/commits\//.test(x))).length;
   const before = reads();
-  assert.equal(await run(2), true, "a moved head makes a held release due");
+  assert.equal(await run(2), false, "a moved head re-arms every held release to the soak window; none is due yet");
   assert.equal(reads() - before, 1, "one head read for the pass, the hold included");
   const rs = await prodReleases();
   assert.ok(Object.values(rs).every((r) => r.verifiedHead === "e".repeat(40)), "every held release records the new head");
@@ -824,6 +838,50 @@ test("a held re-verify that holds for the same reason comments once", async () =
   await run(2);
   assert.equal(commentsOn(5).filter((b) => b.startsWith("**Production verification held")).length, 1);
   assert.equal((await prodReleases())[100].attempts, 2);
+  // foreman#186: the re-fail is not silent.
+  const again = commentsOn(5).filter((b) => b.startsWith("**Re-verified, still held: `prod-verify-failed`.**"));
+  assert.equal(again.length, 1);
+  assert.match(again[0], /Release PR #100, attempt 2\./);
+  assert.match(again[0], /Next re-verify: /);
+});
+
+// foreman#186: a follow-up proven healthy re-arms the held release it corrects; a prod pass never does.
+// The relation is read while the follow-up's issues are open (`relationsOf`), so each way GitHub records it works.
+for (const [how, setup] of [
+  ["blocked-by link", (w) => { w.blocking = { 5: [{ number: 7 }] }; }],
+  ["title `follow-up to #N`", (w) => { w.issues["5"].title = "Fix the sync \u2014 follow-up to #7"; }],
+]) {
+  test(`a follow-up's soak pass re-arms the held release it corrects (${how}); its prod pass does not`, async () => {
+    world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
+    const far = new Date(Date.now() + 5 * 3_600_000).toISOString();
+    await seedRelease(rt, repo, { pr: 90, headSha: MERGE, issues: [7], phase: "held", attempts: 8, retryAt: far, hold: "acceptance-failed", verifiedHead: MERGE, since: far });
+    const st = gh(); setup(st); writeFileSync(GH_STATE, JSON.stringify(st));
+    await run();
+    assert.equal(await run(2), false, "nothing due");
+    let held = (await prodReleases())[90];
+    assert.equal(held.attempts, 8, "the follow-up's prod pass left the held release alone");
+    assert.equal(held.retryAt, far);
+    await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+    rt = withFreshMemory(rt);
+    await run(3);
+    assert.equal((await prodReleases())[100], undefined, "the soak passed and dropped the follow-up");
+    held = (await prodReleases())[90];
+    assert.equal(held.attempts, 0);
+    const wait = Date.parse(held.retryAt) - Date.now();
+    assert.ok(wait > REARM_SETTLE_MS - 60_000 && wait <= REARM_SETTLE_MS, "due one settle window on, not on the 6 h cap");
+  });
+}
+
+test("a soak pass re-arms nothing when the release corrects no held release", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: VERIFY(100) });
+  const far = new Date(Date.now() + 5 * 3_600_000).toISOString();
+  await seedRelease(rt, repo, { pr: 90, headSha: MERGE, issues: [7], phase: "held", attempts: 4, retryAt: far, hold: "acceptance-failed", verifiedHead: MERGE, since: far });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await run(2);
+  const held = (await prodReleases())[90];
+  assert.equal(held.attempts, 4);
+  assert.equal(held.retryAt, far);
 });
 
 test("a tag already on the merge commit is reused, never duplicated", async () => {

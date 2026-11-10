@@ -54,6 +54,11 @@ export interface ProdRelease {
   retryAt?: string;
   /** The production branch head at the last prod verification attempt; a different head makes a held release due now. */
   verifiedHead?: string;
+  /**
+   * The issues this release's issues correct (`relationsOf(...).corrects`, read in `passRelease` while they are open),
+   * so the release's healthy end can re-arm the held releases that carry them (foreman#186).
+   */
+  followUpOf?: number[];
   /** ISO time the release stage started it. */
   since: string;
   /**
