@@ -90,10 +90,13 @@ export interface UnrelatedErrors {
   signatures?: string[];
 }
 
+/** A verifier's own account of what it could not check: `class` is real-defect, spec-defect, tooling-gap, window or none. */
+export interface VerifyGap { class: string; reason?: string }
+
 /** What a verification came back with. */
 export type VerifyResult =
   /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
-  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: UnrelatedErrors }
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: UnrelatedErrors; gap?: VerifyGap; soak?: "PASS" | "FAIL" | "NOT-VERIFIED" }
   /** No verdict: an error or a timeout. Nothing was written. */
   | { kind: "error"; error: string };
 
@@ -103,7 +106,7 @@ export interface Verifier {
   /** Verify a merged release PR in production, or run its soak (nothing left to soak: `{ kind: "nothing" }`). */
   verifyProd(
     repo: RepoConfig, config: AgentConfig, pr: number, logger: Logger,
-    abortSignal?: AbortSignal, transcriptPath?: string, mode?: "prod" | "soak",
+    abortSignal?: AbortSignal, transcriptPath?: string, mode?: "prod" | "soak", recheck?: boolean,
   ): Promise<VerifyResult | { kind: "nothing"; reason: string }>;
 }
 

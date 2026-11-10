@@ -210,6 +210,9 @@ reset (or the upstream back-off window) has passed.
 - Then the Tech Lead approves, the SRE merges and deploys. **The Foreman never merges.**
 - Prod verification follows; a pass closes the issue and schedules a soak re-verify 30
   minutes later. A hold is `prodVerifyHeld` (§1).
+  A hold the soak raised (`soak:<slug>`) is re-verified by a fresh soak (`--mode soak --recheck`),
+  never by prod verification: only a soak pass closes it. A soak NOT VERIFIED for a `tooling-gap`
+  with no regression passes, the gap named in the close comment.
 
 ## 5. Self-healing limits (when "wait" stops being the answer)
 
