@@ -74,6 +74,11 @@ const verifier = z.looseObject({
   eligible_at: isoTime.nullable().optional(),
   unrelated_errors: z.array(unrelatedError).optional(),
   acceptance: z.string().optional(),
+  /** What the verifier could not check: real-defect, spec-defect, tooling-gap, window or none. */
+  gap_class: z.string().optional(),
+  gap_reason: z.string().optional(),
+  /** Soak mode only: the soak's own verdict, apart from the acceptance row's. */
+  soak_result: z.enum(["PASS", "FAIL", "NOT-VERIFIED"]).optional(),
 }).superRefine((v, ctx) => {
   if (v.outcome === "hold" && !v.hold) ctx.addIssue({ code: "custom", path: ["hold"], message: "required when outcome is hold" });
   if (v.hold === "wait-until" && !v.eligible_at) ctx.addIssue({ code: "custom", path: ["eligible_at"], message: "required when hold is wait-until" });
