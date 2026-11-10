@@ -56,14 +56,14 @@ const EVIDENCE_HEADING = /^\s*## Dev Verification Evidence\b/;
 const POST_MERGE_PASS = /\|\s*\*{0,2}Post-merge verification[^|]*\|\s*\*{0,2}PASS\*{0,2}\s*\|/i;
 
 /**
- * The SRE's newest `## Dev Verification Evidence` for this merge (a body naming the merge SHA's first 8 characters)
- * is newer than the hold and its Post-merge verification row is PASS. A later FAIL supersedes an earlier PASS. Pure.
+ * The SRE's newest `## Dev Verification Evidence` on the merged PR (the producer's template names no merge SHA, and the
+ * comment sits on this PR) is newer than the hold and its Post-merge verification row is PASS. A later FAIL supersedes an earlier PASS. Pure.
  */
-export function srePassedSince(comments: readonly IssueTextRow[], mergeSha: string, heldAtIso: string): boolean {
+export function srePassedSince(comments: readonly IssueTextRow[], heldAtIso: string): boolean {
   const heldAt = Date.parse(heldAtIso);
-  if (Number.isNaN(heldAt) || mergeSha.length < 8) return false;
+  if (Number.isNaN(heldAt)) return false;
   const evidence = comments
-    .filter((c) => c.author === SRE_LOGIN && EVIDENCE_HEADING.test(c.body) && c.body.includes(mergeSha.slice(0, 8)) && !Number.isNaN(Date.parse(c.at)))
+    .filter((c) => c.author === SRE_LOGIN && EVIDENCE_HEADING.test(c.body) && !Number.isNaN(Date.parse(c.at)))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   const newest = evidence.at(-1);
   return Boolean(newest) && Date.parse(newest!.at) > heldAt && POST_MERGE_PASS.test(newest!.body);
@@ -83,7 +83,7 @@ export async function deployHoldFacts(repoConfig: RepoConfig, h: VerifyHold): Pr
   if (!mergeSha) return {};
   let sre: boolean | undefined;
   try {
-    sre = srePassedSince(await codeHost().issueCommentRows(repoConfig.githubRepo, h.prNumber, repoConfig.repoPath), mergeSha, h.heldAt);
+    sre = srePassedSince(await codeHost().issueCommentRows(repoConfig.githubRepo, h.prNumber, repoConfig.repoPath), h.heldAt);
   } catch { /* unknown */ }
   if (sre === true) return { srePassedSince: true };
   let repaired: boolean | undefined;
