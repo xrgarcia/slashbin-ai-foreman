@@ -488,6 +488,8 @@ export interface CodeHost {
   // Issue and PR comments.
   commentBodies(config: RepoConfig, num: number): Promise<string[]>;
   commentOnPr(config: RepoConfig, pr: number, body: string): Promise<void>;
+  /** Rewrite a PR's description: `rewrite` gets the current body and returns the new one or null for no change. True when written. Throws on a failed read or write. */
+  editPrBody(config: RepoConfig, pr: number, rewrite: (current: string) => string | null): Promise<boolean>;
   commentsWithTimes(config: RepoConfig, num: number): Promise<Array<{
     at: string;
     body: string;
