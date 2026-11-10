@@ -93,10 +93,13 @@ export interface UnrelatedErrors {
 /** A verifier's own account of what it could not check: `class` is real-defect, spec-defect, tooling-gap, window or none. */
 export interface VerifyGap { class: string; reason?: string }
 
+/** One issue's grade on its own acceptance rows of the verifier's evidence (foreman#117). */
+export interface IssueAcceptance { issue: number; state: "PASS" | "FAIL" | "NOT-VERIFIED" }
+
 /** What a verification came back with. */
 export type VerifyResult =
   /** Finished with a verdict: `pass` advances the issue; anything else holds it. */
-  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: UnrelatedErrors; gap?: VerifyGap; soak?: "PASS" | "FAIL" | "NOT-VERIFIED" }
+  | { kind: "verdict"; pass: boolean; trailer: ReviewTrailer; reason?: string; summary: string; by?: "QA"; unrelated?: UnrelatedErrors; gap?: VerifyGap; soak?: "PASS" | "FAIL" | "NOT-VERIFIED"; issues?: IssueAcceptance[] }
   /** No verdict: an error or a timeout. Nothing was written. */
   | { kind: "error"; error: string };
 
@@ -126,6 +129,8 @@ export interface DeployTrailer {
   holdClass?: "time" | "person" | "transient";
   /** Why it holds, for the card. Display only: it decides nothing. */
   holdReason?: string;
+  /** The prod verify's grade of each issue on its own rows, when it did not pass (foreman#117). */
+  issues?: IssueAcceptance[];
 }
 
 /** What a deploy came back with. */

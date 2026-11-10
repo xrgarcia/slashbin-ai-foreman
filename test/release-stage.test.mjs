@@ -114,6 +114,10 @@ if (a[0] === "api") {
   if (/\\/commits\\//.test(path)) out(st.prodHead);
   if (method === "GET" && flag("--jq") === ".state" && (m = /issues\\/(\\d+)$/.exec(path))) out((st.epicStates || {})[m[1]] || "open");
   if (method === "GET" && (m = /issues\\/(\\d+)$/.exec(path))) out((st.issues[m[1]] || {}).body || "");
+  if (/\\/compare\\//.test(path) && flag("--jq") === ".status") {
+    if (st.compareStatusFail) fail("HTTP 502: Bad Gateway");
+    out((st.compareStatus || {})[path.split("/compare/")[1].split("...")[0]] || "behind");
+  }
   if (/\\/compare\\//.test(path) && st.compareCommits && (flag("--jq") || "").includes("headline")) {
     out(st.compareCommits.map((c) => JSON.stringify(c)).join("\\n"));
   }
@@ -1943,4 +1947,146 @@ test("stranded sweep: a skip waiting on a prerequisite is not a delivery and pro
   rescan();
   await run();
   assert.deepEqual(commentsOn(681), []);
+});
+
+// --- foreman#117: a joined issue is graded on its own row; a net-zero issue off production is never joined -------
+
+const ROWS = (...r) => r.map(([issue, state]) => ({ issue, state }));
+const ACC = (rows, extra = {}) => V1({ outcome: "hold", hold: "acceptance-failed", acceptance: "FAIL", issue_acceptance: rows, ...extra });
+const splitWorld = async (ctl, issues = [5, 6]) => {
+  world({
+    issues: issues.map((n) => issue(n, "release pending")),
+    prs: [mergedPr(100, `### Issues included\n${issues.map((n) => `- #${n}: Issue ${n}`).join("\n")}\n\n---\nsigned`, MERGE, 20)],
+    compareFiles: 0, prodHead: MERGE,
+  }, ctl);
+  await trackedMerged(issues);
+};
+
+test("#117: a release with one PASS row and one FAIL row holds only the FAIL issue; the PASS issue closes on its own evidence", async () => {
+  await splitWorld({ prod: ACC(ROWS([5, "PASS"], [6, "FAIL"])) });
+  await run();
+  assertClosedVerified(5);
+  assertHeld(6, "acceptance-failed");
+  assert.ok(!commentsOn(5).some((b) => b.startsWith("**Production verification held")), "the passing issue is never told it is held");
+  const rel = (await prodReleases())[100];
+  assert.equal(rel.phase, "held");
+  assert.deepEqual(rel.issues, [6], "the release record narrows to the held issue");
+  assert.equal((await recordOf(rt, repo, 5)).prodVerified.mergeSha, MERGE, "the passing issue is recorded verified");
+});
+
+test("#117: the held issue re-verifies alone and closes on a later pass; the closed issue is not touched again", async () => {
+  await splitWorld({ prod: [ACC(ROWS([5, "PASS"], [6, "FAIL"])), VERIFY(100)] });
+  await run();
+  await dueNow();
+  await run(2);
+  assertClosedVerified(6);
+  assert.equal((await prodReleases())[100]?.phase === "soaking" || (await prodReleases())[100] === undefined, true);
+  assert.equal(commentsOn(5).filter((b) => b.startsWith("**Verified in production.**")).length, 1, "#5 has its one closing comment");
+});
+
+test("#117: three issues, PASS / FAIL / NOT-VERIFIED: only the PASS closes; the not-verified one stays held with the failing one", async () => {
+  await splitWorld({ prod: ACC(ROWS([5, "PASS"], [6, "FAIL"], [7, "NOT-VERIFIED"])) }, [5, 6, 7]);
+  await run();
+  assertClosedVerified(5);
+  assertHeld(6, "acceptance-failed");
+  assertHeld(7, "acceptance-failed");
+  assert.deepEqual((await prodReleases())[100].issues, [6, 7]);
+});
+
+for (const [name, rows, hold] of [
+  ["no rows (an older SRE)", undefined, "acceptance-failed"],
+  ["every row FAIL", ROWS([5, "FAIL"], [6, "FAIL"]), "acceptance-failed"],
+  ["a release-level hold with every row PASS", ROWS([5, "PASS"], [6, "PASS"]), "acceptance-failed"],
+  ["a row missing for one issue", ROWS([5, "PASS"]), "acceptance-failed"],
+  ["a hold that is not about acceptance", ROWS([5, "PASS"], [6, "FAIL"]), "deploy-unhealthy"],
+]) {
+  test(`#117: ${name}: the release is graded as a whole, so every issue is held`, async () => {
+    await splitWorld({ prod: V1({ outcome: "hold", hold, ...(rows ? { issue_acceptance: rows } : {}) }) });
+    await run();
+    assertHeld(5, hold);
+    assertHeld(6, hold);
+    assert.deepEqual((await prodReleases())[100].issues, [5, 6]);
+  });
+}
+
+test("#117: a malformed issue_acceptance reads as no rows, never a pass", async () => {
+  await splitWorld({ prod: V1({ outcome: "hold", hold: "acceptance-failed", issue_acceptance: [{ issue: "five", state: "PASS" }] }) });
+  await run();
+  assertHeld(5, "acceptance-failed");
+  assertHeld(6, "acceptance-failed");
+});
+
+test("#117: a deploy whose prod verify holds on acceptance splits the release the same way", async () => {
+  world(pending(), {
+    approve: { exit: 0 },
+    deploy: { exit: 0, merge: MERGE, out: `FOREMAN_RESULT_V1 ${JSON.stringify({ schema: 1, role: "deployer", outcome: "merged", pr: 100, merged: true, merge_sha: MERGE, verify: "hold", hold: "acceptance-failed", hold_class: "person", issue_acceptance: ROWS([5, "FAIL"], [6, "PASS"]) })}` },
+  });
+  await run();
+  assertClosedVerified(6);
+  assertHeld(5, "acceptance-failed");
+  assert.deepEqual((await prodReleases())[100].issues, [5]);
+});
+
+test("#117: a soak that holds on acceptance holds only the failing issue's release record", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass"), soak: V1({ outcome: "hold", hold: "acceptance-failed", soak_result: "FAIL", issue_acceptance: ROWS([5, "PASS"], [6, "FAIL"]) }) });
+  await run();
+  await editRel(100, (r) => { r.soakAt = new Date(Date.now() - 1000).toISOString(); });
+  await run(2);
+  assert.deepEqual((await prodReleases())[100].issues, [6], "only the failing issue stays held");
+  assert.equal(gh().issues[5].state, "CLOSED", "the passing issue stays closed");
+  assertHeld(6, "soak:acceptance-failed");
+});
+
+// A net-zero issue: its PR merged to develop with no file changed, and no release carries it.
+const NZ_SHA = "e".repeat(40);
+const netZeroWorld = (files, ctl = {}, extra = {}) => world({
+  issues: [issue(9, "release pending")],
+  prs: [
+    mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 20),
+    mergedFeature(300, "docs: nothing", "Closes #9", { files, mergeCommit: { oid: NZ_SHA }, commits: [] }),
+  ],
+  compareFiles: 0, prodHead: MERGE, ...extra,
+}, ctl);
+const seedHeadRelease = () => seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "held", mergeSha: MERGE, mergedAt: new Date().toISOString(),
+  attempts: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), since: new Date().toISOString() });
+
+test("#117: a net-zero issue whose merge is not on production is closed with a no-op note and never joined to the release", async () => {
+  netZeroWorld([]);
+  await seedHeadRelease();
+  await run();
+  const i = gh().issues[9];
+  assert.equal(i.state, "CLOSED");
+  assert.ok(!i.labels.includes("blocked"));
+  assert.match(commentsOn(9)[0], /^\*\*Closed: nothing to verify in production\.\*\*/);
+  assert.match(commentsOn(9)[0], /PR #300/);
+  assert.doesNotMatch(gh().prs[100].body, /#9/, "the release PR never names it, so it never gets a verdict");
+  assert.deepEqual((await prodReleases())[100].issues, [5]);
+});
+
+test("#117: a net-zero issue whose merge IS on production is carried: it joins the release as before", async () => {
+  netZeroWorld([], {}, {});
+  const st = gh(); st.compareStatus = { [NZ_SHA]: "ahead" }; writeFileSync(GH_STATE, JSON.stringify(st));
+  await seedHeadRelease();
+  await run();
+  assert.match(gh().prs[100].body, /- #9: Issue 9/, "joined");
+  assert.ok(!commentsOn(9).some((b) => b.startsWith("**Closed: nothing to verify")));
+});
+
+test("#117: an issue whose PR changed files is joined, however its merge compares", async () => {
+  netZeroWorld([{ path: "src/a.ts" }]);
+  await seedHeadRelease();
+  await run();
+  assert.match(gh().prs[100].body, /- #9: Issue 9/);
+  assert.ok(!commentsOn(9).some((b) => b.startsWith("**Closed: nothing to verify")));
+});
+
+test("#117: when GitHub cannot say whether the merge is on production, the issue is left alone this scan", async () => {
+  netZeroWorld([]);
+  const st = gh(); st.compareStatusFail = true; writeFileSync(GH_STATE, JSON.stringify(st));
+  await seedHeadRelease();
+  await run();
+  assert.equal(gh().issues[9].state, "OPEN");
+  assert.deepEqual(gh().issues[9].labels, ["approved", "release pending"]);
+  assert.deepEqual(commentsOn(9), []);
+  assert.doesNotMatch(gh().prs[100].body, /#9/);
 });

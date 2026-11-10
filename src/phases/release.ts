@@ -38,7 +38,7 @@ import type { Logger } from "../logger.js";
 import { emit, advance } from "../work-source.js";
 import type { Move } from "../lifecycle.js";
 import { roleFor } from "../plugins/registry.js";
-import type { DeployTrailer, VerifyResult } from "../plugins/contract.js";
+import type { DeployTrailer, IssueAcceptance, VerifyResult } from "../plugins/contract.js";
 import { parseWaitUntil } from "../contract/result-v1.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues } from "../release-tracker.js";
@@ -75,18 +75,39 @@ export const HEAD_PROBE_MS = 60_000;
 
 type Verdict =
   | { kind: "pass"; evidence?: string; /** What the verifier could not check, passed anyway: named in the close comment. */ note?: string }
-  | { kind: "hold"; hold: string; evidence?: string }
+  | { kind: "hold"; hold: string; evidence?: string; /** The verifier's grade of each issue on its own rows (foreman#117). */ rows?: IssueAcceptance[] }
   /** Not a failure: the SRE named the time the rest becomes observable. */
   | { kind: "wait"; retryAt: string; hold: string }
   /** Nothing was verified (the SRE could not run): back off, write nothing. */
   | { kind: "defer"; reason: string };
 
 /** A hold slug's verdict: `defer` and `wait` are not failures (verifyHoldPlan). */
-function holdVerdict(hold: string, evidence?: string): Verdict {
+function holdVerdict(hold: string, evidence?: string, rows?: IssueAcceptance[]): Verdict {
   const plan = verifyHoldPlan(hold);
   if (plan.kind === "defer") return { kind: "defer", reason: hold };
   if (plan.kind === "wait") return { kind: "wait", retryAt: plan.retryAt, hold };
-  return { kind: "hold", hold, ...(evidence ? { evidence } : {}) };
+  return { kind: "hold", hold, ...(evidence ? { evidence } : {}), ...(rows?.length ? { rows } : {}) };
+}
+
+/** Hold slugs that are a verdict on acceptance rows: only these are split per issue. */
+const ACCEPTANCE_HOLD = /acceptance/;
+
+/**
+ * Which of a release's issues a failing verdict holds, and which it passes (foreman#117). The verifier grades each
+ * issue on its own acceptance rows; one issue's failing row must not hold the issues whose rows passed. Split only
+ * on an acceptance hold where EVERY issue has a row, at least one FAIL and at least one PASS: anything less (no
+ * rows, a missing row, all failing, a deploy or release-level hold) is the release's verdict as a whole. An issue
+ * graded NOT-VERIFIED is not passed: it stays held with the failing ones. Pure, exported for tests.
+ */
+export function splitByIssueRows(issues: readonly number[], hold: string, rows: readonly IssueAcceptance[] | undefined): { passing: number[]; held: number[] } | undefined {
+  if (!rows?.length || !ACCEPTANCE_HOLD.test(hold)) return undefined;
+  const state = new Map<number, IssueAcceptance["state"]>();
+  for (const r of rows) if (!state.has(r.issue)) state.set(r.issue, r.state);
+  if (!issues.every((n) => state.has(n))) return undefined;
+  const passing = issues.filter((n) => state.get(n) === "PASS");
+  const held = issues.filter((n) => state.get(n) !== "PASS");
+  if (passing.length === 0 || !issues.some((n) => state.get(n) === "FAIL")) return undefined;
+  return { passing, held };
 }
 
 /** Production verification (or the soak) by the enabled verifier; an error result when none is enabled. */
@@ -120,7 +141,7 @@ async function fromVerifyResult(rt: ForemanRuntime, r: VerifyResult, repoConfig:
   if (soak && r.soak === "NOT-VERIFIED" && r.gap?.class === "tooling-gap" && !REGRESSION_HOLD.test(r.reason ?? "")) {
     return { kind: "pass", ...(evidence ? { evidence } : {}), note: gapNote ?? "the SRE could not check part of it (gap: `tooling-gap`)" };
   }
-  return holdVerdict(r.reason ?? "prod-verify-held", evidence);
+  return holdVerdict(r.reason ?? "prod-verify-held", evidence, r.issues);
 }
 
 const now = () => Date.now();
@@ -250,9 +271,14 @@ async function noteEpicClose(rt: ForemanRuntime, repoConfig: RepoConfig, n: numb
   }
 }
 
-/** A pass: close every issue with one line of evidence, record it, and queue the soak. */
-async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, move: Move, evidence: string | undefined, logger: Logger, note?: string): Promise<void> {
-  await tagRelease(repoConfig, rel, logger);
+/**
+ * Close `issues` of a release with one line of evidence, each only once its verification is recorded. False when a
+ * save or a close did not land: the issue is left open and the release is verified again next pass.
+ */
+async function closeIssues(
+  rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, issues: readonly number[], move: Move,
+  evidence: string | undefined, logger: Logger, note?: string,
+): Promise<boolean> {
   const line =
     `**Verified in production.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as \`${short(rel.mergeSha)}\`` +
     `${rel.tag ? `, tagged \`${rel.tag}\`` : ""}. Evidence: ${evidence ?? rel.evidence ?? "the SRE's verification on the release PR"}.` +
@@ -263,7 +289,7 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
   const unsaved: number[] = [];
   const saved = new Set<number>();
   const notClosed: number[] = [];
-  for (const n of rel.issues) {
+  for (const n of issues) {
     const ok = await rt.records.updateIssueRecord(repoConfig, n, (d) => {
       d.prodVerified = {
         pr: rel.pr, mergeSha: rel.mergeSha ?? "", at,
@@ -273,16 +299,11 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
     if (ok) saved.add(n);
     else unsaved.push(n);
   }
-  // What these issues correct, read while they are open (a closed issue's title is gone): the release's healthy end
-  // re-arms the held releases carrying them. An unreadable link throws: nothing is closed and the next pass retries.
-  const relations = await codeHost().relationsOf(repoConfig, rel.issues, logger);
-  const followUpOf = [...new Set(rel.issues.flatMap((n) => relations.get(n)?.corrects ?? []))].filter((n) => !rel.issues.includes(n));
-  rel = { ...rel, ...(followUpOf.length > 0 ? { followUpOf } : {}) };
   if (unsaved.length > 0) logger.warn(`Release PR #${rel.pr}: the production verification of ${unsaved.map((n) => `#${n}`).join(", ")} could not be recorded; nothing is closed for them, the release is verified again next pass`);
   // A closed issue was verified by an earlier pass of this release (a re-verify after a join).
   const openIssues = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const open = new Set(openIssues.map((i) => i.number));
-  for (const n of (await writable(repoConfig, rel, logger)).filter((i) => open.has(i) && saved.has(i))) {
+  for (const n of (await writable(repoConfig, { ...rel, issues: [...issues] }, logger)).filter((i) => open.has(i) && saved.has(i))) {
     await noteEpicClose(rt, repoConfig, n, logger);
     // Close first, comment once it is closed: a close that fails is retried next pass and must not repeat the comment.
     if (!(await advance(rt, itemOf(repoConfig, n), move, repoConfig, logger))) {
@@ -291,14 +312,26 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
     }
     await comment(repoConfig, n, line, logger);
   }
-  if (unsaved.length > 0) return;
+  if (unsaved.length > 0) return false;
   // A close that did not land leaves the issue open and labelled `release pending`: the release stays at
   // this phase and the next pass closes it, instead of soaking with an open issue nobody owns (#220).
   if (notClosed.length > 0) {
     logger.warn(`Release PR #${rel.pr}: could not close ${notClosed.map((n) => `#${n}`).join(", ")}; the release is verified again next pass`);
-    return;
+    return false;
   }
-  logger.info(`Release PR #${rel.pr} verified in production; closed ${[...saved].map((n) => `#${n}`).join(", ")}`);
+  return true;
+}
+
+/** A pass: close every issue with one line of evidence, record it, and queue the soak. */
+async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, move: Move, evidence: string | undefined, logger: Logger, note?: string): Promise<void> {
+  await tagRelease(repoConfig, rel, logger);
+  // What these issues correct, read while they are open (a closed issue's title is gone): the release's healthy end
+  // re-arms the held releases carrying them. An unreadable link throws: nothing is closed and the next pass retries.
+  const relations = await codeHost().relationsOf(repoConfig, rel.issues, logger);
+  const followUpOf = [...new Set(rel.issues.flatMap((n) => relations.get(n)?.corrects ?? []))].filter((n) => !rel.issues.includes(n));
+  rel = { ...rel, ...(followUpOf.length > 0 ? { followUpOf } : {}) };
+  if (!(await closeIssues(rt, repoConfig, rel, rel.issues, move, evidence, logger, note))) return;
+  logger.info(`Release PR #${rel.pr} verified in production; closed ${rel.issues.map((n) => `#${n}`).join(", ")}`);
   // The issues are closed and recorded; a failed save here only repeats the (idempotent) verification next pass.
   if (rel.soaked) {
     if (await dropRelease(rt, repoConfig, rel.pr, logger)) await rearmHeld(rt, repoConfig, rel, rel.followUpOf, logger);
@@ -309,6 +342,30 @@ async function passRelease(rt: ForemanRuntime, repoConfig: RepoConfig, rel: Prod
     ...rel, phase: "soaking", soakAt: iso(mergedAt + SOAK_DELAY_MS),
     ...(evidence ? { evidence } : {}), retryAt: undefined, hold: undefined,
   }, logger);
+}
+
+/**
+ * A failing verdict, split per issue when the verifier graded each on its own rows (foreman#117): the release keeps
+ * only the issues that failed (or could not be graded) and is held for them, and the issues whose rows passed are
+ * closed on their own evidence (those already closed by a first prod pass stay closed). Without a usable split it is
+ * `holdRelease` on the whole release. `closeMove` is null when the passing issues are already closed.
+ */
+async function holdFailing(
+  rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease,
+  v: { hold: string; evidence?: string }, rows: IssueAcceptance[] | undefined,
+  move: Move, closeMove: Move | null, logger: Logger,
+): Promise<void> {
+  const split = splitByIssueRows(rel.issues, v.hold, rows);
+  if (!split) {
+    await holdRelease(rt, repoConfig, config, rel, v, move, logger);
+    return;
+  }
+  logger.info(`Release PR #${rel.pr}: held for ${split.held.map((n) => `#${n}`).join(", ")} on its own acceptance rows; ${split.passing.map((n) => `#${n}`).join(", ")} passed`);
+  if (!(await holdRelease(rt, repoConfig, config, { ...rel, issues: split.held }, v, move, logger))) return;
+  if (!closeMove) return;
+  const open = new Set((await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger)).map((i) => i.number));
+  const passing = split.passing.filter((n) => open.has(n));
+  if (passing.length > 0) await closeIssues(rt, repoConfig, rel, passing, closeMove, v.evidence, logger, `its own acceptance rows passed; another issue's row failed (\`${v.hold}\`)`);
 }
 
 /**
@@ -323,7 +380,7 @@ async function holdRelease(
   v: { hold: string; evidence?: string },
   move: Move,
   logger: Logger,
-): Promise<void> {
+): Promise<boolean> {
   await tagRelease(repoConfig, rel, logger);
   const attempts = rel.attempts + 1;
   const retryAt = iso(now() + backoffDelay(attempts, config.backoff.prodVerifyRetry));
@@ -345,7 +402,7 @@ async function holdRelease(
     ...(verifiedHead ? { verifiedHead } : {}),
     ...(v.evidence ? { evidence: v.evidence } : {}),
   };
-  if (!(await putRelease(rt, repoConfig, held, logger))) return;
+  if (!(await putRelease(rt, repoConfig, held, logger))) return false;
   if (first) {
     const body = [
       `**Production verification held: \`${v.hold}\`.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as ` +
@@ -367,6 +424,7 @@ async function holdRelease(
     for (const n of await writable(repoConfig, rel, logger)) await comment(repoConfig, n, body, logger);
   }
   logger.warn(`Release PR #${rel.pr}: prod verification held (${v.hold}), attempt ${attempts}; re-verify at ${retryAt}`);
+  return true;
 }
 
 /** A STOP: the issues need a person. Blocked, with the reason on each; `release pending` stays. */
@@ -568,10 +626,29 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, releases
   const { ok } = await rt.records.actionableIssues(repoConfig, orphans);
   if (ok.length < orphans.length) logger.info(`Release orphans: ${orphans.length - ok.length} issue(s) with an unreadable record left alone this scan`);
   if (ok.length === 0) return;
-  const joined = await joinCarryingRelease(rt, repoConfig, releases, ok, logger);
+  // A net-zero issue whose merge is not on production shipped nothing: no release carries it, and joining it to one
+  // would hand it a verdict that is not its own (foreman#117). It ends here, closed with a note saying so.
+  let noop: Map<number, { pr: number; url: string }>;
+  try {
+    noop = await codeHost().netZeroOffProduction(repoConfig, ok, logger);
+  } catch (err) {
+    logger.warn(`Release orphans: could not tell whether ${ok.map((n) => `#${n}`).join(", ")} changed anything; left alone this scan: ${errText(err)}`);
+    return;
+  }
+  for (const [n, w] of noop) {
+    if (!(await advance(rt, itemOf(repoConfig, n), "prodVerified", repoConfig, logger))) continue;  // retried next scan
+    await comment(repoConfig, n,
+      `**Closed: nothing to verify in production.** This issue's PR #${w.pr} (${w.url}) merged to \`${repoConfig.baseBranch}\` with an empty net diff, ` +
+      `so no change shipped and no release carries it. It was not joined to a release: a release's verdict is about the changes it shipped, ` +
+      "and none of them are this issue's. Reopen it if there is work left.", logger);
+    logger.info(`Closed #${n}: its PR #${w.pr} is net-zero and not on ${repoConfig.productionBranch}; nothing to verify`);
+  }
+  const carried = ok.filter((n) => !noop.has(n));
+  if (carried.length === 0) return;
+  const joined = await joinCarryingRelease(rt, repoConfig, releases, carried, logger);
   // Unreadable is not "no release carries them": they are not blocked on a record that could not be read.
   if (joined !== false) return;
-  await stopRelease(rt, repoConfig, null, ok,
+  await stopRelease(rt, repoConfig, null, carried,
     `no release carries this issue: its work is already on \`${repoConfig.productionBranch}\`, but no release PR merged in the last ` +
     "48 hours lists it, so there is no release to verify it by. Check production by hand and close it, or move it back to " +
     `\`${repoConfig.lifecycleLabels.readyForProd}\` once a release can carry it`, undefined, logger);
@@ -762,7 +839,7 @@ async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
       return;
     case "hold":
       rt.memory.releaseBackoff.clear(key);
-      await holdRelease(rt, repoConfig, config, rel, v, "prodHeld", logger);
+      await holdFailing(rt, repoConfig, config, rel, v, v.rows, "prodHeld", rel.phase === "held" ? "prodReverified" : "prodVerified", logger);
       return;
     case "wait":
       logger.info(`Release PR #${rel.pr}: the SRE can verify the rest after ${v.retryAt} (${v.hold})`);
@@ -830,12 +907,15 @@ async function settleSoak(
       rt.memory.releaseBackoff.clear(key);
       const hold = { hold: `soak:${v.hold}`, ...(v.evidence ? { evidence: v.evidence } : {}) };
       if (held) {
-        // Still held by its soak: keep the attempt count, so the re-verify backs off.
-        await holdRelease(rt, repoConfig, config, { ...rel, soaked: true }, hold, "soakHeld", logger);
+        // Still held by its soak: keep the attempt count, so the re-verify backs off. An issue whose own rows
+        // passed was reopened with the rest: it closes now.
+        await holdFailing(rt, repoConfig, config, { ...rel, soaked: true }, hold, v.rows, "soakHeld", "prodReverified", logger);
         return;
       }
-      for (const n of rel.issues) await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
-      await holdRelease(rt, repoConfig, config, { ...rel, soaked: true, attempts: 0, phase: "soaking", hold: undefined }, hold, "soakHeld", logger);
+      // The issues whose own rows passed stay closed with their verification; the rest are reopened and held.
+      const split = splitByIssueRows(rel.issues, v.hold, v.rows);
+      for (const n of split?.held ?? rel.issues) await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.prodVerified; });
+      await holdFailing(rt, repoConfig, config, { ...rel, soaked: true, attempts: 0, phase: "soaking", hold: undefined }, hold, v.rows, "soakHeld", null, logger);
       return;
     }
   }
@@ -993,7 +1073,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   if (tr.verify === "pass") {
     await settle(rt, repoConfig, config, merged, { kind: "pass", ...(tr.evidence ? { evidence: tr.evidence } : {}) }, logger);
   } else if (tr.verify === "hold" || tr.verify === "fail") {
-    const v = holdVerdict(tr.hold ?? (tr.verify === "fail" ? "prod-verify-failed" : "prod-verify-held"), tr.evidence);
+    const v = holdVerdict(tr.hold ?? (tr.verify === "fail" ? "prod-verify-failed" : "prod-verify-held"), tr.evidence, tr.issues);
     // A deferred verdict leaves it `merged`: the next pass verifies it.
     if (v.kind !== "defer") await settle(rt, repoConfig, config, merged, v, logger);
   }

@@ -173,6 +173,12 @@ lifecycle label; the one label a person writes is the EM's `ready for prod relea
    labels and closes it. A hold or fail labels it `prod verification held`, reopens it if GitHub's
    keywords closed it, comments the reason, and re-verifies (`sre.mjs verify --mode prod`) on
    `backoff.prodVerifyRetry`. No issue is ever left closed-but-unverified or open-but-unlabelled.
+   **Each issue is graded on its own row (foreman#117).** The SRE's v1 line (verifier, and deployer when its
+   prod verify did not pass) carries `issue_acceptance: [{issue, state}]`, `state` PASS, FAIL or NOT-VERIFIED.
+   When the hold is an acceptance hold and every issue of the release has a row, at least one FAIL and at
+   least one PASS, only the issues not PASS are held; the PASS ones close on their own evidence and the
+   release record narrows to the held issues, which re-verify alone. Any other shape (no rows, a row missing,
+   all FAIL, all PASS, a hold that is not about acceptance, a malformed list) holds the whole release as before.
 6. **Soak.** At least 30 minutes after the merge, the stage runs `sre.mjs verify --mode soak` once;
    a hold or fail reopens the issues to `prod verification held`.
 
@@ -182,6 +188,12 @@ an existing `## Production Verification` comment), the tag, the soak, and the sa
 Issues the SRE's promotion-verify sweep marked `blocked` ("**Production release check needs a person.**")
 are moved to `prod verification held`. The SRE's promotion-verify-sweep (a systemd timer on the owner's
 desktop) is retired once this ships.
+
+**Net-zero issues.** An open `release pending` issue whose own merged PR changed no file, and whose merge
+commit is not on the production branch, shipped nothing and no release carries it. It is never joined to the
+release at production's head (that would hand it a verdict about someone else's changes): it is closed with a
+"Closed: nothing to verify in production" comment naming the PR. If GitHub cannot say, it is left alone for the
+next scan. A net-zero merge that is on production is carried as before.
 
 The promote and release path sends nothing to Discord: what needs a person is a comment and a label
 on the issue, which also moves its Paperclip card.

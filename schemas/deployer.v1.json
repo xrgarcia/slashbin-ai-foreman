@@ -145,6 +145,31 @@
         ],
         "additionalProperties": {}
       }
+    },
+    "issue_acceptance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issue": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "NOT-VERIFIED"
+            ]
+          }
+        },
+        "required": [
+          "issue",
+          "state"
+        ]
+      }
     }
   },
   "required": [
