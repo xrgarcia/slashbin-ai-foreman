@@ -113,6 +113,7 @@ export function githubCodeHost(
     commentBodies: prComments.commentBodies,
     commentOnPr: prComments.commentOnPr,
     editPrBody: prBody.editPrBody,
+    commitSubjects: prBody.commitSubjects,
     commentsWithTimes: prComments.commentsWithTimes,
     hasCommentContaining: prComments.hasCommentContaining,
     reopenedSince: prComments.reopenedSince,

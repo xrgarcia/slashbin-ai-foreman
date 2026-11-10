@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { rewriteBodyForRevert, revisionLeavesBodyStale, amendRevisedPrBody, REVERTED_HEADING } from "../dist/pr-body.js";
+import { rewriteBodyForRevert, revisionLeavesBodyStale, amendRevisedPrBody, bodySyncFor, droppedFromSubjects, REVERTED_HEADING } from "../dist/pr-body.js";
 import { registerPlugin, startPlugins, resetRegistryForTests } from "../dist/plugins/registry.js";
 import { GitHubPlugin } from "../dist/plugins/github.js";
 import { readResultV1 } from "../dist/contract/result-v1.js";
@@ -89,8 +89,10 @@ console.log(JSON.stringify(${JSON.stringify(BODY)}));
   process.env.FOREMAN_GITHUB_TOKEN = "test";
   try {
     const logger = { info() {}, warn() {}, error() {}, debug() {} };
-    const changed = await amendRevisedPrBody({ githubRepo: "o/r", repoPath: dir }, 700, { outcome: "reverted", reverted_items: ["#696"], pr_body_stale: true }, logger);
+    const r = { outcome: "reverted", reverted_items: ["#696"], pr_body_stale: true };
+    const { changed, matched } = await amendRevisedPrBody({ githubRepo: "o/r", repoPath: dir }, 700, bodySyncFor(r, []), r, logger);
     assert.equal(changed, true);
+    assert.equal(matched, 2);
     const args = JSON.parse(readFileSync(log, "utf8"));
     const body = args.find((x) => x.startsWith("body=")).slice(5);
     assert.ok(args.includes("repos/o/r/pulls/700"));
@@ -107,5 +109,38 @@ test("revisePRFeedback amends the body before it reports success, and fails the 
   const src = readFileSync(new URL("../src/phases/revise-workflow.ts", import.meta.url), "utf8");
   const amend = src.indexOf("amendRevisedPrBody(");
   assert.ok(amend > 0 && amend < src.lastIndexOf("return { success: true, summary"), "the amend comes before the success return");
-  assert.match(src, /return \{ success: false, error: `PR description amend failed/);
+  assert.match(src, /return \{ success: false, error: `PR description sync failed/);
+  assert.match(src, /bodyNote\}/, "the instruction reaches every prompt, repo-local skill and default included");
+  assert.ok((src.match(/\$\{bodyNote\}/g) ?? []).length >= 2);
+});
+
+const SUBJECT = "fix: drop @grpc/grpc-js 1.14.6 bump, no runtime smoke test possible (#700)";
+
+test("legacy output, no v1 line: the revision's own commit subject names what it dropped, and the incident row is struck", () => {
+  const sync = bodySyncFor(null, ["fix: address review feedback (#700)", SUBJECT]);
+  assert.equal(sync.needed, true);
+  assert.equal(sync.certain, false);
+  const { body, matched } = rewriteBodyForRevert(BODY, { items: sync.items });
+  const row = body.split("\n").find((l) => l.includes("1.14.6"));
+  assert.ok(!/\*\*Landed\*\*/.test(row), row);
+  assert.ok(matched >= 1);
+});
+
+test("an ordinary fix subject needs no sync", () => {
+  assert.equal(bodySyncFor(null, ["fix: address review feedback (#700)"]).needed, false);
+  assert.equal(bodySyncFor({ outcome: "pushed" }, ["fix: tighten the guard"]).needed, false);
+});
+
+test("v1 says reverted with no reverted_items: items come from the commit subjects; with nothing to match, matched is 0 so the pass fails", () => {
+  const v1 = { outcome: "reverted", reverted_findings: [2], pr_body_stale: true };
+  const withSubject = bodySyncFor(v1, [SUBJECT]);
+  assert.equal(withSubject.certain, true);
+  assert.ok(rewriteBodyForRevert(BODY, { items: withSubject.items }).matched >= 1);
+  const none = bodySyncFor(v1, ["fix: address review feedback"]);
+  assert.equal(none.certain, true);
+  assert.equal(rewriteBodyForRevert(BODY, { items: none.items, findings: [2] }).matched, 0);
+});
+
+test("droppedFromSubjects reads refs, packages, versions and paths", () => {
+  assert.deepEqual(droppedFromSubjects(["revert: back out #12 in src/a.ts"]).items.sort(), ["#12", "src/a.ts"]);
 });
