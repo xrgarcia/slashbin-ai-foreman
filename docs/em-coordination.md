@@ -127,7 +127,7 @@ itself when its check turns true):
 | `divergence` | retired (foreman#208): no shared branch to diverge; kept in the list so old records still read | none | none |
 | `verify-no-pr` | `pr merged` with no merged PR closing the issue | `mergedPrFound` | link the PR or fix the label history |
 | `verify-held` | dev verification failed, waiting out back-off | `specEdited` | none — wait |
-| `verify-exhausted` | dev verification spent its attempts | `specEdited`, `baseAdvanced`, `holdNoLongerCharged` | edit the spec or land the fix |
+| `verify-exhausted` | dev verification spent its attempts | `specEdited`, `baseAdvanced`, `holdNoLongerCharged`, and for a deploy failure (`dev-verify-failed`, `deploy=…`) `srePassedSince` (the SRE's newer PASS evidence for the merge: `pr approved` with no new run) and `deployRepaired` (a newer SUCCESS dev deployment on the merge SHA: re-verifies, forcing the SRE to run again) | edit the spec or land the fix; a repaired environment needs nothing |
 | `revision-exhausted` | revise failed twice | `prHeadMoved` | rule on scope or file the fix |
 | `revision-stalemate` | revise made no commit twice on the same PR head (kept across restarts and idle passes; cleared by a push, the PR closing, or an `**EM scope ruling` PR comment newer than the last no-commit round, which buys one more revise) | `prHeadMoved`, `rulingPosted` | rule on scope |
 

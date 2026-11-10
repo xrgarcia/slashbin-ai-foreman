@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { Relation, SessionEvent } from "../adapters.js";
+import type { DeploymentView, IssueTextRow } from "../code-host.js";
 import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { roleFor } from "../plugins/registry.js";
@@ -30,6 +31,66 @@ import type { ForemanRuntime } from "../runtime.js";
  */
 export function isDeployFailureHold(reason: string): boolean {
   return reason === "dev-verify-failed" || reason.startsWith("deploy=");
+}
+
+/** The GitHub login the SRE posts its evidence as (SRE_GITHUB_KEY, src/plugins/sre.ts). Anyone else's "PASS" is not evidence. */
+export const SRE_LOGIN = "slashbin-sre";
+
+/** A deployment environment that is dev: Railway posts `<project> / development` (or `dev`). */
+export const isDevEnvironment = (environment: string): boolean => /(^|\/\s*)(dev|development)\s*$/i.test(environment);
+
+/**
+ * The merge's newest dev deployment is SUCCESS and reached it after the hold: the environment was repaired
+ * (a redeploy, a rebuilt commit) with no change to the spec or the base branch. Pure.
+ */
+export function devDeployRepaired(deployments: readonly DeploymentView[], heldAtIso: string): boolean {
+  const heldAt = Date.parse(heldAtIso);
+  if (Number.isNaN(heldAt)) return false;
+  const dev = deployments.filter((d) => isDevEnvironment(d.environment) && !Number.isNaN(Date.parse(d.at)));
+  if (dev.length === 0) return false;
+  const newest = dev.reduce((a, b) => (Date.parse(b.at) > Date.parse(a.at) ? b : a));
+  return newest.state === "success" && Date.parse(newest.at) > heldAt;
+}
+
+const EVIDENCE_HEADING = /^\s*## Dev Verification Evidence\b/;
+const POST_MERGE_PASS = /\|\s*\*{0,2}Post-merge verification[^|]*\|\s*\*{0,2}PASS\*{0,2}\s*\|/i;
+
+/**
+ * The SRE's newest `## Dev Verification Evidence` on the merged PR (the producer's template names no merge SHA, and the
+ * comment sits on this PR) is newer than the hold and its Post-merge verification row is PASS. A later FAIL supersedes an earlier PASS. Pure.
+ */
+export function srePassedSince(comments: readonly IssueTextRow[], heldAtIso: string): boolean {
+  const heldAt = Date.parse(heldAtIso);
+  if (Number.isNaN(heldAt)) return false;
+  const evidence = comments
+    .filter((c) => c.author === SRE_LOGIN && EVIDENCE_HEADING.test(c.body) && !Number.isNaN(Date.parse(c.at)))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const newest = evidence.at(-1);
+  return Boolean(newest) && Date.parse(newest!.at) > heldAt && POST_MERGE_PASS.test(newest!.body);
+}
+
+/**
+ * The two facts that release an exhausted deploy-failure hold. Each is undefined when GitHub cannot say
+ * (unknown never releases). `srePassedSince` is read first and `deployRepaired` only when it is not true.
+ */
+export async function deployHoldFacts(repoConfig: RepoConfig, h: VerifyHold): Promise<{ deployRepaired?: boolean; srePassedSince?: boolean }> {
+  let mergeSha: string | null;
+  try {
+    mergeSha = (await codeHost().viewReleasePr(repoConfig, h.prNumber)).mergeSha;
+  } catch {
+    return {};
+  }
+  if (!mergeSha) return {};
+  let sre: boolean | undefined;
+  try {
+    sre = srePassedSince(await codeHost().issueCommentRows(repoConfig.githubRepo, h.prNumber, repoConfig.repoPath), h.heldAt);
+  } catch { /* unknown */ }
+  if (sre === true) return { srePassedSince: true };
+  let repaired: boolean | undefined;
+  try {
+    repaired = devDeployRepaired(await codeHost().deploymentsForSha(repoConfig, mergeSha), h.heldAt);
+  } catch { /* unknown */ }
+  return { ...(sre !== undefined ? { srePassedSince: sre } : {}), ...(repaired !== undefined ? { deployRepaired: repaired } : {}) };
 }
 
 /** The files a PR touched, for the EM's call; an unreadable list throws and fails the pass (EM#1244 f5). */
@@ -305,6 +366,8 @@ export async function tryVerify(
   // fresh attempt count, because retrying an unchanged spec cannot pass; new
   // commits on base reopen an exhausted one, unless dev could not observe it.
   let released = false;
+  // Issues the SRE's earlier PASS advanced this pass: their label moves on the next read, so they are not verified again now.
+  const passedBySre = new Set<number>();
   for (const [key, h] of Object.entries(held)) {
     const n = Number(key);
     const noPr = h.reason === "no-merged-pr";
@@ -322,6 +385,18 @@ export async function tryVerify(
       }
     }
     const kind: BlockKind = exhausted ? "verify-exhausted" : "verify-held";
+    // An exhausted deploy failure is the environment's, and repairing it (or the SRE passing it later) is not a spec edit
+    // or a base commit: read the deployment and the SRE's evidence (foreman#106).
+    const deployFacts = exhausted && h.prNumber > 0 && isDeployFailureHold(h.reason) ? await deployHoldFacts(repoConfig, h) : {};
+    if (deployFacts.srePassedSince === true && (await qaApplies(repoConfig, config)) === false) {
+      // The SRE already passed this merge and no QA gate follows: take the pass, with no new SRE run.
+      vlog.info(`#${n}: the SRE passed PR #${h.prNumber} after the hold — advancing without a new run`);
+      await advanceOnSrePass(rt, repoConfig, n, vlog);
+      delete held[n];
+      passedBySre.add(n);
+      released = true;
+      continue;
+    }
     const ok = noPr
       ? await releaseIfResolved(rt, "verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
       : await releaseIfResolved(rt, kind, {
@@ -330,8 +405,14 @@ export async function tryVerify(
         // Exhausted on a reason that no longer charges (it joined TOOLING_HOLDS after the
         // attempts were spent): those attempts were never verdicts, so it reopens.
         ...(exhausted ? { holdNoLongerCharged: isToolingHold(h.reason) } : {}),
+        ...deployFacts,
       }, [n], repoConfig, vlog);
-    if (ok) { delete held[n]; released = true; }
+    if (ok) {
+      delete held[n];
+      released = true;
+      // The SRE would replay its cached failure for the same merge and spec; this re-verify must run again.
+      if (deployFacts.deployRepaired === true || deployFacts.srePassedSince === true) rt.memory.verifyForce.add(`${repoName}#${h.prNumber}`);
+    }
   }
   if (released) await persist();
   const unmatched = waiting.filter((n) => !refs.some((r) => r.issueNumber === n) && !held[n]);
@@ -344,7 +425,7 @@ export async function tryVerify(
   }
   if (unmatched.length > 0) await persist();
 
-  const target = pickVerifyTarget(refs, held, Date.now(), verifyRetry);
+  const target = pickVerifyTarget(refs.filter((r) => !passedBySre.has(r.issueNumber)), held, Date.now(), verifyRetry);
   if (!target) return false;
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -361,8 +442,10 @@ export async function tryVerify(
 
   try {
     await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, vlog);
-    const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath)
+    const forceKey = `${repoName}#${target.prNumber}`;
+    const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath, rt.memory.verifyForce.has(forceKey))
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
+    if (sre.kind === "verdict") rt.memory.verifyForce.delete(forceKey);
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
     // Held in memory until the record has them; the gate runs on EVERY result, so a clean re-verification cannot advance past an unsaved report.
     const subject = handoffSubject(repoConfig.githubRepo, target.prNumber);
@@ -468,3 +551,8 @@ export async function tryVerify(
   }
 }
 
+
+/** The pass path for an issue whose hold the SRE's own later PASS evidence cleared: the card moves on, nothing runs. */
+async function advanceOnSrePass(rt: ForemanRuntime, repoConfig: RepoConfig, n: number, vlog: Logger): Promise<void> {
+  await advance(rt, itemOf(repoConfig, n), "verifyPassed", repoConfig, vlog);
+}

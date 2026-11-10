@@ -7,6 +7,7 @@ import { describeSpawnFailure, phaseTranscriptPath, spawnClaude } from "../sessi
 import { REVISION_NO_COMMIT, extractStreamResult, type RevisionResult } from "../session/protocol.js";
 import { declaredNoCommitV1, sessionResultV1 } from "../session/result-v1.js";
 import { recordContractPath } from "../contract/usage.js";
+import { amendRevisedPrBody, bodySyncFor } from "../pr-body.js";
 import { IMAGE_HANDLING_INSTRUCTIONS, readOverlay, skillInstruction } from "./workflow-prompt.js";
 
 /**
@@ -56,6 +57,9 @@ export async function revisePRFeedback(
   // re-reviewed — Slashbin-console#843 sat in exactly that deadlock.
   const noCommitNote = `\n\nIF NO CODE CHANGE IS NEEDED: do not invent one. Say so on its own line, as the LAST line of your output:\n\n  FOREMAN_REVISION no-commit reason=<one line: why the branch is already correct>\n\nWithout that trailer, a run that pushes nothing is treated as a failed revision — which is the correct default, because a silent no-op and a deliberate one look identical from outside.`;
 
+  // In every prompt, not only the bundled skill's: a repo-local skill (revisionSkillPath) never carries it (foreman#116).
+  const bodyNote = `\n\nPR DESCRIPTION: if this revision drops or reverts anything the PR body claims delivered (a bump, a file, a row marked "Landed"), the body must stop claiming it. Rewrite it to match the branch's final diff (gh pr edit ${prNumber || "<number>"} --body-file <file>), and name what you dropped in the commit subject ("drop <thing>"). End with one line, FOREMAN_RESULT_V1 and a single-line JSON object: {"schema":1,"role":"reviser","outcome":"reverted","changed":["revert"],"reverted_items":["<each dropped claim, e.g. #696>"],"pr_body_stale":false} (pr_body_stale true if you did not rewrite the body; the Foreman then strikes the lines naming reverted_items itself).`;
+
   const skill = config.revisionSkillPath ? skillInstruction(config, config.revisionSkillPath, "revise") : null;
   const overlay = readOverlay(config, config.revisionSkillOverlayPath, "revisionSkillOverlayPath");
   for (const part of [skill, overlay]) {
@@ -68,7 +72,7 @@ export async function revisePRFeedback(
   let prompt: string;
 
   if (config.revisionSkillPath && skill?.ok) {
-    prompt = `${skill.text}\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${qaContext}${labelNote}${noCommitNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
+    prompt = `${skill.text}\n\nRevise PR #${prNumber || "(pending)"} which has review feedback for this repository. The skill defines the full workflow — follow it exactly.${prContext}${qaContext}${labelNote}${noCommitNote}${bodyNote}\n\n${IMAGE_HANDLING_INSTRUCTIONS}`;
   } else {
     prompt = `Revise PR #${prNumber || "(find open PRs with review feedback)"} in this repository.
 
@@ -78,7 +82,7 @@ export async function revisePRFeedback(
 4. Run tests: npm test
 5. Commit fixes with message: fix: address review feedback (#${prNumber || "<number>"})
 6. Push to the PR branch.
-${prContext}${qaContext}${labelNote}${noCommitNote}
+${prContext}${qaContext}${labelNote}${noCommitNote}${bodyNote}
 
 ${IMAGE_HANDLING_INSTRUCTIONS}
 
@@ -139,6 +143,33 @@ Work autonomously. Do not ask questions.`;
     }
     logger.error(`PR revision completed (exit 0) but no commits were pushed to ${headBranch} (SHA unchanged at ${beforeSha.slice(0, 10)}) and no FOREMAN_REVISION no-commit trailer was given — marking as failed`);
     return { success: false, error: "no commits pushed — revision was a no-op" };
+  }
+
+  // A revision that dropped or reverted what the PR description claims must not hand the PR back to
+  // review with that description (foreman#116: the SRE graded the stale claim against the deployed code
+  // and failed dev verification). Not left to the model: the sync runs from the v1 result when there is
+  // one AND from the revision's own commit subjects, so a repo-local skill's legacy output, or a v1 line
+  // without `reverted_items`, is covered too. When the reviser said the body is stale and no body line
+  // can be tied to the revert, the pass fails: never hand back a body known to be stale.
+  if (prNumber && beforeSha && afterSha) {
+    const v1Body = sessionResultV1(result.stdout, "reviser");
+    try {
+      const subjects = await codeHost().commitSubjects(config.githubRepo, beforeSha, afterSha, config.repoPath);
+      const sync = bodySyncFor(v1Body.status === "ok" ? v1Body.result : null, subjects);
+      if (sync.needed) {
+        const done = await amendRevisedPrBody(config, prNumber, sync, v1Body.status === "ok" ? v1Body.result : null, logger);
+        logger.info(done.changed ? `PR #${prNumber} description amended: the revision reverted what it claimed` : `PR #${prNumber} description already records the revision's reverts`);
+        if (sync.certain && done.matched === 0) {
+          const error = `the revision reverted work PR #${prNumber}'s description claims, but no line of it names what was reverted (reverted_items was empty or matched nothing); not handing a stale description back to review`;
+          logger.error(error);
+          return { success: false, error };
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`PR revision pushed, but PR #${prNumber}'s description could not be synced (${msg}); not handing a possibly stale description back to review`);
+      return { success: false, error: `PR description sync failed after a revision: ${msg}` };
+    }
   }
 
   logger.info(`PR revision completed successfully for ${config.name}`);

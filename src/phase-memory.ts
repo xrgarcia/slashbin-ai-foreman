@@ -88,6 +88,8 @@ export class PhaseMemory {
   readonly qaMergeWait = new BackoffTracker();
   /** Per repo: the verify stage waiting after the SRE could not run at all (backoff.agentUnavailable). */
   readonly verifyDefer = new BackoffTracker();
+  /** `repo#pr` whose exhausted deploy-failure hold was released because the environment was repaired: its next SRE run is forced (the SRE would otherwise replay its cached failure). */
+  readonly verifyForce = new Set<string>();
 
   // --- Release stage ---
 
