@@ -34,14 +34,16 @@ company: each GitHub issue it builds gets a Paperclip task whose holder, status 
 follow the issue through its lifecycle, and which gets a note at every step.
 
 GitHub stays the only work source. Paperclip only ever shows what the Foreman is doing; nothing
-set in Paperclip starts, stops or changes a build. The mirror is off by default, and a config
-without a `paperclip` block runs exactly as it would without this feature.
+set in Paperclip starts, stops or changes a build. The mirror is the Paperclip plugin
+(`src/plugins/paperclip.ts`, an observer); it is off by default, and off it is never started:
+the Foreman makes no Paperclip call. It is self-sufficient: each pass's snapshot is enough to put
+every card where GitHub says, with no other writer's help.
 
 ## Configuration
 
 The `paperclip` block sits at the top level of `.ai-agent.json` (never per repo: one Foreman
 is one Paperclip agent). Each environment variable, when set, overrides the file's value for
-that one field. The block is read once at startup — restart the daemon after changing it.
+that one field. A reload applies the block: enabling it starts the mirror, disabling it stops it.
 
 | Field | Type | Env override | Default | Description |
 |---|---|---|---|---|
@@ -51,25 +53,29 @@ that one field. The block is read once at startup — restart the daemon after c
 | `agentName` | string | `AI_AGENT_PAPERCLIP_AGENT_NAME` | `"Foreman"` | The name the Foreman registers under, and finds itself by, in Paperclip. |
 | `agentId` | string | `AI_AGENT_PAPERCLIP_AGENT_ID` | — | The Foreman's Paperclip agent id, once registered. |
 | `apiKey` | string | `AI_AGENT_PAPERCLIP_API_KEY` | — | The bearer credential sent as `authorization: Bearer` on every request, for an instance that requires sign-in. Unset sends no authorization header. Set it from the environment; it is a secret and is redacted from the mirror's logs. |
+| `registryUrl` | string | `AI_AGENT_PAPERCLIP_REGISTRY_URL` | — | The registry's MCP endpoint (slashbin_mcp_services, `repo_identity`). The mirror compares cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own key (exact string comparison), and no registry call is made. Set, each open card also carries its GitHub issue's customer labels: every issue label whose name matches a registry customer's `github_label` (list_customers), in name order, or `no customer label` alone when none does. Unset: no customer label is written, and the mirror works the same otherwise. |
+| `registryApiKey` | string | `AI_AGENT_PAPERCLIP_REGISTRY_API_KEY` | — | The bearer credential the registry's router requires. Set it from the environment; it is a secret and is redacted from the mirror's logs. Unset sends no authorization header. |
+| `commentAuthorHeader` | string | `AI_AGENT_PAPERCLIP_COMMENT_AUTHOR_HEADER` | — | The request header that credits a write to the Foreman's agent (or another author) instead of the key's user, for an instance that supports one. Unset = no credit header is sent: every write reads as the key's user. |
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
 | `statusMap` | object | none | — | Per-bucket override of the Paperclip status name. Unset = the bucket names. |
 | `taskTitleFormat` | string | `AI_AGENT_PAPERCLIP_TASK_TITLE_FORMAT` | `"{repo}#{N}"` | How a task the Foreman creates is titled. {repo} is the full owner/name, {owner} and {name} its two halves, {N} the issue number; {N} is required so two issues never share a title. Only new tasks: an existing title is never rewritten, and matching goes by identityKeyFormat, never by title. |
 | `projectId` | string | `AI_AGENT_PAPERCLIP_PROJECT_ID` | — | The Paperclip project every task the Foreman creates is filed under. Wins over `projects`. Unset (and `projects` off) = tasks are created with no project. The Foreman never moves an existing task between projects. |
 | `projects` | boolean | none | `false` | File each new task under the Unplaced project: the one project whose description line 1 is "roadmap-position: unplaced", for a roadmap sync that places it from there. With no such project, or two, no task is created until one exists. Off (the default) = no project, or `projectId`. |
 | `repos` | array | none | — | Only issues in these repos (owner/name, as in githubRepo) get a card. Unset = every configured repo. A repo left out is never touched in Paperclip; its existing cards stay as they are. |
-| `ownsCards` | boolean | none | `false` | The Foreman is the only writer of every card for an issue in a mirrored repo: it creates one for each open issue (approved or not), keeps its title ("{name}#{N} {title}"), description and status in step with GitHub (not approved: backlog, unassigned; closed: done, or cancelled when not planned), writes a held issue's reason from GitHub, and retires a second card for the same issue. Published with the config, so another sync reads it and leaves those cards' content alone; where a card is filed (project, parent, goal, priority) stays that sync's. Off = cards are created on claim and moved by the Foreman's own steps only. |
+| `ownsCards` | boolean | none | `false` | The Foreman is the only writer of every card for an issue in a mirrored repo: it creates one for each open issue (approved or not), keeps its title ("{name}#{N} {title}"), description and status in step with GitHub (not approved: backlog, unassigned, or held by humanUserId when approved-for-human; closed: done, or cancelled when not planned), writes a held issue's reason from GitHub, and retires a second card for the same issue. Published with the config, so another sync reads it and leaves those cards' content alone; where a card is filed (project, parent, goal, priority) stays that sync's. Off = cards are created on claim and moved by the Foreman's own steps only. |
 | `agentStatus` | boolean | none | `true` | Set the Foreman agent's own status in Paperclip: running while a session runs, idle otherwise. |
 | `roles` | object | none | `{}` | Other agents that hold cards, by role key (e.g. reviewer): { name, title?, role?, reportsTo?, id? }. reportsTo names another role key or "foreman". `npm run paperclip:register` finds or creates each by name and writes its id here. Empty = the Foreman holds every card. |
-| `humanUserId` | string | none | — | The Paperclip user id of the person who holds `approved-for-human` cards (assigneeFor in board.ts), written by whatever syncs those issues; the Foreman's own moves never assign a user. Set it in the installed `.ai-agent.json`: a person's id never goes in the repo. Unset = those cards are written unassigned. |
+| `humanUserId` | string | none | — | The Paperclip user id of the person who holds `approved-for-human` cards (assigneeFor in board.ts), applied by the card sync (ownsCards) to an open card in no lifecycle stage. Set it in the installed `.ai-agent.json`: a person's id never goes in the repo. Unset = those cards are written unassigned. |
 | `agentReportsTo` | string | none | — | The role key the Foreman's own agent reports to, applied by `npm run paperclip:register`. Unset = left as it is. |
-| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"releaseAuthorized":{"owner":"foreman","status":"in_review","label":"releaseAuthorized"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"releasing":{"owner":"foreman","status":"in_progress","label":"releasing"},"prodVerifyHeld":{"owner":"foreman","status":"in_review","label":"prodVerifyHeld"},"needsRuling":{"owner":"foreman","status":"blocked","label":"needsRuling"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
-| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"pendingVerification":{"name":"Awaiting EM verification","color":"#7c3aed"},"releaseAuthorized":{"name":"Release authorized","color":"#4f46e5"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"releasing":{"name":"Releasing","color":"#16a34a"},"prodVerifyHeld":{"name":"Prod verification held","color":"#b45309"},"needsRuling":{"name":"Needs EM ruling","color":"#be185d"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched. |
+| `board` | object | none | `{"approved":{"owner":"foreman","status":"todo","label":null},"implementing":{"owner":"foreman","status":"in_progress","label":null},"inReview":{"owner":"foreman","status":"in_review","label":"inReview"},"reviewing":{"owner":"foreman","status":"in_progress","label":"inReview"},"changesRequested":{"owner":"foreman","status":"todo","label":"changesRequested"},"revising":{"owner":"foreman","status":"in_progress","label":"changesRequested"},"merged":{"owner":"foreman","status":"in_review","label":"merged"},"verifying":{"owner":"foreman","status":"in_progress","label":"merged"},"qaReviewing":{"owner":"foreman","status":"in_progress","label":"qaReviewing"},"pendingVerification":{"owner":"foreman","status":"in_review","label":"pendingVerification"},"releaseAuthorized":{"owner":"foreman","status":"in_review","label":"releaseAuthorized"},"awaitingRelease":{"owner":"foreman","status":"in_review","label":"awaitingRelease"},"releasing":{"owner":"foreman","status":"in_progress","label":"releasing"},"awaitingSignoff":{"owner":"foreman","status":"blocked","label":"awaitingSignoff"},"prodVerifyHeld":{"owner":"foreman","status":"in_review","label":"prodVerifyHeld"},"needsRuling":{"owner":"foreman","status":"blocked","label":"needsRuling"},"blocked":{"owner":"foreman","status":"blocked","label":"blocked"}}` | Per lifecycle stage: the role that holds the card ("foreman" or a key of roles), its status bucket, and its stage label (a key of stageLabels, or null for none). |
+| `stageLabels` | object | none | `{"inReview":{"name":"In code review","color":"#2563eb"},"changesRequested":{"name":"Changes requested","color":"#d97706"},"merged":{"name":"Dev verification","color":"#0891b2"},"qaReviewing":{"name":"QA review","color":"#db2777"},"pendingVerification":{"name":"Awaiting EM verification","color":"#7c3aed"},"releaseAuthorized":{"name":"Release authorized","color":"#4f46e5"},"awaitingRelease":{"name":"Awaiting release","color":"#059669"},"releasing":{"name":"Releasing","color":"#16a34a"},"awaitingSignoff":{"name":"Awaiting EM sign-off","color":"#ea580c"},"prodVerifyHeld":{"name":"Prod verification held","color":"#b45309"},"needsRuling":{"name":"Needs EM ruling","color":"#be185d"},"blocked":{"name":"Blocked","color":"#dc2626"}}` | The stage labels, by key: { name, color }. Created in the company on first use; a card carries at most one, and a stage change swaps it. Other labels on a card are never touched, except the customer label (registryUrl). |
 | `liveLeaseMinutes` | integer | none | `15` | Minutes a live-session lease (the Foreman agent's metadata.foremanLive) stays valid without renewal. Past it, a card left in progress belongs to a session that died with the Foreman; the Foreman restores such cards when it next starts, and any external sync can read the lease the same way. |
 | `publishConfig` | boolean | none | `true` | Publish the config file the Foreman loaded, verbatim, on its agent's metadata (foremanConfig: { sha256, publishedAt, text }) at start and on every reload that changes it, so a tool that places the same cards reads the mapping the Foreman runs instead of keeping its own copy. A file holding a secret-shaped key or a known secret value is never published. |
 | `comments` | object | none | `{"enabled":true,"events":{"implementStart":true,"implementEnd":true,"reviewStart":true,"reviewEnd":true,"reviseStart":true,"reviseEnd":true,"progress":true,"release":true,"blocked":true},"maxLength":3000,"includeDiffStat":true}` | What a card's thread says: { enabled, events, maxLength, includeDiffStat }. enabled false = the one-line note per step. events turns each comment off by kind (implementStart, implementEnd, reviewStart, reviewEnd, reviseStart, reviseEnd, progress, release, blocked). maxLength caps every comment, includeDiffStat adds the PR's files and +/- lines to the implement summary. Every comment is redacted (known secrets and token-shaped strings) and never repeats the task's latest comment. |
 
 `enabled` is a boolean; given as a string (as the env var always is) it takes `true` / `false`,
 `1` / `0`, `yes` / `no` or `on` / `off`, and any other value stops the Foreman at startup.
+A block that is off (or absent) is never validated, so a stale or partial one cannot stop startup.
 `companyId` is required once `enabled` is true; the Foreman refuses to start without it.
 The mirror runs only when `enabled` is true **and** both `companyId` and `agentId` are set;
 with `agentId` missing the daemon logs that it is skipping the mirror and runs without it.
@@ -92,8 +98,8 @@ A minimal block, before registration:
 
 A task is matched to its GitHub issue by the **first line of the task's description**, built
 from `identityKeyFormat` (default `source: {repo}#{N}`): `{repo}` is the issue's
-full `owner/name` and `{N}` its number. Before creating a task the Foreman scans the company's
-tasks for one whose description starts with that line, and adopts it if found — so a task
+full `owner/name` and `{N}` its number. Before creating a task the Foreman reads that repo's tasks
+in play for one whose description starts with that line, and adopts it if found — so a task
 another tool created for the same issue is reused, not duplicated, **provided both use the same
 format**. A task the Foreman creates is titled from `taskTitleFormat` (default
 `{repo}#{N}`; `{owner}` and `{name}` are the two halves of `{repo}`), its
@@ -103,7 +109,24 @@ ever written at creation, and never used to find a task, so changing the format 
 
 When two tasks carry the same identity line, the card is the oldest one that is not cancelled
 (else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
-the receiver's sync the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+another writer the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+
+### What the plugin reads
+
+The plugin reads **one repo at a time, and only cards in play**: a list request filtered to the
+statuses backlog, todo, in_progress, in_review and blocked, and to the repo's name. It **never
+reads a done or cancelled card** and never reads the whole company board; the client refuses a
+list request without a status filter. Each repo's rows replace that repo's data in full. A failed
+read (a Paperclip timeout, a registry outage) places nothing for that repo on that pass, and every
+other repo carries on; the next snapshot retries. The "Paperclip looks down" warning is logged
+once per outage, so the per-repo "cards not read" line is the signal.
+
+The plugin is the only writer of a Foreman card's status, placement and terminal state. A close
+or reopen comes only from the Foreman's own GitHub reads of the repo: a closed issue whose card is
+still in play moves to done (completed) or cancelled (not planned) on the next snapshot, and the
+card is then forgotten, so a reopened issue gets a fresh card. Nothing else is needed or assumed.
+Before this, the first company-wide read after a restart (about 3,450 rows) timed out, restarted
+at row 0, and stopped every repo; a card (SLA-3778) was never moved again (Foreman #100, 2026-11-05).
 
 ## Who writes which card
 
@@ -122,7 +145,7 @@ the snapshot of the repo:
   `GitHub: open · not approved` or `GitHub: closed completed|not_planned` (at a stage a role
   holds, then `Next: <role> — <action>`; see **Handoffs**), a blank line, the issue's URL (`stage awaitingRelease` when an open PR into the production branch names it);
 - not approved: `backlog`, nobody's, no stage label; closed: `done`, or `cancelled` when
-  not planned, no stage label, the last holder kept; approved: the lifecycle stage, as before;
+  not planned, no stage label, nobody holding it; approved: the lifecycle stage, as before;
 - held by the blocked label: the holder's reason as the unblock descriptor
   (`blocked: on GitHub — <their comment's first line> (<login>, <date>) <url>`), and their
   comment copied once, never on another agent's card;
@@ -130,8 +153,9 @@ the snapshot of the repo:
   line rewritten to `duplicate of <card> (<key>)` so nothing adopts it again.
 
 Another writer may set where one of these cards is filed (project, project workspace, goal,
-parent, priority) and nothing else. With `ownsCards` off the Foreman creates a card only on a
-claim and moves it by its own steps, and leaves a card's content to whoever wrote it.
+parent, priority) and nothing else. With `ownsCards` off the Foreman still creates a card for an
+issue at a lifecycle stage that has none (once GitHub reads it open, within the same 20 writes),
+moves it by its own steps and the snapshot, and leaves a card's content to whoever wrote it.
 
 ### A closed issue's card
 
@@ -226,7 +250,7 @@ knows of are redacted from every note before it is sent.
 | `releaseClosed` | That release pull request is closed without merging; the task stays in review until the next one. | unchanged | `release PR #{pr} closed without merging; waiting for the next release` |
 | `backoffPause` | A GitHub or Claude limit pauses the build in progress. | unchanged | `paused: {upstream} back-off: {reason}` |
 | `backoffResume` | The build in progress resumes after that limit clears. | unchanged | `resumed after back-off` |
-| `waiting` | The Foreman holds the issue back this cycle (an occupied branch, a branch divergence). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner. | `waiting` | `waiting: {reason}` |
+| `waiting` | The Foreman holds the issue back this cycle (an open PR holding the repo, a dev verification in progress). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner. | `waiting` | `waiting: {reason}` |
 | `resumed` | An issue the Foreman had moved to blocked is no longer held back. | unchanged | `resumed: no longer waiting` |
 | `implementFinished` | The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason). | unchanged | `implement session finished: {detail}` |
 | `implementFailed` | The build session for the issue fails. | unchanged | `implement session failed: {detail}` |
@@ -240,7 +264,7 @@ knows of are redacted from every note before it is sent.
 | `reviewFailed` | The review fails. | unchanged | `review failed: {detail}` |
 | `verifyStarted` | A dev-verification session starts on the merged pull request; the note names the verifier. | `verifying` | `{reviewer} verifying PR #{pr} in dev` |
 | `verifyFinished` | Dev verification passes; the issue moves on to release. | unchanged | `dev verification finished: {detail}` |
-| `verifyFailed` | Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most. | unchanged | `dev verification did not pass: {detail}` |
+| `verifyFailed` | Dev verification holds or errors; the issue is blocked with the reason and retried after 10 minutes, then 20, then left blocked for a person (`backoff.verifyRetry`); tooling and `wait-until` holds charge no attempt. | unchanged | `dev verification did not pass: {detail}` |
 
 A task is created only when the Foreman picks an issue up (`claim`). A later step on an issue
 that has no task writes nothing.
@@ -292,6 +316,19 @@ wake checking the card out. A `needsRuling` owner whose agent wakes on assignmen
 `blocked` cards: every escalation arrives `blocked`, and one that refuses blocked work leaves
 the ruling unmade.
 
+The Foreman does not re-move a card while a run of its assignee is in flight. Assigning a card to a
+seat that wakes opens a run whose checkout flips the card to `in_progress`; a second write that sets
+any other status and reassigns makes Paperclip cancel that run, and the cancel leaves an execution
+hold that freezes the card (SLA-2959, 2026-10-29). So a move reads the card first: with
+`executionRunId` or `checkoutRunId` set on a card held by another agent, the move is deferred and
+retried at the end of the next snapshot. A move whose status is `in_progress` is never deferred.
+The retry decides the move again and reads the card live first: a seat's or a person's hold put on
+it while the move waited is newer and wins, over a Foreman block or ruling too, and a stage move is
+also dropped when a hold outranks it or GitHub has moved the issue to another stage (that snapshot
+placed the card). A needs-ruling block re-delivered after a lost write is read live the same way.
+Replayed blind, a move deferred during the EM seat's run undid the escalation the run made (SLA-4308
+left Blocked for in_review, 2026-11-06).
+
 | Stage | Meaning | Default owner | Default status | Default stage label |
 |---|---|---|---|---|
 | `approved` | Authorized and waiting to be built. | `foreman` | `todo` | none |
@@ -302,10 +339,12 @@ the ruling unmade.
 | `revising` | A revision session is running on it. | `foreman` | `in_progress` | `changesRequested` |
 | `merged` | Merged to the base branch; waiting for dev verification. | `foreman` | `in_review` | `merged` |
 | `verifying` | A dev-verification session is running on it. | `foreman` | `in_progress` | `merged` |
+| `qaReviewing` | The QA gate (qaGate on) is running its checks on dev, after the SRE passed it. | `foreman` | `in_progress` | `qaReviewing` |
 | `pendingVerification` | Dev-verified (`pr approved`); waiting for the EM's verification and `ready for prod release`. | `foreman` | `in_review` | `pendingVerification` |
 | `releaseAuthorized` | The EM authorized the release (`ready for prod release`); promote puts it in the release pull request next. | `foreman` | `in_review` | `releaseAuthorized` |
 | `awaitingRelease` | In an open release pull request a person merges (the release stage is off); waiting for the release to merge. | `foreman` | `in_review` | `awaitingRelease` |
 | `releasing` | In the release pull request the Foreman owns (`release pending`): Tech Lead approval, SRE deploy and prod verification. | `foreman` | `in_progress` | `releasing` |
+| `awaitingSignoff` | In the release pull request the Foreman owns, but its `foreman/em-sign-off` status is failing: an issue in it lacks `ready for prod release`. The EM signs it off or takes it out of the release. | `foreman` | `blocked` | `awaitingSignoff` |
 | `prodVerifyHeld` | Merged to production, but prod verification held (`prod verification held`); the SRE re-verifies it on a back-off. | `foreman` | `in_review` | `prodVerifyHeld` |
 | `needsRuling` | Paused for the EM's ruling: a revision (the ruling comment on the PR resumes it), or a skip out of attempts (a person changing the issue resumes it; an agent's edit or label buys one session). | `foreman` | `blocked` | `needsRuling` |
 | `blocked` | Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries. | `foreman` | `blocked` | `blocked` |
@@ -319,10 +358,12 @@ label is created in the company on first use (by name, so one created by hand is
 | `inReview` | `In code review` | `#2563eb` |
 | `changesRequested` | `Changes requested` | `#d97706` |
 | `merged` | `Dev verification` | `#0891b2` |
+| `qaReviewing` | `QA review` | `#db2777` |
 | `pendingVerification` | `Awaiting EM verification` | `#7c3aed` |
 | `releaseAuthorized` | `Release authorized` | `#4f46e5` |
 | `awaitingRelease` | `Awaiting release` | `#059669` |
 | `releasing` | `Releasing` | `#16a34a` |
+| `awaitingSignoff` | `Awaiting EM sign-off` | `#ea580c` |
 | `prodVerifyHeld` | `Prod verification held` | `#b45309` |
 | `needsRuling` | `Needs EM ruling` | `#be185d` |
 | `blocked` | `Blocked` | `#dc2626` |
@@ -410,8 +451,8 @@ whenever a reload changes the file. The sha256 is of the file less its trailing 
 that places the same cards reads its board mapping from there, so it never runs a copy the
 Foreman has moved on from. A file with a secret-shaped key (`apiKey`, `token`, `secret`,
 `password`) or a known secret value is not published, and the Foreman logs why. A reload that
-changes `enabled`, `url`, `companyId`, `agentId` or `identityKeyFormat` needs a
-restart: until then the mirror and the published config keep the old file.
+changes `url`, `companyId`, `agentId` or `identityKeyFormat` restarts the mirror on
+the new file.
 
 ## Assignment
 
@@ -428,8 +469,9 @@ Release the block on GitHub, where the Foreman looks, and the card follows on it
 ### Cards held by a person
 
 A card labelled `approved-for-human` waits on a person, not on a stage's owner. The plugin
-never reads GitHub labels, so a sync supplies them: `assigneeFor(cfg, { labels, repo })` in
-`board.ts`, a pure function. The Foreman's own moves never call it, and are unchanged.
+never reads GitHub; the work source's cards carry each open issue's labels, and the card sync
+(`syncCard` in `snapshot-sync.ts`, with `ownsCards` on) asks `assigneeFor(cfg, { labels, repo })` in
+`board.ts` who holds a card that is in no lifecycle stage. A closed card stays nobody's.
 
 | The item | Assignee |
 |---|---|
@@ -484,8 +526,8 @@ The mirror is best-effort and never blocks the Foreman. Every Paperclip call is 
 failure logs one warning when an outage starts (`Paperclip mirror: … failed, notes are skipped
 until Paperclip answers again`) and one info line when the next call succeeds. Notes and status
 changes due during the outage are skipped, not queued, and builds, reviews and promotions carry
-on unaffected. A skipped status is set again at the issue's next status-setting step; an issue
-picked up while Paperclip was down gets no task, because only the pick-up creates one.
+on unaffected. The first snapshot after the outage moves each card to its issue's stage, and
+creates the card of an issue picked up while Paperclip was down.
 
 ## Set up
 
@@ -520,5 +562,5 @@ picks it up, its Paperclip task appears, in progress and assigned to the Foreman
 ## Remove
 
 Set `paperclip.enabled` to `false` (or `AI_AGENT_PAPERCLIP_ENABLED=false`), or delete the
-block, and restart the daemon. The Foreman then makes no Paperclip call at all. Tasks and notes
+block (a reload is enough). The Foreman then makes no Paperclip call, snapshot or session-report read. Tasks and notes
 already written stay in Paperclip; delete the Foreman agent there if you no longer want it.

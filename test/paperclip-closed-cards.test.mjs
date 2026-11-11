@@ -15,6 +15,7 @@
 //   not_planned+read
 //   unreadable     the live read fails: nothing is guessed, the card stays
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
@@ -22,10 +23,12 @@ import { defaultLifecycleLabels } from "../dist/config.js";
 import { closedWins, issueStage } from "../dist/github-work-source.js";
 import { issueStates } from "../dist/github/cards.js";
 import { addObserver, drainObservers, publishSnapshot, registerWorkSource } from "../dist/work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const CID = "company-1";
 const AGENT = "agent-1";
@@ -41,7 +44,10 @@ function fakePaperclip(rows) {
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
     if (method === "GET" && u.pathname === `/api/companies/${CID}/issues`) {
       const off = Number(u.searchParams.get("offset") ?? 0);
-      return ok(rows.slice(off, off + Number(u.searchParams.get("limit"))));
+      // The server's status filter: a terminal card is never returned to a caller that does not ask for it.
+      const want = u.searchParams.get("status")?.split(",");
+      assert.ok(want && !want.includes("done") && !want.includes("cancelled"), "the plugin lists only the statuses in play");
+      return ok(rows.filter((r) => want.includes(r.status)).slice(off, off + Number(u.searchParams.get("limit"))));
     }
     if (method === "GET" && u.pathname === `/api/companies/${CID}/projects`) return ok([]);
     if (method === "POST" && u.pathname === `/api/companies/${CID}/projects`) return ok({ id: "proj-1", ...body }, 201);
@@ -105,7 +111,8 @@ const GITHUB = ["open", "completed", "not_planned", "completed+read", "not_plann
 const CARDS = ["done", "in_review", "cancelled"];
 
 /**
- * The table: the column the card ends in.
+ * The table: the column the card ends in. (A card already done or cancelled is
+ * never read, so it ends where it started.)
  *   - open: the labels' column (none: unchanged with ownsCards off, which has
  *     no card for an unapproved issue; backlog with it on); a cancelled card
  *     of an open issue is a person's call and stays.
@@ -113,16 +120,22 @@ const CARDS = ["done", "in_review", "cancelled"];
  *   - closed, only the stale open view carries it: never out of done or
  *     cancelled; a card the labels would move goes to done (cancelled when
  *     not planned) instead; one they would leave stays until the closed read.
+ *   - closed, in no view at all: the closed sweep reads it live and closes it.
  *   - unreadable: unchanged.
  */
 function expected(owns, gh, label, card) {
   const { bucket } = LABELS[label];
+  // Terminal cards are never read (Ray, 2026-11-05): a card already done or cancelled is not found,
+  // so nothing touches it, whatever GitHub says; an open issue gets a fresh card beside it instead.
+  if (card === "done" || card === "cancelled") return card;
   if (gh === "completed+read") return "done";
   if (gh === "not_planned+read") return "cancelled";
   if (gh === "unreadable" || card === "cancelled") return card;
   if (gh === "open") return bucket ?? (owns ? "backlog" : card);
   // Closed, carried by the stale view alone: does anything ask GitHub about it?
-  const asks = bucket === null ? owns && card !== "backlog" : bucket !== card;
+  // An issue in no view (labels none, ownsCards off) is a card with no open issue
+  // behind it: the closed sweep asks about it unless it is done or cancelled already.
+  const asks = bucket === null ? (owns ? card !== "backlog" : card !== "done") : bucket !== card;
   return asks ? (gh === "completed" ? "done" : "cancelled") : card;
 }
 
@@ -181,18 +194,18 @@ test("cmneb_data_receiver#218: a done card stays done when the open view carries
 
 test("no state reader, or one that throws: nothing moves", async () => {
   for (const states of [undefined, async () => { throw new Error("rate limited"); }]) {
-    const fake = fakePaperclip([{ id: "r7", title: "t", status: "done", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
+    const fake = fakePaperclip([{ id: "r7", title: "t", status: "in_review", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
     const mirror = mirrorOn(fake);
     const log = logger();
     const items = [{ item: { issueNumber: 7, repo: REPO }, stage: "releasing", detail: "release pending" }];
     await mirror.onEvent({ kind: "snapshot", repo: REPO, items, ...(states ? { states } : {}) }, log);
-    assert.equal(fake.rows[0].status, "done");
+    assert.equal(fake.rows[0].status, "in_review");
     assert.ok(log.lines.some((m) => /left #7 where they are: GitHub state not read/.test(m)));
   }
 });
 
 test("one live read per snapshot, for the cards a label would move only", async () => {
-  const rows = [7, 8, 9].map((n) => ({ id: `r${n}`, title: "t", status: n === 9 ? "in_review" : "done", assigneeAgentId: AGENT, description: `source: ${REPO}#${n}` }));
+  const rows = [7, 8, 9].map((n) => ({ id: `r${n}`, title: "t", status: n === 9 ? "in_review" : "todo", assigneeAgentId: AGENT, description: `source: ${REPO}#${n}` }));
   const fake = fakePaperclip(rows);
   const mirror = mirrorOn(fake);
   const asked = [];
@@ -202,7 +215,7 @@ test("one live read per snapshot, for the cards a label would move only", async 
   assert.deepEqual(fake.rows.map((r) => r.status), ["in_review", "done", "in_review"]);
 });
 
-test("an open release PR naming a closed issue does not pull its card out of done or cancelled", async () => {
+test("an open release PR naming a closed issue does not touch its done or cancelled card (never read)", async () => {
   for (const status of ["done", "cancelled"]) {
     const fake = fakePaperclip([{ id: "r7", title: "t", status, assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
     const mirror = mirrorOn(fake);
@@ -210,6 +223,7 @@ test("an open release PR naming a closed issue does not pull its card out of don
       await mirror.onEvent({ kind: "release", release: { repo: REPO, state: "open", pr: 222, productionBranch: "main", owned, issues: [{ issueNumber: 7, repo: REPO }] } }, logger());
     }
     assert.equal(fake.rows[0].status, status);
+    assert.equal(fake.rows.length, 1, "a release event creates no card");
   }
   const fake = fakePaperclip([{ id: "r7", title: "t", status: "in_review", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
   await mirrorOn(fake).onEvent({ kind: "release", release: { repo: REPO, state: "open", pr: 222, productionBranch: "main", owned: true, issues: [{ issueNumber: 7, repo: REPO }] } }, logger());
@@ -222,7 +236,7 @@ test("closedWins: an issue in both the open list and the closed read is closed",
   assert.deepEqual(out.map((x) => [x.item.issueNumber, x.state]), [[8, "open"], [7, "completed"], [9, "not_planned"]]);
 });
 
-test("issueStates: open, completed, not planned; a missing issue or a failed request is left out", () => {
+test("issueStates: open, completed, not planned; a missing issue or a failed request is left out", async () => {
   const queries = [];
   const numbers = Array.from({ length: 27 }, (_, i) => i + 1);
   const query = (q) => {
@@ -231,15 +245,46 @@ test("issueStates: open, completed, not planned; a missing issue or a failed req
     return { repository: { s0: { state: "OPEN" }, s1: { state: "CLOSED", stateReason: "COMPLETED" }, s2: { state: "CLOSED", stateReason: "NOT_PLANNED" }, s3: null } };
   };
   const log = logger();
-  const got = issueStates(REPO, "/tmp", numbers, log, query);
-  assert.equal(queries.length, 2, "25 to a request");
+  const got = await issueStates(REPO, "/tmp", numbers, log, query);
+  assert.equal(queries.length, 4, "25 to a request; the failed batch of 2 is re-read one number per request");
   assert.match(queries[0], /s0: issue\(number: 1\) \{ state stateReason \}/);
-  assert.deepEqual([...got], [[1, "open"], [2, "completed"], [3, "not_planned"]]);
+  assert.deepEqual([...got], [[1, "open"], [2, "completed"], [3, "not_planned"], [26, "open"], [27, "open"]]);
   assert.ok(log.lines.some((m) => /issue states not read: HTTP 502/.test(m)));
 });
 
+test("issueStates: 0, a negative number and a non-integer never appear in any query", async () => {
+  const queries = [];
+  const query = (q) => { queries.push(q); return { repository: { s0: { state: "OPEN" }, s1: { state: "OPEN" } } }; };
+  const got = await issueStates(REPO, "/tmp", [0, -3, 1.5, NaN, 5, 6], logger(), query);
+  assert.equal(queries.length, 1);
+  assert.ok(!/number: (0|-3|1\.5|NaN)\b/.test(queries[0]), queries[0]);
+  assert.deepEqual([...got], [[5, "open"], [6, "open"]]);
+});
+
+test("issueStates: a batch with one unresolvable number still returns the others", async () => {
+  const queries = [];
+  const query = (q) => {
+    queries.push(q);
+    if (/number: 99\b/.test(q)) throw new Error("Could not resolve to an Issue with the number of 99.");
+    return { repository: { s0: { state: "OPEN" } } };
+  };
+  const log = logger();
+  const got = await issueStates(REPO, "/tmp", [4, 99, 7], log, query);
+  assert.deepEqual([...got], [[4, "open"], [7, "open"]]);
+  assert.equal(queries.length, 4, "one batch, then one read per number");
+  assert.ok(log.lines.some((m) => /issue state #99 not read: Could not resolve/.test(m)));
+  assert.ok(!log.lines.some((m) => /issue state #(4|7) not read/.test(m)));
+});
+
+test("issueStates: a healthy batch of 25 is one request", async () => {
+  let calls = 0;
+  const query = () => { calls++; return { repository: {} }; };
+  await issueStates(REPO, "/tmp", Array.from({ length: 25 }, (_, i) => i + 1), logger(), query);
+  assert.equal(calls, 1);
+});
+
 test("publishSnapshot: carries the state reader, and the closed items when the cards are not read", async () => {
-  setStatePath(mkdtempSync(join(tmpdir(), "closed-cards-")));
+  setStatePath(mkTmp("closed-cards-"));
   const asked = [];
   registerWorkSource({
     snapshot: async () => [],
@@ -247,9 +292,9 @@ test("publishSnapshot: carries the state reader, and the closed items when the c
     states: async (_rc, ns) => { asked.push([...ns]); return new Map(ns.map((n) => [n, "open"])); },
   });
   const seen = [];
-  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsCards: () => false });
+  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsSnapshot: () => true });
   try {
-    await publishSnapshot({ name: "r", githubRepo: REPO }, logger());
+    await publishSnapshot(rt, { name: "r", githubRepo: REPO }, logger());
     await drainObservers();
     const e = seen.at(-1);
     assert.deepEqual(e.closed, [{ item: { issueNumber: 7, repo: REPO }, state: "completed" }]);

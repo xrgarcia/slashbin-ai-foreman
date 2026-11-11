@@ -68,7 +68,7 @@ function arrange(cfg, state) {
     return { status: r.status, out: r.stdout + r.stderr, calls };
   };
 }
-const ready = () => ({ push: true, branches: ["features", "develop", "main"], labels: [...LABELS, "bug"] });
+const ready = () => ({ push: true, branches: ["develop", "main"], labels: [...LABELS, "bug"] });
 
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -98,12 +98,12 @@ test("only reads: every gh call is a GET, --version or auth status", () => {
 test("each missing piece is a FAIL that names its fix; the run exits 1", () => {
   const run = arrange(
     { repos: [{ name: "a", githubRepo: "acme/a", skillPath: ".claude/skills/none/SKILL.md" }, { name: "b", githubRepo: "acme/b", repoPath: join(tmp, "nowhere") }] },
-    { "acme/a": { push: false, branches: ["develop", "main"], labels: ["approved"] } },
+    { "acme/a": { push: false, branches: ["main"], labels: ["approved"] } },
   );
   const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN });
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /^FAIL  a: github — .*cannot push/m);
-  assert.match(r.out, /^FAIL  a: branches — missing on GitHub: feature "features"/m);
+  assert.match(r.out, /^FAIL  a: branches — missing on GitHub: base "develop"/m);
   assert.match(r.out, /^FAIL  a: skillPath — .*Use "builtin:"/m);
   assert.match(r.out, /^WARN  a: revisionSkillPath — unset/m);
   assert.match(r.out, /^FAIL  a: labels — missing "pr under review".*npm run labels:install/m);
@@ -116,7 +116,7 @@ test("renamed labels are the ones checked", () => {
   const labels = ["go", "pr under review", "pr pending actions", "pr merged", "pr approved", "ready for prod release",
     "release pending", "prod verification held", "ready to close", "on hold"];
   const cfg = { triggerLabel: "go", github: { blockedLabel: "on hold" }, repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] };
-  assert.equal(arrange(cfg, { "acme/a": { ...ready(), labels } })().status, 0);
+  assert.equal(arrange(cfg, { "acme/a": { ...ready(), labels } })({ FOREMAN_GITHUB_TOKEN: TOKEN }).status, 0);
   assert.match(arrange(cfg, { "acme/a": ready() })().out, /^FAIL  a: labels — missing "go", "on hold"/m);
 });
 
@@ -127,7 +127,7 @@ test("tokens: review without the reviewer's token fails; an SRE path needs its t
   assert.match(r.out, /^FAIL  TECHLEAD_GITHUB_KEY — unset, and review is enabled/m);
   assert.match(r.out, /^FAIL  SRE_GITHUB_KEY — unset, and srePath is set/m);
   const w = arrange({ repos: [{ name: "a", githubRepo: "acme/a" }] }, { "acme/a": ready() })();
-  assert.match(w.out, /^WARN  FOREMAN_GITHUB_TOKEN — unset/m);
+  assert.match(w.out, /^FAIL  FOREMAN_GITHUB_TOKEN — unset — .*no fallback to gh's login/m);
   assert.match(w.out, /^WARN  TECHLEAD_GITHUB_KEY — unset — branch-sync PRs/m);
   // No Tech Lead or SRE: the default stages carry release, so it is skipped, and said so.
   assert.match(w.out, /^WARN  release stage — release stage skipped: techLeadPath and srePath not set/m);
@@ -185,4 +185,26 @@ test("claude trust: trusted passes, untrusted with trustManagedRepos off warns, 
   writeFileSync(claudeCfg, "{ not json");
   assert.match(run().out, /^WARN  a: claude trust — .*does not parse/m);
   assert.equal(readFileSync(claudeCfg, "utf8"), "{ not json", "the doctor wrote Claude Code's config");
+});
+
+// EM#1150 f5: the daemon refuses to start (exit 78) with no work source or no code
+// host enabled, so the doctor reports not-ready for each, naming the fix.
+for (const [role, needs] of [["workSource", /nothing to select work from/], ["codeHost", /nothing to open, review or merge a PR on/]]) {
+  test(`no ${role} enabled: not ready, a FAIL naming the key and the default`, () => {
+    const run = arrange({ techLeadPath: tmp, srePath: tmp, [role]: "nope", repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] }, { "acme/a": ready() });
+    const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN, TECHLEAD_GITHUB_KEY: TOKEN, SRE_GITHUB_KEY: TOKEN });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, new RegExp(`^FAIL  ${role} — no installed plugin is "nope"`, "m"), r.out);
+    assert.match(r.out, needs);
+    assert.match(r.out, new RegExp(`Set "${role}" to "github"`));
+    const other = role === "workSource" ? "codeHost" : "workSource";
+    assert.match(r.out, new RegExp(`^PASS  ${other} — "github"`, "m"), "the other role is still served by GitHub");
+  });
+}
+
+test("the default config enables both: PASS workSource and PASS codeHost", () => {
+  const run = arrange({ techLeadPath: tmp, srePath: tmp, repos: [{ name: "a", githubRepo: "acme/a", skillPath: "builtin:", revisionSkillPath: "builtin:" }] }, { "acme/a": ready() });
+  const r = run({ FOREMAN_GITHUB_TOKEN: TOKEN, TECHLEAD_GITHUB_KEY: TOKEN, SRE_GITHUB_KEY: TOKEN });
+  assert.match(r.out, /^PASS  workSource — "github"$/m, r.out);
+  assert.match(r.out, /^PASS  codeHost — "github"$/m, r.out);
 });

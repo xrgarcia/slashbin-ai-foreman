@@ -17,6 +17,13 @@
 # minutes and the unit crash-looped 44 times).
 set -u
 UNIT=slashbin-foreman.service
+# Refuse before the drain if the build cannot load its own dependencies. 2026-10-31 a
+# worktree setup left node_modules a symlink to itself; dist/config.js could not find
+# zod, and the restart already draining would have come back crash-looping.
+cd "$(dirname "$0")/.."
+if [ -L node_modules ] || ! node -e 'import("./dist/config.js")' >/dev/null 2>&1; then
+  echo "refused: dist/ cannot load its dependencies (node_modules is a symlink or broken); run npm ci && npm run build"; exit 1
+fi
 since=$(date "+%Y-%m-%d %H:%M:%S")
 env -i HOME="$HOME" PATH="$PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
   systemctl --user --no-block restart "$UNIT" || { echo "restart failed"; exit 1; }

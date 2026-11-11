@@ -1,6 +1,7 @@
 // Source text of the modules that were split into directories, for tests that
 // assert on how the code is written. Each joins its pieces back in the order
 // they stood in the single file, so position checks still hold.
+import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,4 +28,29 @@ export function githubSource(tree = "src") {
     "github/lifecycle-scan", "github/review-freshness", "github/ci-gate", "github/promotion",
     "github/reports", "github/branch", "github/dependencies", "github/pr",
   ]);
+}
+
+/**
+ * The session/workflow modules that held agent.ts (protocol, prompt helpers, then
+ * implement, revise and custom stage), joined in the order those jobs stood in it.
+ */
+export function agentSource(tree = "src") {
+  return joined(tree, [
+    "session/protocol", "phases/workflow-prompt", "phases/implement-workflow",
+    "phases/revise-workflow", "phases/custom-workflow",
+  ]);
+}
+
+/**
+ * text[from .. to), both anchors REQUIRED. A bare slice(indexOf(a), indexOf(b)) turns a
+ * missing anchor into -1 and then asserts on the wrong text, or on none, and passes.
+ * Omit `to` to take the rest of the text.
+ */
+export function between(text, from, to) {
+  const a = text.indexOf(from);
+  assert.ok(a >= 0, `anchor not found in source: ${JSON.stringify(from)}`);
+  if (to === undefined) return text.slice(a);
+  const b = text.indexOf(to, a + 1);
+  assert.ok(b > a, `end anchor not found after the start: ${JSON.stringify(to)}`);
+  return text.slice(a, b);
 }

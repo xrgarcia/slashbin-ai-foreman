@@ -18,7 +18,6 @@
 /** Why the Foreman stopped on an item. */
 export type BlockKind =
   | "skip"                 // the implementer declined: held until something it names moves
-  | "divergence"           // the feature branch diverged from its base
   | "verify-no-pr"         // labelled merged, but no merged PR closes the issue
   | "verify-held"          // dev verification failed and is waiting out its backoff
   | "verify-exhausted"     // dev verification failed its last attempt
@@ -33,8 +32,6 @@ export interface BlockFacts {
   waitedOnDone?: boolean;
   /** Someone other than the Foreman edited, commented on or labelled the issue after the skip. */
   issueChanged?: boolean;
-  /** The feature branch no longer diverges from its base. */
-  divergenceCleared?: boolean;
   /** A merged PR into the base branch now closes the issue. */
   mergedPrFound?: boolean;
   /** The base branch gained commits after the block: a fix may have landed. */
@@ -43,6 +40,14 @@ export interface BlockFacts {
   specEdited?: boolean;
   /** Someone pushed to the PR after the Foreman stopped on it. */
   prHeadMoved?: boolean;
+  /** The EM posted a scope ruling on the PR after the stalemate's last no-commit round. */
+  rulingPosted?: boolean;
+  /** An exhausted verify hold's reason is now a tooling hold, which charges no attempt. */
+  holdNoLongerCharged?: boolean;
+  /** A deploy-failure hold: the merge SHA gained a SUCCESS dev deployment after the hold, so the environment was repaired. */
+  deployRepaired?: boolean;
+  /** A deploy-failure hold: the SRE posted a passing Dev Verification Evidence for the merge after the hold. */
+  srePassedSince?: boolean;
 }
 
 export type UnblockCheck = keyof BlockFacts;
@@ -50,12 +55,11 @@ export type UnblockCheck = keyof BlockFacts;
 /** The checks each kind of block is released by, in order. */
 export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>> = {
   "skip": ["transientCauseGone", "waitedOnDone", "issueChanged"],
-  "divergence": ["divergenceCleared"],
   "verify-no-pr": ["mergedPrFound"],
   "verify-held": ["specEdited"],
-  "verify-exhausted": ["specEdited", "baseAdvanced"],
+  "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged", "srePassedSince", "deployRepaired"],
   "revision-exhausted": ["prHeadMoved"],
-  "revision-stalemate": ["prHeadMoved"],
+  "revision-stalemate": ["prHeadMoved", "rulingPosted"],
 };
 
 /** The note each check leaves on the card when it releases one. */
@@ -63,11 +67,14 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   transientCauseGone: "the condition the skip named has cleared",
   waitedOnDone: "the issue or PR the skip was waiting on has closed or merged — building again",
   issueChanged: "the issue changed since the skip — building again",
-  divergenceCleared: "the feature branch no longer diverges from its base",
   mergedPrFound: "a merged PR now closes the issue",
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",
   specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",
   prHeadMoved: "the PR received new commits since the Foreman stopped — resuming",
+  rulingPosted: "the EM posted a scope ruling since the stalemate — revising once more against it",
+  deployRepaired: "the merge now has a successful dev deployment, created after the hold — verifying again with a fresh attempt count",
+  srePassedSince: "the SRE posted a passing dev verification for the merge since the hold — verifying it",
+  holdNoLongerCharged: "the hold's reason means the checker could not run, which no longer spends an attempt — verifying again with a fresh attempt count",
 };
 
 /** The first check for `kind` that `facts` pass, or null. Only `true` passes. */

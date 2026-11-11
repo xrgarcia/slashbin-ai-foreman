@@ -3,8 +3,14 @@
 // to `pr approved`. These pin the pure decisions the stage is built from.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReviewTrailerRecords, verifyVerdict } from "../dist/agent.js";
-import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding, followUpsOf } from "../dist/orchestrator.js";
+import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
+import { verifyVerdict } from "../dist/plugins/sre.js";
+import { labelFromTrailer, workStateOf, pickVerifyTarget, verifyHoldPlan, devVerifyHolding } from "../dist/orchestrator.js";
+import { correctionsToBuild } from "../dist/phases/verify.js";
+
+/** `Relation`s with no mentions: issue -> the issues it corrects. */
+const corrects = (entries) => new Map(entries.map(([n, c]) => [n, { corrects: c, mentions: [] }]));
+import { TOOLING_HOLDS, SRE_TOOLING_HOLDS } from "../dist/phases/verify.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 
 const { baseMs: VERIFY_RETRY_MS, maxAttempts: VERIFY_MAX_ATTEMPTS } = DEFAULT_BACKOFF.verifyRetry;
@@ -116,16 +122,21 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged
   assert.match(charge, /kind: "blocked"/);
 });
 
-test("followUpsOf: the fix a held verification asks for builds instead of queueing behind it", () => {
+test("correctionsToBuild: the fix a held verification asks for builds instead of queueing behind it", () => {
   // Slashbin-console#1340 waited 32 min behind #1338's verification, which needed it.
-  const titles = new Map([
-    [1340, "Follow-up to #1338: fix the pick view"],
-    [1341, "Unrelated work"],
-    [1342, "follow-up to #13380: a different issue"],
-  ]);
-  assert.deepEqual(followUpsOf(1338, [1340, 1341, 1342], titles), [1340]);
-  assert.deepEqual(followUpsOf(1338, [1341], titles), [], "no follow-up, the hold stands");
-  assert.deepEqual(followUpsOf(1338, [9999], titles), [], "an issue with no cached title is not a follow-up");
+  const rel = corrects([[1340, [1338]], [1342, [13380]]]);
+  assert.deepEqual(correctionsToBuild(1338, [1340, 1341, 1342], rel), [1340]);
+  assert.deepEqual(correctionsToBuild(1338, [1341], rel), [], "no follow-up, the hold stands");
+  assert.deepEqual(correctionsToBuild(1338, [9999], rel), [], "an issue with no correction link is not a follow-up");
+});
+
+test("correctionsToBuild: a fix outside the trimmed batch still builds", () => {
+  // Slashbin-console #1440 behind #1431, 2026-10-27: the batch (size 1) was #1432,
+  // so the rework issue #1440 stayed queued and #1431 could never pass.
+  const rel = corrects([[1440, [1431]]]);
+  assert.deepEqual(correctionsToBuild(1431, [...[1432], ...[1432, 1433, 1440]], rel), [1440]);
+  assert.deepEqual(correctionsToBuild(1431, [...[1440], ...[1432, 1440]], rel), [1440], "in the batch too: listed once");
+  assert.deepEqual(correctionsToBuild(1431, [...[1432], ...[1432, 1433]], rel), [], "no follow-up, the hold stands");
 });
 
 test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state> reasons, nothing else", async () => {
@@ -143,14 +154,13 @@ test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state
 });
 
 // EM#485 (PO, 2026-10-24): a visual QA FAIL goes back to the Foreman as a rework issue.
-import { reworkIssueTitle, reworkIssueBody, reworkIssueArgs } from "../dist/orchestrator.js";
 
-test("verifyHoldPlan: visual-qa-failed is a rework; infrastructure and sign-in holds still charge", () => {
-  assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "rework" });
-  for (const r of ["sign-in-failed", "dev-unreachable", "dev-verify-failed"]) assert.deepEqual(verifyHoldPlan(r), { kind: "charge" });
+test("verifyHoldPlan: visual-qa-failed is the EM's decision; infrastructure and sign-in holds still charge", () => {
+  assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "decide" });
+  for (const r of ["sign-in-failed", "dev-unreachable", "dev-verify-failed", "visual-qa-unsafe-host", "acceptance-failed"]) assert.deepEqual(verifyHoldPlan(r), { kind: "charge" });
 });
 
-test("pickVerifyTarget: a rework waits for its fix, then re-verifies at once", () => {
+test("pickVerifyTarget: a legacy rework hold waits for its fix, then re-verifies at once", () => {
   const refs = [{ issueNumber: 5, prNumber: 50 }];
   const heldAt = "2026-10-24T00:00:00.000Z";
   const t0 = Date.parse(heldAt);
@@ -166,20 +176,89 @@ test("devVerifyHolding: a rework hold below max keeps the repo held", () => {
   assert.equal(devVerifyHolding([5, 6], h, VERIFY_MAX_ATTEMPTS), 5);
 });
 
-test("followUpsOf matches the rework title for its parent only", () => {
-  const titles = new Map([[20, reworkIssueTitle(1, 12)], [21, reworkIssueTitle(1, 123)]]);
-  assert.deepEqual(followUpsOf(12, [20, 21], titles), [20]);
-  assert.deepEqual(followUpsOf(123, [20, 21], titles), [21]);
+test("correctionsToBuild matches a correction for its parent only", () => {
+  const rel = corrects([[20, [12]], [21, [123]]]);
+  assert.deepEqual(correctionsToBuild(12, [20, 21], rel), [20]);
+  assert.deepEqual(correctionsToBuild(123, [20, 21], rel), [21]);
 });
 
-test("the rework issue: title, label, and the sections the flight gate needs", () => {
-  assert.equal(reworkIssueTitle(2, 7), "Visual QA rework 2 for #7 — follow-up to #7");
-  const body = reworkIssueBody(7, 70, "x".repeat(3000) + "TAIL");
-  assert.match(body, /## Pre-Flight/);
-  assert.match(body, /## Acceptance/);
-  assert.match(body, /PR #70 failed for #7/);
-  assert.ok(body.endsWith("TAIL\n```\n") && !body.includes("x".repeat(1600)));
-  const args = reworkIssueArgs("o/r", "T", body, "approved");
-  assert.deepEqual(args.slice(0, 6), ["issue", "create", "--repo", "o/r", "--title", "T"]);
-  assert.deepEqual(args.slice(-2), ["--label", "approved"]);
+
+test("verifyHoldPlan: every SRE tooling hold defers; verdict holds do not", () => {
+  for (const r of TOOLING_HOLDS) assert.deepEqual(verifyHoldPlan(r), { kind: "defer" }, r);
+  for (const r of ["registry-unavailable", "evidence-check-failed"]) assert.ok(TOOLING_HOLDS.includes(r), r);
+  assert.deepEqual(verifyHoldPlan("visual-qa-failed"), { kind: "decide" });
+  assert.deepEqual(verifyHoldPlan("acceptance-failed"), { kind: "charge" });
+});
+
+test("SRE_TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checkout is absent)", async (t) => {
+  let src;
+  try { src = (await import("node:fs")).readFileSync(`${process.env.HOME}/code/slashbin_ai_sre/lib/reuse.mjs`, "utf8"); } catch { return t.skip("no SRE checkout"); }
+  const m = /RERUN_HOLDS = \/\^\((.*?)\)\$\//.exec(src);
+  assert.ok(m, "RERUN_HOLDS found");
+  const sre = m[1].split("|").filter((x) => !x.startsWith("wait-until"));
+  assert.deepEqual([...SRE_TOOLING_HOLDS].sort(), sre.sort());
+  assert.ok(TOOLING_HOLDS.includes("qa-errored"), "the Foreman QA gate's own tooling hold (#137)");
+  for (const r of ["qa-held-dev-unreachable", "qa-held-sign-in-failed", "qa-held-review-unavailable"]) assert.ok(TOOLING_HOLDS.includes(r), r);
+  for (const r of ["qa-held-unsafe-host", "qa-held-browser-crashed", "qa-held-nothing-captured"]) assert.ok(!TOOLING_HOLDS.includes(r), r);
+});
+
+// Ray, 2026-10-31 (Slashbin-console#1538): every post-merge fix is the EM's decision; the Foreman files nothing.
+import { evidenceLinks } from "../dist/phases/verify.js";
+import { derivedCandidates, needsCall, openEntry, unstickKey, reworkDecisionReason } from "../dist/unstick.js";
+
+const dopts = { verifyMaxAttempts: VERIFY_MAX_ATTEMPTS, isDeployFailureHold: (r) => r === "dev-verify-failed" || r.startsWith("deploy="), divergenceReason: () => "d" };
+const decision = { files: ["src/JourneyBar.tsx"], evidence: ["https://github.com/o/r/issues/1538#issuecomment-1", "https://img.example/phone.png"], verdict: "FAIL header row clips at 390px" };
+const vqaHold = { 1538: { heldAt: "t", prNumber: 1537, reason: "visual-qa-failed", attempts: VERIFY_MAX_ATTEMPTS, decision } };
+
+test("evidenceLinks: distinct URLs from the verdict output, punctuation trimmed", () => {
+  const out = "FAIL https://github.com/o/r/issues/1#issuecomment-9, ![x](https://img.example/a.png) https://github.com/o/r/issues/1#issuecomment-9.";
+  assert.deepEqual(evidenceLinks(out), ["https://github.com/o/r/issues/1#issuecomment-9", "https://img.example/a.png"]);
+  assert.deepEqual(evidenceLinks("no links"), []);
+});
+
+test("the first visual QA FAIL raises exactly one rework-decision candidate with the PR, files, verdict and evidence", () => {
+  const c = derivedCandidates({ verifyHeld: vqaHold }, dopts);
+  assert.equal(c.length, 1);
+  assert.deepEqual([c[0].issue, c[0].kind], [1538, "rework-decision"]);
+  for (const part of [...decision.evidence, "PR #1537", "src/JourneyBar.tsx", "header row clips at 390px"]) assert.ok(c[0].reason.includes(part), part);
+});
+
+test("a repeat poll on the same evidence makes no second call; new evidence is a new question", () => {
+  const first = derivedCandidates({ verifyHeld: vqaHold }, dopts)[0];
+  const entry = { ...openEntry(undefined, first, "t0"), status: "invoked", attempts: 1 };
+  const again = derivedCandidates({ verifyHeld: vqaHold }, dopts)[0];
+  assert.equal(unstickKey(again.issue, again.kind), "1538:rework-decision");
+  assert.equal(needsCall(entry, again), false);
+  const next = derivedCandidates({ verifyHeld: { 1538: { ...vqaHold[1538], decision: { ...decision, evidence: ["https://x/y"] } } } }, dopts)[0];
+  assert.equal(needsCall(entry, next), true);
+});
+
+test("a charged failure calls the EM on its first failure, not after the retries; at its cap it is verify-exhausted; deploy failures are not rework", () => {
+  const h = (reason, attempts) => ({ 10: { heldAt: "t", prNumber: 4, reason, attempts, decision } });
+  assert.deepEqual(derivedCandidates({ verifyHeld: h("acceptance-not-verified", 1) }, dopts).map((c) => c.kind), ["rework-decision"]);
+  assert.equal(derivedCandidates({ verifyHeld: h("acceptance-not-verified", 1) }, dopts)[0].reason, reworkDecisionReason(h("acceptance-not-verified", 2)[10]), "the retry does not change the question");
+  assert.deepEqual(derivedCandidates({ verifyHeld: h("acceptance-not-verified", VERIFY_MAX_ATTEMPTS) }, dopts).map((c) => c.kind), ["verify-exhausted"]);
+  assert.deepEqual(derivedCandidates({ verifyHeld: h("dev-verify-failed", 1) }, dopts), [], "an SRE deploy hold waits its retries, then deploy-failed");
+  // no decision recorded (an SRE error with no verdict): nothing to show the EM until the retries are spent
+  assert.deepEqual(derivedCandidates({ verifyHeld: { 10: { heldAt: "t", prNumber: 4, reason: "SRE launch threw", attempts: 1 } } }, dopts), []);
+});
+
+test("the Foreman files no rework issue: the filing helpers are gone", async () => {
+  const v = await import("../dist/phases/verify.js");
+  for (const name of ["reworkIssueTitle", "reworkIssueBody", "reworkIssueArgs"]) assert.equal(v[name], undefined, name);
+});
+
+test("a follow-up corrective releases the hold: it builds, its merge advances base, and a spec edit also releases", async () => {
+  const { reopensOnBaseAdvance } = await import("../dist/phases/verify.js");
+  assert.deepEqual(correctionsToBuild(1538, [1543, 1544], corrects([[1543, [1538]]])), [1543]);
+  assert.equal(reopensOnBaseAdvance("visual-qa-failed"), true, "the corrective merging into base reopens the held verification");
+  const { UNBLOCK_CHECKS } = await import("../dist/unblock.js");
+  assert.ok(UNBLOCK_CHECKS["verify-exhausted"].includes("specEdited") && UNBLOCK_CHECKS["verify-exhausted"].includes("baseAdvanced"));
+  assert.equal(devVerifyHolding([1538, 1543], vqaHold, VERIFY_MAX_ATTEMPTS), 1543, "the cap frees the repo");
+  // ... and the corrective still builds before unrelated queued work (Tech Lead R1): implement looks up the follow-up of the FAIL.
+  const { visualDecisionHolder } = await import("../dist/phases/verify.js");
+  assert.equal(visualDecisionHolder([1538, 1539], vqaHold, VERIFY_MAX_ATTEMPTS), 1538);
+  assert.equal(visualDecisionHolder([1538], { 1538: { ...vqaHold[1538], reason: "acceptance-not-verified" } }, VERIFY_MAX_ATTEMPTS), null);
+  const rel = corrects([[1543, [1538]]]);
+  assert.deepEqual(correctionsToBuild(1538, [...[1539], ...[1539, 1543]], rel), [1543]);
 });

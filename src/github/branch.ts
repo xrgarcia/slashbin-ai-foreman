@@ -2,90 +2,79 @@
 
 import type { Logger } from "../logger.js";
 import { findOpenPrs, formatGhError } from "./cache.js";
-import { gh, ghAsTechLead, isBackoffRefusal } from "./gh.js";
+import { ghAsync, ghAsTechLeadAsync, ghHttpStatus, isBackoffRefusal } from "./gh.js";
 import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
 import { OpenPromotionPR } from "./promotion.js";
+import type { BranchDrift } from "../code-host.js";
+export type { BranchDrift } from "../code-host.js";
 
 
 // --- Post-Implementation Self-Check ---
 
 /**
  * After a PR is created, verify it has actual file changes.
- * Returns the count of changed files, or -1 if check fails.
+ * Returns the count of changed files, or -1 when there is no open PR. A failed
+ * read throws (EM#1244 f5): it is never "no PR".
  * Logs the changed files for traceability (Second Way).
  */
-export function checkPRHasChanges(
+export async function checkPRHasChanges(
   repo: string,
   headBranch: string,
   baseBranch: string,
   cwd: string,
   logger: Logger,
-): number {
-  try {
-    const json = gh([
-      "pr", "list",
-      "--repo", repo,
-      "--head", headBranch,
-      "--base", baseBranch,
-      "--state", "open",
-      "--json", "number,files",
-      "--limit", "1",
-    ], cwd);
+): Promise<number> {
+  const json = await ghAsync([
+    "pr", "list",
+    "--repo", repo,
+    "--head", headBranch,
+    "--base", baseBranch,
+    "--state", "open",
+    "--json", "number,files",
+    "--limit", "1",
+  ], cwd);
 
-    const prs = JSON.parse(json || "[]");
-    if (prs.length === 0) return -1;
+  const prs = JSON.parse(json || "[]");
+  if (prs.length === 0) return -1;
 
-    const files: { path: string }[] = prs[0].files || [];
-    if (files.length === 0) {
-      logger.warn("PR has no file changes — implementation may have failed silently");
-      return 0;
-    }
-
-    logger.info(`PR #${prs[0].number} modifies ${files.length} file(s): ${files.map((f: { path: string }) => f.path).join(", ")}`);
-    return files.length;
-  } catch (err) {
-    logger.warn("checkPRHasChanges: gh pr list failed", { ...formatGhError(err) });
-    return -1;
+  const files: { path: string }[] = prs[0].files || [];
+  if (files.length === 0) {
+    logger.warn("PR has no file changes — implementation may have failed silently");
+    return 0;
   }
+
+  logger.info(`PR #${prs[0].number} modifies ${files.length} file(s): ${files.map((f: { path: string }) => f.path).join(", ")}`);
+  return files.length;
 }
 
 /**
- * Read the current HEAD SHA of a remote branch via the GitHub API.
- * Returns null on lookup failure so callers can decide how to react —
- * a transient gh error should not be conflated with a real "branch unchanged"
- * signal.
+ * Read the current HEAD SHA of a remote branch via the GitHub API. A failed
+ * read throws (EM#1244 f5): a transient gh error is never a real "branch
+ * unchanged" signal. Null only when the branch does not exist (a 404).
  */
-export function getRemoteBranchSha(
+export async function getRemoteBranchSha(
   repo: string,
   branch: string,
   cwd: string,
   logger: Logger,
-): string | null {
+): Promise<string | null> {
+  let out: string;
   try {
-    const sha = gh([
+    // --include puts the HTTP status line ahead of the body, on a failure too, so absence is read from the
+    // response's own status and never from text that can carry the branch name (a branch "fix-404").
+    out = await ghAsync([
       "api",
       `repos/${repo}/branches/${encodeURIComponent(branch)}`,
+      "--include",
       "--jq", ".commit.sha",
     ], cwd);
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   } catch (err) {
-    logger.warn("getRemoteBranchSha: gh api failed", { ...formatGhError(err), repo, branch });
-    return null;
+    if (ghHttpStatus(err) === 404) return null;
+    throw err;
   }
-}
-
-// --- Branch Sync ---
-
-export interface BranchDrift {
-  developBehindMain: number;
-  developAheadOfMain: number;
-  /** Files differing between main and develop. Zero means merge-commit-only drift. */
-  developAheadFiles: number;
-  /**
-   * The paths of those files, as GitHub lists them (capped at
-   * {@link COMPARE_FILE_CAP}). Absent when the compare did not return them.
-   */
-  developAheadPaths?: string[];
+  const sha = out.split("\n").pop()?.trim() ?? "";
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`${repo}@${branch}: GitHub returned no head sha`);
+  return sha;
 }
 
 /** GitHub's compare API lists at most this many files; a list this long may be truncated. */
@@ -116,15 +105,15 @@ export function productionDriftFiles(drift: BranchDrift): number {
  * Check if develop has drifted behind main due to accumulated merge commits.
  * Returns the drift counts, or null if the check fails.
  */
-export function checkBranchDrift(
+export async function checkBranchDrift(
   repo: string,
   productionBranch: string,
   baseBranch: string,
   cwd: string,
   logger: Logger,
-): BranchDrift | null {
+): Promise<BranchDrift | null> {
   try {
-    const json = gh([
+    const json = await ghAsync([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}`,
       "--jq", '{"ahead": .ahead_by, "behind": .behind_by, "files": ((.files // []) | length), "paths": [(.files // [])[].filename]}',
     ], cwd);
@@ -154,22 +143,18 @@ export function checkBranchDrift(
 }
 
 /**
- * Check if a sync PR (main → develop) already exists.
+ * Check if a sync PR (main → develop) already exists. Null only when there is none: a failed
+ * read throws (EM#1244 f5), because "could not look" must never open a second sync PR.
  */
-export function findOpenSyncPR(
+export async function findOpenSyncPR(
   repo: string,
   productionBranch: string,
   baseBranch: string,
   cwd: string,
   logger?: Logger,
-): OpenPromotionPR | null {
-  try {
-    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: baseBranch, head: productionBranch, limit: 1 });
-    return prs.length > 0 ? prs[0] : null;
-  } catch (err) {
-    logger?.warn("findOpenSyncPR: gh pr list failed", { ...formatGhError(err) });
-    return null;
-  }
+): Promise<OpenPromotionPR | null> {
+  const prs: OpenPromotionPR[] = await findOpenPrs(repo, cwd, { base: baseBranch, head: productionBranch, limit: 1 });
+  return prs.length > 0 ? prs[0] : null;
 }
 
 /**
@@ -181,7 +166,7 @@ export function findOpenSyncPR(
  * This eliminates the stale sync PR race condition where develop
  * advances between PR creation and external merge.
  */
-export function createSyncPR(
+export async function createSyncPR(
   repo: string,
   productionBranch: string,
   baseBranch: string,
@@ -189,9 +174,9 @@ export function createSyncPR(
   cwd: string,
   logger?: Logger,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
-): string | null {
+): Promise<string | null> {
   try {
-    const result = gh([
+    const result = await ghAsync([
       "pr", "create",
       "--repo", repo,
       "--base", baseBranch,
@@ -217,14 +202,14 @@ export function createSyncPR(
     // coordinates and has no Railway account (Ray, 2026-10-10); merging as the
     // Foreman stalled every post-promotion dev deploy (jerky_skuvault_service#410).
     try {
-      ghAsTechLead([
+      await ghAsTechLeadAsync([
         "pr", "review", prNumber,
         "--repo", repo,
         "--approve",
         "--body", `Branch sync: head is \`${productionBranch}\`, so there is no new code to review.`,
       ], cwd);
 
-      ghAsTechLead([
+      await ghAsTechLeadAsync([
         "pr", "merge", prNumber,
         "--repo", repo,
         "--merge",
@@ -268,18 +253,18 @@ export function createSyncPR(
  * Idempotent by construction: re-approving an approved PR and merging a merged
  * PR are both no-ops we treat as success, so retrying every cycle is safe.
  */
-export function tryMergeSyncPR(
+export async function tryMergeSyncPR(
   repo: string,
   prNumber: number,
   cwd: string,
   logger?: Logger,
   productionBranch = "main",
-): boolean {
+): Promise<boolean> {
   try {
     // Re-approve defensively: on the retry path the original approval is already
     // there, and gh treats a repeat approval as a no-op.
     try {
-      ghAsTechLead([
+      await ghAsTechLeadAsync([
         "pr", "review", String(prNumber),
         "--repo", repo,
         "--approve",
@@ -290,7 +275,7 @@ export function tryMergeSyncPR(
     }
 
     // As the Tech Lead, never the Foreman — see createSyncPR.
-    ghAsTechLead([
+    await ghAsTechLeadAsync([
       "pr", "merge", String(prNumber),
       "--repo", repo,
       "--merge",

@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectDeclaredSkip } from "../dist/agent.js";
+import { detectDeclaredSkip } from "../dist/session/protocol.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { loadConfig } from "../dist/config.js";
 import { UNBLOCK_CHECKS, passingCheck } from "../dist/unblock.js";
@@ -57,43 +57,43 @@ test("parseWaitingOn: owner/repo#N, or #N in this repo", () => {
   assert.equal(parseWaitingOn(undefined, REPO), undefined);
 });
 
-test("held: nothing moved keeps the hold, with no session", () => {
+test("held: nothing moved keeps the hold, with no session", async () => {
   const r = reads();
-  const s = holdStatus(entry("xrgarcia/jerky_com_marketing#166"), REPO, r);
+  const s = await holdStatus(entry("xrgarcia/jerky_com_marketing#166"), REPO, r);
   assert.equal(s.held, true);
   assert.equal(s.refIsPr, true);
   assert.deepEqual(r.calls, { ref: 1, activity: 1 }, "two cheap reads, nothing else");
 });
 
-test("release: the waited-on PR merged or closed", () => {
+test("release: the waited-on PR merged or closed", async () => {
   for (const ref of [{ open: false, isPr: true, merged: true }, { open: false, isPr: true, merged: false }]) {
-    const s = holdStatus(entry("xrgarcia/jerky_com_marketing#166"), REPO, reads({ ref }));
+    const s = await holdStatus(entry("xrgarcia/jerky_com_marketing#166"), REPO, reads({ ref }));
     assert.deepEqual([s.held, s.releasedBy], [false, "waitedOnDone"]);
   }
 });
 
-test("release: the waited-on issue closed", () => {
-  const s = holdStatus(entry("#120"), REPO, reads({ ref: { open: false, isPr: false, merged: false } }));
+test("release: the waited-on issue closed", async () => {
+  const s = await holdStatus(entry("#120"), REPO, reads({ ref: { open: false, isPr: false, merged: false } }));
   assert.deepEqual([s.held, s.releasedBy], [false, "waitedOnDone"]);
 });
 
-test("release: someone other than the Foreman changed the issue after the skip", () => {
-  const s = holdStatus(entry(), REPO, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "xrgarcia" }] }));
+test("release: someone other than the Foreman changed the issue after the skip", async () => {
+  const s = await holdStatus(entry(), REPO, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "xrgarcia" }] }));
   assert.deepEqual([s.held, s.releasedBy], [false, "issueChanged"]);
 });
 
-test("held: the Foreman's own writes, and anything before the skip, never release it", () => {
+test("held: the Foreman's own writes, and anything before the skip, never release it", async () => {
   const activity = [
     { at: "2026-10-14T15:00:00Z", login: "slashbin-foreman" },
     { at: "2026-10-14T13:12:35Z", login: "xrgarcia" },
   ];
-  assert.equal(holdStatus(entry(), REPO, reads({ activity })).held, true);
+  assert.equal((await holdStatus(entry(), REPO, reads({ activity }))).held, true);
   assert.equal(changedSince(activity, SKIPPED, "Slashbin-Foreman"), false, "the login match ignores case");
 });
 
-test("held: a read that fails keeps the hold — unknown never releases", () => {
+test("held: a read that fails keeps the hold — unknown never releases", async () => {
   const errors = [];
-  const s = holdStatus(entry("#166"), REPO, reads({ ref: new Error("404"), activity: new Error("timeout") }), (what) => errors.push(what));
+  const s = await holdStatus(entry("#166"), REPO, reads({ ref: new Error("404"), activity: new Error("timeout") }), (what) => errors.push(what));
   assert.equal(s.held, true);
   assert.equal(errors.length, 2);
 });
@@ -112,10 +112,10 @@ test("the skip block is released by the new checks; the transient check still co
   assert.equal(passingCheck("skip", { issueChanged: true }), "issueChanged");
 });
 
-test("migration: an existing entry with no waiting_on is held, baselined at lastSkippedAt", () => {
+test("migration: an existing entry with no waiting_on is held, baselined at lastSkippedAt", async () => {
   const old = { lastSkippedAt: SKIPPED, reason: "x", skipCount: 9 };
   const r = reads({ activity: [] });
-  assert.equal(holdStatus(old, REPO, r).held, true);
+  assert.equal((await holdStatus(old, REPO, r)).held, true);
   assert.deepEqual(r.calls, { ref: 0, activity: 1 }, "no reference to read; only the issue");
 });
 
@@ -133,14 +133,14 @@ test("config: hold is the default; false opts back into the timed retry, from th
   }
 });
 
-test("no session while held: a held issue leaves the hand-off before any session starts", () => {
+test("no session while held: a held issue leaves the hand-off before any session starts", async () => {
   const src = orchestratorSource();
-  const filterAt = src.indexOf("const gate = skipGate(entry");
-  const sessionAt = src.indexOf("implementApprovedIssues(repoConfig", filterAt);
+  const filterAt = src.indexOf("const gate = await codeHost().skipGate(entry");
+  const sessionAt = src.indexOf("implementApprovedIssues(rt.trust, repoConfig", filterAt);
   assert.ok(filterAt > 0, "the hold check is gone from the implement phase");
   assert.ok(sessionAt > filterAt, "a session launches before the hold check");
   const branch = src.slice(filterAt, src.indexOf("const age = now", filterAt));
-  assert.match(branch, /stillBackedOff\.push\([^]*?\);\s*return false;\s*\}/, "a held issue must be filtered out of the hand-off");
+  assert.match(branch, /stillBackedOff\.push\([^]*?\);\s*continue;\s*\}/, "a held issue must be left out of the hand-off");
   // The timed re-run is gone under hold: the age check only runs after the hold branch returned.
   assert.ok(src.indexOf("const age = now", filterAt) > filterAt);
 });
@@ -150,40 +150,40 @@ test("no session while held: a held issue leaves the hand-off before any session
 const gate = (e, r, transient = false) => skipGate(e, REPO, 3, r, () => transient);
 const changed = { activity: [{ at: "2026-10-14T15:00:00Z", login: "xrgarcia" }] };
 
-test("cap: under it, a cheap release buys one session and keeps the count", () => {
+test("cap: under it, a cheap release buys one session and keeps the count", async () => {
   for (const [r, transient, by] of [[reads(changed), false, "issueChanged"], [reads({ ref: { open: false, isPr: true, merged: true } }), false, "waitedOnDone"], [reads(), true, "transientCauseGone"]]) {
-    const g = gate({ ...entry("#166"), skipCount: 2 }, r, transient);
+    const g = await gate({ ...entry("#166"), skipCount: 2 }, r, transient);
     assert.deepEqual(g, { run: true, by, reset: false });
   }
 });
 
-test("cap: a released entry runs until a session ends on it, with no further reads", () => {
+test("cap: a released entry runs until a session ends on it, with no further reads", async () => {
   const r = reads();
-  assert.deepEqual(gate({ ...entry(), skipCount: 1, releasedAt: "2026-10-14T15:01:00Z" }, r), { run: true, reset: false });
+  assert.deepEqual(await gate({ ...entry(), skipCount: 1, releasedAt: "2026-10-14T15:01:00Z" }, r), { run: true, reset: false });
   assert.deepEqual(r.calls, { ref: 0, activity: 0 });
 });
 
-test("cap: out of attempts, it is escalated once and stays held, with no session", () => {
+test("cap: out of attempts, it is escalated once and stays held, with no session", async () => {
   const r = reads({ ref: { open: false, isPr: true, merged: true } });
-  const g = gate({ ...entry("#166"), skipCount: 3 }, r, true);
+  const g = await gate({ ...entry("#166"), skipCount: 3 }, r, true);
   assert.equal(g.run, false);
   assert.equal(g.escalate, true);
   assert.equal(g.reason, escalatedReason("refund_policy.md not on main", 3));
   assert.match(g.reason, /skipped 3 times in a row; held for the EM until a person changes this issue \(an agent's edit or label buys one session; its comment releases nothing\)$/);
   assert.deepEqual(r.calls, { ref: 0, activity: 1 }, "a merged reference or a cleared transient no longer releases it");
-  const again = gate({ ...entry("#166"), skipCount: 3, escalatedAt: "2026-10-14T13:13:00Z" }, reads(), true);
+  const again = await gate({ ...entry("#166"), skipCount: 3, escalatedAt: "2026-10-14T13:13:00Z" }, reads(), true);
   assert.deepEqual([again.run, again.escalate], [false, false], "escalated once, not every cycle");
 });
 
-test("cap: an escalated issue is released only by a person changing it, and the count resets", () => {
+test("cap: an escalated issue is released only by a person changing it, and the count resets", async () => {
   const e = { ...entry(), skipCount: 4, escalatedAt: "2026-10-14T13:13:00Z", releasedAt: "2026-10-14T12:00:00Z" };
-  assert.deepEqual(gate(e, reads(changed)), { run: true, by: "issueChanged", reset: true });
-  assert.equal(gate(e, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "slashbin-foreman" }] })).run, false, "the Foreman's own write is not a release");
-  assert.equal(gate(e, reads({ activity: new Error("timeout") })).run, false, "unknown never releases");
+  assert.deepEqual(await gate(e, reads(changed)), { run: true, by: "issueChanged", reset: true });
+  assert.equal((await gate(e, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "slashbin-foreman" }] }))).run, false, "the Foreman's own write is not a release");
+  assert.equal((await gate(e, reads({ activity: new Error("timeout") }))).run, false, "unknown never releases");
 });
 
-test("migration: an entry already past the cap (jerky_service#127, skipped 8 times) is escalated", () => {
-  const g = gate({ lastSkippedAt: SKIPPED, reason: "x", skipCount: 8 }, reads());
+test("migration: an entry already past the cap (jerky_service#127, skipped 8 times) is escalated", async () => {
+  const g = await gate({ lastSkippedAt: SKIPPED, reason: "x", skipCount: 8 }, reads());
   assert.deepEqual([g.run, g.escalate], [false, true]);
 });
 
@@ -213,25 +213,25 @@ const escalated = { ...entry(), skipCount: 3, escalatedAt: "2026-10-14T13:13:00Z
 const at = "2026-10-14T15:00:00Z";
 const agentReads = (activity) => ({ ...reads({ activity }), agents: AGENTS });
 
-test("cap: another agent's comment does not release an escalated issue", () => {
-  const g = gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }]));
+test("cap: another agent's comment does not release an escalated issue", async () => {
+  const g = await gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }]));
   assert.equal(g.run, false, "an agent's comment is talk, not a change");
   assert.equal(g.escalate, false);
 });
 
-test("cap: another agent's label or edit buys one session and keeps the count", () => {
+test("cap: another agent's label or edit buys one session and keeps the count", async () => {
   for (const kind of ["event", "edit"]) {
-    assert.deepEqual(gate(escalated, agentReads([{ at, login: "agent-ops", kind }])), { run: true, by: "issueChanged", reset: false });
+    assert.deepEqual(await gate(escalated, agentReads([{ at, login: "agent-ops", kind }])), { run: true, by: "issueChanged", reset: false });
   }
 });
 
-test("cap: a person's comment still releases it and resets the count, agents' comments around it or not", () => {
-  const g = gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }, { at, login: "xrgarcia", kind: "comment" }]));
+test("cap: a person's comment still releases it and resets the count, agents' comments around it or not", async () => {
+  const g = await gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }, { at, login: "xrgarcia", kind: "comment" }]));
   assert.deepEqual(g, { run: true, by: "issueChanged", reset: true });
 });
 
-test("under the cap an agent's comment still buys a session: the cap is what bounds it", () => {
-  assert.deepEqual(gate({ ...entry(), skipCount: 1 }, agentReads([{ at, login: "agent-manager", kind: "comment" }])), { run: true, by: "issueChanged", reset: false });
+test("under the cap an agent's comment still buys a session: the cap is what bounds it", async () => {
+  assert.deepEqual(await gate({ ...entry(), skipCount: 1 }, agentReads([{ at, login: "agent-manager", kind: "comment" }])), { run: true, by: "issueChanged", reset: false });
 });
 
 test("config: agentLogins defaults to none, from the file as a list or the env comma-separated", () => {

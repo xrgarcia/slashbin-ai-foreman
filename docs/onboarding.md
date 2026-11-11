@@ -40,12 +40,20 @@ the daemon's machine, its three branches, and write access for the Foreman's tok
      yourself ([configuration.md](configuration.md#onboarding)).
 2. **Syncs its skills** (when `skillSync` is on). Before the implement session for the
    repo's first approved issue starts, the Foreman copies the golden skill files into
-   the checkout and commits them on the feature branch, so the session runs on the
+   the checkout and commits them on the base branch (the issue's own branch is cut from it), so the session runs on the
    current skill and the commit rides that issue's PR. Not repeated by onboarding: it
    already happens ahead of every build ([skill-sync.md](skill-sync.md)).
 3. **Shows its cards on the board** (when Paperclip is on — optional, off by default).
    After every pass the Foreman publishes the repo's open work to the board, so the
    repo's issues appear there from its first pass ([paperclip.md](paperclip.md)).
+
+A repo with `syncOnly: true` (the human lane, which runs only the `skill-deliver` stage)
+skips both onboarding and the records import, since each writes to the repo.
+
+On a machine upgraded from the old release, the first pass over each repo also imports
+that repo's legacy state ([upgrading.md](upgrading.md#what-happens-to-existing-state-on-first-start)).
+The first time the Foreman saves repo-level state it creates a closed issue titled
+"Foreman repo records (bookkeeping, do not close or edit)". Leave it alone.
 
 Code: `src/onboarding.ts` (labels), `src/phases/implement.ts` and `src/skill-sync.ts`
 (skills), `src/orchestrator.ts` `publishBoard` (board). Tests:

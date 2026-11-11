@@ -19,8 +19,14 @@ import { loadConfig, defaultLifecycleLabels } from "../dist/config.js";
 import { configureIssueCache } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
 import { transition } from "../dist/lifecycle.js";
-import { revisePRFeedback } from "../dist/agent.js";
+import { revisePRFeedback } from "../dist/phases/revise-workflow.js";
+import { ClaudeTrust } from "../dist/claude-trust.js";
+const trust = new ClaudeTrust();
 import { createLogger } from "../dist/logger.js";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+
+setCodeHost(githubCodeHost());
 
 const CUSTOM = {
   prUnderReview: "in-review",
@@ -45,6 +51,12 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(GH_LOG)}, JSON.stringify(args) + "\\n");
 if (args[0] === "issue" && args[1] === "list") { process.stdout.write(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")); process.exit(0); }
+if (args[0] === "issue" && args[1] === "view") {
+  const i = JSON.parse(fs.readFileSync(${JSON.stringify(GH_ISSUES)}, "utf8")).find((x) => String(x.number) === args[2]);
+  process.stdout.write(JSON.stringify(i ? { state: "OPEN", labels: i.labels } : null)); process.exit(0);
+}
+if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) { process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs"); process.exit(0); }
+if (args[0] === "api" && /\\/branches\\//.test(args[1])) { process.stdout.write("0".repeat(40)); process.exit(0); }
 process.stdout.write("[]");
 `);
 writeFileSync(join(binDir, "claude"), `#!/usr/bin/env node
@@ -160,11 +172,11 @@ test("actionable set excludes the CONFIGURED lifecycle labels, not the defaults"
 
 test("implementation applies the configured under-review label", async () => {
   const c = load({ lifecycleLabels: CUSTOM });
-  resetGh();
+  resetGh([issue(7, "approved")]);
   const item = { issueNumber: 7, repo: "example/acceptance" };
   assert.equal(await new GitHubIssueConnector().record(
     { kind: "transition", item, observed: false, ...transition("implemented") }, c.repos[0], logger), true);
-  const [call] = ghCalls();
+  const call = ghCalls().find((a) => a[0] === "issue" && a[1] === "edit");
   assert.deepEqual(call, ["issue", "edit", "7", "--repo", "example/acceptance", "--add-label", "in-review"]);
 });
 
@@ -205,7 +217,7 @@ test("dead-zone recovery never moves an issue backwards from a later stage", asy
 
 test("every claude session receives FOREMAN_TRIGGER_LABEL and FOREMAN_LIFECYCLE_LABELS", async () => {
   const c = load({ triggerLabel: "build-me", lifecycleLabels: { prUnderReview: "in-review" } });
-  await revisePRFeedback(c.repos[0], logger, undefined, 1, [9]);
+  await revisePRFeedback(trust, c.repos[0], logger, undefined, 1, [9]);
   const env = JSON.parse(readFileSync(CLAUDE_ENV, "utf8"));
   assert.equal(env.FOREMAN_TRIGGER_LABEL, "build-me");
   assert.deepEqual(JSON.parse(env.FOREMAN_LIFECYCLE_LABELS), { ...c.lifecycleLabels });

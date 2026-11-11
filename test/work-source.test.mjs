@@ -16,9 +16,12 @@ import { loadConfig } from "../dist/config.js";
 import { runRepoPass } from "../dist/orchestrator.js";
 import { configureIssueCache, discoveryBatch } from "../dist/github.js";
 import { GitHubIssueConnector } from "../dist/github-work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { addObserver, drainObservers } from "../dist/work-source.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 let tmp, F, saved;
@@ -35,7 +38,8 @@ const BOARD = [
   { number: 1, title: "one", labels: [{ name: "approved" }] },
 ];
 
-before(() => {
+before(async () => {
+  await startGitHubWorkSource();
   tmp = mkdtempSync(join(tmpdir(), "foreman-work-source-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);
@@ -45,9 +49,13 @@ before(() => {
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(${JSON.stringify(JSON.stringify(BOARD))});
-else if (args[0] === "pr" && args[1] === "list" && args.includes("--head") && process.env.FAKE_FEATURE_PR) process.stdout.write(process.env.FAKE_FEATURE_PR);
+// foreman#208: the Foreman lists the open PRs and checks head ownership (the legacy shared head \`features\` is still its own).
+else if (args[0] === "pr" && args[1] === "list" && process.env.FAKE_FEATURE_PR) process.stdout.write(JSON.stringify(JSON.parse(process.env.FAKE_FEATURE_PR).map((p) => ({ ...p, headRefName: "features", baseRefName: "develop" }))));
+else if (args[0] === "pr" && args[1] === "view" && process.env.FAKE_FEATURE_PR) process.stdout.write(JSON.stringify({ ...JSON.parse(process.env.FAKE_FEATURE_PR)[0], headRefName: "features" }));
 else if (args[0] === "api" && args[1] === "repos/example/ordered/issues/3/dependencies/blocked_by") process.stdout.write(JSON.stringify([{ number: 2, state: "open", labels: [{ name: "approved" }] }]));
+else if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/issues\\/\\d+$/.test(args[1])) { process.stdout.write("## Acceptance\\n- **Script:** scripts/x/x-acceptance.mjs"); }
 else if (args[0] === "ls-files") process.stdout.write(Array.from({ length: 40 }, (_, i) => "f" + i).join("\\n"));
+else if (args[0] === "api" && /\\/branches\\//.test(args[1])) process.stdout.write("0".repeat(40));
 else process.stdout.write("[]");
 `);
   writeFileSync(join(bin, "claude"), `#!/usr/bin/env node
@@ -87,7 +95,7 @@ function load(repo, top = {}) {
 async function pass(config) {
   rmSync(F.claudeLog, { force: true });
   events.length = 0;
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   await drainObservers();
   const prompt = existsSync(F.claudeLog) ? JSON.parse(readFileSync(F.claudeLog, "utf8").trim().split("\n")[0]).prompt : null;
   return { prompt, events: [...events] };
@@ -105,7 +113,7 @@ test("the GitHub connector offers every eligible issue, uncapped, in gh order", 
   const config = load({});
   const items = await new GitHubIssueConnector().selectWork(config.repos[0], config, logger);
   assert.deepEqual(items.map((w) => w.issueNumber), [5, 4, 3, 2, 1]);
-  assert.deepEqual(discoveryBatch(config.repos[0], [5, 4, 3, 2, 1], logger), [1, 2, 3],
+  assert.deepEqual(await discoveryBatch(config.repos[0], [5, 4, 3, 2, 1], logger), [1, 2, 3],
     "unranked, the batch is oldest first, capped at the size asked for");
 });
 
@@ -131,9 +139,9 @@ test("4 approved → 1 claimed + 3 left todo: the highest tier, else the oldest"
   // example/ordered offers 5, 4, 2, 1 (#3 waits on its blocker); #5 is the S1.
   assert.ok(prompt?.includes("no others: #5."), prompt?.slice(0, 300));
   assert.deepEqual(numbersOf("claim", evs), [5]);
-  const unranked = discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, () => []);
+  const unranked = await discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, () => []);
   assert.deepEqual(unranked, [1], "with no priority labels, the oldest is built");
-  const ranked = discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, (n) => (n === 7 ? ["bug"] : []));
+  const ranked = await discoveryBatch(load({}).repos[0], [4, 2, 1, 7], logger, 1, (n) => (n === 7 ? ["bug"] : []));
   assert.deepEqual(ranked, [7], "a higher tier goes before an older issue");
 });
 

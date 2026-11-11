@@ -1,20 +1,20 @@
 import type { AgentConfig } from "./config.js";
-import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { concurrencyWarning, loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
 import { lanesFor, setSessionLimit } from "./lanes.js";
 import { stageName } from "./stages.js";
 import { join } from "node:path";
-import { configureIssueCache, gh } from "./github.js";
-import {
-  clearActivity, configureGitHubState, recordActivity, setGitHubStateRepos, takeGitHubStateUsage,
-} from "./github-state.js";
+import { codeHost } from "./plugins/registry.js";
 import { addObserver } from "./work-source.js";
-import { stateDir } from "./state.js";
+import { stateDir } from "./state-dir.js";
 import { configureBackoff } from "./backoff.js";
+import { configureRunner } from "./refusal.js";
 import { configureUpstreamBackoff, isUpstreamBlocked, whenUpstreamClear, UpstreamBackoffError } from "./upstream-backoff.js";
 import { configureGhUsage } from "./gh-usage.js";
+import type { ForemanRuntime } from "./runtime.js";
+import { startEventLoopMonitor } from "./event-loop-delay.js";
+import { checkKindContract } from "./unstick-contract.js";
 
 export interface DaemonOptions {
   configPath?: string;
@@ -27,11 +27,13 @@ export interface DaemonHandle {
   stop(): Promise<void>;
 }
 
-export function startDaemon(config: AgentConfig, logger: Logger, options?: DaemonOptions): DaemonHandle {
+export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Logger, options?: DaemonOptions): DaemonHandle {
   let cycleNumber = 0;
   let stopping = false;
   let sleepResolve: (() => void) | null = null;
   let activeConfig = config;
+  // Event-loop stall detector (#228): logs any freeze over 250 ms with the lane passes in flight.
+  const loopMonitor = startEventLoopMonitor(logger);
 
   // No Discord (owner, 2026-10-11: "GitHub and Paperclip are where Foreman should be
   // posting important messages"). What needs a person is a label and comment on the
@@ -42,25 +44,26 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   // Every back-off and retry limit, for the module-level code that takes no
   // config (gh retries, CI gate, stuck-merge scan, upstream windows).
   configureBackoff(config.backoff);
+  configureRunner(config.runner);
 
   // Every managed checkout trusted before the first session (src/claude-trust.ts);
   // again on each reload, and once more before every spawn.
-  configureClaudeTrust({ enabled: config.trustManagedRepos });
-  trustManagedRepos(config.repos, logger);
+  rt.trust.configure({ enabled: config.trustManagedRepos });
+  rt.trust.trustManagedRepos(config.repos, logger);
 
-  configureIssueCache({
+  const host = codeHost();
+  host.configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
     snapshotLimit: config.issueSnapshotLimit,
   });
 
   // Every repo's open issues and PRs from ONE bulk GraphQL query per refresh,
   // and only what changed since the last one. See the header of github-state.ts.
-  configureGitHubState({
+  host.configureState({
     repos: config.repos.map((r) => r.githubRepo),
     refreshMs: config.issueCacheTtlMs,
     issueLimit: config.issueSnapshotLimit,
     persistPath: join(stateDir(), ".github-state.json"),
-    run: (args) => gh(args, process.cwd()),
     logger,
   });
 
@@ -69,13 +72,13 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   addObserver({
     onEvent: async (event) => {
       switch (event.kind) {
-        case "claim": return recordActivity(event.item.repo, event.item.issueNumber, "claimed");
-        case "transition": return recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
-        case "prLink": return recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
-        case "blocked": return recordActivity(event.item.repo, event.item.issueNumber, "blocked");
-        case "escalated": return recordActivity(event.item.repo, event.item.issueNumber, "needs-ruling");
-        case "merged": return recordActivity(event.item.repo, event.item.issueNumber, "merged");
-        case "promoted": return clearActivity(event.item.repo, event.item.issueNumber);
+        case "claim": return host.recordActivity(event.item.repo, event.item.issueNumber, "claimed");
+        case "transition": return host.recordActivity(event.item.repo, event.item.issueNumber, String(event.to));
+        case "prLink": return host.recordActivity(event.item.repo, event.item.issueNumber, "pr-linked", event.prUrl);
+        case "blocked": return host.recordActivity(event.item.repo, event.item.issueNumber, "blocked");
+        case "escalated": return host.recordActivity(event.item.repo, event.item.issueNumber, "needs-ruling");
+        case "merged": return host.recordActivity(event.item.repo, event.item.issueNumber, "merged");
+        case "promoted": return host.clearActivity(event.item.repo, event.item.issueNumber);
         default: return;
       }
     },
@@ -91,7 +94,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
   // One info line per hour: spawned gh calls by quota bucket and subcommand.
   // statePoints: what the fleet state's bulk queries actually cost, as GitHub reported it.
-  configureGhUsage({ intervalMs: 3_600_000, logger, extra: takeGitHubStateUsage });
+  configureGhUsage({ intervalMs: 3_600_000, logger, extra: () => host.takeStateUsage() });
 
   // A TTL at or above the poll interval means a cycle can be served entirely
   // from the previous cycle's snapshot, so an externally-applied `approved`
@@ -109,6 +112,11 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   if (releaseWarning) logger.warn(releaseWarning);
   const retired = concurrencyWarning(config);
   if (retired) logger.warn(retired);
+
+  // The EM publishes the alert kinds it accepts; a kind the Foreman sends that it lacks is an alert nobody receives.
+  void checkKindContract(config, logger);
+
+  logger.info(config.profile ? `Config profile: ${config.profile}` : "Config profile: none (neutral defaults)");
 
   const repoNames = config.repos.map((r) => r.name).join(", ");
   const startLanes = lanesFor(config.stages);
@@ -134,7 +142,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
       repoPath: repo.repoPath,
       triggerLabel: repo.triggerLabel,
       baseBranch: repo.baseBranch,
-      featureBranch: repo.featureBranch,
+      branchPrefix: repo.branchPrefix,
     });
   }
 
@@ -170,10 +178,11 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
         }
       }
 
-      setGitHubStateRepos(fresh.repos.map((r) => r.githubRepo));
+      host.setStateRepos(fresh.repos.map((r) => r.githubRepo));
       configureBackoff(fresh.backoff);
-      configureClaudeTrust({ enabled: fresh.trustManagedRepos });
-      trustManagedRepos(fresh.repos, logger);
+      configureRunner(fresh.runner);
+      rt.trust.configure({ enabled: fresh.trustManagedRepos });
+      rt.trust.trustManagedRepos(fresh.repos, logger);
       options?.onReload?.(fresh);
       return fresh;
     } catch (err) {
@@ -234,10 +243,23 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
 
         let didWork = false;
         try {
+          // The fleet state refreshes here, off the event loop, so the pass's
+          // reads find it fresh instead of each running the bulk query
+          // synchronously and freezing every lane and observer with it. A failed
+          // warm is not the pass's failure: its own reads report the error.
+          await host.warmState().catch((err: unknown) => {
+            if (err instanceof UpstreamBackoffError) return;
+            repoLogger.debug("Fleet state warm failed — the pass reads report it", {
+              error: err instanceof Error ? err.message.split("\n")[0] : String(err),
+            });
+          });
           // The first lane mirrors the board every pass, as the whole-repo pass
           // did; the others only after they changed something, so splitting a
           // repo into lanes does not multiply the idle snapshot rate.
-          const result = await runLanePass(repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work");
+          // The pass is in the stall detector's in-flight set until it returns, throws, or is cut short.
+          const result = await loopMonitor.track(repoName, laneName, () =>
+            runLanePass(rt, repoConfig, activeConfig, lane, logger, lanes[0].name === laneName ? "always" : "if-work"),
+          );
           didWork = result.processed > 0;
           for (const event of result.events) logger[event.level](event.message);
         } catch (err) {
@@ -317,6 +339,7 @@ export function startDaemon(config: AgentConfig, logger: Logger, options?: Daemo
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    loopMonitor.disable();
 
     logger.info("Shutting down...");
     requestShutdown();

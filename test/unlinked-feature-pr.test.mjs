@@ -1,6 +1,6 @@
 // An open feature PR that names no approved issue is reviewed, not skipped.
 //
-// jerky_service #99, 2026-10-10: a person's PR on `features`, linked to nothing
+// jerky_service #99, 2026-10-10: a person's PR on the Foreman branch, linked to nothing
 // ("Follow-up to #98", a merged PR). The review stage only took PRs with an
 // issue in review or one it could adopt, so it never touched #99; the implement
 // stage queues every approved issue behind any open feature PR, so #102 sat
@@ -13,10 +13,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { findPRsNeedingReview } from "../dist/github.js";
+import { BackoffTracker } from "../dist/backoff.js";
 import { loadConfig } from "../dist/config.js";
 
 let tmp, ghState, savedPath, savedToken;
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return logger; } };
+// The code host's approved-but-unmerged waits, one tracker for the file as the plugin keeps one.
+const waits = new BackoffTracker();
 
 before(() => {
   tmp = mkdtempSync(join(tmpdir(), "foreman-unlinked-"));
@@ -53,7 +56,7 @@ let n = 0;
 // A fresh repo name per case: the open-issue and open-PR lists are cached per repo.
 function arrange({ body = "Follow-up to #98", issues = [], reviews = [] } = {}) {
   const repo = `example/r${++n}`;
-  const pr = { number: 99, url: `https://github.com/${repo}/pull/99`, title: "fix(mcp): keep the bearer out of argv", body, headRefName: "features", baseRefName: "develop", headRefOid: "e4927f5", updatedAt: "2026-10-08T20:08:13Z" };
+  const pr = { number: 99, url: `https://github.com/${repo}/pull/99`, title: "fix(mcp): keep the bearer out of argv", body, headRefName: "foreman/99-bearer-argv", baseRefName: "develop", headRefOid: "e4927f5", updatedAt: "2026-10-08T20:08:13Z" };
   writeFileSync(ghState, JSON.stringify({ pr, issues, reviews }));
   const p = join(tmp, `cfg${n}.json`);
   writeFileSync(p, JSON.stringify({ repos: [{ name: "a", repoPath: tmp, githubRepo: repo }] }));
@@ -61,35 +64,35 @@ function arrange({ body = "Follow-up to #98", issues = [], reviews = [] } = {}) 
 }
 const issue = (number, labels, state = "OPEN") => ({ number, state, title: `t${number}`, labels: labels.map((name) => ({ name })) });
 
-test("a feature PR that names only a closed ref is reviewed with no issues", () => {
+test("a feature PR that names only a closed ref is reviewed with no issues", async () => {
   const cfg = arrange({ issues: [issue(98, ["approved"], "CLOSED"), issue(102, ["approved", "chore"])] });
-  assert.deepEqual(findPRsNeedingReview(cfg, "slasbhin-techlead", logger), { prNumber: 99, prUrl: `https://github.com/${cfg.githubRepo}/pull/99`, issueNumbers: [], adopted: [] });
+  assert.deepEqual(await findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), { prNumber: 99, prUrl: `https://github.com/${cfg.githubRepo}/pull/99`, issueNumbers: [], adopted: [] });
 });
 
-test("a feature PR that names nothing at all is reviewed with no issues", () => {
+test("a feature PR that names nothing at all is reviewed with no issues", async () => {
   const cfg = arrange({ body: "" });
-  assert.deepEqual(findPRsNeedingReview(cfg, "slasbhin-techlead", logger)?.issueNumbers, []);
+  assert.deepEqual((await findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false))?.issueNumbers, []);
 });
 
-test("a current verdict by the reviewer is not reviewed again", () => {
+test("a current verdict by the reviewer is not reviewed again", async () => {
   const cfg = arrange({ reviews: [{ author: { login: "slasbhin-techlead" }, state: "CHANGES_REQUESTED", submittedAt: "2026-10-08T20:08:13Z" }] });
-  assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger), null);
+  assert.equal(await findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), null);
 });
 
-test("an approved issue the PR names is still adopted as before", () => {
+test("an approved issue the PR names is still adopted as before", async () => {
   const cfg = arrange({ body: "Closes #98", issues: [issue(98, ["approved"])] });
-  const c = findPRsNeedingReview(cfg, "slasbhin-techlead", logger);
+  const c = await findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false);
   assert.deepEqual([c?.issueNumbers, c?.adopted], [[98], [98]]);
 });
 
-test("a PR whose issue is in revise or past review is left to that stage", () => {
+test("a PR whose issue is in revise or past review is left to that stage", async () => {
   for (const labels of [["approved", "pr pending actions"], ["approved", "ready for prod release"]]) {
     const cfg = arrange({ body: "Closes #98", issues: [issue(98, labels)] });
-    assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger), null, labels.join(","));
+    assert.equal(await findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), null, labels.join(","));
   }
 });
 
-test("a ref that cannot be read holds the PR for a later pass", () => {
+test("a ref that cannot be read holds the PR for a later pass", async () => {
   const cfg = arrange({ body: "Closes #77" });
-  assert.equal(findPRsNeedingReview(cfg, "slasbhin-techlead", logger), null);
+  assert.equal(await findPRsNeedingReview(cfg, "slasbhin-techlead", logger, waits, () => false), null);
 });

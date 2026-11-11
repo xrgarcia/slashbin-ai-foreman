@@ -16,6 +16,7 @@
 // a handoff is due, this decides what it says.
 
 import type { Stage } from "../lifecycle.js";
+import { centralStamp } from "../review-progress.js";
 
 /** One stage's handoff: what the holder does, and when it is done. */
 export interface StageHandoff {
@@ -110,6 +111,13 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
     why: "the Foreman started the verify session",
     done: "the verification's result is on {pr}",
   },
+  qaReviewing: {
+    act: false,
+    todo: "QA is checking {pr} on dev now (visual and behaviour). Nothing to do from this card.",
+    next: "nothing; QA of {pr} on dev is running",
+    why: "the SRE passed dev verification and the QA gate started",
+    done: "QA passes (`{prApproved}`; the card moves to EM verification) or holds (the card moves to Blocked)",
+  },
   pendingVerification: {
     act: true,
     todo: "Run the EM release gate (`/deliver-to-prod` step 3a) for {issue} and, if it passes, apply `{readyForProd}` to the issue. The prod release does not start until you do.",
@@ -137,6 +145,13 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
     next: "nothing; the Foreman runs the release",
     why: "{issue} is in the release PR the Foreman owns (`{releasePending}`)",
     done: "prod verification passes (the issue closes, the card goes to done) or holds (`{prodVerifyHeld}`)",
+  },
+  awaitingSignoff: {
+    act: true,
+    todo: "The release {pr} that carries {issue} is held: its EM sign-off status is failing. {unsignedTodo} The Tech Lead's approval and the SRE's deploy do not start until then.",
+    next: "sign off {unsignedNext} (release {pr}), or take them out of the release",
+    why: "the release {pr}'s EM sign-off status is failing ({unsignedWhy})",
+    done: "the sign-off status turns green (the card returns to Releasing)",
   },
   prodVerifyHeld: {
     act: true,
@@ -174,6 +189,13 @@ export const HANDOFF_VARIANTS = Object.freeze({
     why: "dev verification failed because the deploy to dev did (the reason is above)",
     done: "the merge is deployed to dev and the hold lifts (the card returns to its stage)",
   },
+  verifyScheduled: {
+    act: false,
+    todo: "Nothing to do from this card: dev verification of {pr} is scheduled and resumes {resumeAt}.",
+    next: "nothing; dev verification of {pr} resumes {resumeAt}",
+    why: "dev verification of {pr} is held until {resumeAt}",
+    done: "dev verification runs at {resumeAt} and passes (`{prApproved}`; the card moves to EM verification) or holds (the card moves to Blocked)",
+  },
 } satisfies Record<string, StageHandoff>);
 export type HandoffVariant = keyof typeof HANDOFF_VARIANTS;
 
@@ -184,6 +206,10 @@ export interface HandoffFacts {
   /** The seat that holds the card now, by name. */
   readonly seat: string;
   readonly pr?: { readonly number: number; readonly url?: string };
+  /** At `awaitingSignoff`: the unsigned issues of the release `pr` (a number list, possibly empty). */
+  readonly unsigned?: readonly number[];
+  /** An ISO time the card's next step is scheduled for (the `verifyScheduled` variant). */
+  readonly resumeAt?: string;
   /** The latest outcome on the card (a session's result), and when it came. */
   readonly evidence?: { readonly text: string; readonly at?: string; readonly url?: string };
 }
@@ -193,13 +219,33 @@ function fill(template: string, vars: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m));
 }
 
+/** The three phrasings of what an `awaitingSignoff` hold waits for: the issues to sign, or the PR when none is named. */
+function unsignedVars(f: HandoffFacts, labels: HandoffLabels): Record<string, string> {
+  const pr = f.pr ? `PR #${f.pr.number}` : "the release PR";
+  if (f.unsigned && f.unsigned.length > 0) {
+    const list = f.unsigned.map((n) => `${f.repo}#${n}`).join(", ");
+    return {
+      unsignedTodo: `Run the EM release gate (\`/deliver-to-prod\` step 3a) for each of ${list} and apply \`${labels.readyForProd}\`, or take it out of the release.`,
+      unsignedNext: list,
+      unsignedWhy: `${list} lack \`${labels.readyForProd}\``,
+    };
+  }
+  return {
+    unsignedTodo: `No listed issue lacks a sign-off label, so read the status on ${pr} for what it holds, then sign off or take out what it names.`,
+    unsignedNext: `what ${pr} is held for`,
+    unsignedWhy: `no listed issue lacks a sign-off label; read the status on ${pr}`,
+  };
+}
+
 function varsOf(f: HandoffFacts, labels: HandoffLabels): Record<string, string> {
   return {
+    ...unsignedVars(f, labels),
     ...labels,
     issue: `${f.repo}#${f.issueNumber}`,
     repo: f.repo,
     pr: f.pr ? `PR #${f.pr.number}` : "the PR",
     prNumber: f.pr ? String(f.pr.number) : "<PR>",
+    resumeAt: f.resumeAt ? centralStamp(f.resumeAt) : "its scheduled time",
   };
 }
 

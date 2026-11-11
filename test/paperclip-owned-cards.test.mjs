@@ -4,6 +4,7 @@
 // hold reason read from GitHub, and the snapshot carrying every card only when
 // an observer owns them.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -12,8 +13,10 @@ import { foremanOwnsCard, FOREMAN_BLOCKED_PREFIX, HOLD_PREFIX as PLUGIN_HOLD_PRE
 import { pickCard } from "../dist/paperclip/mirror.js";
 import { HOLD_PREFIX, holdReason } from "../dist/github/cards.js";
 import { addObserver, drainObservers, publishSnapshot, registerWorkSource, wantsCards } from "../dist/work-source.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 
@@ -25,6 +28,16 @@ test("foremanOwnsCard: a served, mirrored repo's card with ownsCards on; everyth
   assert.equal(foremanOwnsCard({ ownsCards: true }, served, "xrgarcia/slashbin-engineering-manager"), false, "the EM repo is not served");
   assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["xrgarcia/jerky_service"] }, served, "xrgarcia/jerky_ops"), false, "served but not mirrored");
   assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["xrgarcia/jerky_service"] }, served, "xrgarcia/jerky_service"), true);
+});
+
+test("foremanOwnsCard: with a registry a moved repo matches under either owner; without one it stays exact (#177)", () => {
+  const served = ["xrgarcia/slashbin_data_receiver"];
+  const reg = { ownsCards: true, registryUrl: "https://registry.example/registry/mcp" };
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/slashbin_data_receiver"), true, "moved owner, registry set");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/Slashbin_Data_Receiver"), true, "case does not matter");
+  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "slashbin-io/slashbin_data_receiver"), false, "no registry: exact");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/slashbin_mcp_services"), false, "a different name is not owned");
+  assert.equal(foremanOwnsCard({ ...reg, repos: ["slashbin-io/slashbin_data_receiver"] }, served, "xrgarcia/slashbin_data_receiver"), true, "paperclip.repos under the other owner");
 });
 
 test("pickCard: the oldest row that is not cancelled, else the oldest; undated rows by list order, after dated ones", () => {
@@ -70,7 +83,7 @@ test("holdReason: the labeller's newest comment from 15 minutes before the label
 });
 
 test("publishSnapshot: the cards are read and carried only while an observer owns them", async () => {
-  setStatePath(mkdtempSync(join(tmpdir(), "owned-cards-")));
+  setStatePath(mkTmp("owned-cards-"));
   let cardReads = 0;
   const card = { item: { issueNumber: 1, repo: "o/r" }, title: "t", url: "u", state: "open", stage: null };
   registerWorkSource({
@@ -79,17 +92,17 @@ test("publishSnapshot: the cards are read and carried only while an observer own
   });
   const seen = [];
   let owns = false;
-  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsCards: () => owns });
+  addObserver({ onEvent: async (e) => { seen.push(e); }, wantsSnapshot: () => true, wantsCards: () => owns });
   const repoConfig = { name: "r", githubRepo: "o/r" };
   try {
     assert.equal(wantsCards(), false);
-    await publishSnapshot(repoConfig, logger);
+    await publishSnapshot(rt, repoConfig, logger);
     await drainObservers();
     assert.equal(cardReads, 0);
     assert.equal("cards" in seen.at(-1), false);
     owns = true;
     assert.equal(wantsCards(), true);
-    await publishSnapshot(repoConfig, logger);
+    await publishSnapshot(rt, repoConfig, logger);
     await drainObservers();
     assert.equal(cardReads, 1);
     assert.deepEqual(seen.at(-1).cards, [card]);

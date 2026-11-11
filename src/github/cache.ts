@@ -2,10 +2,11 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import {
-  closedVersion, isGitHubStateEnabled, markAllDirty, markRepoDirty, stateOpenIssues, stateOpenPrs,
-} from "../github-state.js";
-import { gh } from "./gh.js";
+import { fleetState } from "../github-state.js";
+import { ghAsync } from "./gh.js";
+import { isForemanOwnedHead } from "../foreman-branch.js";
+import type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
+export type { IssueSnapshot, PrSnapshot, GhFailure } from "../code-host.js";
 
 
 // ---------------------------------------------------------------------------
@@ -43,18 +44,31 @@ import { gh } from "./gh.js";
  * Additive and OSS-safe: `issueCacheTtlMs: 0` restores the old behaviour of one
  * live query per lookup.
  */
-export interface IssueSnapshot {
-  number: number;
-  title: string;
-  labels: { name: string }[];
-}
-
 export const DEFAULT_ISSUE_CACHE_TTL_MS = 30_000;
 export const DEFAULT_ISSUE_SNAPSHOT_LIMIT = 500;
 
-export let issueCacheTtlMs = DEFAULT_ISSUE_CACHE_TTL_MS;
-export let issueSnapshotLimit = DEFAULT_ISSUE_SNAPSHOT_LIMIT;
-export const issueSnapshots = new Map<string, { fetchedAt: number; issues: IssueSnapshot[] }>();
+/**
+ * Process-wide: the per-repo read caches in front of the one `gh` runner. That
+ * runner clears them on every write it makes (`invalidateSnapshotIfMutating`), so
+ * there is exactly one, and nothing else holds a copy.
+ */
+class ReadCache {
+  ttlMs = DEFAULT_ISSUE_CACHE_TTL_MS;
+  snapshotLimit = DEFAULT_ISSUE_SNAPSHOT_LIMIT;
+  readonly issues = new Map<string, { fetchedAt: number; issues: IssueSnapshot[] }>();
+  /** Open PRs per repo (see `getOpenPrs`). */
+  readonly prs = new Map<string, { fetchedAt: number; prs: PrSnapshot[] }>();
+  /** Deep reads keyed on what the fleet state says (see `ghKeyed`). */
+  readonly deep = new Map<string, { key: string; json: string }>();
+  /**
+   * `hasFreshReview` answers, keyed by the PR's head commit and last-update time
+   * from the fleet state. A new commit moves the head; a submitted review bumps
+   * the PR's updatedAt — either one misses this cache. Without it, every idle
+   * cycle re-read the reviews of every open feature PR waiting on a human.
+   */
+  readonly freshReviews = new Map<string, { key: string; fresh: boolean }>();
+}
+export const reads = new ReadCache();
 
 /**
  * Apply daemon-level cache settings. Called once at startup; defaults stand if
@@ -62,13 +76,13 @@ export const issueSnapshots = new Map<string, { fetchedAt: number; issues: Issue
  */
 export function configureIssueCache(opts: { ttlMs?: number; snapshotLimit?: number }): void {
   if (typeof opts.ttlMs === "number" && Number.isFinite(opts.ttlMs) && opts.ttlMs >= 0) {
-    issueCacheTtlMs = opts.ttlMs;
+    reads.ttlMs = opts.ttlMs;
   }
   if (typeof opts.snapshotLimit === "number" && Number.isFinite(opts.snapshotLimit) && opts.snapshotLimit > 0) {
-    issueSnapshotLimit = Math.floor(opts.snapshotLimit);
+    reads.snapshotLimit = Math.floor(opts.snapshotLimit);
   }
-  issueSnapshots.clear();
-  prSnapshots.clear();
+  reads.issues.clear();
+  reads.prs.clear();
 }
 
 /**
@@ -85,11 +99,11 @@ export function invalidateSnapshotIfMutating(args: string[]): void {
   // everything — conservative, and a cache miss only costs one request.
   const methodIdx = args.indexOf("--method");
   if (args[0] === "api" && methodIdx >= 0 && args[methodIdx + 1] !== "GET") {
-    issueSnapshots.clear();
-    prSnapshots.clear();
+    reads.issues.clear();
+    reads.prs.clear();
     const m = /^repos\/([^/]+\/[^/]+)\//.exec(args.find((a) => a.startsWith("repos/")) ?? "");
-    if (m) markRepoDirty(m[1]);
-    else markAllDirty();
+    if (m) fleetState.markRepoDirty(m[1]);
+    else fleetState.markAllDirty();
     return;
   }
 
@@ -99,14 +113,14 @@ export function invalidateSnapshotIfMutating(args: string[]): void {
   const READ_ONLY = new Set(["list", "view", "diff", "checks", "status"]);
   if (READ_ONLY.has(args[1])) return;
 
-  markRepoDirty(repo);
-  if (args[0] === "issue") issueSnapshots.delete(repo);
+  fleetState.markRepoDirty(repo);
+  if (args[0] === "issue") reads.issues.delete(repo);
   // A PR merge closes the PR *and* moves the issue labels that track it, so a
   // `pr` mutation has to drop both — otherwise a later phase this cycle reads a
   // merged PR back as open.
   if (args[0] === "pr") {
-    prSnapshots.delete(repo);
-    issueSnapshots.delete(repo);
+    reads.prs.delete(repo);
+    reads.issues.delete(repo);
   }
 }
 
@@ -120,8 +134,8 @@ export function invalidateSnapshotIfMutating(args: string[]): void {
  * foreign process may have just written must drop the snapshot first.
  */
 export function dropIssueSnapshot(repo: string): void {
-  issueSnapshots.delete(repo);
-  markRepoDirty(repo);
+  reads.issues.delete(repo);
+  fleetState.markRepoDirty(repo);
 }
 
 /**
@@ -129,40 +143,40 @@ export function dropIssueSnapshot(repo: string): void {
  * read. What observers mirror the board from: GitHub is the record, so a card
  * that drifted from it is put back on the next cycle.
  */
-export function openIssueLabels(config: RepoConfig, logger: Logger): Array<{ number: number; labels: string[] }> {
-  return getOpenIssues(config.githubRepo, config.repoPath, logger).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+export async function openIssueLabels(config: RepoConfig, logger: Logger): Promise<Array<{ number: number; labels: string[] }>> {
+  return (await getOpenIssues(config.githubRepo, config.repoPath, logger)).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
 }
 
 /** Every open issue in the repo, from cache when warm. */
-export function getOpenIssues(repo: string, cwd: string, logger: Logger): IssueSnapshot[] {
+export async function getOpenIssues(repo: string, cwd: string, logger: Logger): Promise<IssueSnapshot[]> {
   // The fleet-wide state (github-state.ts) answers for every configured repo
   // from one bulk query. `issueCacheTtlMs: 0` still means "always live".
-  if (issueCacheTtlMs > 0 && isGitHubStateEnabled(repo)) return stateOpenIssues(repo);
+  if (reads.ttlMs > 0 && fleetState.isEnabled(repo)) return await fleetState.openIssues(repo);
 
-  const cached = issueSnapshots.get(repo);
-  if (cached && issueCacheTtlMs > 0 && Date.now() - cached.fetchedAt < issueCacheTtlMs) {
+  const cached = reads.issues.get(repo);
+  if (cached && reads.ttlMs > 0 && Date.now() - cached.fetchedAt < reads.ttlMs) {
     return cached.issues;
   }
 
-  const json = gh([
+  const json = await ghAsync([
     "issue", "list",
     "--repo", repo,
     "--state", "open",
     "--json", "number,title,labels",
-    "--limit", String(issueSnapshotLimit),
+    "--limit", String(reads.snapshotLimit),
   ], cwd);
   const issues: IssueSnapshot[] = JSON.parse(json || "[]");
 
   // No silent caps. Hitting the limit means discovery may be blind to issues it
   // is supposed to see, which would look exactly like "no work to do".
-  if (issues.length >= issueSnapshotLimit) {
+  if (issues.length >= reads.snapshotLimit) {
     logger.warn(
       "Open-issue snapshot hit its limit — discovery may be missing issues; raise issueSnapshotLimit",
-      { repo, limit: issueSnapshotLimit, returned: issues.length },
+      { repo, limit: reads.snapshotLimit, returned: issues.length },
     );
   }
 
-  if (issueCacheTtlMs > 0) issueSnapshots.set(repo, { fetchedAt: Date.now(), issues });
+  if (reads.ttlMs > 0) reads.issues.set(repo, { fetchedAt: Date.now(), issues });
   return issues;
 }
 
@@ -171,7 +185,7 @@ export function hasLabel(issue: IssueSnapshot, name: string): boolean {
   return issue.labels.some((l) => l.name === name);
 }
 
-/**
+/*
  * The same collapse for OPEN pull requests, and for the same reason.
  *
  * Roughly three `gh pr list --state open` calls run per repo per cycle no matter
@@ -190,49 +204,39 @@ export function hasLabel(issue: IssueSnapshot, name: string): boolean {
  * and the one call that needs `files` (a per-PR file list, far heavier than the
  * scalar fields below). Those stay live.
  */
-export interface PrSnapshot {
-  number: number;
-  url: string;
-  title: string;
-  body: string;
-  headRefName: string;
-  baseRefName: string;
-}
-
-export const prSnapshots = new Map<string, { fetchedAt: number; prs: PrSnapshot[] }>();
 
 /**
  * Drop what the Foreman holds about `repo`'s open PRs, so the next read asks
  * GitHub. A session runs `gh pr create` in its own process, which the
- * mutation hook in `gh()` never sees: without this, the check that the
+ * mutation hook in `ghAsync()` never sees: without this, the check that the
  * session's PR exists read the list cached before it, found nothing, and
  * booked a built PR as "PR creation could not be verified"
  * (slashbin_mcp_services PR #240, 2026-10-09).
  */
 export function forgetOpenPrs(repo: string): void {
-  prSnapshots.delete(repo);
-  markRepoDirty(repo);
+  reads.prs.delete(repo);
+  fleetState.markRepoDirty(repo);
 }
 
 /** Every open PR in the repo, from cache when warm. */
-export function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
-  if (issueCacheTtlMs > 0 && isGitHubStateEnabled(repo)) return stateOpenPrs(repo);
+export async function getOpenPrs(repo: string, cwd: string): Promise<PrSnapshot[]> {
+  if (reads.ttlMs > 0 && fleetState.isEnabled(repo)) return await fleetState.openPrs(repo);
 
-  const cached = prSnapshots.get(repo);
-  if (cached && issueCacheTtlMs > 0 && Date.now() - cached.fetchedAt < issueCacheTtlMs) {
+  const cached = reads.prs.get(repo);
+  if (cached && reads.ttlMs > 0 && Date.now() - cached.fetchedAt < reads.ttlMs) {
     return cached.prs;
   }
 
-  const json = gh([
+  const json = await ghAsync([
     "pr", "list",
     "--repo", repo,
     "--state", "open",
-    "--json", "number,url,title,body,headRefName,baseRefName",
+    "--json", "number,url,title,body,headRefName,baseRefName,headRefOid",
     "--limit", "100",
   ], cwd);
   const prs: PrSnapshot[] = JSON.parse(json || "[]");
 
-  if (issueCacheTtlMs > 0) prSnapshots.set(repo, { fetchedAt: Date.now(), prs });
+  if (reads.ttlMs > 0) reads.prs.set(repo, { fetchedAt: Date.now(), prs });
   return prs;
 }
 
@@ -242,9 +246,9 @@ export function getOpenPrs(repo: string, cwd: string): PrSnapshot[] {
  * Null when it cannot say: the list failed, or it is full (`--limit 100`), where
  * a missing PR may just be past the page.
  */
-export function isPrOpen(repo: string, prNumber: number, cwd: string): boolean | null {
+export async function isPrOpen(repo: string, prNumber: number, cwd: string): Promise<boolean | null> {
   try {
-    const prs = getOpenPrs(repo, cwd);
+    const prs = await getOpenPrs(repo, cwd);
     if (prs.some((p) => p.number === prNumber)) return true;
     return prs.length >= 100 ? null : false;
   } catch {
@@ -256,12 +260,12 @@ export function isPrOpen(repo: string, prNumber: number, cwd: string): boolean |
  * Open PRs matching a head/base pair, newest first — the shape the old
  * `--head X --base Y --limit N` calls returned.
  */
-export function findOpenPrs(
+export async function findOpenPrs(
   repo: string,
   cwd: string,
   opts: { head?: string; base?: string; limit?: number },
-): PrSnapshot[] {
-  const matches = getOpenPrs(repo, cwd).filter(
+): Promise<PrSnapshot[]> {
+  const matches = (await getOpenPrs(repo, cwd)).filter(
     (p) =>
       (opts.head === undefined || p.headRefName === opts.head) &&
       (opts.base === undefined || p.baseRefName === opts.base),
@@ -270,18 +274,47 @@ export function findOpenPrs(
 }
 
 /**
+ * Open PRs into `config.baseBranch` whose head is Foreman-owned (branchPrefix, or the legacy
+ * featureBranch), newest first. The ONE way the Foreman finds its own PRs (#208): a human-named
+ * head never appears here, so nothing downstream can revise, reconcile or push to it.
+ */
+export async function findOpenForemanPrs(config: RepoConfig, limit?: number): Promise<PrSnapshot[]> {
+  const matches = (await getOpenPrs(config.githubRepo, config.repoPath))
+    .filter((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
+  return limit === undefined ? matches : matches.slice(0, limit);
+}
+
+/** The first open Foreman-owned PR the fleet state knows about; undefined is "ask GitHub", never "no PR" (see knownOpenPr). */
+export async function knownOpenForemanPr(
+  config: RepoConfig,
+): Promise<{ number: number; url: string; headRefOid: string; headRefName: string } | undefined> {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(config.githubRepo)) return undefined;
+  const pr = (await fleetState.openPrs(config.githubRepo))
+    .find((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
+  return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid, headRefName: pr.headRefName } : undefined;
+}
+
+/** The first open Foreman-owned PR's head commit and last update, or null when the state cannot say. */
+export async function openForemanPrVersion(config: RepoConfig): Promise<string | null> {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(config.githubRepo)) return null;
+  const pr = (await fleetState.openPrs(config.githubRepo))
+    .find((p) => p.baseRefName === config.baseBranch && isForemanOwnedHead(config, p.headRefName));
+  return pr ? `${pr.number}:${pr.headRefOid}@${pr.updatedAt}` : null;
+}
+
+/**
  * The open `head → base` PR the fleet state already knows about, or undefined
  * when the state is off or has none. Undefined is "ask GitHub", never "no PR":
  * a session the Foreman just ran may have opened one the state has not seen yet,
  * and a caller that reads absence as "no PR" would open a duplicate.
  */
-export function knownOpenPr(
+export async function knownOpenPr(
   repo: string,
   head: string,
   base: string,
-): { number: number; url: string; headRefOid: string } | undefined {
-  if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return undefined;
-  const pr = stateOpenPrs(repo).find((p) => p.headRefName === head && p.baseRefName === base);
+): Promise<{ number: number; url: string; headRefOid: string } | undefined> {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return undefined;
+  const pr = (await fleetState.openPrs(repo)).find((p) => p.headRefName === head && p.baseRefName === base);
   return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid } : undefined;
 }
 
@@ -290,42 +323,29 @@ export function knownOpenPr(
  * only when the thing they read can have changed. `key` returns null when the
  * state cannot vouch (off, or the PR is not in it) — then the read is live.
  */
-export const deepReadCache = new Map<string, { key: string; json: string }>();
-
-export function ghKeyed(id: string, key: () => string | null, args: string[], cwd: string): string {
+export async function ghKeyed(id: string, key: () => string | null | Promise<string | null>, args: string[], cwd: string): Promise<string> {
   let k: string | null = null;
-  try { k = key(); } catch { k = null; }
+  try { k = await key(); } catch { k = null; }
   if (k !== null) {
-    const hit = deepReadCache.get(id);
+    const hit = reads.deep.get(id);
     if (hit && hit.key === k) return hit.json;
   }
-  const json = gh(args, cwd);
-  if (k !== null) deepReadCache.set(id, { key: k, json });
+  const json = await ghAsync(args, cwd);
+  if (k !== null) reads.deep.set(id, { key: k, json });
   return json;
 }
 
 /** The open `head → base` PR's head commit and last update, or null when the state cannot say. */
-export function openPrVersion(repo: string, head: string, base: string): string | null {
-  if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return null;
-  const pr = stateOpenPrs(repo).find((p) => p.headRefName === head && p.baseRefName === base);
+export async function openPrVersion(repo: string, head: string, base: string): Promise<string | null> {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return null;
+  const pr = (await fleetState.openPrs(repo)).find((p) => p.headRefName === head && p.baseRefName === base);
   return pr ? `${pr.number}:${pr.headRefOid}@${pr.updatedAt}` : null;
 }
 
 /** Changes whenever a PR in the repo was seen merged or closed, or null when the state is off. */
-export function closedPrVersion(repo: string): string | null {
-  if (issueCacheTtlMs <= 0 || !isGitHubStateEnabled(repo)) return null;
-  return String(closedVersion(repo));
-}
-
-/**
- * Extract the actionable bits of a thrown gh CLI error so callers can log
- * something useful instead of swallowing the failure. execFileSync attaches
- * `stderr` (Buffer) and `status` (exit code) to the Error it throws.
- */
-export interface GhFailure {
-  message: string;
-  stderr: string;
-  status: number | null;
+export async function closedPrVersion(repo: string): Promise<string | null> {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return null;
+  return String(await fleetState.closedVersion(repo));
 }
 
 export function formatGhError(err: unknown): GhFailure {

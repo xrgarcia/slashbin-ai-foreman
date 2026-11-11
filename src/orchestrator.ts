@@ -1,14 +1,15 @@
 import { releaseStageReady, type AgentConfig, type RepoConfig } from "./config.js";
 import { configureBackoff } from "./backoff.js";
+import { configureRunner } from "./refusal.js";
 import type { Logger } from "./logger.js";
-import { publishSnapshot, hasObservers, workSourceFor } from "./work-source.js";
-import { pruneClosedHolds } from "./closed-holds.js";
-import { type ImplementationResult } from "./agent.js";
+import { publishSnapshot, wantsSnapshot, workSourceFor } from "./work-source.js";
+import { type ImplementationResult } from "./session/protocol.js";
 import { dispatchStages, hasStage, isCustomStage, type StageEntry, type StageResult } from "./stages.js";
 import { getQueuedSessionCount, lanesFor, setSessionLimit, stageNeedsCheckout, stageSpawnsSession, withCheckoutLock, withLaneLock, withSessionSlot, type Lane } from "./lanes.js";
-import { CycleEvent, activeRuns, failureCount, revisionFailureCount } from "./phases/common.js";
+import { CycleEvent, activeRuns } from "./phases/common.js";
 import { tryCustomStage } from "./phases/custom.js";
 import { tryBatchImplementation } from "./phases/implement.js";
+import { trySkillDeliver } from "./phases/skill-deliver.js";
 import { tryFileDependencyBatchIssue, tryPromotion, trySyncDrift } from "./phases/promote.js";
 import { runReconcileStage } from "./phases/reconcile.js";
 import { tryRelease } from "./phases/release.js";
@@ -16,13 +17,13 @@ import { tryUnstick } from "./phases/unstick.js";
 import { tryReview } from "./phases/review.js";
 import { tryRevision } from "./phases/revise.js";
 import { tryVerify } from "./phases/verify.js";
-import { onboardRepo } from "./onboarding.js";
+import type { ForemanRuntime } from "./runtime.js";
 
 // The phases live in src/phases/; these are the parts of them the daemon, the
 // CLI and the tests reach through the orchestrator.
-export { stoppedReason, divergenceNotice, labelFromTrailer, workStateOf, type CycleEvent } from "./phases/common.js";
+export { stoppedReason, labelFromTrailer, workStateOf, type CycleEvent } from "./phases/common.js";
 export { prBlockingSkip } from "./phases/implement.js";
-export { verifyHoldPlan, pickVerifyTarget, devVerifyHolding, followUpsOf, reworkIssueTitle, reworkIssueBody, reworkIssueArgs } from "./phases/verify.js";
+export { verifyHoldPlan, pickVerifyTarget, devVerifyHolding, visualDecisionHolder, evidenceLinks } from "./phases/verify.js";
 
 export interface OrchestratorState {
   implementing: string | null;
@@ -34,12 +35,12 @@ export interface OrchestratorState {
   repos: Record<string, { failures: number; revisionFailures: number }>;
 }
 
-export function getState(config: AgentConfig): OrchestratorState {
+export function getState(rt: ForemanRuntime, config: AgentConfig): OrchestratorState {
   const repos: OrchestratorState["repos"] = {};
   for (const repo of config.repos) {
     repos[repo.name] = {
-      failures: failureCount.get(repo.name) ?? 0,
-      revisionFailures: revisionFailureCount.get(repo.name) ?? 0,
+      failures: rt.memory.failureCount.get(repo.name) ?? 0,
+      revisionFailures: rt.memory.revisionFailureCount.get(repo.name) ?? 0,
     };
   }
   const implementingRepos = getActiveRunRepos();
@@ -71,6 +72,7 @@ export function getActiveRunRepos(): string[] {
  * drain that ended with the subprocess would stop the daemon between a deploy
  * and its record — and the next start would not know the deploy happened.
  */
+/** Process-wide: the shutdown drain waits on every lane pass the process is running. */
 const lanePassesInFlight = new Map<string, number>();
 export function getActiveLanePasses(): string[] {
   return [...lanePassesInFlight.keys()];
@@ -88,6 +90,7 @@ export function getActiveLanePassCount(): number {
  * start an implement session in the same pass — work begun inside the drain
  * window and then cut off when the window elapsed, leaving a half-built branch.
  */
+/** Process-wide: one SIGTERM stops every lane pass in the process. */
 let shutdownRequested = false;
 export function requestShutdown(): void {
   shutdownRequested = true;
@@ -140,11 +143,6 @@ export interface CycleResult {
   events: CycleEvent[];
 }
 
-/** Pass counter per (repo, lane). The fleet-wide `cycle=N` alone became
- *  unreadable the moment repos ran concurrently, so every line carries
- *  `repo`, `lane` and `repoCycle` — that lane's own pass count on that repo. */
-const laneCycleCounter = new Map<string, number>();
-
 export interface RepoCycleResult {
   processed: number;
   lastImplementation: ImplementationResult | null;
@@ -160,18 +158,28 @@ export type SnapshotPolicy = "always" | "if-work" | "never";
  * caller waits for the first (withLaneLock).
  */
 export async function runLanePass(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   lane: Lane,
   logger: Logger,
   snapshot: SnapshotPolicy = "always",
 ): Promise<RepoCycleResult> {
+  // A sync-only (human-lane) repo runs the skill-deliver stage and nothing else; every other repo never runs it.
+  // Checked first: no onboarding (it would create labels), no records import, no board snapshot for a human repo.
+  const delivers = lane.stages.some((s) => !isCustomStage(s) && s.type === "skill-deliver");
+  if (!!repoConfig.syncOnly !== delivers) return { processed: 0, lastImplementation: null, events: [] };
   // No lane runs on a repo before it is onboarded: its labels exist (onboarding.ts).
-  if (config.onboarding && !(await onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
+  // A sync-only repo skips onboarding and the records import: both write (labels, records) and delivery must not depend on them.
+  if (!repoConfig.syncOnly) {
+    if (config.onboarding && !(await rt.onboarding.onboardRepo(repoConfig, logger))) return { processed: 0, lastImplementation: null, events: [] };
+    // The legacy per-issue entries of `.agent-state.json` move into the record store once, before any lane reads a record.
+    await rt.legacy.importLegacyRecords(repoConfig, logger, config.allRepos ?? config.repos);
+  }
   const key = `${repoConfig.name}/${lane.name}`;
   lanePassesInFlight.set(key, (lanePassesInFlight.get(key) ?? 0) + 1);
   try {
-    return await withLaneLock(repoConfig.name, lane.name, () => runLaneCycle(repoConfig, config, lane, logger, snapshot));
+    return await withLaneLock(repoConfig.name, lane.name, () => runLaneCycle(rt, repoConfig, config, lane, logger, snapshot));
   } finally {
     const n = (lanePassesInFlight.get(key) ?? 1) - 1;
     if (n > 0) lanePassesInFlight.set(key, n);
@@ -184,14 +192,15 @@ export async function runLanePass(
  * and the tests; the daemon drives each lane on its own loop instead.
  */
 export async function runRepoPass(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   logger: Logger,
 ): Promise<RepoCycleResult> {
   const results = await Promise.all(
-    lanesFor(config.stages).map((lane) => runLanePass(repoConfig, config, lane, logger, "never")),
+    lanesFor(config.stages).map((lane) => runLanePass(rt, repoConfig, config, lane, logger, "never")),
   );
-  await publishBoard(repoConfig, logger.child({ repo: repoConfig.name }));
+  if (!repoConfig.syncOnly) await publishBoard(rt, repoConfig, logger.child({ repo: repoConfig.name }));
   return {
     processed: results.reduce((n, r) => n + r.processed, 0),
     lastImplementation: results.find((r) => r.lastImplementation)?.lastImplementation ?? null,
@@ -203,18 +212,12 @@ export async function runRepoPass(
 // card only when the Foreman acts on that issue, so a card it never acts on
 // again (blocked by an old skip, then advanced by a label heal) stayed wrong
 // for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
-async function publishBoard(repoConfig: RepoConfig, log: Logger): Promise<void> {
-  // A closed issue holds nothing: its skip, hold and failure entries go, observers or not.
+async function publishBoard(rt: ForemanRuntime, repoConfig: RepoConfig, log: Logger): Promise<void> {
+  if (!wantsSnapshot()) return;
   try {
-    await pruneClosedHolds(repoConfig, workSourceFor(repoConfig), log);
+    await publishSnapshot(rt, repoConfig, log);
   } catch (err) {
-    log.debug(`Closed-issue holds not cleared: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (!hasObservers()) return;
-  try {
-    await publishSnapshot(repoConfig, log);
-  } catch (err) {
-    log.debug(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn(`Board snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -239,6 +242,7 @@ async function publishBoard(repoConfig: RepoConfig, log: Logger): Promise<void> 
  * one repo never overlap; everything else runs alongside them.
  */
 async function runLaneCycle(
+  rt: ForemanRuntime,
   repoConfig: RepoConfig,
   config: AgentConfig,
   lane: Lane,
@@ -250,8 +254,8 @@ async function runLaneCycle(
   let lastImplementation: ImplementationResult | null = null;
 
   const counterKey = `${repoConfig.name}/${lane.name}`;
-  const repoCycle = (laneCycleCounter.get(counterKey) ?? 0) + 1;
-  laneCycleCounter.set(counterKey, repoCycle);
+  const repoCycle = (rt.memory.laneCycleCounter.get(counterKey) ?? 0) + 1;
+  rt.memory.laneCycleCounter.set(counterKey, repoCycle);
   // The phase helpers use the cycle number for per-repo failure cooldowns
   // ("retry after N idle cycles"), so it counts THIS lane's passes on this repo:
   // each of those maps belongs to exactly one lane, and a cooldown measured in
@@ -265,7 +269,7 @@ async function runLaneCycle(
     // release lane's deploy must never be cut off half-way; the drain waits for
     // every lane pass already running.
     if (stageSpawnsSession(stage) && shutdownRequested) return { outcome: "stop", reason: "shutdown requested" };
-    const run = () => runStage(stage, repoConfig, config, base, cycleNumber, events);
+    const run = () => runStage(rt, stage, repoConfig, config, base, cycleNumber, events);
     // Lock first, then the session slot: a stage waiting for the checkout never
     // holds a slot another repo could use.
     const withSlot = stageSpawnsSession(stage) ? () => withSessionSlot(run) : run;
@@ -280,7 +284,7 @@ async function runLaneCycle(
     base.debug(`Lane pass stopped at stage "${stage}" (${outcome}${reason ? `: ${reason}` : ""}) — later stages of the ${lane.name} lane skipped this pass`);
   }
 
-  if (snapshot === "always" || (snapshot === "if-work" && processed > 0)) await publishBoard(repoConfig, base);
+  if (!repoConfig.syncOnly && (snapshot === "always" || (snapshot === "if-work" && processed > 0))) await publishBoard(rt, repoConfig, base);
 
   return { processed, lastImplementation, events };
 }
@@ -293,6 +297,7 @@ interface StageRun {
 
 /** Run one stage. Each built-in is the phase that used to be called by name, unchanged. */
 async function runStage(
+  rt: ForemanRuntime,
   stage: StageEntry,
   repoConfig: RepoConfig,
   config: AgentConfig,
@@ -306,7 +311,7 @@ async function runStage(
   if (stageSpawnsSession(stage) && shutdownRequested) return { result: { outcome: "stop", reason: "shutdown requested" }, processed };
 
   if (isCustomStage(stage)) {
-    const r = await tryCustomStage(repoConfig, stage, base, events);
+    const r = await tryCustomStage(rt, repoConfig, stage, base, events);
     if (r.ran) processed++;
     return { result: r, processed };
   }
@@ -314,24 +319,24 @@ async function runStage(
   switch (stage.type) {
     // --- Reconcile orphaned commits (features ahead of develop with no PR) and dead zones ---
     case "reconcile":
-      processed += await runReconcileStage(repoConfig, config, base, events);
+      processed += await runReconcileStage(rt, repoConfig, config, base, events);
       break;
 
     // --- Review open feature PRs (invokes the configured review skill). The
     //    outcome-label reconcile (reviewLabelReconcile) runs inside tryReview. ---
     case "review":
-      if (await tryReview(repoConfig, config, base, cycleNumber, events)) processed++;
+      if (await tryReview(rt, repoConfig, config, base, cycleNumber, events)) processed++;
       break;
 
     // --- Dev-verify PRs the reviewer merged (`pr merged` → `pr approved`).
     //    A no-op unless srePath is configured (EM#440). ---
     case "verify":
-      if (await tryVerify(repoConfig, config, base, cycleNumber, events)) processed++;
+      if (await tryVerify(rt, repoConfig, config, base, cycleNumber, events)) processed++;
       break;
 
     // --- Revise PRs with pending review feedback ---
     case "revise": {
-      const revisionInfo = await tryRevision(repoConfig, config, base, cycleNumber, events);
+      const revisionInfo = await tryRevision(rt, repoConfig, config, base, cycleNumber, events);
       if (revisionInfo) {
         events.push({ message: `Revised ${repoConfig.githubRepo} PR #${revisionInfo.pr.number} (issues: ${revisionInfo.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
         processed++;
@@ -341,7 +346,7 @@ async function runStage(
 
     // --- Implement approved issues (one batch per repo) ---
     case "implement": {
-      const implResult = await tryBatchImplementation(repoConfig, config, base, cycleNumber, events);
+      const implResult = await tryBatchImplementation(rt, repoConfig, config, base, cycleNumber, events);
       if (implResult) {
         processed++;
         lastImplementation = implResult;
@@ -353,8 +358,8 @@ async function runStage(
     //    post-promotion merge commits. Runs independently of promotion work so
     //    drift is cleared even when no ready-for-prod issues exist. ---
     case "branch-sync":
-      if (!(repoConfig.baseBranch === repoConfig.productionBranch && repoConfig.featureBranch === repoConfig.productionBranch)) {
-        if (trySyncDrift(repoConfig, base, cycleNumber)) {
+      if (!(repoConfig.baseBranch === repoConfig.productionBranch)) {
+        if (await trySyncDrift(repoConfig, base, cycleNumber)) {
           events.push({ message: `Branch sync on ${repoConfig.githubRepo} (${repoConfig.productionBranch} → ${repoConfig.baseBranch}) — merged`, level: "info" });
           processed++;
         }
@@ -370,11 +375,11 @@ async function runStage(
     //    the queue with no human step; bare everywhere else. ---
     case "dependabot":
       if (repoConfig.baseBranch !== repoConfig.productionBranch) {
-        const filed = tryFileDependencyBatchIssue(repoConfig, base, cycleNumber);
+        const filed = await tryFileDependencyBatchIssue(rt, repoConfig, base, cycleNumber);
         if (filed) {
           events.push({
             message: repoConfig.dependencyPreApproved
-              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved — queued to build`
+              ? `${repoConfig.githubRepo}: filed dependency batch issue #${filed}, pre-approved with the production grant — queued to build and deliver to prod`
               : `${repoConfig.githubRepo}: filed dependency batch issue #${filed} — needs \`${repoConfig.triggerLabel}\` to build`,
             level: "info",
           });
@@ -389,7 +394,7 @@ async function runStage(
     //    the issue labels are the record. ---
     case "promote": {
       const releaseActive = hasStage(config.stages, "release") && releaseStageReady(config);
-      const promotionResult = await tryPromotion(repoConfig, base, cycleNumber, releaseActive);
+      const promotionResult = await tryPromotion(rt, repoConfig, base, cycleNumber, releaseActive);
       if (promotionResult === "promoted" || promotionResult === "synced") processed++;
       break;
     }
@@ -398,14 +403,20 @@ async function runStage(
     //    tag, prod verification, close or hold, soak. No Discord message on
     //    any outcome; a no-op without srePath and techLeadPath. ---
     case "release":
-      if (await tryRelease(repoConfig, config, base, cycleNumber)) processed++;
+      if (await tryRelease(rt, repoConfig, config, base, cycleNumber)) processed++;
       break;
 
     // --- Ask the EM to unstick stuck work (foreman#103): holds, escalations,
     //    divergence and the release gate. Needs emRepoPath; independent of
     //    Paperclip. Never clears a block. ---
     case "unstick":
-      processed += await tryUnstick(repoConfig, config, base, cycleNumber);
+      processed += await tryUnstick(rt, repoConfig, config, base, cycleNumber);
+      break;
+
+    // --- Human lane: put the golden skills on an `approved-for-human` issue's
+    //    feature branch. Sync-only repos only (runLanePass); never builds. ---
+    case "skill-deliver":
+      processed += await trySkillDeliver(rt, repoConfig, config, base, events);
       break;
   }
   return { result: { outcome: "ok" }, processed, lastImplementation };
@@ -417,6 +428,7 @@ async function runStage(
  * still caps the sessions.
  */
 export async function runCycle(
+  rt: ForemanRuntime,
   config: AgentConfig,
   logger: Logger,
   cycleNumber: number
@@ -424,6 +436,7 @@ export async function runCycle(
   const cycleLogger = logger.child({ cycle: cycleNumber, phase: "poll" });
   // `--once` and programmatic callers start here, not in the daemon.
   configureBackoff(config.backoff);
+  configureRunner(config.runner);
   setSessionLimit(config.maxConcurrentSessions);
 
   let totalProcessed = 0;
@@ -432,7 +445,7 @@ export async function runCycle(
 
   await Promise.all(config.repos.map(async (repoConfig) => {
     try {
-      const result = await runRepoPass(repoConfig, config, logger);
+      const result = await runRepoPass(rt, repoConfig, config, logger);
       totalProcessed += result.processed;
       events.push(...result.events);
       if (result.lastImplementation) lastResult = result.lastImplementation;

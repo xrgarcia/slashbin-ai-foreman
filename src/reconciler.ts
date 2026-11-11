@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { git as runGit } from "./git-exec.js";
 import type { RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
-import { gh, knownOpenPr, verifyPRExists } from "./github.js";
-import { fillTitle, signed } from "./github/conventions.js";
+import { codeHost } from "./plugins/registry.js";
+import { fillTitle, signed } from "./config-schema/github.js";
+import { branchPrefixOf, isForemanOwnedHead } from "./foreman-branch.js";
 
 export interface ReconciliationResult {
   reconciled: boolean;
@@ -40,13 +41,15 @@ interface OrphanedCommit {
 
 const GIT_TIMEOUT_MS = 30_000;
 
-export function git(args: string[], cwd: string): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: GIT_TIMEOUT_MS,
-  }).trim();
+/**
+ * `git` without blocking the event loop (a synchronous one froze every lane and observer for the
+ * whole timeout of a remote that was not answering, 2026-11-06, `spawnSync git ETIMEDOUT`).
+ *
+ * A timeout rejects with the code `ETIMEDOUT`, which `formatGitError` reads as a timeout; a
+ * SIGTERM from systemd is not Node's kill, so it still reads as cancelled.
+ */
+export function gitAsync(args: string[], cwd: string): Promise<string> {
+  return runGit(args, cwd, { timeoutMs: GIT_TIMEOUT_MS });
 }
 
 /**
@@ -96,211 +99,23 @@ export function formatGitError(err: unknown): GitFailure {
   };
 }
 
-export interface LocalBranchDivergence {
-  ahead: number;
-  behind: number;
-}
-
 /**
- * Inspect divergence of a local branch ref vs `origin/<branch>` in a shared
- * Foreman working clone. Fetches the branch first to ensure origin refs are
- * current. Returns `null` if any git call fails (clone gone, network blip,
- * branch missing) — callers must treat null as "unknown, don't act."
- *
- * Used by the orchestrator's skip-cache filter to re-check whether a
- * previously-recorded "branch diverged" skip reason is still true. When EM
- * manually reconciles a polluted local features ref (force-align to origin),
- * the skip cache's 30-min back-off would otherwise pin the issue dead-zoned
- * for that whole window before auto-clearing.
+ * The remote branches the Foreman owns (#208): `origin/<branchPrefix>*` plus the LEGACY shared
+ * featureBranch (exact name only, so `features-x` by a person is not swept in). Every candidate goes
+ * through the one ownership test, so a human-named head is never scanned, reconciled or deleted.
  */
-export function checkLocalBranchDivergence(
-  repoPath: string,
-  branch: string,
-  logger: Logger,
-): LocalBranchDivergence | null {
+async function getRemoteOwnedBranches(config: RepoConfig): Promise<string[]> {
   try {
-    git(["fetch", "origin", branch, "--quiet"], repoPath);
-    const ahead = parseInt(
-      git(["rev-list", "--count", `origin/${branch}..${branch}`], repoPath),
-      10,
-    );
-    const behind = parseInt(
-      git(["rev-list", "--count", `${branch}..origin/${branch}`], repoPath),
-      10,
-    );
-    if (Number.isNaN(ahead) || Number.isNaN(behind)) return null;
-    return { ahead, behind };
-  } catch (err) {
-    logger.warn("Local branch divergence check failed", {
-      repoPath,
-      branch,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
-/**
- * Filled by `fastForwardFeatureBranch` when it returns "diverged". The merge
- * base identifies the episode: commits added on either side keep it, and only
- * a reconcile (or a rewrite) moves it.
- */
-export interface BranchDivergence {
-  ahead?: number;
-  behind?: number;
-  mergeBase?: string;
-}
-
-export type FastForwardOutcome =
-  | "advanced"       // features moved up to base; origin updated
-  | "already-current"
-  | "work-in-flight" // features carries commits base lacks — nothing to do, not a fault
-  | "diverged"       // both sides have unique commits — a human decides
-  | "unknown";       // a git call failed; caller must not infer anything
-
-/**
- * Does a recorded divergence still hold? Read-only (fetch + counts + diff, no
- * checkout, no push), so it is safe while a revision session holds the shared
- * clone. The implement phase returns at its pending-revision gate before
- * fastForwardFeatureBranch runs, so without this a block outlives its cause
- * for as long as a feature PR is in review/revise (jerky_service #76/#79,
- * 2026-10-05). Returns undefined when git fails: that proves nothing.
- */
-export function divergenceStillHolds(config: RepoConfig): boolean | undefined {
-  const { repoPath, baseBranch, featureBranch } = config;
-  if (!baseBranch || !featureBranch || baseBranch === featureBranch) return false;
-  try {
-    git(["fetch", "origin", baseBranch, featureBranch, "--quiet"], repoPath);
-    const ahead = parseInt(git(["rev-list", "--count", `origin/${baseBranch}..origin/${featureBranch}`], repoPath), 10);
-    const behind = parseInt(git(["rev-list", "--count", `origin/${featureBranch}..origin/${baseBranch}`], repoPath), 10);
-    if (Number.isNaN(ahead) || Number.isNaN(behind)) return undefined;
-    if (!(ahead > 0 && behind > 0)) return false;
-    const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
-    return git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) !== "";
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Fast-forward the shared feature branch onto its base, and push.
- *
- * Why this exists: the implement skill's Phase 0 is `checkout features` +
- * `pull origin features`. Nothing has ever brought the base branch INTO
- * `features`. Dependabot PRs merge straight into the base, so the tree an
- * implement session builds and boots is missing every dependency bump landed
- * since the last feature merge. Measured 2026-09-10 across all twenty managed
- * repos: `features` was 0 ahead of base in every one, and behind by 3 to 300
- * commits; on `jerky_event_processor` the one file that actually differed was
- * `package-lock.json` (brace-expansion 2.1.3 vs 2.1.4).
- *
- * That matters more since 2026-09-07 (36c8f03), when `tryMergeDependencyPR` was
- * deleted and a dependency upgrade started going through an implement session
- * precisely so that something builds and STARTS the app. A session that boots a
- * 300-commit-stale tree does not prove what that change intended.
- *
- * FAST-FORWARD ONLY, deliberately (owner decision 2026-09-10):
- * - `--ff-only` cannot rewrite history and cannot invent a merge commit, so it
- *   is safe to run on a branch the daemon shares with its own working clone.
- * - When `features` is genuinely ahead (a feature PR is in flight, the normal
- *   mid-cycle state) the fast-forward is impossible and that is NOT a fault —
- *   the branch is doing its job. Report `work-in-flight` and let the session
- *   proceed; forcing it would discard unmerged commits.
- * - True divergence is the only failure, and it is reported rather than
- *   resolved. Auto-resolving is how a shared clone gets polluted, which is the
- *   documented cause of the "diverged from origin/features" dead-zone.
- *
- * Never force-pushes. Never resolves a conflict.
- */
-export function fastForwardFeatureBranch(
-  config: RepoConfig,
-  logger: Logger,
-  divergence?: BranchDivergence,
-): FastForwardOutcome {
-  const { repoPath, baseBranch, featureBranch } = config;
-  if (!baseBranch || !featureBranch || baseBranch === featureBranch) {
-    return "already-current";
-  }
-
-  try {
-    git(["fetch", "origin", baseBranch, featureBranch, "--quiet"], repoPath);
-
-    const ahead = parseInt(
-      git(["rev-list", "--count", `origin/${baseBranch}..origin/${featureBranch}`], repoPath),
-      10,
-    );
-    const behind = parseInt(
-      git(["rev-list", "--count", `origin/${featureBranch}..origin/${baseBranch}`], repoPath),
-      10,
-    );
-    if (Number.isNaN(ahead) || Number.isNaN(behind)) return "unknown";
-
-    // Base's unique commits change no files — the main→develop back-sync after
-    // a promotion adds merge commits only. That is not divergence: features
-    // already holds base's whole tree, so an in-flight feature PR proceeds.
-    // (jerky_service 2026-10-05: sync PR #85 landed while PR #84 was open, and
-    // every waiting issue stopped as "diverged, 2 ahead 2 behind".)
-    if (ahead > 0 && behind > 0) {
-      const mb = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
-      if (git(["diff", "--name-only", mb, `origin/${baseBranch}`], repoPath) === "") return "work-in-flight";
-    }
-
-    if (ahead > 0 && behind > 0) {
-      // Debug, not warn: the orchestrator announces a divergence once per
-      // episode (foreman#44). A warn here repeated every cycle — 837 lines in
-      // a week that nobody read.
-      logger.debug(
-        `${featureBranch} has diverged from ${baseBranch} (${ahead} ahead, ${behind} behind) — not fast-forwarding. A human decides this one.`,
-        { repo: config.name, ahead, behind },
-      );
-      if (divergence) {
-        divergence.ahead = ahead;
-        divergence.behind = behind;
-        divergence.mergeBase = git(["merge-base", `origin/${baseBranch}`, `origin/${featureBranch}`], repoPath);
-      }
-      return "diverged";
-    }
-    if (ahead > 0) return "work-in-flight";
-    if (behind === 0) return "already-current";
-
-    // Strictly behind: a fast-forward is exactly what is wanted.
-    git(["checkout", featureBranch], repoPath);
-    git(["merge", "--ff-only", `origin/${baseBranch}`], repoPath);
-    git(["push", "origin", featureBranch], repoPath);
-    logger.info(
-      `Fast-forwarded ${featureBranch} onto ${baseBranch} (+${behind} commit(s)) before implementing`,
-      { repo: config.name, commits: behind },
-    );
-    return "advanced";
-  } catch (err) {
-    const failure = formatGitError(err);
-    logger.warn(`Could not fast-forward ${featureBranch} onto ${baseBranch}`, {
-      repo: config.name,
-      ...failure,
-    });
-    return "unknown";
-  }
-}
-
-/**
- * List remote branches matching the feature branch prefix.
- * Feature branches are named `features-*`, not a single `features` ref.
- */
-function getRemoteFeatureBranches(
-  repoPath: string,
-  featureBranchPrefix: string,
-): string[] {
-  try {
-    const output = git(
-      ["branch", "-r", "--list", `origin/${featureBranchPrefix}*`],
-      repoPath,
-    );
+    const patterns = [`origin/${branchPrefixOf(config)}*`];
+    if (config.featureBranch && config.featureBranch !== config.baseBranch) patterns.push(`origin/${config.featureBranch}`);
+    const output = await gitAsync(["branch", "-r", "--list", ...patterns], config.repoPath);
     if (!output) return [];
-    return output
+    return [...new Set(output
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line && !line.includes("->"))
-      .map((ref) => ref.replace(/^origin\//, ""));
+      .map((ref) => ref.replace(/^origin\//, ""))
+      .filter((b) => b !== config.baseBranch && isForemanOwnedHead(config, b)))];
   } catch {
     return [];
   }
@@ -318,28 +133,19 @@ function extractIssueNumbers(commits: OrphanedCommit[]): number[] {
   return [...issueNums].sort((a, b) => a - b);
 }
 
-function hasOpenPR(
+async function hasOpenPR(
   githubRepo: string,
   featureBranch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string } | null | "unknown" {
+): Promise<{ number: number; url: string } | null | "unknown"> {
   try {
     // Every cycle, for every branch with commits waiting on review, this asks
     // whether the PR is still open — and almost always it is. The fleet state
     // answers that without a request; only "not known open" goes to GitHub.
-    const known = knownOpenPr(githubRepo, featureBranch, baseBranch);
+    const known = await codeHost().knownOpenPr(githubRepo, featureBranch, baseBranch);
     if (known) return { number: known.number, url: known.url };
-    const json = gh([
-      "pr", "list",
-      "--repo", githubRepo,
-      "--head", featureBranch,
-      "--base", baseBranch,
-      "--state", "open",
-      "--json", "number,url",
-      "--limit", "1",
-    ], cwd);
-    const prs: { number: number; url: string }[] = JSON.parse(json || "[]");
+    const prs = await codeHost().openPrsForBranch(githubRepo, featureBranch, baseBranch, cwd);
     return prs.length > 0 ? prs[0] : null;
   } catch {
     // Unknown, never "no open PR". Read as null, a failed lookup made the
@@ -351,44 +157,35 @@ function hasOpenPR(
 }
 
 /**
- * The most recent CLOSED-UNMERGED PR for `featureBranch → baseBranch`, with the
- * head SHA it was closed at.
+ * The closed PRs for `branch → baseBranch`: the most recent CLOSED-UNMERGED one (a rejection) and
+ * whether the branch's current head is exactly what a MERGED PR delivered.
  *
  * `hasOpenPR` deliberately only sees open PRs, which is what lets a rejection
- * become invisible: the EM closes a PR unmerged, its commits stay on the shared
- * branch, and one cycle later the reconciler finds "commits ahead, no open PR"
+ * become invisible: the EM closes a PR unmerged, its commits stay on the branch,
+ * and one cycle later the reconciler finds "commits ahead, no open PR"
  * and mints a fresh PR for the work that was just refused. Observed on
  * jerky_data_receiver (#72 rejected → #74 recreated it, bundled with new work).
  *
- * Merged PRs are excluded on purpose — a merged PR is a completed delivery, not a
- * refusal, and its commits being ahead of base again means something new happened.
+ * A merged PR is a completed delivery, not a refusal. `deliveredSha` is the head a merged
+ * PR carried: a branch still sitting at that head (squash merges leave its commits "ahead" of
+ * base forever) has nothing new to propose, so it is neither reconciled nor a rejection.
  */
-function findLastClosedUnmergedPR(
+async function readClosedPrs(
   githubRepo: string,
-  featureBranch: string,
+  branch: string,
   baseBranch: string,
   cwd: string,
-): { number: number; url: string; headSha: string } | null | "unknown" {
+): Promise<{ rejected: { number: number; url: string; headSha: string } | null; deliveredShas: string[] } | "unknown"> {
   try {
-    const json = gh([
-      "pr", "list",
-      "--repo", githubRepo,
-      "--head", featureBranch,
-      "--base", baseBranch,
-      "--state", "closed",
-      "--json", "number,url,mergedAt,headRefOid,closedAt",
-      "--limit", "20",
-    ], cwd);
-    const prs: {
-      number: number; url: string;
-      mergedAt: string | null; headRefOid: string; closedAt: string | null;
-    }[] = JSON.parse(json || "[]");
+    const prs = await codeHost().closedPrsForBranch(githubRepo, branch, baseBranch, cwd);
     const unmerged = prs
       .filter((p) => !p.mergedAt && p.headRefOid)
       .sort((a, b) => String(b.closedAt ?? "").localeCompare(String(a.closedAt ?? "")));
-    if (unmerged.length === 0) return null;
     const latest = unmerged[0];
-    return { number: latest.number, url: latest.url, headSha: latest.headRefOid };
+    return {
+      rejected: latest ? { number: latest.number, url: latest.url, headSha: latest.headRefOid } : null,
+      deliveredShas: prs.filter((p) => p.mergedAt && p.headRefOid).map((p) => p.headRefOid),
+    };
   } catch {
     // Unknown, not "no rejection": proceeding on a failed read would re-propose
     // a diff a person may have just refused. The caller skips the branch.
@@ -396,13 +193,40 @@ function findLastClosedUnmergedPR(
   }
 }
 
-function createReconciliationPR(
+/**
+ * Delete the Foreman's per-issue branches whose work has merged (#208): owned by PREFIX (never the
+ * legacy featureBranch, never a human head), no open PR, and still exactly at the head a merged PR
+ * delivered, so nothing unmerged is lost. Returns the branches deleted. Best effort per branch.
+ */
+export async function pruneMergedBranches(config: RepoConfig, logger: Logger, branches: string[]): Promise<string[]> {
+  const deleted: string[] = [];
+  for (const branch of branches) {
+    if (!branch.startsWith(branchPrefixOf(config))) continue;
+    try {
+      const open = await hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+      if (open !== null) continue; // open, or unknown: delete nothing
+      const closed = await readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
+      if (closed === "unknown") continue;
+      const sha = await gitAsync(["rev-parse", `origin/${branch}`], config.repoPath);
+      if (!closed.deliveredShas.includes(sha)) continue;
+      if (await codeHost().deleteMergedBranch(config, branch)) {
+        deleted.push(branch);
+        logger.info(`Deleted merged branch ${branch}`);
+      }
+    } catch (err) {
+      logger.warn(`Could not delete merged branch ${branch}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
+  }
+  return deleted;
+}
+
+async function createReconciliationPR(
   config: RepoConfig,
   headBranch: string,
   issueNumbers: number[],
   commitCount: number,
   logger: Logger,
-): string | null {
+): Promise<string | null> {
   const issueList = issueNumbers.length > 0
     ? issueNumbers.map((n) => `- Related to #${n}`).join("\n")
     : "_No linked issues found in commit messages_";
@@ -423,14 +247,7 @@ ${issueList}
 ${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``, config.github, " (reconciler)");
 
   try {
-    const result = gh([
-      "pr", "create",
-      "--repo", config.githubRepo,
-      "--base", config.baseBranch,
-      "--head", headBranch,
-      "--title", title,
-      "--body", body,
-    ], config.repoPath);
+    const result = await codeHost().createPr(config, { base: config.baseBranch, head: headBranch, title, body });
 
     const match = result.match(/https:\/\/github\.com\/[^\s]+/);
     return match ? match[0] : null;
@@ -442,18 +259,13 @@ ${commitCount} commit(s) on \`${headBranch}\` ahead of \`${config.baseBranch}\``
   }
 }
 
-export function reconcileRepo(
+export async function reconcileRepo(
   config: RepoConfig,
   logger: Logger,
-): ReconciliationResult {
-  // Skip main-only repos (like docs site)
-  if (config.baseBranch === config.featureBranch) {
-    return { reconciled: false, issueNumbers: [], commitCount: 0 };
-  }
-
-  // Fetch all refs first
+): Promise<ReconciliationResult> {
+  // Fetch all refs first. --prune drops remote-tracking refs of branches deleted after their merge.
   try {
-    git(["fetch", "origin"], config.repoPath);
+    await gitAsync(["fetch", "origin", "--prune"], config.repoPath);
   } catch (err) {
     const failure = formatGitError(err);
     if (failure.timedOut) {
@@ -470,11 +282,16 @@ export function reconcileRepo(
     return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
 
-  // Discover feature branches matching the prefix pattern
-  const featureBranches = getRemoteFeatureBranches(config.repoPath, config.featureBranch);
+  // Only Foreman-owned heads are scanned (per-issue branches, plus the legacy shared one).
+  const featureBranches = await getRemoteOwnedBranches(config);
   if (featureBranches.length === 0) {
     return { reconciled: false, issueNumbers: [], commitCount: 0 };
   }
+
+  // Merged work leaves no branch behind: delete it before scanning, so a squash-merged branch
+  // never reads as orphaned commits.
+  const pruned = await pruneMergedBranches(config, logger, featureBranches);
+  for (const b of pruned) featureBranches.splice(featureBranches.indexOf(b), 1);
 
   // Branches whose commits stand rejected. Collected rather than returned early:
   // one repo can have several feature branches and a rejection on one must not stop
@@ -485,7 +302,7 @@ export function reconcileRepo(
   for (const branch of featureBranches) {
     let commits: OrphanedCommit[];
     try {
-      const log = git(
+      const log = await gitAsync(
         ["log", `origin/${config.baseBranch}..origin/${branch}`, "--format=%H %s"],
         config.repoPath,
       );
@@ -503,7 +320,7 @@ export function reconcileRepo(
     logger.info(`Found ${commits.length} commit(s) on ${branch} ahead of ${config.baseBranch}`);
 
     // Check if PR already exists for this specific branch
-    const existingPR = hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    const existingPR = await hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
     if (existingPR === "unknown") {
       logger.warn(`Could not read the open PRs for ${branch} — skipping reconciliation this pass rather than risk a duplicate PR`);
       continue;
@@ -516,13 +333,18 @@ export function reconcileRepo(
     // Rejection guard: a PR is also "not open" when a human closed it unmerged.
     // If the branch has not moved since that rejection, recreating the PR would
     // re-propose the exact diff that was just refused.
-    const lastRejected = findLastClosedUnmergedPR(
-      config.githubRepo, branch, config.baseBranch, config.repoPath,
-    );
-    if (lastRejected === "unknown") {
+    const closedPrs = await readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
+    if (closedPrs === "unknown") {
       logger.warn(`Could not read the closed PRs for ${branch} — skipping reconciliation this pass rather than re-propose refused work`);
       continue;
     }
+    // Already delivered: the branch is exactly the head a merged PR carried (a squash merge leaves
+    // its commits "ahead" of base for good). Nothing new to propose.
+    if (closedPrs.deliveredShas.includes(commits[0].hash)) {
+      logger.debug(`${branch} sits at the head a merged PR delivered — no reconciliation needed`);
+      continue;
+    }
+    const lastRejected = closedPrs.rejected;
     if (lastRejected) {
       const headSha = commits[0].hash; // git log lists newest first
       if (headSha === lastRejected.headSha) {
@@ -555,7 +377,7 @@ export function reconcileRepo(
     const issueNumbers = extractIssueNumbers(commits);
     logger.info(`Extracted issue numbers from ${branch}: ${issueNumbers.join(", ") || "none"}`);
 
-    const prUrl = createReconciliationPR(config, branch, issueNumbers, commits.length, logger);
+    const prUrl = await createReconciliationPR(config, branch, issueNumbers, commits.length, logger);
     if (!prUrl) {
       return {
         reconciled: false, issueNumbers, commitCount: commits.length,
@@ -563,7 +385,7 @@ export function reconcileRepo(
       };
     }
 
-    const verified = verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath, logger);
+    const verified = await codeHost().verifyPRExists(config.githubRepo, branch, config.baseBranch, config.repoPath, logger);
     if (!verified) {
       logger.warn("PR URL returned but verification failed — PR may not exist");
       return {

@@ -17,10 +17,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { orchestratorSource } from "./source-text.mjs";
+import { orchestratorSource, agentSource, between } from "./source-text.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const agent = readFileSync(join(root, "src/agent.ts"), "utf-8");
+const agent = agentSource();
 const orchestrator = orchestratorSource();
 
 /** The live regex, lifted from source so the test cannot drift from it. */
@@ -51,7 +53,7 @@ test("a bare no-commit claim without a reason does NOT parse", () => {
 });
 
 test("the SHA guard returns success ONLY on a declared no-commit", () => {
-  const guard = agent.slice(agent.indexOf("if (beforeSha && afterSha && beforeSha === afterSha)"));
+  const guard = between(agent, "if (beforeSha && afterSha && beforeSha === afterSha)");
   const block = guard.slice(0, 2000);
   assert.match(block, /REVISION_NO_COMMIT\.exec/,
     "the guard must consult the trailer before failing the run");
@@ -71,26 +73,39 @@ test("the agent is told how to declare it, in both prompt branches", () => {
     `both the skill-driven and fallback prompts must carry it — found ${uses.length}`);
 });
 
-test("two declared no-commits in a row escalate instead of looping", () => {
-  assert.match(orchestrator, /const consecutiveNoCommit = new Map<string, number>\(\)/,
-    "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
+test("two declared no-commits on one head escalate instead of looping", () => {
   const block = orchestrator.slice(orchestrator.indexOf("if (result.noCommit)"), orchestrator.indexOf("if (result.noCommit)") + 2000);
+  const fn0 = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  assert.match(fn0, /const seen = await rt\.streaks\.record\(repoConfig, prNumber, head, prior\)/, "no bookkeeping means a reviewer/reviser disagreement ping-pongs forever");
   assert.match(block, /MAX_CONSECUTIVE_NO_COMMIT/, "the cap must be applied, not just declared");
   assert.match(block, /events\.push/, "a stalemate nobody is told about looks exactly like an idle queue");
   assert.match(block, /level: "error"/, "two agents deadlocked is an error-level condition");
   assert.match(block, /return null/, "on escalation it must NOT re-label, or the loop continues");
 });
 
-test("the no-commit streak clears on a real push and when feedback clears", () => {
-  const deletes = orchestrator.match(/consecutiveNoCommit\.delete\(repoName\)/g) ?? [];
-  assert.ok(deletes.length >= 2,
-    `a streak that never resets escalates a healthy repo later — found ${deletes.length} clear sites`);
+test("the no-commit streak clears on a real push, never on an idle pass (foreman#167)", () => {
+  const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  assert.match(fn, /\} else \{\n(?:\s*\/\/[^\n]*\n)?\s+await rt\.streaks\.clear\(repoConfig, prNumber\);/, "a pushed revision ends the streak");
+  const idle = fn.slice(fn.indexOf("if (!pending) {"), fn.indexOf("return null;", fn.indexOf("if (!pending) {")));
+  assert.doesNotMatch(idle, /rt\.streaks\.clear\(/, "a pass with no pending revision must not reset it");
 });
 
-test("an escalated stalemate stops launching revision sessions until the feedback clears", () => {
+test("an escalated stalemate stops launching revision sessions until the head moves", () => {
   const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
-  const skip = fn.indexOf("(consecutiveNoCommit.get(repoName) ?? 0) > MAX_CONSECUTIVE_NO_COMMIT");
+  const skip = fn.indexOf("noCommitCount(streak, head) > MAX_CONSECUTIVE_NO_COMMIT");
   assert.ok(skip > 0, "without it every cycle re-runs a paid revision that re-answers the same review");
   assert.ok(skip < fn.indexOf("revisePRFeedback("), "the skip must come before the session launches");
-  assert.ok(fn.indexOf("consecutiveNoCommit.delete(repoName)") < skip, "clearing pending feedback must still reset it");
+});
+
+test("a marker that cannot be saved admits no paid session; a round counts only after the session and a successful read (EM#1244 f5)", () => {
+  const fn = orchestrator.slice(orchestrator.indexOf("async function tryRevision("));
+  const read = fn.indexOf("const beforeSha = await codeHost().getRemoteBranchSha(");
+  const admit = fn.indexOf("await rt.streaks.admitRevision(");
+  assert.ok(read > 0 && read < admit, "the branch sha is read BEFORE anything is written: a failed read leaves nothing to take back");
+  assert.ok(admit > 0 && admit < fn.indexOf("revisePRFeedback("), "the marker is saved before the paid session");
+  assert.match(fn.slice(admit, admit + 400), /^await rt\.streaks\.admitRevision\([^\n]*\n[^\n]*\n\s+return null;/, "a failed save starts nothing, every pass");
+  assert.ok(admit < fn.indexOf('tryAcquire(runnerName())'), "and before the slot is taken");
+  assert.doesNotMatch(fn.slice(read, fn.indexOf("rt.streaks.record(") + 600), /restore/i, "nothing is restored: an outage that blocks reads also blocks the write that would undo a save");
+  const counted = fn.indexOf("rt.streaks.record(");
+  assert.ok(counted > fn.indexOf("if (result.noCommit)"), "a round is counted only on a completed session whose later read showed the head unchanged");
 });

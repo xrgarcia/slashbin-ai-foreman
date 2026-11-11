@@ -5,6 +5,7 @@
 ## Contents
 
 - [What it does](#what-it-does)
+- [Human lane: sync-only repos](#human-lane-sync-only-repos)
 - [Config](#config)
 
 A session runs the skill file in the repo it works in (`.claude/skills/<name>/SKILL.md`).
@@ -19,15 +20,18 @@ with its next approved issue, in that issue's own PR.
 ## What it does
 
 - **Notices.** On each implement pass, the Foreman compares every carried skill by
-  content: each file's path and bytes, on `origin/<featureBranch>`.
+  content: each file's path and bytes, on `origin/<baseBranch>`.
   - A changed byte makes the copy stale.
   - So does a missing file, or a file the golden doesn't have.
   - Drift is logged once per repo for each golden version, not on every poll.
 - **Syncs at implement time.** When an approved issue is picked up for a stale repo,
   the Foreman's code (never the session) copies the golden files byte for byte into
   the checkout, under the checkout lock.
-  - It commits them on the feature branch:
+  - It commits them on the local base branch; the issue's own branch is cut from it, and the base is moved back once the session ends:
     `chore(skills): sync <names> from <source>@<version> (#<issue>)`.
+  - Skill files are added with `git add --force`, so a repo that ignores `.claude/` still gets
+    them, and a file the golden no longer has is removed. The commit skips repo hooks
+    (`--no-verify`): it is a reviewed copy, and CI still runs on the PR.
   - The session then runs on the fresh skill, and the commit is pushed with the
     session's work. So it rides the issue's PR.
   - `(#<issue>)` appears only when the session was handed exactly one issue.
@@ -35,7 +39,8 @@ with its next approved issue, in that issue's own PR.
   the issue is built on the skill already there:
   - the golden can't be read
   - the checkout has uncommitted changes, or local commits that origin doesn't have
-  - any git step fails
+  - any git step fails (a warning is logged; the index and the skill files are put back exactly
+    as found, so a failed sync never leaves uncommitted changes that would block the next one)
 - **Leaves no strays.** If the session pushes nothing, the sync commit is taken back
   off the local branch, and the next issue syncs again.
 - **Not in revise.** A revision answers review using the skill it was built with.
@@ -44,6 +49,30 @@ with its next approved issue, in that issue's own PR.
 
 Only the skills the golden has are touched. A skill that exists only in the repo is
 left alone.
+
+## Human lane: sync-only repos
+
+A repo the registry puts in the `human` lane is built by a person running the unified
+`implement-approved-issues` skill directly (direct mode, branch `feature/<N>-<slug>`). The Foreman
+builds nothing there, but it keeps the skills that person runs current. Register the repo in
+`.ai-agent.json` with `"syncOnly": true` (and its `baseBranch`: the branch PRs merge into, `develop`
+or else `main`); it then runs only the `skill-deliver` stage (`src/phases/skill-deliver.ts`) and
+no implement, review, revise, reconcile, release, verify, unstick or board mirror. It is not
+onboarded, so no label is created.
+
+For each open `approved-for-human` issue (lowest number first), `SkillSync.deliverSkillsForIssue`:
+
+1. fetches `origin/<base>` and compares the carried skills by content. Current: nothing is done.
+2. looks for `feature/<N>-*` on origin. Present (the person started it, or an earlier delivery):
+   nothing is done. The direct-mode skill resumes that branch, and a second push would diverge it.
+3. otherwise builds one `chore(skills): sync ... (#N)` commit on `origin/<base>` and pushes it as
+   `feature/<N>-<slug>` (same slug rule as the skill: lower-case, non-alphanumerics to `-`, 40
+   characters). The person's session finds the branch, checks it out and merges `origin/<base>`.
+
+It uses git plumbing and a throwaway index, so the clone's working tree, index and branches are never
+touched (the clone may be someone's own) and there is no sync commit to settle afterwards. It never
+force-pushes, opens a PR, comments, labels or implements. Once the person's PR merges, the base is
+current and the repo is quiet until the golden changes.
 
 ## Config
 
@@ -61,7 +90,7 @@ Global `skillSync` block. It is off unless `enabled` is set.
 | `label` | the checkout's dir name | The source name used in the commit subject. |
 | `refreshMs` | `300000` | How long one read of the golden is reused. |
 
-Per repo, `skillSyncSkills` replaces `skills`, and `[]` opts that repo out.
+Per repo, `skillSyncSkills` replaces `skills`, and `[]` opts that repo out. Per repo, `syncOnly: true` makes it a human-lane repo (above).
 
 Example: a git source that serves the Foreman-lane and shared skills.
 

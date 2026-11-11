@@ -15,16 +15,22 @@ import { loadConfig, configSchema } from "../dist/config.js";
 import { BUILTIN_STAGES, dispatchStages, parseStageTrailer } from "../dist/stages.js";
 import { runRepoPass } from "../dist/orchestrator.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { memoryRecords } from "./issue-records.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
-const DEFAULT = ["reconcile", "review", "verify", "promote", "release", "revise", "implement", "branch-sync", "dependabot", "unstick"];
+const DEFAULT = ["reconcile", "review", "verify", "promote", "release", "revise", "implement", "branch-sync", "dependabot", "unstick", "skill-deliver"];
 const logger = createLogger({ format: "text", level: "error" });
 const names = (stages) => stages.map((s) => s.type ?? s.id);
 
 let tmp, F, saved;
 
-before(() => {
+before(async () => {
+  await startGitHubWorkSource();
+  memoryRecords(); // the dependency ledger (foreman#230) lives in the record store; the fake gh has no comment endpoint
   tmp = mkdtempSync(join(tmpdir(), "foreman-stages-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);
@@ -43,6 +49,10 @@ fs.appendFileSync(${JSON.stringify(F.ghLog)}, JSON.stringify(args) + "\\n");
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(F.ghState)}, "utf8"));
 if (args[0] === "pr" && args[1] === "list") {
   process.stdout.write(JSON.stringify(args.includes("--head") ? st.featurePrs : st.openPrs));
+} else if (args[0] === "pr" && args[1] === "view") {
+  // foreman#208: the open Foreman PR is read by number, not by the shared head.
+  const p = st.openPrs.find((x) => String(x.number) === args[2]);
+  process.stdout.write(JSON.stringify(p ?? {}));
 } else if (args[0] === "api" && args.join(" ").includes("dependabot/alerts")) {
   if (st.alertsFail) { process.stderr.write("gh: Dependabot alerts are disabled for this repository. (HTTP 404)"); process.exit(1); }
   process.stdout.write((st.alerts || []).join("\\n") + ((st.alerts || []).length ? "\\n" : ""));
@@ -92,7 +102,7 @@ function load(cfg, repo = {}) {
 function arrange({ featurePrs = [], openPrs = [], claudeOut = "", alerts = [], alertsFail = false } = {}) {
   writeFileSync(F.ghLog, "");
   writeFileSync(F.claudeLog, "");
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs, alerts, alertsFail }));
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs: [...featurePrs.map((p) => ({ ...p, headRefName: "features", baseRefName: "develop" })), ...openPrs], alerts, alertsFail }));
   writeFileSync(F.claudeOut, claudeOut);
 }
 const lines = (f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -101,12 +111,13 @@ const ghCalls = () => lines(F.ghLog);
 /** The promote stage's first act is listing the ready-for-prod issues. */
 const promoteRan = () => ghCalls().some((a) => a[0] === "issue" && a[1] === "list");
 
+// foreman#208: a fixture PR in `featurePrs` is the legacy shared-branch Foreman PR (head `features`, still owned) into the base `develop`.
 const SHA = "a".repeat(40);
 const OPEN_PR = { number: 7, title: "feat: scan target (#3)", body: "Related to #4", commits: [], headRefOid: SHA };
 
 // --- Config resolution -------------------------------------------------------
 
-test("default stages: a config with no `stages` resolves to the ten built-ins, in order", () => {
+test("default stages: a config with no `stages` resolves to the eleven built-ins, in order", () => {
   assert.deepEqual([...BUILTIN_STAGES], DEFAULT);
   assert.deepEqual(names(load({}).stages), DEFAULT);
   assert.deepEqual(names(configSchema.parse({}).stages), DEFAULT);
@@ -171,7 +182,7 @@ test("parseStageTrailer reads the last verdict line", () => {
 test("custom stage: one Claude session on its skillPath, told the work in flight; pass lets later stages run", async () => {
   arrange({ featurePrs: [OPEN_PR], claudeOut: "scanned\nFOREMAN_STAGE pass\n" });
   const config = load({ stages: [{ id: "security", skillPath: "/opt/sec/SKILL.md" }, { type: "promote" }] }, { name: "custom-pass" });
-  const r = await runRepoPass(config.repos[0], config, logger);
+  const r = await runRepoPass(rt, config.repos[0], config, logger);
 
   const runs = claudeRuns();
   assert.equal(runs.length, 1, "exactly one session");
@@ -185,6 +196,7 @@ test("custom stage: one Claude session on its skillPath, told the work in flight
     FOREMAN_STAGE_REPO: "example/repo",
     FOREMAN_STAGE_BASE_BRANCH: "develop",
     FOREMAN_STAGE_FEATURE_BRANCH: "features",
+    FOREMAN_STAGE_HEAD_BRANCH: "features", // foreman#208: the PR's own head, for a per-issue branch; FEATURE_BRANCH keeps the same value for stages written against it
     FOREMAN_STAGE_PR: "7",
     FOREMAN_STAGE_ISSUES: JSON.stringify([3, 4]),
     FOREMAN_STAGE_HEAD_SHA: SHA,
@@ -194,7 +206,7 @@ test("custom stage: one Claude session on its skillPath, told the work in flight
 
   // Same head next pass: the verdict stands, no second session.
   arrange({ featurePrs: [OPEN_PR], claudeOut: "FOREMAN_STAGE pass\n" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   assert.equal(claudeRuns().length, 0, "verdict reused while the feature head is unchanged");
   assert.ok(promoteRan());
 });
@@ -203,20 +215,20 @@ for (const [outcome, claudeOut] of [["blocked", 'FOREMAN_STAGE blocked reason="C
   test(`custom stage: ${outcome} outcome keeps every later stage from running that pass`, async () => {
     arrange({ featurePrs: [OPEN_PR], claudeOut });
     const config = load({ stages: [{ id: "security", skillPath: "/opt/sec/SKILL.md" }, { type: "promote" }] }, { name: `custom-${outcome}` });
-    const r = await runRepoPass(config.repos[0], config, logger);
+    const r = await runRepoPass(rt, config.repos[0], config, logger);
     assert.equal(claudeRuns().length, 1);
     assert.ok(!promoteRan(), "promote must not run past a stopped stage");
     assert.ok(r.events.some((e) => e.message.includes(`Stage "security" ${outcome}`)));
 
     // Still the same head: still held, and no new session spent.
     arrange({ featurePrs: [OPEN_PR], claudeOut: "FOREMAN_STAGE pass\n" });
-    await runRepoPass(config.repos[0], config, logger);
+    await runRepoPass(rt, config.repos[0], config, logger);
     assert.equal(claudeRuns().length, 0);
     assert.ok(!promoteRan());
 
     // The feature branch moved: the stage runs again and its new verdict rules.
     arrange({ featurePrs: [{ ...OPEN_PR, headRefOid: "b".repeat(40) }], claudeOut: "FOREMAN_STAGE pass\n" });
-    await runRepoPass(config.repos[0], config, logger);
+    await runRepoPass(rt, config.repos[0], config, logger);
     assert.equal(claudeRuns().length, 1);
     assert.ok(promoteRan());
   });
@@ -225,7 +237,7 @@ for (const [outcome, claudeOut] of [["blocked", 'FOREMAN_STAGE blocked reason="C
 test("custom stage: nothing in flight → no session, later stages run", async () => {
   arrange({ featurePrs: [], claudeOut: "FOREMAN_STAGE blocked\n" });
   const config = load({ stages: [{ id: "security", skillPath: "/opt/sec/SKILL.md" }, { type: "promote" }] }, { name: "custom-idle" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   assert.equal(claudeRuns().length, 0);
   assert.ok(promoteRan());
 });
@@ -233,7 +245,7 @@ test("custom stage: nothing in flight → no session, later stages run", async (
 test("a stage left out of `stages` never runs", async () => {
   arrange({ featurePrs: [OPEN_PR], claudeOut: "FOREMAN_STAGE pass\n" });
   const config = load({ stages: [{ id: "security", skillPath: "/opt/sec/SKILL.md" }] }, { name: "no-promote" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   assert.equal(claudeRuns().length, 1);
   assert.ok(!promoteRan(), "promote is not configured");
 });
@@ -242,9 +254,9 @@ test("a stage left out of `stages` never runs", async () => {
 
 for (const pre of [true, false]) {
   test(`dependabot stage: dependencyPreApproved=${pre} ${pre ? "files the batch with" : "files the batch without"} the trigger label`, async () => {
-    arrange({ alerts: ["lodash"], openPrs: [{ number: 11, url: "u", title: "Bump lodash from 4.17.20 to 4.17.21", body: "", headRefName: "dependabot/npm/lodash", baseRefName: "features" }] });
+    arrange({ alerts: ["lodash"], openPrs: [{ number: 11, url: "u", title: "Bump lodash from 4.17.20 to 4.17.21", body: "", headRefName: "dependabot/npm/lodash", baseRefName: "develop" }] });
     const config = load({ stages: [{ type: "dependabot" }] }, { name: `dep-${pre}`, dependencyPreApproved: pre });
-    await runRepoPass(config.repos[0], config, logger);
+    await runRepoPass(rt, config.repos[0], config, logger);
     const create = ghCalls().find((a) => a[0] === "issue" && a[1] === "create");
     assert.ok(create, "batch issue filed");
     const i = create.indexOf("--label");
@@ -255,7 +267,7 @@ for (const pre of [true, false]) {
 
 // --- Dependabot: security updates only -----------------------------------------
 
-const depPr = (number, title, body = "") => ({ number, url: "u", title, body, headRefName: `dependabot/npm/p${number}`, baseRefName: "features" });
+const depPr = (number, title, body = "") => ({ number, url: "u", title, body, headRefName: `dependabot/npm/p${number}`, baseRefName: "develop" });
 const issueCreates = () => ghCalls().filter((a) => a[0] === "issue" && a[1] === "create");
 
 test("dependabot.securityOnly defaults to true and can be turned off", () => {
@@ -269,7 +281,7 @@ test("securityOnly: only the PR whose package has an open alert is batched", asy
     openPrs: [depPr(1, "Bump ws from 8.0.0 to 8.22.0"), depPr(2, "Bump lodash from 4.17.20 to 4.17.21"), depPr(3, "Bump typescript from 5.0.0 to 5.9.0")],
   });
   const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-one" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   const [create] = issueCreates();
   assert.ok(create, "a batch is filed for the security update");
   const body = create[create.indexOf("--body") + 1];
@@ -281,7 +293,7 @@ test("securityOnly: only the PR whose package has an open alert is batched", asy
 test("securityOnly: red before green — with it off the same PRs are all batched", async () => {
   arrange({ alerts: ["ws"], openPrs: [depPr(1, "Bump ws from 8.0.0 to 8.22.0"), depPr(2, "Bump lodash from 4.17.20 to 4.17.21")] });
   const config = load({ dependabot: { securityOnly: false }, stages: [{ type: "dependabot" }] }, { name: "sec-off" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   const body = issueCreates()[0][issueCreates()[0].indexOf("--body") + 1];
   assert.match(body, /#1\b/);
   assert.match(body, /#2\b/);
@@ -290,7 +302,7 @@ test("securityOnly: red before green — with it off the same PRs are all batche
 test("securityOnly: no open alerts means no batch, and the PRs are left alone", async () => {
   arrange({ alerts: [], openPrs: [depPr(2, "Bump lodash from 4.17.20 to 4.17.21")] });
   const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-none" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   assert.equal(issueCreates().length, 0);
 });
 
@@ -303,7 +315,7 @@ test("securityOnly: a grouped PR with no packages in its title is read from its 
     ],
   });
   const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-group" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   const body = issueCreates()[0][issueCreates()[0].indexOf("--body") + 1];
   assert.match(body, /#5\b/);
   assert.doesNotMatch(body, /#6\b/, "an unreadable group is treated as non-security");
@@ -312,6 +324,6 @@ test("securityOnly: a grouped PR with no packages in its title is read from its 
 test("securityOnly: an alerts-API failure batches nothing — it never falls back to everything", async () => {
   arrange({ alertsFail: true, openPrs: [depPr(1, "Bump ws from 8.0.0 to 8.22.0"), depPr(2, "Bump lodash from 4.17.20 to 4.17.21")] });
   const config = load({ stages: [{ type: "dependabot" }] }, { name: "sec-fail" });
-  await runRepoPass(config.repos[0], config, logger);
+  await runRepoPass(rt, config.repos[0], config, logger);
   assert.equal(issueCreates().length, 0);
 });

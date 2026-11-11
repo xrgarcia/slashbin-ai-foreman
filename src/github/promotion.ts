@@ -3,25 +3,20 @@
 import type { LifecycleLabels } from "../config.js";
 import type { Logger } from "../logger.js";
 import { findOpenPrs, formatGhError, getOpenIssues, hasLabel } from "./cache.js";
-import { gh, isBackoffRefusal } from "./gh.js";
+import { ghAsync, isBackoffRefusal } from "./gh.js";
+import { unlinkedSection, type ReleaseCarry } from "./release-carry.js";
 import { DEFAULT_GITHUB_CONVENTIONS, fillTitle, signed, type GithubConventions } from "./conventions.js";
+import type { PromotionIssue, OpenPromotionPR } from "../code-host.js";
+export type { PromotionIssue, OpenPromotionPR } from "../code-host.js";
 
-
-// --- Promotion PR Creation ---
-
-export interface PromotionIssue {
-  number: number;
-  title: string;
-}
-
-export function findReadyForProdIssues(
+export async function findReadyForProdIssues(
   repo: string,
   cwd: string,
   labels: LifecycleLabels,
   logger: Logger
-): PromotionIssue[] {
+): Promise<PromotionIssue[]> {
   try {
-    return getOpenIssues(repo, cwd, logger)
+    return (await getOpenIssues(repo, cwd, logger))
       .filter((i) => hasLabel(i, labels.readyForProd))
       .map((i) => ({ number: i.number, title: i.title }));
   } catch (err) {
@@ -36,26 +31,16 @@ export function findReadyForProdIssues(
   }
 }
 
-export interface OpenPromotionPR {
-  number: number;
-  url: string;
-  body: string;
-}
-
-export function findOpenPromotionPR(
+/** The open promotion PR, or null when there is none. A failed read throws (EM#1244 f5): it must never open a second PR. */
+export async function findOpenPromotionPR(
   repo: string,
   productionBranch: string,
   baseBranch: string,
   cwd: string,
   logger?: Logger,
-): OpenPromotionPR | null {
-  try {
-    const prs: OpenPromotionPR[] = findOpenPrs(repo, cwd, { base: productionBranch, head: baseBranch, limit: 1 });
-    return prs.length > 0 ? prs[0] : null;
-  } catch (err) {
-    logger?.warn("findOpenPromotionPR: gh pr list failed", { ...formatGhError(err) });
-    return null;
-  }
+): Promise<OpenPromotionPR | null> {
+  const prs: OpenPromotionPR[] = await findOpenPrs(repo, cwd, { base: productionBranch, head: baseBranch, limit: 1 });
+  return prs.length > 0 ? prs[0] : null;
 }
 
 /**
@@ -63,9 +48,9 @@ export function findOpenPromotionPR(
  * PR that left it may have merged or been closed unmerged. Null when the read
  * failed.
  */
-export function getPrState(repo: string, prNumber: number, cwd: string, logger?: Logger): "OPEN" | "MERGED" | "CLOSED" | null {
+export async function getPrState(repo: string, prNumber: number, cwd: string, logger?: Logger): Promise<"OPEN" | "MERGED" | "CLOSED" | null> {
   try {
-    const out = gh(["pr", "view", String(prNumber), "--repo", repo, "--json", "state"], cwd);
+    const out = await ghAsync(["pr", "view", String(prNumber), "--repo", repo, "--json", "state"], cwd);
     const state = (JSON.parse(out || "{}") as { state?: string }).state;
     return state === "OPEN" || state === "MERGED" || state === "CLOSED" ? state : null;
   } catch (err) {
@@ -74,13 +59,14 @@ export function getPrState(repo: string, prNumber: number, cwd: string, logger?:
   }
 }
 
-export function updatePromotionPR(
+export async function updatePromotionPR(
   repo: string,
   prNumber: number,
   issues: PromotionIssue[],
   cwd: string,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
-): boolean {
+  unlinked: ReleaseCarry["unlinked"] = [],
+): Promise<boolean> {
   const issueList = issues
     .map((i) => `- #${i.number}: ${i.title}`)
     .join("\n");
@@ -92,7 +78,7 @@ export function updatePromotionPR(
   const body = signed(`## Production Promotion
 
 ### Issues included
-${issueList}`, conventions);
+${issueList}${unlinkedSection(unlinked)}`, conventions);
 
   // REST, NOT `gh pr edit` (2026-07-27).
   //
@@ -114,7 +100,7 @@ ${issueList}`, conventions);
   // cannot affect it. Do not "simplify" this back to `gh pr edit`.
   const [owner, name] = repo.split("/");
   try {
-    gh([
+    await ghAsync([
       "api", "--method", "PATCH",
       `repos/${owner}/${name}/pulls/${prNumber}`,
       "-f", `title=${title}`,
@@ -136,15 +122,15 @@ ${issueList}`, conventions);
  * so the Foreman never opens a no-op PR when develop is ahead of main
  * only by sync merge commits with no file diff.
  */
-export function countBranchDiffFiles(
+export async function countBranchDiffFiles(
   repo: string,
   base: string,
   head: string,
   cwd: string,
   logger: Logger,
-): number {
+): Promise<number> {
   try {
-    const json = gh([
+    const json = await ghAsync([
       "api",
       `repos/${repo}/compare/${base}...${head}`,
       "--jq", "{ahead: .ahead_by, files: (.files // [] | length)}",
@@ -164,16 +150,16 @@ export function countBranchDiffFiles(
  * see the label (EM strips it only at close time, 1-2 min later) and create
  * a phantom follow-up promotion PR.
  */
-export function stripReadyForProdLabel(
+export async function stripReadyForProdLabel(
   repo: string,
   issueNumbers: number[],
   cwd: string,
   labels: LifecycleLabels,
   logger: Logger,
-): void {
+): Promise<void> {
   for (const num of issueNumbers) {
     try {
-      gh([
+      await ghAsync([
         "issue", "edit", String(num),
         "--repo", repo,
         "--remove-label", labels.readyForProd,
@@ -185,7 +171,7 @@ export function stripReadyForProdLabel(
   }
 }
 
-export function createPromotionPR(
+export async function createPromotionPR(
   repo: string,
   productionBranch: string,
   baseBranch: string,
@@ -193,7 +179,8 @@ export function createPromotionPR(
   cwd: string,
   logger?: Logger,
   conventions: GithubConventions = DEFAULT_GITHUB_CONVENTIONS,
-): string | null {
+  unlinked: ReleaseCarry["unlinked"] = [],
+): Promise<string | null> {
   const issueList = issues
     .map((i) => `- #${i.number}: ${i.title}`)
     .join("\n");
@@ -205,10 +192,10 @@ export function createPromotionPR(
   const body = signed(`## Production Promotion
 
 ### Issues included
-${issueList}`, conventions);
+${issueList}${unlinkedSection(unlinked)}`, conventions);
 
   try {
-    const result = gh([
+    const result = await ghAsync([
       "pr", "create",
       "--repo", repo,
       "--base", productionBranch,

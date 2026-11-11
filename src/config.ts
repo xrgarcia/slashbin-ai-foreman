@@ -1,15 +1,17 @@
 import { z } from "zod";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
 import { stagesSchema, hasStage, type StageEntry } from "./stages.js";
+import { enabledFor } from "./plugins/registry.js";
 import {
-  paperclipConfigSchema, mergePaperclip, resolvePaperclipConfig, type PaperclipConfig,
-} from "./paperclip/config.js";
-import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./github/conventions.js";
+  paperclipConfigSchema, mergePaperclip, leniencyForDisabled, resolvePaperclipConfig, type PaperclipConfig,
+} from "./config-schema/paperclip.js";
+import { githubConventionsSchema, freezeGithubConventions, type GithubConventions } from "./config-schema/github.js";
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
+import { runnerConfigSchema, type RunnerConfig } from "./refusal.js";
 import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSyncConfig } from "./skill-sync.js";
+import { applyProfile, profileNamed } from "./profiles/index.js";
 
 // --- Schemas ---
 
@@ -23,6 +25,15 @@ import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSync
 // reads what implement wrote, revise reads what review wrote — so two repos with
 // different names would be one fleet speaking two protocols. `triggerLabel` stays
 // separate for the opposite reason: it selects work, and it does cascade per repo.
+/**
+ * The production grant label, `deliver-to-prod`: the EM's release gate reads it on a standalone
+ * issue as the owner's authorization to ship that issue to production. Deliberately NOT in
+ * `lifecycleLabels` (those are stripped as an issue moves through the pipeline; a grant must stay),
+ * and the Foreman never acts on it: it only files dependency batches carrying it on a
+ * `dependencyPreApproved` repo (owner decision 2026-11-06).
+ */
+export const PROD_GRANT_LABEL = "deliver-to-prod";
+
 const lifecycleLabelsSchema = z.object({
   // Implement/revise opened or updated a PR; the review phase picks it up.
   prUnderReview: z.string().min(1).default("pr under review"),
@@ -63,8 +74,9 @@ const repoEntrySchema = z.object({
   baseBranch: z.string().optional(),
   productionBranch: z.string().optional(),
   featureBranch: z.string().optional(),
+  branchPrefix: z.string().optional(),
   // A repo-relative SKILL.md, or "builtin:" for the generic skill shipped in
-  // this package's skills/ directory (see resolveSkill in agent.ts).
+  // this package's skills/ directory (see skillInstruction in phases/workflow-prompt.ts).
   skillPath: z.string().optional(),
   revisionSkillPath: z.string().optional(),
   // Optional repo-relative file appended to the implement / revise prompt after
@@ -77,19 +89,22 @@ const repoEntrySchema = z.object({
   maxDurationMs: z.coerce.number().int().positive().optional(),
   // Per-repo opt-out for the review phase (falls back to the global default).
   reviewEnabled: z.boolean().optional(),
-  // Per-repo review skill and reviewer identity; each falls back to the global
-  // value. See the global fields below for what they mean and how a relative
-  // reviewSkillPath resolves.
-  reviewSkillPath: z.string().optional(),
+  // Per-repo reviewer identity; falls back to the global value.
   reviewerLogin: z.string().optional(),
   // Owner standing authorization: file this repo's dependency batch issue
-  // already carrying the trigger label. Opt-in per repo, default OFF — owner
+  // already carrying the trigger label and the production grant label
+  // `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for
+  // prod release` per issue). Opt-in per repo, default OFF — owner
   // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
   // the batch unapproved, as before, and nothing builds until a human approves.
   dependencyPreApproved: z.boolean().optional(),
   // The skills this repo's copy follows when skillSync is on, in place of
   // skillSync.skills. [] opts the repo out of skill sync.
   skillSyncSkills: z.array(z.string()).optional(),
+  // A human-lane repo (registry lane `human`): the Foreman does not implement, review, revise,
+  // release or label anything there. It only delivers the golden skills, per `approved-for-human`
+  // issue, as a `feature/<N>-<slug>` branch the person's direct-mode session resumes. Needs skillSync.
+  syncOnly: z.boolean().optional(),
 });
 
 export const configSchema = z.object({
@@ -108,8 +123,12 @@ export const configSchema = z.object({
   baseBranch: z.string().default("develop"),
   // The branch promotion PRs target; branch sync merges it back into baseBranch.
   productionBranch: z.string().default("main"),
-  // The branch implement and revise sessions commit to.
+  // LEGACY (#208). Nothing is built on this branch any more; a PR whose head equals it is still
+  // Foreman-owned so PRs open at the cutover drain. Removed once no repo has an open one.
   featureBranch: z.string().default("features"),
+  // Every issue is built on its own branch `<branchPrefix><issue>-<slug>` cut from baseBranch.
+  // A PR is Foreman-owned iff its head starts with this (or equals the legacy featureBranch).
+  branchPrefix: z.string().default("foreman/"),
   // The implement skill: a repo-relative SKILL.md, or "builtin:" for skills/implement/.
   skillPath: z.string().optional(),
   // The revise skill: a repo-relative SKILL.md, or "builtin:" for skills/revise/.
@@ -131,6 +150,11 @@ export const configSchema = z.object({
 
   // --- Global settings ---
 
+  // A named set of defaults for one operator's fleet (src/profiles/): each key it
+  // sets replaces the neutral default below, and a key this file sets still wins.
+  // `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name
+  // stops startup, naming the valid ones.
+  profile: z.string().min(1).optional(),
   // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
   // RETIRED, ignored. It capped how many repos ran their serial pass at once;
@@ -192,6 +216,13 @@ export const configSchema = z.object({
   // docs/configuration.md. The old top-level `skipBackoffMs`,
   // `upstreamBackoffBaseMs` and `upstreamBackoffCapMs` are still read into it.
   backoff: backoffConfigSchema,
+  // The agent CLI builder sessions run on, and how it says it has refused work
+  // (a usage, token or rate limit) rather than failed: `name`,
+  // `refusalPatterns`, `refusalExitCodes`, `resetPattern`. A refusal is never
+  // charged to a retry and pauses that runner daemon-wide until the limit
+  // lifts; the EM's unstick calls are read the same way. Claude's by default.
+  // See src/refusal.ts.
+  runner: runnerConfigSchema,
   // How long a repo's open-issue snapshot stays warm. The discovery phases each
   // used to run their own `gh issue list` against the same repo — six GraphQL
   // requests per repo per cycle, which at 20 repos on a 60s poll blew GitHub's
@@ -223,7 +254,7 @@ export const configSchema = z.object({
   // inert when unset or when the file does not exist. Additive + OSS-safe.
   builderMcpConfig: z.string().optional(),
   // Env var names a Claude session inherits from the daemon, on top of the
-  // essentials every session gets (SESSION_ENV_ESSENTIALS in agent.ts). Nothing
+  // essentials every session gets (SESSION_ENV_ESSENTIALS in session/env.ts). Nothing
   // else from the daemon's env reaches a session: the production daemon runs
   // under `doppler run`, and on 2026-10-01 a session that listed its env printed
   // FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix
@@ -250,18 +281,55 @@ export const configSchema = z.object({
   // Tech Lead, never a Claude session in this directory.
   emRepoPath: z.string().optional(),
   // GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
+  // Unset = no one is mentioned: the hold stays at its failed cap and the log says so.
   unstickEscalationOwner: z.string().min(1).optional(),
-  // The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each
-  // review is offered to it FIRST — Codex judges, its code posts and merges.
-  // It exits 3 when Codex cannot take the review and nothing was written; the
-  // review phase then runs the Claude /review-all-prs session exactly as
-  // before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
+  // The name issue bodies give the epic tracker in `<label> #N` references (the
+  // `## References` convention). When an issue closes in production, each epic it
+  // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
+  epicRefLabel: z.string().min(1).optional(),
+  // The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about:
+  // the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
+  epicRepo: z.string().min(1).optional(),
+  // The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each
+  // review runs through it — Codex judges, its code posts and merges.
+  // It exits 3 when it cannot take the review and nothing was written; the PR
+  // waits and the review retries after a backoff wait. Unset = no review runs.
   techLeadPath: z.string().optional(),
-  // The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at
+  // The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at
   // the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs
   // `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved.
   // Unset = no verify stage: the review run verifies and labels as before.
   srePath: z.string().optional(),
+  // The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify
+  // passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the
+  // result is posted on the PR as "## QA Report (report-only)". It never gates:
+  // the card moves to prApproved first and nothing waits on QA. Unset = no QA.
+  // Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry
+  // bearer, `qaBearerKey`).
+  qaPath: z.string().optional(),
+  // GitHub repos (owner/name) QA applies to. Default none. Override: covered even when QA says no.
+  // Any other repo is covered when `bin/qa.mjs covers --repo R` exits 0 (EM#794).
+  qaRepos: z.array(z.string()).default([]),
+  // The script in the EM checkout (relative to emRepoPath) that runs QA's dev check
+  // with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (`qaBearerKey`), handed to
+  // that child alone. The local check and the `covers`
+  // question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
+  qaSecretsRunner: z.string().min(1).optional(),
+  // The registry bearer's key for the runner's --keys, as `NAME` or `NAME@project` (a pin lists
+  // that one Doppler project instead of every one). It lives only in `prd`.
+  qaBearerKey: z.string().min(1).default("EM_SLASHBIN_MCP_ROUTER_BEARER"),
+  // Whether QA gates delivery. false (default) = report-only: the card advances on the
+  // SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances,
+  // FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card
+  // like an SRE hold. Needs `qaPath`. A config flip, reversible.
+  qaGate: z.boolean().default(false),
+  // QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA
+  // fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs
+  // `bin/qa.mjs check --local` on the approved head (it boots the PR itself; only the registry bearer), and only
+  // a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder.
+  // Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged.
+  // Needs `qaPath` and `techLeadPath`. A config flip, reversible.
+  qaBeforeMerge: z.boolean().default(false),
   // The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex
   // run and a prod-verification Codex run of up to 40 min each, plus the merge
   // and the deploy wait. The Foreman kills the deploy only past this; a deploy
@@ -270,9 +338,6 @@ export const configSchema = z.object({
   sreDeployMaxDurationMs: z.coerce.number().int().positive().default(7_200_000),
   // Run the review stage. Off by default; per repo too, where it wins.
   reviewEnabled: z.boolean().default(false),
-  // No longer read: review runs through the Tech Lead (techLeadPath), which
-  // carries its own review procedure. Accepted so an older config still loads.
-  reviewSkillPath: z.string().optional(),
   // Model for review sessions, independent of `model`. Omit for the CLI default.
   reviewModel: z.string().optional(),
   // Where the review session finds the service repo's code.
@@ -316,18 +381,9 @@ export const configSchema = z.object({
     (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
     z.boolean(),
   ).default(true),
-  // Broad tool surface — the skill drives GitHub, Postgres, Redis, Railway, and
-  // the knowledge index via MCP, plus shell scripts and file reads.
-  reviewAllowedTools: z.array(z.string()).default([
-    "Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch",
-    "mcp__github__*",
-    "mcp__pg-dev-console__*", "mcp__pg-dev-worker__*",
-    "mcp__pg-prod-console__*", "mcp__pg-prod-worker__*",
-    "mcp__redis-dev-console__*", "mcp__redis-dev-ingest__*", "mcp__redis-dev-worker__*",
-    "mcp__redis-prod-console__*", "mcp__redis-prod-ingest__*", "mcp__redis-prod-worker__*",
-    "mcp__railway__*",
-    "mcp__slashbin-ai-knowledge__*",
-  ]),
+  // The review session's tools: file and shell tools, plus any MCP servers
+  // (`mcp__<server>__*`) your fleet's review needs. Default the file and shell tools only.
+  reviewAllowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch"]),
   // GitHub login the review runs as — used by the freshness guard to detect a
   // review already posted for the current PR head (avoids re-review loops).
   // No default. Unset, the guard counts a verdict by ANY reviewer as current,
@@ -347,7 +403,7 @@ export const configSchema = z.object({
   // (src/lanes.ts): revise+implement form the `build` lane, promote+release the
   // `release` lane, every other built-in a lane of its own, and each (repo, lane)
   // pair polls on its own loop. Order matters only inside a lane. Omitted, it is
-  // the ten built-ins in order; `release` runs only when both srePath and
+  // the eleven built-ins in order; `release` runs only when both srePath and
   // techLeadPath are set and is skipped with a startup warning otherwise. Listing
   // `release` explicitly without both is refused at startup. A custom stage is
   // `{ id, skillPath }`: one Claude session on that skill, in the lane of the
@@ -362,6 +418,18 @@ export const configSchema = z.object({
   // what the Foreman always used. Global, like lifecycleLabels. See
   // [GitHub conventions](#github-conventions-github).
   github: githubConventionsSchema,
+
+  // Where the Foreman's work comes from: the id of the work-source plugin that
+  // selects issues and records their moves. `github` (default) is GitHub issues,
+  // the only one today; any other value turns GitHub off, and the Foreman refuses
+  // to start until a plugin of that id is installed.
+  workSource: z.string().min(1).default("github"),
+
+  // Where the Foreman's PRs, branches, merges, comments and labels live: the id
+  // of the code-host plugin. `github` (default) is the only one today; any other
+  // value turns GitHub's code host off, and the Foreman refuses to start until a
+  // plugin of that id is installed.
+  codeHost: z.string().min(1).default("github"),
 
   // The optional Paperclip board mirror, off unless `enabled` (docs/paperclip.md).
   // Global, never per repo: one Foreman is one Paperclip agent. prefault for
@@ -388,11 +456,28 @@ export const configSchema = z.object({
     // to batch every Dependabot PR, as before.
     securityOnly: z.boolean().default(true),
   }).prefault({}),
+
+  // --- Metrics ---
+  // The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle
+  // stage advances in a local SQLite file, read back with `npm run metrics:report`.
+  // Global. Off unless `enabled`.
+  metrics: z.object({
+    // Record lifecycle events. Off by default.
+    enabled: z.boolean().default(false),
+    // The SQLite file. Omitted: `foreman-metrics.db` in the Foreman's state directory.
+    // A leading `~` is expanded.
+    path: z.string().min(1).optional(),
+    // Days of events kept; older rows are deleted at start and at most hourly after.
+    retentionDays: z.number().int().min(1).default(90),
+  }).prefault({}),
 });
 
 // --- Types ---
 
 export interface DependabotConfig { readonly securityOnly: boolean }
+
+/** The metrics observer's settings (`metrics` block). */
+export interface MetricsConfig { readonly enabled: boolean; readonly path?: string; readonly retentionDays: number }
 
 
 /** Configured names of the lifecycle labels. See `lifecycleLabelsSchema`. */
@@ -420,7 +505,10 @@ export interface RepoConfig {
   baseBranch: string;
   /** Branch promotion PRs target; sync PRs merge it back into baseBranch. */
   productionBranch: string;
+  /** LEGACY (#208): a head equal to it is still Foreman-owned; nothing new is pushed to it. */
   featureBranch: string;
+  /** Prefix of every Foreman-owned per-issue branch (`<branchPrefix><issue>-<slug>`). */
+  branchPrefix: string;
   /** Repo-relative skill path, or "builtin:" for the skill shipped in skills/. */
   skillPath?: string;
   revisionSkillPath?: string;
@@ -440,20 +528,25 @@ export interface RepoConfig {
   // Whether the review phase runs for this repo (resolved from per-repo override
   // or the global reviewEnabled default).
   reviewEnabled: boolean;
-  /** Review skill as configured (per-repo, else global). Required when reviewEnabled. */
-  reviewSkillPath?: string;
   /** Reviewer login for the freshness guard (per-repo, else global). */
   reviewerLogin?: string;
   // File the dependency batch issue pre-approved. Per-repo opt-in, default false.
   dependencyPreApproved: boolean;
   /** The fleet-wide Dependabot selection — the global value. */
   dependabot: DependabotConfig;
+  /** The metrics observer's settings — the global value. */
+  metrics: MetricsConfig;
   /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
   skillSyncSkills?: readonly string[];
+  /** Sync-only (human lane): only the `skill-deliver` stage runs here; see the repo schema. */
+  syncOnly?: boolean;
   /** The fleet-wide lifecycle labels — the global value, never a per-repo one. */
   lifecycleLabels: LifecycleLabels;
   /** The fleet-wide GitHub conventions (`github` block) — the global value. */
   github: GithubConventions;
+  /** The epic label in `<label> #N` issue references — the global value; undefined = no epic parsing. */
+  epicRefLabel?: string;
+  epicRepo?: string;
 }
 
 /**
@@ -461,6 +554,8 @@ export interface RepoConfig {
  * Use `config.repos[i]` to get the RepoConfig for each repo.
  */
 export interface AgentConfig {
+  /** The config profile selected (`profile`), undefined for the neutral defaults. */
+  profile?: string;
   repos: readonly RepoConfig[];
   /**
    * Every configured repo, even when `--repo` narrowed `repos` to one. Set only
@@ -483,6 +578,8 @@ export interface AgentConfig {
   buildWaitsForDevVerify: boolean;
   /** Every back-off and retry limit (see src/backoff.ts). */
   backoff: BackoffConfig;
+  /** The agent runner's name and how it signals a refusal (see src/refusal.ts). */
+  runner: RunnerConfig;
   /** How long a repo's open-issue snapshot stays warm (default 30s; 0 disables). */
   issueCacheTtlMs: number;
   /** Page cap for the open-issue snapshot (default 500). */
@@ -495,15 +592,28 @@ export interface AgentConfig {
   // --- Review phase settings (shared across repos) ---
   // emRepoPath is the absolute path to the EM checkout (unstick stage's cwd).
   emRepoPath?: string;
-  /** Login @-mentioned when the unstick stage gives up on a hold; default UNSTICK_ESCALATION_OWNER. */
+  /** Login @-mentioned when the unstick stage gives up on a hold; undefined = the give-up is only logged. */
   unstickEscalationOwner?: string;
+  /** The epic label in `<label> #N` issue references; undefined = no epic parsing. */
+  epicRefLabel?: string;
+  epicRepo?: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
+  /** Absolute path to the QA checkout; undefined = no QA report. */
+  qaPath?: string;
+  /** Repos QA applies to. */
+  qaRepos: string[];
+  /** EM-checkout-relative script that runs QA's dev check with its secret; undefined = the dev check errors. */
+  qaSecretsRunner?: string;
+  /** The registry bearer's runner key, `NAME` or `NAME@project` (see configSchema). */
+  qaBearerKey: string;
+  /** QA gates the advance to prApproved (see configSchema). */
+  qaGate: boolean;
+  /** QA runs on the PR head before the Tech Lead merges it (see configSchema). */
+  qaBeforeMerge: boolean;
   /** Ceiling on one SRE deploy run (the release stage). */
   sreDeployMaxDurationMs: number;
-  /** Global review skill; repos read their resolved `RepoConfig.reviewSkillPath`. */
-  reviewSkillPath?: string;
   reviewModel?: string;
   reviewCheckoutRoot: string;
   reviewMaxTurns: number;
@@ -514,14 +624,20 @@ export interface AgentConfig {
   reviewLabelReconcile: boolean;
   lifecycleLabels: LifecycleLabels;
   github: GithubConventions;
-  /** The stages each repo pass runs, in order. Defaults to the ten built-ins. */
+  /** The stages each repo pass runs, in order. Defaults to the eleven built-ins. */
   stages: readonly StageEntry[];
+  /** The work-source plugin's id (default `github`). Optional so a hand-built test config means the default. */
+  workSource?: string;
+  /** The code-host plugin's id (default `github`). Optional so a hand-built test config means the default. */
+  codeHost?: string;
   /** Paperclip mirror settings. Always present; `enabled` is false unless opted in. */
   paperclip: PaperclipConfig;
   /** Skill sync settings. Always present; `enabled` is false unless opted in. */
   skillSync: SkillSyncConfig;
   /** The Dependabot stage's selection (`dependabot` block). */
   dependabot: DependabotConfig;
+  /** The metrics observer's settings (`metrics` block). */
+  metrics: MetricsConfig;
 }
 
 // --- Helpers ---
@@ -535,13 +651,38 @@ const SESSION_ENV_FORBIDDEN: readonly string[] = [
   "FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY",
 ];
 
+/**
+ * The `origin` URL of a checkout, read from its git config files rather than by running `git remote
+ * get-url` (config loading is synchronous, and a subprocess here would hold the event loop on every
+ * reload; slashbin-ai-foreman#253). A linked worktree's `.git` is a file naming its gitdir, whose
+ * `commondir` points at the config. Undefined when there is none.
+ */
+function originUrlOf(repoPath: string): string | undefined {
+  const root = resolve(repoPath);
+  let gitDir = resolve(root, ".git");
+  if (statSync(gitDir).isFile()) {
+    const m = readFileSync(gitDir, "utf-8").match(/^gitdir:\s*(.+)$/m);
+    if (!m) return undefined;
+    gitDir = resolve(root, m[1].trim());
+  }
+  const commonFile = resolve(gitDir, "commondir");
+  const common = existsSync(commonFile) ? readFileSync(commonFile, "utf-8").trim() : "";
+  const configDir = common ? (isAbsolute(common) ? common : resolve(gitDir, common)) : gitDir;
+  let inOrigin = false;
+  for (const raw of readFileSync(resolve(configDir, "config"), "utf-8").split("\n")) {
+    const line = raw.trim();
+    const section = line.match(/^\[\s*(\S+)(?:\s+"([^"]*)")?\s*\]/);
+    if (section) { inOrigin = section[1].toLowerCase() === "remote" && section[2] === "origin"; continue; }
+    const kv = inOrigin ? line.match(/^url\s*=\s*(.+)$/i) : null;
+    if (kv) return kv[1].trim();
+  }
+  return undefined;
+}
+
 function inferGithubRepo(repoPath: string): string | undefined {
   try {
-    const remote = execSync("git remote get-url origin", {
-      cwd: resolve(repoPath),
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    const remote = originUrlOf(repoPath);
+    if (!remote) return undefined;
     const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/);
     return match?.[1];
   } catch {
@@ -555,17 +696,21 @@ function inferGithubRepo(repoPath: string): string | undefined {
  * label. The one selection rule — onboarding, `npm run labels:install` and
  * `npm run doctor` all read it from here.
  */
-export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github">): string[] {
-  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel])];
+export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github"> & { dependencyPreApproved?: boolean }): string[] {
+  // The production grant label is not a lifecycle label (lifecycle labels get stripped as an issue moves);
+  // a pre-approved repo files its dependency batches carrying it, and gh refuses a label that does not exist.
+  const grant = repo.dependencyPreApproved ? [PROD_GRANT_LABEL] : [];
+  return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel, ...grant])];
 }
 
-/** True when the unstick stage can run: it calls the EM checkout's `bin/em.mjs`. Independent of `paperclip.enabled`. */
-export function unstickStageReady(config: Pick<AgentConfig, "emRepoPath">): boolean {
-  return Boolean(config.emRepoPath);
+/** True when the unstick stage can run: an enabled unstick plugin (the EM: `emRepoPath`). Independent of `paperclip.enabled`. */
+export function unstickStageReady(config: AgentConfig): boolean {
+  return enabledFor("unstick", config);
 }
 
-export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLeadPath">): boolean {
-  return Boolean(config.srePath && config.techLeadPath);
+/** True when the release stage can run: it needs an enabled reviewer (approval) and deployer (deploy). */
+export function releaseStageReady(config: AgentConfig): boolean {
+  return enabledFor("deployer", config) && enabledFor("reviewer", config);
 }
 
 /**
@@ -574,9 +719,10 @@ export function releaseStageReady(config: Pick<AgentConfig, "srePath" | "techLea
  * runs or is not configured. An explicit `release` in `stages` without both
  * paths never gets here: loadConfig refuses it.
  */
-export function releaseStageWarning(config: Pick<AgentConfig, "srePath" | "techLeadPath" | "stages">): string | null {
+export function releaseStageWarning(config: AgentConfig): string | null {
   if (!hasStage(config.stages, "release") || releaseStageReady(config)) return null;
-  const missing = [!config.techLeadPath && "techLeadPath", !config.srePath && "srePath"].filter(Boolean).join(" and ");
+  // Named by the key that turns each built-in agent plugin on: the reviewer (Tech Lead), the deployer (SRE).
+  const missing = [!enabledFor("reviewer", config) && "techLeadPath", !enabledFor("deployer", config) && "srePath"].filter(Boolean).join(" and ");
   return `release stage skipped: ${missing} not set. Promote keeps its pre-release behaviour: it strips the ` +
     `authorization label when it lists an issue, and the release PR waits for a person to merge it and close its issues.`;
 }
@@ -610,7 +756,11 @@ function loadConfigFile(configPath?: string): Record<string, unknown> {
 // --- Config Loading ---
 
 export function loadConfig(configPath?: string): AgentConfig {
-  const fileConfig = loadConfigFile(configPath);
+  // The profile's values sit under the file's (src/profiles/index.ts), so from here
+  // on a profile value reads exactly like one the file set. Env still wins.
+  const rawFile = loadConfigFile(configPath);
+  const profileName = typeof rawFile.profile === "string" ? rawFile.profile : undefined;
+  const fileConfig = profileName ? applyProfile(rawFile, profileNamed(profileName)) : rawFile;
 
   const merged = {
     repoPath: process.env.AI_AGENT_REPO_PATH ?? fileConfig.repoPath,
@@ -642,23 +792,33 @@ export function loadConfig(configPath?: string): AgentConfig {
     baseBranch: process.env.AI_AGENT_BASE_BRANCH ?? fileConfig.baseBranch,
     productionBranch: process.env.AI_AGENT_PRODUCTION_BRANCH ?? fileConfig.productionBranch,
     featureBranch: process.env.AI_AGENT_FEATURE_BRANCH ?? fileConfig.featureBranch,
+    branchPrefix: process.env.AI_AGENT_BRANCH_PREFIX ?? fileConfig.branchPrefix,
     maxTurns: process.env.AI_AGENT_MAX_TURNS ?? fileConfig.maxTurns,
     maxDurationMs: process.env.AI_AGENT_MAX_DURATION_MS ?? fileConfig.maxDurationMs,
     model: process.env.AI_AGENT_MODEL ?? fileConfig.model,
     allowedTools: fileConfig.allowedTools,
     builderMcpConfig: process.env.AI_AGENT_BUILDER_MCP_CONFIG ?? fileConfig.builderMcpConfig,
     sessionEnv: fileConfig.sessionEnv,
+    runner: fileConfig.runner,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
+    profile: fileConfig.profile,
     repos: fileConfig.repos,
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
+    epicRefLabel: fileConfig.epicRefLabel,
+    epicRepo: fileConfig.epicRepo,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
+    qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
+    qaRepos: fileConfig.qaRepos,
+    qaSecretsRunner: fileConfig.qaSecretsRunner,
+    qaBearerKey: fileConfig.qaBearerKey,
+    qaGate: fileConfig.qaGate,
+    qaBeforeMerge: fileConfig.qaBeforeMerge,
     sreDeployMaxDurationMs: process.env.AI_AGENT_SRE_DEPLOY_MAX_DURATION_MS ?? fileConfig.sreDeployMaxDurationMs,
     reviewEnabled: fileConfig.reviewEnabled,
-    reviewSkillPath: fileConfig.reviewSkillPath,
     reviewModel: fileConfig.reviewModel,
     reviewCheckoutRoot: process.env.AI_AGENT_REVIEW_CHECKOUT_ROOT ?? fileConfig.reviewCheckoutRoot,
     reviewMaxTurns: process.env.AI_AGENT_REVIEW_MAX_TURNS ?? fileConfig.reviewMaxTurns,
@@ -669,9 +829,12 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels: fileConfig.lifecycleLabels,
     stages: fileConfig.stages,
     github: fileConfig.github,
-    paperclip: mergePaperclip(fileConfig.paperclip),
+    workSource: fileConfig.workSource,
+    codeHost: fileConfig.codeHost,
+    paperclip: leniencyForDisabled(mergePaperclip(fileConfig.paperclip)),
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
+    metrics: fileConfig.metrics,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -701,6 +864,9 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
+    metrics: Object.freeze({ enabled: parsed.metrics.enabled, path: parsed.metrics.path, retentionDays: parsed.metrics.retentionDays }),
+    epicRefLabel: parsed.epicRefLabel,
+    epicRepo: parsed.epicRepo,
   };
 
   let repos: RepoConfig[];
@@ -726,6 +892,7 @@ export function loadConfig(configPath?: string): AgentConfig {
         baseBranch: entry.baseBranch ?? parsed.baseBranch,
         productionBranch: entry.productionBranch ?? parsed.productionBranch,
         featureBranch: entry.featureBranch ?? parsed.featureBranch,
+        branchPrefix: entry.branchPrefix ?? parsed.branchPrefix,
         skillPath: entry.skillPath,
         revisionSkillPath: entry.revisionSkillPath,
         skillOverlayPath: entry.skillOverlayPath,
@@ -735,10 +902,10 @@ export function loadConfig(configPath?: string): AgentConfig {
         maxTurns: entry.maxTurns ?? parsed.maxTurns,
         maxDurationMs: entry.maxDurationMs ?? parsed.maxDurationMs,
         reviewEnabled: entry.reviewEnabled ?? parsed.reviewEnabled,
-        reviewSkillPath: entry.reviewSkillPath ?? parsed.reviewSkillPath,
         reviewerLogin: entry.reviewerLogin ?? parsed.reviewerLogin,
         dependencyPreApproved: entry.dependencyPreApproved ?? false,
         ...(entry.skillSyncSkills ? { skillSyncSkills: Object.freeze([...entry.skillSyncSkills]) } : {}),
+        ...(entry.syncOnly ? { syncOnly: true } : {}),
         ...globals,
       };
     });
@@ -762,6 +929,7 @@ export function loadConfig(configPath?: string): AgentConfig {
       baseBranch: parsed.baseBranch,
       productionBranch: parsed.productionBranch,
       featureBranch: parsed.featureBranch,
+      branchPrefix: parsed.branchPrefix,
       skillPath: parsed.skillPath,
       revisionSkillPath: parsed.revisionSkillPath,
       skillOverlayPath: parsed.skillOverlayPath,
@@ -771,7 +939,6 @@ export function loadConfig(configPath?: string): AgentConfig {
       maxTurns: parsed.maxTurns,
       maxDurationMs: parsed.maxDurationMs,
       reviewEnabled: parsed.reviewEnabled,
-      reviewSkillPath: parsed.reviewSkillPath,
       reviewerLogin: parsed.reviewerLogin,
       dependencyPreApproved: false,
       ...globals,
@@ -831,6 +998,7 @@ export function loadConfig(configPath?: string): AgentConfig {
   const paperclip = resolvePaperclipConfig(parsed.paperclip, repos.map((r) => r.githubRepo));
 
   return Object.freeze({
+    profile: parsed.profile,
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
     ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
@@ -841,6 +1009,11 @@ export function loadConfig(configPath?: string): AgentConfig {
     buildWaitsForDevVerify: parsed.buildWaitsForDevVerify,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,
+    runner: Object.freeze({
+      ...parsed.runner,
+      refusalPatterns: Object.freeze([...parsed.runner.refusalPatterns]),
+      refusalExitCodes: Object.freeze([...parsed.runner.refusalExitCodes]),
+    }) as RunnerConfig,
     issueCacheTtlMs: parsed.issueCacheTtlMs,
     issueSnapshotLimit: parsed.issueSnapshotLimit,
     logFormat: parsed.logFormat,
@@ -848,10 +1021,17 @@ export function loadConfig(configPath?: string): AgentConfig {
     sessionEnv: [...parsed.sessionEnv],
     emRepoPath,
     unstickEscalationOwner: parsed.unstickEscalationOwner,
+    epicRefLabel: parsed.epicRefLabel,
+    epicRepo: parsed.epicRepo,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
+    qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
+    qaRepos: [...parsed.qaRepos],
+    qaSecretsRunner: parsed.qaSecretsRunner,
+    qaBearerKey: parsed.qaBearerKey,
+    qaGate: parsed.qaGate,
+    qaBeforeMerge: parsed.qaBeforeMerge,
     sreDeployMaxDurationMs: parsed.sreDeployMaxDurationMs,
-    reviewSkillPath: parsed.reviewSkillPath,
     reviewModel: parsed.reviewModel,
     reviewCheckoutRoot: parsed.reviewCheckoutRoot.replace(/^~(?=$|\/)/, homedir()),
     reviewMaxTurns: parsed.reviewMaxTurns,
@@ -862,8 +1042,11 @@ export function loadConfig(configPath?: string): AgentConfig {
     lifecycleLabels,
     github,
     stages,
+    workSource: parsed.workSource,
+    codeHost: parsed.codeHost,
     paperclip,
     skillSync: resolveSkillSync(parsed.skillSync),
     dependabot: globals.dependabot,
+    metrics: globals.metrics,
   });
 }
