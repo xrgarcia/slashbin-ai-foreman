@@ -71,7 +71,7 @@ An agent runs visual and behaviour checks on a PR before it merges (`qaBeforeMer
 
 - **Roles:** `qa`
 - **On when:** `qaPath` is set (covers `qaRepos`)
-- **Config:** `qaPath`, `qaRepos`, `qaGate`, `qaBeforeMerge`, `qaSecretsRunner`, `qaBearerKey`
+- **Config:** `qaPath`, `emRepoPath`, `qaRepos`, `qaGate`, `qaBeforeMerge`, `qaSecretsRunner`, `qaBearerKey`
 - **Env:** `DEV_SESSION_MINT_KEY`
 - **When off:** No QA gate: a PR moves on review and verification alone.
 
