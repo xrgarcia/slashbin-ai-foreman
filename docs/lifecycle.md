@@ -82,8 +82,8 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `recoverFailed` | unknown | changesRequested | `changesRequested` | Dead-zone recovery: a fresh verification failed. |
 | `recoverMerged` | unknown | merged | `merged` | Dead-zone recovery with a verify stage: the merge is recorded and verification follows. |
 | `humanMerged` | unknown | merged | `merged` | No reviewer is enabled, so a person reviewed and merged the PR: the merge is recorded, and dev verification follows when a verifier is enabled. |
-| `humanMergedApproved` | merged | approved | `pendingVerification` | A person merged it, and there is no verifier: it goes straight on. |
-| `closedNoRelease` | approved | released | `done` | A person merged it, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed. |
+| `humanMergedApproved` | merged | approved | `pendingVerification` | It merged (by a person, or by the reviewer), and there is no verifier: it goes straight on. |
+| `closedNoRelease` | approved | released | `done` | It merged, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed. |
 | `release` | unknown | queued | `approved` | An orphan: in review with no open PR; released back to the queue. |
 | `releaseQueued` | releaseAuthorized | releasing | `releasing` | The promote stage put an EM-authorized item in the release PR (opened, updated, or already listing it), or found its work already in production with no prod verification on record. |
 | `alreadyReleased` | releaseAuthorized | released | `done` | Authorized, its work already in production, and a passed prod verification on record for it: closed. |

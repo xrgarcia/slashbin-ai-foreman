@@ -241,11 +241,26 @@ test("resume, nothing releases: an issue left at `pr approved` by a failed close
   }
 });
 
-test("resume leaves alone: any reviewer or verifier config, `pr approved` with a release path, and a label whose PR never merged", async () => {
+test("resume, reviewer but no verifier: an issue the reviewer merged is approved and closed, never left at `pr merged`", async () => {
   const box = commentBox();
   const moves = recordMoves();
   try {
-    assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, techLeadPath: "/x" }, logger, { ...box, ...pass("pr merged") }), [], "reviewer: no-op");
+    const cfg = { ...NONE, techLeadPath: "/x" };
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, cfg, logger, { ...box, ...pass("pr merged") }), [{ issueNumber: 12, prNumber: 34, settled: "closed" }]);
+    assert.deepEqual(moves, ["humanMergedApproved", "closedNoRelease"]);
+    assert.equal(box.posted.length, 1);
+    assert.ok(!box.posted[0][1].includes("by a person"), "the reviewer merged it, not a person");
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, cfg, logger, { ...box, ...pass("pr under review") }), [], "in review is the reviewer's");
+  } finally {
+    registerWorkSource(null);
+  }
+});
+
+test("resume leaves alone: in review with a reviewer, any verifier config, `pr approved` with a release path, and a label whose PR never merged", async () => {
+  const box = commentBox();
+  const moves = recordMoves();
+  try {
+    assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, techLeadPath: "/x" }, logger, { ...box, ...pass("pr under review") }), [], "reviewer owns in-review");
     assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, srePath: "/x" }, logger, { ...box, ...pass("pr merged") }), [], "verifier owns `pr merged`");
     assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE, stages: [{ type: "promote" }] }, logger, { ...box, ...pass("pr approved") }), [], "promote releases `pr approved`");
     assert.deepEqual(await resumeHumanMerges(rt, REPO, { ...NONE }, logger, { ...box, ...pass("pr merged"), mergedToBase: () => [] }), [], "never merged: untouched");
