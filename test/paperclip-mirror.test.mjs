@@ -1880,7 +1880,8 @@ test("identity: the registry client does not retry what is not passing: a 401, a
 });
 
 test("timeout scenario: a hung registry on one repo no longer costs the scan; the next scan inside the TTL asks nothing", async () => {
-  const hang = (_url, init) => new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason)));
+  // Holds a ref'd handle until aborted, as a real socket does (Node 22 unrefs AbortSignal.timeout's timer).
+  const hang = (_url, init) => { const live = setInterval(() => {}, 1000); return new Promise((_res, rej) => init.signal.addEventListener("abort", () => { clearInterval(live); rej(init.signal.reason); })); };
   const fake = fakePaperclip([{ id: "r9", title: "t", status: "todo", description: "source: example/other#9\n\nx" }]);
   let hungRegistry = true;
   const ri = createRepoIdentity({ url: "http://registry.test/mcp", timeoutMs: 10, fetch: (u, i) => (hungRegistry ? hang(u, i) : Promise.reject(new Error("unused"))) });
