@@ -5,7 +5,7 @@ import type { Logger } from "../logger.js";
 import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import type { QaManifest, QaOutcome } from "../qa-report.js";
 import { runAgentCli, type CliRun } from "./agent-cli.js";
-import type { ForemanPlugin, QaRunner } from "./contract.js";
+import type { ForemanPlugin, QaRunner, PluginCatalogEntry } from "./contract.js";
 
 /**
  * slashbin_ai_qa (`<qaPath>/bin/qa.mjs check`) as the QA plugin (EM#1150 f3).
@@ -101,6 +101,13 @@ export function readOutcome(r: CliRun, out: string, logger: Logger): QaOutcome {
 export class QaPlugin implements ForemanPlugin {
   readonly id = "qa";
   readonly roles = ["qa"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "QA",
+    purpose: "An agent runs visual and behaviour checks on a PR before it merges (`qaBeforeMerge`) or on dev after verification (`qaGate`), for the repos in `qaRepos`.",
+    onWhen: "`qaPath` is set (covers `qaRepos`)",
+    requires: { config: ["qaPath", "qaRepos", "qaGate", "qaBeforeMerge", "qaSecretsRunner", "qaBearerKey"], env: ["DEV_SESSION_MINT_KEY"] },
+    whenOff: "No QA gate: a PR moves on review and verification alone.",
+  };
   readonly qa: QaRunner;
   private readonly mintKey: string;
   /** Per repo: the coverage answer (or the one in flight) and when it was asked. */

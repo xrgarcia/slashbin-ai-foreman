@@ -234,9 +234,8 @@ async function reviewPass(
 
   try {
     await emit(rt, { kind: "session", session: { ...session, status: "started", reviewer } }, null, reviewLogger);
-    // EM#427: the Tech Lead is the reviewer, on Codex only. Its "wrote nothing"
-    // exit (Codex unavailable) is a wait, never a hand-off (Ray, 2026-10-10): no
-    // failure is charged and the repo asks again after a backoff.agentUnavailable wait.
+    // The reviewer's "wrote nothing" exit (its engine unavailable) is a wait,
+    // never a hand-off: no failure is charged and the repo asks again after a backoff.agentUnavailable wait.
     const result = await agent.reviewPr(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress, noMerge)
       .catch((e: unknown): ReviewFallback => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {

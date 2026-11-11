@@ -432,15 +432,11 @@ export function dependencyBatchIssueCreateArgs(
  * opt-in `dependencyPreApproved` flag on the repo's config, default off, so a
  * newly onboarded repo can never inherit it by omission.
  *
- * **Production grant (owner decision, 2026-11-06).** Ray, in session: "Dependency
- * upgrades and security patches probably should just get created with approved and
- * delivered to prod labels." A pre-approved repo's batch is therefore filed with
- * BOTH the trigger label and `deliver-to-prod` (`PROD_GRANT_LABEL`); before this the
- * EM's release gate held every batch, because a standalone issue needs the grant on
- * itself. Safe because nothing is skipped: the SRE checks logs and health on dev and
- * again on prod, the EM still signs `ready for prod release` per issue, and production
- * verification plus soak follow the deploy. The Foreman still never decides a release;
- * it only files with the label, and the EM's gate is what reads it.
+ * **Production grant.** A pre-approved repo's batch is filed with BOTH the trigger label
+ * and the production grant label (`prodGrantLabel`), because a release gate that needs the
+ * grant on each standalone issue would otherwise hold every batch. Nothing is skipped: dev
+ * and production verification still run when those roles are on. The Foreman still never
+ * decides a release; it only files with the label, and whoever gates the release reads it.
  */
 export async function createDependencyBatchIssue(
   repo: string,

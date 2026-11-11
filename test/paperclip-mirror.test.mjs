@@ -1352,7 +1352,7 @@ test("handoff: dev verification passing hands the card to the EM with the releas
   const notes = fake.comments.r1283;
   const handoff = notes.at(-1);
   assert.match(handoff, /^approved\n\n\*\*Next: Engineering Manager — action needed\*\*/);
-  assert.ok(handoff.includes("- **Do:** Run the EM release gate (`/deliver-to-prod` step 3a) for xrgarcia/Slashbin-console#1283 and, if it passes, apply `ready for prod release` to the issue. The prod release does not start until you do."));
+  assert.ok(handoff.includes("- **Do:** Run the release gate for xrgarcia/Slashbin-console#1283 and, if it passes, apply `ready for prod release` to the issue. The prod release does not start until you do."));
   assert.match(handoff, /- \*\*Why:\*\* dev verification passed \(`pr approved`\) — PR #1291 verified in dev \(deploy SUCCESS\) \(\d{4}-\d\d-\d\d \d\d:\d\dZ\)/);
   assert.ok(handoff.includes("[xrgarcia/Slashbin-console#1283](https://github.com/xrgarcia/Slashbin-console/issues/1283)"));
   assert.ok(handoff.includes("[PR #1291](https://github.com/xrgarcia/Slashbin-console/pull/1291)"));
@@ -1388,7 +1388,7 @@ test("handoff: an owned card at another seat's stage says the next action under 
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels: ["approved", "pr approved"] }]), cards: [c] }, logger());
   const lines = fake.rows[0].description.split("\n");
   assert.equal(lines[1], "GitHub: open · stage pendingVerification");
-  assert.equal(lines[2], "Next: Engineering Manager — run the EM release gate (/deliver-to-prod 3a) for example/r#7, then apply `ready for prod release`");
+  assert.equal(lines[2], "Next: Engineering Manager — run the release gate for example/r#7, then apply `ready for prod release`");
 });
 
 test("a dev-verification wait stays in review, never Blocked; the same reason twice writes nothing (jerky_ops#18)", async () => {

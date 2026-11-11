@@ -8,7 +8,7 @@ import { setContractReaderEnv } from "../handoff-contract.js";
 import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "../review-progress.js";
 import { isTransientGhError } from "../github/gh.js";
 import { cliTail, lastLine, parseReviewTrailerRecords, runAgentCli } from "./agent-cli.js";
-import type { ForemanPlugin, PromotionApproval, Reviewer, ReviewFallback } from "./contract.js";
+import type { ForemanPlugin, PromotionApproval, Reviewer, ReviewFallback, PluginCatalogEntry } from "./contract.js";
 
 /**
  * The Tech Lead (slashbin_ai_tech_lead, EM#427) as the reviewer
@@ -92,7 +92,7 @@ export async function reviewViaTechLead(
     return { success: false, error: "TECHLEAD_GITHUB_KEY not set — refusing to run review without Tech Lead attribution" };
   }
   const args = ["review-pr", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), ...(noMerge ? ["--no-merge"] : []), ...(mergeApprovedSha ? ["--merge-approved", mergeApprovedSha] : [])];
-  logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead (Codex)`);
+  logger.info(`Offering PR #${prNumber} on ${repoConfig.githubRepo} to the Tech Lead`);
 
   const milestones = onProgress ? milestoneReader(onProgress) : null;
   const out = await runAgentCli(techLead, "bin/tech-lead.mjs", args, buildTechLeadEnv(agentConfig, repoConfig), agentConfig,
@@ -104,10 +104,10 @@ export async function reviewViaTechLead(
     });
 
   if (out.code === 3) {
-    const reason = out.stdout.trim().split("\n").pop() || "Codex unavailable";
+    const reason = out.stdout.trim().split("\n").pop() || "reviewer unavailable";
     logger.info(`Tech Lead declined PR #${prNumber} (wrote nothing): ${reason} — retried later`);
     // Exit 3 with GitHub down ("GitHub unavailable after 4 attempts") is a network defer, silent like the
-    // exit-1 form below; Codex unavailable stays the visible wait it always was (foreman#180).
+    // exit-1 form below; a reviewer-engine outage stays the visible wait it always was (foreman#180).
     const githubDown = /github unavailable/i.test(out.stdout) || isTransientGhError(new Error(out.stderr));
     return githubDown ? { fallback: true, reason, unavailable: true } : { fallback: true, reason };
   }
@@ -196,6 +196,13 @@ export async function approvePromotionViaTechLead(
 export class TechLeadPlugin implements ForemanPlugin {
   readonly id = "tech-lead";
   readonly roles = ["reviewer"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "Tech Lead",
+    purpose: "An agent reviews each PR before it merges, approves or asks for changes, and merges on approval. It also approves release PRs.",
+    onWhen: "`techLeadPath` is set (and `reviewEnabled` turns the review stage on)",
+    requires: { config: ["techLeadPath", "reviewEnabled"], env: ["TECHLEAD_GITHUB_KEY"] },
+    whenOff: "No automated review: each PR waits for a person to review and merge it, and the Foreman records the merge and carries on. The release stage cannot run (it needs a reviewer and a deployer), so a release PR waits for a person.",
+  };
   readonly reviewer: Reviewer = { reviewPr: reviewViaTechLead, approvePromotion: approvePromotionViaTechLead };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.techLeadPath);

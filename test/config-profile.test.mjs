@@ -125,7 +125,7 @@ test("applyProfile copies the profile's arrays and blocks, so a config never ali
 // deployment's names can't creep back in through prose.
 test("Slashbin's names appear in src/ only under src/profiles/", () => {
   const src = fileURLToPath(new URL("../src/", import.meta.url));
-  const banned = ["xrgarcia", "slashbin-engineering-manager", "x-slashbin-comment-author", "engineering-manager #"];
+  const banned = ["xrgarcia", "slashbin-engineering-manager", "x-slashbin-comment-author", "engineering-manager #", "deliver-to-prod", "(Codex)", "Codex unavailable"];
   const hits = [];
   const walk = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {

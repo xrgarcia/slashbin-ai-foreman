@@ -120,8 +120,8 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
   },
   pendingVerification: {
     act: true,
-    todo: "Run the EM release gate (`/deliver-to-prod` step 3a) for {issue} and, if it passes, apply `{readyForProd}` to the issue. The prod release does not start until you do.",
-    next: "run the EM release gate (/deliver-to-prod 3a) for {issue}, then apply `{readyForProd}`",
+    todo: "Run the release gate for {issue} and, if it passes, apply `{readyForProd}` to the issue. The prod release does not start until you do.",
+    next: "run the release gate for {issue}, then apply `{readyForProd}`",
     why: "dev verification passed (`{prApproved}`)",
     done: "`{readyForProd}` is on {issue}; the Foreman then moves this card to Release authorized and opens the release PR",
   },
@@ -225,7 +225,7 @@ function unsignedVars(f: HandoffFacts, labels: HandoffLabels): Record<string, st
   if (f.unsigned && f.unsigned.length > 0) {
     const list = f.unsigned.map((n) => `${f.repo}#${n}`).join(", ");
     return {
-      unsignedTodo: `Run the EM release gate (\`/deliver-to-prod\` step 3a) for each of ${list} and apply \`${labels.readyForProd}\`, or take it out of the release.`,
+      unsignedTodo: `Run the release gate for each of ${list} and apply \`${labels.readyForProd}\`, or take it out of the release.`,
       unsignedNext: list,
       unsignedWhy: `${list} lack \`${labels.readyForProd}\``,
     };

@@ -158,8 +158,8 @@ export class Placement {
 
   /**
    * True when a Blocked card's hold is someone else's: a seat's escalation hop
-   * (`process.escalate`) or a person's hold (the deliver-to-prod nudge put
-   * SLA-2591 on Ray). Every block the Foreman or a GitHub label makes names
+   * (`process.escalate`) or a person's hold (a release-gate nudge put
+   * the card on a person). Every block the Foreman or a GitHub label makes names
    * FOREMAN_BLOCKED_PREFIX, and the receiver's entry text is GitHub's label.
    */
   externalHold(id: string): boolean {

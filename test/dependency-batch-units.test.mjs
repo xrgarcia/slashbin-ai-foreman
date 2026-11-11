@@ -112,7 +112,7 @@ test("filer: pre-approved repos file with the trigger label and the production g
   const issue = { title: "t", body: "b", changes: [] };
   await new BatchIssueFiler(host).file(repoConfig(), issue, quiet);
   await new BatchIssueFiler(host).file(repoConfig({ dependencyPreApproved: false }), issue, quiet);
-  assert.deepEqual(host.filed.map((f) => f.labels), [["approved", "deliver-to-prod"], []]);
+  assert.deepEqual(host.filed.map((f) => f.labels), [["approved", "ship to prod"], []]);
 });
 test("probe: sees an open batch issue and ignores a closed one", async () => {
   const host = new FakeHost();

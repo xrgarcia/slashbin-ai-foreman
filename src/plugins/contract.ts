@@ -200,9 +200,28 @@ export interface Unsticker {
 /** The agent roles, each named as its field on ForemanPlugin. */
 export type AgentRole = "reviewer" | "verifier" | "deployer" | "qa" | "unstick";
 
+/**
+ * What a plugin is for, in an operator's words: the source of `docs/capabilities.md`
+ * and of the setup interview (foreman#285). A test fails when the doc and this disagree.
+ */
+export interface PluginCatalogEntry {
+  /** A display name. */
+  readonly name: string;
+  /** What it does for the operator, one or two sentences. */
+  readonly purpose: string;
+  /** The setting that turns it on. */
+  readonly onWhen: string;
+  /** Config keys it reads and env vars it needs; `[]` when none. */
+  readonly requires: { readonly config: readonly string[]; readonly env: readonly string[] };
+  /** What the lifecycle does when it is off. */
+  readonly whenOff: string;
+}
+
 export interface ForemanPlugin {
   readonly id: string;
   readonly roles: readonly PluginRole[];
+  /** What it is for, what it needs, and what happens without it (docs/capabilities.md). */
+  readonly catalog: PluginCatalogEntry;
   /** Whether this config turns the plugin on. Read at startup; a disabled plugin is never started or called. */
   enabled(config: AgentConfig): boolean;
   /** Why an apparently requested plugin is off, logged once at startup (e.g. a missing id). */
