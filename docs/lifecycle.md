@@ -77,13 +77,13 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `revised` | changesRequested | inReview | `inReview` | A revise session pushed changes; back to review. |
 | `qaRerunRevise` | changesRequested | inReview | `inReview` | The EM asked for QA again on the open PR (a PR comment opening `**EM QA re-run`, newer than every QA Report for its head) while it waited for a revise session: no session runs, and it goes back to review and QA. |
 | `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`. |
-| `qaRerun` | approved | merged | `merged` | The EM asked for QA again on the merged PR (a PR comment opening `**EM QA re-run`): dev verification and the QA gate run again (slashbin-ai-foreman#158). |
+| `qaRerun` | approved | merged | `merged` | The EM asked for QA again on the merged PR (a PR comment opening `**EM QA re-run`): dev verification and the QA gate run again. |
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |
 | `recoverFailed` | unknown | changesRequested | `changesRequested` | Dead-zone recovery: a fresh verification failed. |
 | `recoverMerged` | unknown | merged | `merged` | Dead-zone recovery with a verify stage: the merge is recorded and verification follows. |
 | `humanMerged` | unknown | merged | `merged` | No reviewer is enabled, so a person reviewed and merged the PR: the merge is recorded, and dev verification follows when a verifier is enabled. |
-| `humanMergedApproved` | merged | approved | `pendingVerification` | A person merged it, and there is no verifier: it goes straight on. |
-| `closedNoRelease` | approved | released | `done` | A person merged it, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed. |
+| `humanMergedApproved` | merged | approved | `pendingVerification` | It merged (by a person, or by the reviewer), and there is no verifier: it goes straight on. |
+| `closedNoRelease` | approved | released | `done` | It merged, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed. |
 | `release` | unknown | queued | `approved` | An orphan: in review with no open PR; released back to the queue. |
 | `releaseQueued` | releaseAuthorized | releasing | `releasing` | The promote stage put an EM-authorized item in the release PR (opened, updated, or already listing it), or found its work already in production with no prod verification on record. |
 | `alreadyReleased` | releaseAuthorized | released | `done` | Authorized, its work already in production, and a passed prod verification on record for it: closed. |
