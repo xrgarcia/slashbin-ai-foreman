@@ -12,13 +12,13 @@ export async function commentBodies(config: RepoConfig, num: number): Promise<st
   return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as string);
 }
 
-/** Every comment on issue-or-PR `num` with its creation time, all pages, oldest first. Throws on a failed read. */
-export async function commentsWithTimes(config: RepoConfig, num: number): Promise<Array<{ at: string; body: string }>> {
+/** Every comment on issue-or-PR `num` with its creation time and author login, all pages, oldest first. Throws on a failed read. */
+export async function commentsWithTimes(config: RepoConfig, num: number): Promise<Array<{ at: string; body: string; author: string }>> {
   const out = await ghAsync([
     "api", `repos/${config.githubRepo}/issues/${num}/comments?per_page=100`, "--paginate",
-    "--jq", ".[] | {at: .created_at, body: (.body // \"\")} | @json",
+    "--jq", ".[] | {at: .created_at, body: (.body // \"\"), author: (.user.login // \"\")} | @json",
   ], config.repoPath);
-  return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { at: string; body: string });
+  return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { at: string; body: string; author: string });
 }
 
 /** True when any comment body on `num`, across all pages, satisfies `match`. */

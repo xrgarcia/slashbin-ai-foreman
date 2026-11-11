@@ -5,7 +5,7 @@ import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { emit, advance, wantsSessionReports } from "../work-source.js";
 import { revisePRFeedback } from "./revise-workflow.js";
-import { latestQaFailLines, qaBeforeMergeApplies, qaRerunVoidsHead } from "../qa-report.js";
+import { latestQaFailLines, qaBeforeMergeApplies, qaRerunVoidsHead, trustedQaComments } from "../qa-report.js";
 import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
 import { runnerName } from "../refusal.js";
 import { type BlockKind } from "../unblock.js";
@@ -72,7 +72,7 @@ export async function tryRevision(
   if ((await qaBeforeMergeApplies(repoConfig, config)) === true) {
     let rerun = false;
     try {
-      rerun = qaRerunVoidsHead(await codeHost().commentsWithTimes(repoConfig, prNumber), head);
+      rerun = qaRerunVoidsHead(trustedQaComments(await codeHost().commentsWithTimes(repoConfig, prNumber), await codeHost().foremanLogin(repoConfig.repoPath)), head);
     } catch (e) {
       revLogger.warn(`Could not read PR #${prNumber}'s comments for an EM QA re-run (${String(e).slice(0, 200)}); revising as usual`);
     }
@@ -266,6 +266,19 @@ export async function tryRevision(
       revLogger.info("PR revision succeeded");
       return pending;
     } else {
+      // A present but invalid v1 result: held for a person, the field named. Retrying would print the same line,
+      // so no retry is charged; the PR resumes when someone pushes to it (the exhausted-revision release).
+      if (result.contractInvalid) {
+        const why = `Revision of PR #${pending.pr.number} held for a person: contract-invalid-result: ${result.contractInvalid} — push to the PR and the Foreman resumes`;
+        revLogger.error(why);
+        rt.memory.revisionFailureCount.set(repoName, maxFailures);
+        rt.memory.revisionEscalated.add(repoName);
+        const stoppedHead = pending.pr.headRefOid;
+        if (stoppedHead) rt.memory.revisionStoppedHead.set(repoName, stoppedHead);
+        events.push({ message: `${repoConfig.githubRepo} PR #${pending.pr.number}: ${why}`, level: "error" });
+        for (const n of pending.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why, stuck: "revision-exhausted" }, repoConfig, revLogger);
+        return null;
+      }
       // The session did not answer: the marker admitted above stays, and is not a round.
       // An upstream limit refused the run — not a defect, so it charges no retry.
       // The card still goes to Blocked: the work has stopped, and the board says why.
