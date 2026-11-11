@@ -163,7 +163,7 @@ Work autonomously. Do not ask questions.`;
 
   {
     const v1 = sessionResultV1(result.stdout, "implementer");
-    if (v1.status === "invalid") logger.warn(`contract: the implementer session's FOREMAN_RESULT_V1 line is invalid (${v1.problem}); reading its legacy trailer`);
+    if (v1.status === "invalid") logger.warn(`contract: the implementer session's FOREMAN_RESULT_V1 line is invalid (${v1.problem}); the work is held for a person if the branch did not move`);
     recordContractPath("implement-session", "implementer", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger.info(m));
   }
 
@@ -197,6 +197,16 @@ Work autonomously. Do not ask questions.`;
   // A declared LANDED is the same kind of declaration, with the same SHA guard:
   // "nothing to land" is only believable when the branch did not move. It names
   // its issue and the orchestrator closes only an issue in the batch.
+  // A PRESENT v1 line that fails its schema holds the work for a person, naming the field: the legacy trailer
+  // the skill prints beside it never closes an issue or skips one in its place (foreman#287 review, S2). Only
+  // an unmoved branch is held: commits are the truth, as for any trailer.
+  const v1Now = sessionResultV1(result.stdout, "implementer");
+  if (v1Now.status === "invalid" && !(await movedBranch())) {
+    const problem = v1Now.problem;
+    logger.error(`Implementation held for a person: the implementer's FOREMAN_RESULT_V1 line is invalid (${problem}); its legacy trailer is not read`);
+    return { success: false, contractInvalid: problem, summary: extractStreamResult(result.stdout), error: `contract-invalid-result: ${problem}` };
+  }
+
   const declaredLanded = declaredLandedV1(result.stdout) ?? detectDeclaredLanded(result.stdout);
   if (declaredLanded.landed) {
     const moved = await movedBranch();

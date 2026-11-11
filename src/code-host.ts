@@ -507,6 +507,8 @@ export interface CodeHost {
   commentsWithTimes(config: RepoConfig, num: number): Promise<Array<{
     at: string;
     body: string;
+    /** The commenter's login. */
+    author: string;
 }>>;
   hasCommentContaining(config: RepoConfig, num: number, mark: string): Promise<boolean>;
   reopenedSince(config: RepoConfig, num: number, sinceIso: string): Promise<boolean>;

@@ -767,6 +767,24 @@ export async function tryBatchImplementation(
         repoLogger.warn(why);
         await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why }, repoConfig, repoLogger);
       }
+    } else if (result.contractInvalid) {
+      // A present but invalid v1 result: nothing it said is believed. Held for a person: the skip record is
+      // escalated (the filter at the top stops every release but a person's change to the issue) and the card
+      // is escalated Blocked with the field named. No retry is charged: a retry would print the same line.
+      const reason = `contract-invalid-result: ${result.contractInvalid}`;
+      const stamp = new Date().toISOString();
+      worked = [...actionableIssues];
+      for (const n of actionableIssues) {
+        await rt.records.updateIssueRecord(repoConfig, n, (d) => {
+          d.skipped = { lastSkippedAt: stamp, reason, skipCount: (d.skipped?.skipCount ?? 0) + 1, escalatedAt: stamp };
+        });
+        repoLogger.warn(`Held #${n} for a person: ${reason}`);
+        await emit(rt, { kind: "escalated", item: itemOf(repoConfig, n), reason, at: "approved" }, repoConfig, repoLogger);
+      }
+      rt.memory.failureCount.set(repoName, 0);
+      rt.memory.lastFailureReason.delete(repoName);
+      rt.memory.failurePause.clear(repoName);
+      events?.push({ message: `Implementation held for a person on ${repoConfig.githubRepo}: ${reason}`, level: "error" });
     } else if (result.skipped) {
       // Deliberate no-op by the agent (e.g., issue body says "investigate first").
       // Record per-issue skip timestamps so the back-off filter at the top of

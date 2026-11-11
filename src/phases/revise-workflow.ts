@@ -97,7 +97,7 @@ Work autonomously. Do not ask questions.`;
 
   {
     const v1 = sessionResultV1(result.stdout, "reviser");
-    if (v1.status === "invalid") logger.warn(`contract: the reviser session's FOREMAN_RESULT_V1 line is invalid (${v1.problem}); reading its legacy trailer`);
+    if (v1.status === "invalid") logger.warn(`contract: the reviser session's FOREMAN_RESULT_V1 line is invalid (${v1.problem}); the revision is held for a person if the branch did not move`);
     recordContractPath("revise-session", "reviser", v1.status === "ok" ? "v1" : v1.status === "invalid" ? "invalid" : "legacy", (m) => logger.info(m));
   }
 
@@ -121,6 +121,13 @@ Work autonomously. Do not ask questions.`;
   // A branch that does not exist yet reads null; a read that FAILS throws and fails the
   // pass (EM#1244 f5): neither a trailer nor an exit code is trusted on an unread branch.
   const afterSha = await codeHost().getRemoteBranchSha(config.githubRepo, headBranch, config.repoPath, logger);
+  const v1Now = sessionResultV1(result.stdout, "reviser");
+  if (v1Now.status === "invalid" && beforeSha && afterSha && beforeSha === afterSha) {
+    // A PRESENT v1 line that fails its schema holds the revision for a person, naming the field: the legacy
+    // FOREMAN_REVISION trailer beside it never reports success or returns unchanged work to review (S2).
+    logger.error(`PR revision held for a person: the reviser's FOREMAN_RESULT_V1 line is invalid (${v1Now.problem}); its legacy trailer is not read`);
+    return { success: false, contractInvalid: v1Now.problem, error: `contract-invalid-result: ${v1Now.problem}`, summary: extractStreamResult(result.stdout) };
+  }
   if (beforeSha && afterSha && beforeSha === afterSha) {
     // Declared no-commit: the revision determined the branch is already correct
     // and said so on the trailer. That is a real outcome, not a misfire, and it
