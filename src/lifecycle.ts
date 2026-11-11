@@ -79,7 +79,7 @@ export const MOVES = Object.freeze({
   revised: { from: "changesRequested", to: "inReview", why: "A revise session pushed changes; back to review." },
   qaRerunRevise: { from: "changesRequested", to: "inReview", why: "The EM asked for QA again on the open PR (a PR comment opening `**EM QA re-run`, newer than every QA Report for its head) while it waited for a revise session: no session runs, and it goes back to review and QA." },
   verifyPassed: { from: "merged", to: "approved", why: "Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`." },
-  qaRerun: { from: "approved", to: "merged", why: "The EM asked for QA again on the merged PR (a PR comment opening `**EM QA re-run`): dev verification and the QA gate run again (slashbin-ai-foreman#158)." },
+  qaRerun: { from: "approved", to: "merged", why: "The EM asked for QA again on the merged PR (a PR comment opening `**EM QA re-run`): dev verification and the QA gate run again." },
   recoverPassed: { from: "unknown", to: "approved", why: "Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed." },
   recoverFailed: { from: "unknown", to: "changesRequested", why: "Dead-zone recovery: a fresh verification failed." },
   recoverMerged: { from: "unknown", to: "merged", why: "Dead-zone recovery with a verify stage: the merge is recorded and verification follows." },

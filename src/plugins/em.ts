@@ -3,7 +3,7 @@ import type { Logger } from "../logger.js";
 import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { cliTail, lastLine, runAgentCli, type CliRun } from "./agent-cli.js";
 import { detectRefusal } from "../refusal.js";
-import type { ForemanPlugin, Unsticker, UnstickOutcome } from "./contract.js";
+import type { ForemanPlugin, Unsticker, UnstickOutcome, PluginCatalogEntry } from "./contract.js";
 
 /**
  * The EM (`<emRepoPath>/bin/em.mjs`) as the unstick plugin (#103, EM#1150 f3):
@@ -137,6 +137,13 @@ export async function publishedKindsViaEm(agentConfig: AgentConfig, logger: Logg
 export class EmPlugin implements ForemanPlugin {
   readonly id = "em";
   readonly roles = ["unstick"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "Unstick (EM)",
+    purpose: "An agent is called when work is stuck or held, to clear it or escalate it to a named owner.",
+    onWhen: "`emRepoPath` is set",
+    requires: { config: ["emRepoPath", "unstickEscalationOwner"], env: ["EM_GITHUB_TOKEN"] },
+    whenOff: "Stuck or held work stays where it is until a person clears it; nothing escalates it.",
+  };
   readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm, publishedKinds: publishedKindsViaEm };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.emRepoPath);

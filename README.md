@@ -270,7 +270,8 @@ that names one. The core never imports GitHub or Paperclip code and never runs `
 | QA | `qa` | [`src/plugins/qa.ts`](src/plugins/qa.ts) | `qaPath` is set (covers `qaRepos`) |
 | EM | `unstick` | [`src/plugins/em.ts`](src/plugins/em.ts) | `emRepoPath` is set |
 
-A stage whose role no plugin fills does not run: with no reviewer, a person merges. With
+[`docs/capabilities.md`](docs/capabilities.md) is generated from each plugin's catalog: what each
+role needs and what happens with it off. A stage whose role no plugin fills does not run: with no reviewer, a person merges. With
 no work source or code host, startup refuses. An operator's own values (logins, repo
 names, MCP tool lists) live in a profile under `src/profiles/`, selected with
 `"profile"`; each key resolves as neutral default, then profile, then `.ai-agent.json`,
