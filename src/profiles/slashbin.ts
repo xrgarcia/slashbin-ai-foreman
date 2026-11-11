@@ -32,6 +32,8 @@ export const slashbinProfile: ConfigProfile = {
   epicRefLabel: "engineering-manager",
   // The epics live in the EM repo; one closed there is not asked about.
   epicRepo: "xrgarcia/slashbin-engineering-manager",
+  // The EM release gate reads this as the owner's grant (owner decision 2026-11-06).
+  prodGrantLabel: "deliver-to-prod",
   // Slashbin's Paperclip fork credits a write to an agent through this header.
   paperclip: { commentAuthorHeader: "x-slashbin-comment-author" },
 };

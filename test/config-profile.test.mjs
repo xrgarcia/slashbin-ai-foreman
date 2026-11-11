@@ -125,7 +125,7 @@ test("applyProfile copies the profile's arrays and blocks, so a config never ali
 // deployment's names can't creep back in through prose.
 test("Slashbin's names appear in src/ only under src/profiles/", () => {
   const src = fileURLToPath(new URL("../src/", import.meta.url));
-  const banned = ["xrgarcia", "slashbin-engineering-manager", "x-slashbin-comment-author", "engineering-manager #"];
+  const banned = ["xrgarcia", "slashbin-engineering-manager", "x-slashbin-comment-author", "engineering-manager #", "deliver-to-prod", "(Codex)", "Codex unavailable"];
   const hits = [];
   const walk = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -139,4 +139,12 @@ test("Slashbin's names appear in src/ only under src/profiles/", () => {
   };
   walk(src);
   assert.deepEqual(hits, [], `move these into src/profiles/:\n${hits.join("\n")}`);
+});
+
+// A move's reason is read by any team's operator; a tracker number from this repo's
+// history means nothing to them, so no `#123` may come back into one.
+test("no lifecycle move reason cites an issue number", async () => {
+  const { MOVES } = await import("../dist/lifecycle.js");
+  const hits = Object.entries(MOVES).filter(([, m]) => /#\d+/.test(m.why)).map(([k, m]) => `${k}: ${m.why}`);
+  assert.deepEqual(hits, [], hits.join("\n"));
 });
