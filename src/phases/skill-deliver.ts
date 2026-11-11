@@ -34,12 +34,15 @@ export async function trySkillDeliver(
       .filter((i) => codeHost().hasLabel(i, HUMAN_LANE_LABEL))
       .sort((a, b) => a.number - b.number);
     for (const issue of issues) {
-      const out = await rt.skillSync.deliverSkillsForIssue(config.skillSync, repoConfig, issue, logger);
+      const out = await rt.skillSync.deliverSkillsForIssue(
+        config.skillSync, repoConfig, issue, logger,
+        (branch) => codeHost().allPrsForBranch(repoConfig.githubRepo, branch, repoConfig.baseBranch, repoConfig.repoPath),
+      );
       // Current is repo-wide (origin/<base> carries the skills): no issue needs anything. A skip or failure repeats on the next issue.
-      if (out.status !== "delivered" && out.status !== "exists") break;
-      if (out.status === "delivered") {
+      if (out.status !== "delivered" && out.status !== "refreshed" && out.status !== "exists") break;
+      if (out.status === "delivered" || out.status === "refreshed") {
         delivered++;
-        events.push({ message: `${repoConfig.githubRepo}#${issue.number}: skills synced onto ${out.branch} (${out.skills.join(", ")})`, level: "info" });
+        events.push({ message: `${repoConfig.githubRepo}#${issue.number}: skills ${out.status === "refreshed" ? "refreshed on" : "synced onto"} ${out.branch} (${out.skills.join(", ")})`, level: "info" });
       } else if (out.status === "exists") {
         logger.debug(`Skill delivery: #${issue.number} already has ${out.branch} — left alone`);
       }
