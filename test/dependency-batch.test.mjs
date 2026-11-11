@@ -23,6 +23,7 @@ import {
   DEPENDENCY_BATCH_TITLE_PREFIX,
   dependencyBatchIssueCreateArgs,
 } from "../dist/github.js";
+import { versionMovesFromBody } from "../dist/github/dependencies.js";
 
 // --- Title parsing. All four shapes were observed live on 2026-09-07. --------
 
@@ -47,7 +48,75 @@ test("a grouped bump lists its packages and claims NO version", () => {
   assert.deepEqual(c.packages, ["qs", "express"]);
   assert.equal(c.from, undefined);
   assert.equal(c.to, undefined);
-  assert.equal(c.major, false, "unknown versions must not be reported as a major");
+  assert.equal(c.major, null, "unreadable versions are unknown: never reported as 'not a major'");
+});
+
+// A grouped Dependabot PR states its versions in the BODY (slashbin-ai-foreman#118).
+const GROUPED_BODY = [
+  "Bumps the npm_and_yarn group with 2 updates in the / directory: [qs](https://github.com/ljharb/qs) and [express](https://github.com/expressjs/express).",
+  "",
+  "Updates `qs` from 6.11.0 to 6.14.0",
+  "<details><summary>Release notes</summary></details>",
+  "",
+  "Updates `express` from 4.21.2 to 5.2.1",
+].join("\n");
+
+test("a grouped bump reads each package's versions from the PR body and flags a major", () => {
+  const c = describeDependencyPR(315, "chore(deps): bump qs and express", GROUPED_BODY);
+  assert.deepEqual(c.packages, ["qs", "express"]);
+  assert.deepEqual(c.moves, [
+    { package: "qs", from: "6.11.0", to: "6.14.0" },
+    { package: "express", from: "4.21.2", to: "5.2.1" },
+  ]);
+  assert.equal(c.major, true, "express 4 -> 5 is a major even though the title says nothing");
+  assert.equal(c.from, undefined, "no single from/to for a multi-package PR");
+});
+
+test("a grouped bump whose every move is read and none is major is 'no'", () => {
+  const body = "Updates `qs` from 6.11.0 to 6.11.2\n\nUpdates `express` from 4.21.1 to 4.21.2";
+  assert.equal(describeDependencyPR(1, "chore(deps): bump qs and express", body).major, false);
+});
+
+test("a group title that names no package takes the packages from the body table", () => {
+  const body = [
+    "Bumps the npm_and_yarn group with 2 updates.", "",
+    "| Package | From | To |", "| --- | --- | --- |",
+    "| [vite](https://github.com/vitejs/vite) | `5.4.21` | `8.2.2` |",
+    "| [form-data](https://github.com/form-data/form-data) | `4.0.5` | `4.0.6` |",
+  ].join("\n");
+  const c = describeDependencyPR(9, "chore(deps): bump the npm_and_yarn group across 1 directory with 2 updates", body);
+  assert.deepEqual(c.packages, ["vite", "form-data"]);
+  assert.equal(c.major, true);
+});
+
+test("one package unread among read ones: a known major still shows, otherwise unknown", () => {
+  const body = "Updates `qs` from 6.11.0 to 6.11.2";
+  assert.equal(describeDependencyPR(2, "chore(deps): bump qs and express", body).major, null, "express is unread: unknown, not no");
+  const withMajor = "Updates `qs` from 1.0.0 to 2.0.0";
+  assert.equal(describeDependencyPR(3, "chore(deps): bump qs and express", withMajor).major, true);
+});
+
+test("versionMovesFromBody reads the three Dependabot forms and invents nothing", () => {
+  assert.deepEqual(versionMovesFromBody("Bumps [vite](https://x/y) from 5.4.21 to 8.2.2.\n"), [{ package: "vite", from: "5.4.21", to: "8.2.2" }]);
+  assert.deepEqual(versionMovesFromBody("Updates `esbuild` from 0.25.12 to 0.28.1"), [{ package: "esbuild", from: "0.25.12", to: "0.28.1" }]);
+  assert.deepEqual(versionMovesFromBody("Bumps the group with 2 updates: [a](u) and [b](u)."), []);
+  assert.deepEqual(versionMovesFromBody(""), []);
+});
+
+test("an unknown major prints 'unknown' in the batch issue, never 'no'", () => {
+  const c = describeDependencyPR(315, "chore(deps): bump qs and express");
+  const { title, body } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(body, /\| #315 \| qs, express \| grouped — read the PR \| unknown \|/);
+  assert.match(body, /grouped with versions the PR does not state/);
+  assert.doesNotMatch(body, /None of these crosses a major version/);
+  assert.match(title, /\(1 unknown\)/);
+});
+
+test("a grouped PR with readable versions renders each move in the issue", () => {
+  const c = describeDependencyPR(315, "chore(deps): bump qs and express", GROUPED_BODY);
+  const { title, body } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(body, /qs `6\.11\.0` → `6\.14\.0`; express `4\.21\.2` → `5\.2\.1` \| \*\*yes\*\* \|/);
+  assert.match(title, /\(1 major\)/);
 });
 
 test("a grouped bump drops the trailing directory qualifier", () => {
@@ -90,7 +159,7 @@ const changes = [
 ];
 
 test("the title carries the idempotency prefix, the count and the major count", () => {
-  const { title } = buildDependencyBatchIssue("features", changes);
+  const { title } = buildDependencyBatchIssue("develop", changes);
   assert.ok(title.startsWith(DEPENDENCY_BATCH_TITLE_PREFIX),
     "the prefix IS the at-most-one-open-issue mechanism — a title that loses it files a duplicate every cycle");
   assert.match(title, /2 dependency updates/);
@@ -98,30 +167,52 @@ test("the title carries the idempotency prefix, the count and the major count", 
 });
 
 test("a batch with no major says so instead of claiming one", () => {
-  const { title, body } = buildDependencyBatchIssue("features", [changes[1]]);
+  const { title, body } = buildDependencyBatchIssue("develop", [changes[1]]);
   assert.doesNotMatch(title, /major\)/);
   assert.match(body, /None of these crosses a major version/);
   assert.match(title, /1 dependency update\b/, "singular, not '1 dependency updates'");
 });
 
 test("every PR appears in the table and in References", () => {
-  const { body } = buildDependencyBatchIssue("features", changes);
+  const { body } = buildDependencyBatchIssue("develop", changes);
   for (const c of changes) {
     assert.ok(body.includes(`| #${c.number} |`), `PR #${c.number} missing from the table`);
     assert.ok(body.includes(`- #${c.number}`), `PR #${c.number} missing from References`);
   }
 });
 
-test("the body demands the app be STARTED, not merely built", () => {
-  // This is the whole point of the change. A body that only says "build" would
-  // reproduce the CI-rollup gate the issue exists to replace.
-  const { body } = buildDependencyBatchIssue("features", changes);
-  assert.match(body, /Start the application and confirm it serves/);
-  assert.match(body, /Exercise the flows/);
+test("boot and health sit under dev verification; no in-session step needs a datastore", () => {
+  // foreman#115: the implement session has no Postgres, Redis or Docker, so a step that boots the app dropped every update.
+  const { body } = buildDependencyBatchIssue("develop", changes);
+  const required = body.slice(body.indexOf("## Required Changes"), body.indexOf("## Acceptance"));
+  const steps = required.split("\n").filter((l) => /^\d+\. /.test(l));
+  assert.equal(steps.length, 5);
+  assert.match(steps[1], /lockfile/);
+  assert.match(steps[2], /Build/);
+  assert.match(steps[3], /test suite/);
+  assert.match(steps[4], /bundle/);
+  for (const step of steps) assert.doesNotMatch(step, /\b(start|boot|serves?|health|postgres|redis|docker|database)\b/i, `a datastore step in the session: ${step}`);
+  assert.doesNotMatch(body, /Start the application and confirm it serves/);
+
+  const dev = body.slice(body.indexOf("### Dev verification"), body.indexOf("### Human validation"));
+  assert.ok(dev.length > 0, "a Dev verification section");
+  assert.match(dev, /SRE/);
+  assert.match(dev, /boots/);
+  assert.match(dev, /health route/);
+  const automated = body.slice(body.indexOf("### Automated checks"), body.indexOf("### Dev verification"));
+  assert.doesNotMatch(automated, /starts|health/i, "the session's automated checks do not claim a boot");
+});
+
+test("an environment gap is not an update failure: a PR is dropped only when a step that can run here fails", () => {
+  const { body } = buildDependencyBatchIssue("develop", changes);
+  assert.match(body, /environment gap, not an update failure/);
+  assert.match(body, /Never drop an update because the app would not start here/);
+  assert.match(body, /only when a step that can run\s+here/);
+  assert.match(body, /Exercise|dev verification/i);
 });
 
 test("the body carries the flight-gate sections the approval gate requires", () => {
-  const { body } = buildDependencyBatchIssue("features", changes);
+  const { body } = buildDependencyBatchIssue("develop", changes);
   // Match whole lines: `## Problem` is the first line of the body, so a
   // "\n## Problem\n" test would fail on a body that is perfectly correct.
   const headings = new Set(body.split("\n").map((l) => l.trim()));
@@ -135,12 +226,12 @@ test("the body carries the flight-gate sections the approval gate requires", () 
 });
 
 test("a grouped PR renders as 'read the PR' rather than a fabricated version", () => {
-  const { body } = buildDependencyBatchIssue("features", [describeDependencyPR(315, "chore(deps): bump qs and express")]);
+  const { body } = buildDependencyBatchIssue("develop", [describeDependencyPR(315, "chore(deps): bump qs and express")]);
   assert.match(body, /grouped — read the PR/);
   assert.ok(body.includes("qs, express"));
 });
 
-test("the feature branch name is taken from config, never hardcoded", () => {
+test("the landing branch name is taken from the caller, never hardcoded", () => {
   const { title, body } = buildDependencyBatchIssue("wip", changes);
   assert.match(title, /on `wip`/);
   assert.ok(body.includes("`wip`"));
@@ -159,20 +250,69 @@ test("the feature branch name is taken from config, never hardcoded", () => {
 // of the label are pinned here.
 
 test("a pre-approved repo files its batch carrying the trigger label", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", "approved");
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", ["approved", "deliver-to-prod"]);
   const i = args.indexOf("--label");
   assert.ok(i >= 0, "no --label on the create call — the batch would stall unapproved");
   assert.equal(args[i + 1], "approved");
+  assert.equal(args[args.lastIndexOf("--label") + 1], "deliver-to-prod", "no production grant — the EM gate would hold the batch");
 });
 
 test("a repo that is NOT pre-approved files its batch with no label at all", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", null);
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", []);
   assert.ok(!args.includes("--label"), "a label here flies work the owner never authorized");
   assert.ok(!args.includes("approved"));
 });
 
 test("the label comes from config, never hardcoded", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", "go");
+  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", ["go"]);
   assert.equal(args[args.indexOf("--label") + 1], "go");
   assert.ok(!args.includes("approved"));
+});
+
+test("batch instructions merge into the issue's own branch and deliver via its PR, never merge into base locally (#208 review S2)", async () => {
+  const { buildDependencyBatchIssue } = await import("../dist/github.js");
+  const { body } = buildDependencyBatchIssue("develop", [{ number: 1, packages: ["x"], from: "1.0.0", to: "1.0.1", major: false }], undefined, "develop");
+  assert.match(body, /Merge the Dependabot branches into \*\*this issue's own assigned branch\*\*/);
+  assert.match(body, /Never merge into `develop` locally/);
+  assert.doesNotMatch(body, /Merge the branches into `develop` locally/);
+  assert.match(body, /own PR into `develop`/);
+});
+
+test("the issue's acceptance: plain `Updates express from 4.22.3 to 5.3.0` reads as a major, renders yes, counts in the title", () => {
+  const c = describeDependencyPR(158, "chore(deps): bump express and @types/express", "Updates express from 4.22.3 to 5.3.0");
+  assert.equal(c.major, true);
+  const { title, body } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(title, /\(1 major\)/);
+  assert.match(body, /\*\*yes\*\*/);
+  assert.match(body, /\*\*1 of these is a major version change\.\*\*/);
+});
+
+test("a generic group keeps an unread package in its inventory: major stays unknown, nothing claims no major", () => {
+  const body = "Updates `qs` from 6.11.0 to 6.14.0\n\n| Package | From | To |\n|---|---|---|\n| [qs](https://x/qs) | `6.11.0` | `6.14.0` |\n| [express](https://x/express) | see changelog | see changelog |\n";
+  const c = describeDependencyPR(315, "chore(deps): bump the npm_and_yarn group with 2 updates", body);
+  assert.deepEqual(c.packages.map((p) => p.toLowerCase()).sort(), ["express", "qs"]);
+  assert.equal(c.major, null);
+  const { title, body: issue } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(title, /\(1 unknown\)/);
+  assert.doesNotMatch(issue, /None of these crosses a major version/);
+  assert.match(issue, /express \(version not stated\)/);
+});
+
+test("a mixed batch reports the known major and the unknown ones in the anchor sentence as well as the title", () => {
+  const known = describeDependencyPR(415, "chore(deps): bump vite from 5.4.21 to 8.2.2");
+  const unread = describeDependencyPR(315, "chore(deps): bump qs and express");
+  const { title, body } = buildDependencyBatchIssue("develop", [known, unread]);
+  assert.match(title, /\(1 major\) \(1 unknown\)/);
+  assert.match(body, /\*\*1 of these is a major version change\.\*\*.*A further 1 is grouped with versions the PR does not state/);
+});
+
+test("a group summary line ('Bumps the x group ...: [qs](u) and [express](u)') keeps express in the inventory even when only qs states versions", () => {
+  const body = "Bumps the npm_and_yarn group with 2 updates in the / directory: [qs](u) and [express](u).\n\nUpdates `qs` from 6.11.0 to 6.14.0";
+  const c = describeDependencyPR(315, "chore(deps): bump the npm_and_yarn group with 2 updates", body);
+  assert.deepEqual(c.packages.map((p) => p.toLowerCase()).sort(), ["express", "qs"]);
+  assert.equal(c.major, null);
+  const { title, body: issue } = buildDependencyBatchIssue("develop", [c]);
+  assert.match(title, /\(1 unknown\)/);
+  assert.doesNotMatch(issue, /None of these crosses a major version/);
+  assert.match(issue, /\| unknown \|/);
 });

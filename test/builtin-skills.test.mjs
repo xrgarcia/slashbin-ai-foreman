@@ -12,10 +12,17 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { setCodeHost } from "../dist/plugins/registry.js";
+import { githubCodeHost } from "../dist/plugins/github.js";
+
+setCodeHost(githubCodeHost());
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { implementApprovedIssues, revisePRFeedback } = await import(join(root, "dist/agent.js"));
+const { implementApprovedIssues } = await import(join(root, "dist/phases/implement-workflow.js"));
+const { revisePRFeedback } = await import(join(root, "dist/phases/revise-workflow.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
+const { ClaudeTrust } = await import(join(root, "dist/claude-trust.js"));
+const trust = new ClaudeTrust();
 const { createLogger } = await import(join(root, "dist/logger.js"));
 const logger = createLogger({ format: "text", level: "error" });
 
@@ -31,7 +38,7 @@ before(() => {
   writeFileSync(join(bin, "claude"),
     `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(capture)}, process.argv[3]);\n` +
     `process.stdout.write("done\\n");\n`);
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho '[]'\n");
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\ncase \"$*\" in *branches/*) printf 0000000000000000000000000000000000000000;; *) echo '[]';; esac\n");
   chmodSync(join(bin, "claude"), 0o755);
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
@@ -68,23 +75,23 @@ const firstLine = (file) =>
   readFileSync(join(root, file), "utf8").split("\n").find((l) => l.startsWith("# "));
 
 test("builtin: inlines the shipped implement skill with the repo's branches", async () => {
-  const { prompt } = await promptOf(() => implementApprovedIssues(repo({ skillPath: "builtin:" }), logger));
+  const { prompt } = await promptOf(() => implementApprovedIssues(trust, repo({ skillPath: "builtin:" }), logger));
   assert.ok(prompt, "claude was not launched");
   assert.ok(prompt.includes(firstLine("skills/implement/SKILL.md")), "the built-in skill text is not in the prompt");
-  assert.match(prompt, /Feature branch: work\. Pull requests target: trunk\./);
+  assert.match(prompt, /Branch prefix for Foreman work: foreman\/\. Pull requests target: trunk\./);
   assert.ok(!prompt.includes("Read and follow the skill at builtin:"), "builtin: was passed through as a literal path");
   assert.match(prompt, /FOREMAN_RESULT: skipped issue=/, "the skip protocol must still follow the skill");
 });
 
 test("builtin: inlines the shipped revise skill", async () => {
-  const { prompt } = await promptOf(() => revisePRFeedback(repo({ revisionSkillPath: "builtin:" }), logger, undefined, 7, [3]));
+  const { prompt } = await promptOf(() => revisePRFeedback(trust, repo({ revisionSkillPath: "builtin:" }), logger, undefined, 7, [3]));
   assert.ok(prompt.includes(firstLine("skills/revise/SKILL.md")));
   assert.match(prompt, /FOREMAN_REVISION no-commit/, "the no-commit trailer contract must survive");
 });
 
 test("an overlay is appended after the skill, before the skip protocol", async () => {
   const { prompt } = await promptOf(() =>
-    implementApprovedIssues(repo({ skillPath: "builtin:", skillOverlayPath: "overlay.md" }), logger));
+    implementApprovedIssues(trust, repo({ skillPath: "builtin:", skillOverlayPath: "overlay.md" }), logger));
   const skillAt = prompt.indexOf("===== END SKILL =====");
   const overlayAt = prompt.indexOf("OVERLAY-RULE");
   const skipAt = prompt.indexOf("Skip protocol");
@@ -93,14 +100,14 @@ test("an overlay is appended after the skill, before the skip protocol", async (
 
 test("a revise overlay is appended too", async () => {
   const { prompt } = await promptOf(() =>
-    revisePRFeedback(repo({ revisionSkillPath: "builtin:", revisionSkillOverlayPath: "overlay.md" }), logger, undefined, 7, [3]));
+    revisePRFeedback(trust, repo({ revisionSkillPath: "builtin:", revisionSkillOverlayPath: "overlay.md" }), logger, undefined, 7, [3]));
   assert.ok(prompt.indexOf("OVERLAY-RULE") > prompt.indexOf("===== END SKILL ====="));
 });
 
 test("a configured overlay that cannot be read stops the run before claude starts", async () => {
   for (const [fn, extra] of [
-    [(c) => implementApprovedIssues(c, logger), { skillPath: "builtin:", skillOverlayPath: "missing.md" }],
-    [(c) => revisePRFeedback(c, logger, undefined, 7, [3]), { revisionSkillPath: "builtin:", revisionSkillOverlayPath: "missing.md" }],
+    [(c) => implementApprovedIssues(trust, c, logger), { skillPath: "builtin:", skillOverlayPath: "missing.md" }],
+    [(c) => revisePRFeedback(trust, c, logger, undefined, 7, [3]), { revisionSkillPath: "builtin:", revisionSkillOverlayPath: "missing.md" }],
   ]) {
     const { result, prompt } = await promptOf(() => fn(repo(extra)));
     assert.equal(prompt, null, "claude was launched without the overlay");
@@ -111,7 +118,7 @@ test("a configured overlay that cannot be read stops the run before claude start
 
 test("a repo-local skillPath produces the same prompt opening as before", async () => {
   const { prompt } = await promptOf(() =>
-    implementApprovedIssues(repo({ skillPath: ".claude/skills/implement-approved-issues/SKILL.md" }), logger));
+    implementApprovedIssues(trust, repo({ skillPath: ".claude/skills/implement-approved-issues/SKILL.md" }), logger));
   assert.ok(prompt.startsWith(
     "Read and follow the skill at .claude/skills/implement-approved-issues/SKILL.md.\n\nImplement all approved issues for this repository."));
   assert.ok(!prompt.includes("===== SKILL ====="));
@@ -122,7 +129,7 @@ test("a repo-local skillPath produces the same prompt opening as before", async 
 test("skill mode hands the selected work items to the session", async () => {
   const line = "Implement exactly these work items, and no others: #4, #9.";
   for (const skillPath of [".claude/skills/implement-approved-issues/SKILL.md", "builtin:"]) {
-    const { prompt } = await promptOf(() => implementApprovedIssues(repo({ skillPath }), logger, undefined, null, [4, 9]));
+    const { prompt } = await promptOf(() => implementApprovedIssues(trust, repo({ skillPath }), logger, undefined, null, [4, 9]));
     assert.ok(prompt.includes(line), `${skillPath}: the batch is not in the prompt`);
     assert.ok(!prompt.includes("Implement all approved issues"), `${skillPath}: the prompt still widens to every approved issue`);
   }

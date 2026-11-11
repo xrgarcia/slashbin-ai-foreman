@@ -3,16 +3,18 @@
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { formatGhError, getOpenIssues } from "./cache.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
+import type { RulingState } from "../code-host.js";
+export type { RulingState } from "../code-host.js";
 
 
 // --- Session reports (observers only) ---
 
 /** Each of `numbers` with its open issue's title, from the cycle's issue snapshot. Empty on a failed read. */
-export function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, logger: Logger): Record<number, string> {
+export async function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, logger: Logger): Promise<Record<number, string>> {
   const out: Record<number, string> = {};
   try {
-    for (const i of getOpenIssues(config.githubRepo, config.repoPath, logger)) {
+    for (const i of await getOpenIssues(config.githubRepo, config.repoPath, logger)) {
       if (numbers.includes(i.number) && i.title) out[i.number] = i.title;
     }
   } catch (err) {
@@ -21,15 +23,15 @@ export function issueTitles(config: RepoConfig, numbers: ReadonlyArray<number>, 
   return out;
 }
 
-/** A PR's title and diff stat, for a session summary. Null when it could not be read. */
-export function readPrDigest(
+/** A PR's title and diff stat, for a session summary. Display only: null when it could not be read, and no decision rests on it. */
+export async function readPrDigest(
   repo: string,
   pr: string | number,
   cwd: string,
   logger: Logger,
-): { number: number; url: string; title: string; additions: number; deletions: number; changedFiles: number } | null {
+): Promise<{ number: number; url: string; title: string; additions: number; deletions: number; changedFiles: number } | null> {
   try {
-    const out = gh(["pr", "view", String(pr), "--repo", repo, "--json", "number,url,title,additions,deletions,changedFiles"], cwd);
+    const out = await ghAsync(["pr", "view", String(pr), "--repo", repo, "--json", "number,url,title,additions,deletions,changedFiles"], cwd);
     const j = JSON.parse(out || "{}");
     return typeof j.number === "number" ? j : null;
   } catch (err) {
@@ -38,13 +40,21 @@ export function readPrDigest(
   }
 }
 
+/** The paths a PR changed. Throws when it could not be read: an unread list is never "no UI files" (EM#1244 f5). */
+export async function prChangedFiles(repo: string, pr: number, cwd: string, logger: Logger): Promise<string[]> {
+  const j = JSON.parse(await ghAsync(["pr", "view", String(pr), "--repo", repo, "--json", "files"], cwd) || "{}");
+  // No `files` array is an unread list, not an empty one: "this PR changes nothing" is a claim (foreman#110), never a default.
+  if (!Array.isArray(j.files)) throw new Error(`PR #${pr}: GitHub returned no file list`);
+  return j.files.map((f: { path?: unknown }) => String(f.path ?? "")).filter(Boolean);
+}
+
 /**
  * The body of the newest review posted on `pr` at or after `since` (ISO), the
- * one a review session just wrote. Null when there is none or the read failed.
+ * one a review session just wrote. Display only: null when there is none or the read failed, and no decision rests on it.
  */
-export function readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): string | null {
+export async function readLatestReviewBody(repo: string, pr: number, since: string, cwd: string, logger: Logger): Promise<string | null> {
   try {
-    const out = gh(["api", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd);
+    const out = await ghAsync(["api", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd);
     const reviews = (JSON.parse(out || "[]") as Array<{ body?: string; submitted_at?: string }>)
       .filter((r) => (r.body ?? "").trim() && Date.parse(r.submitted_at ?? "") >= Date.parse(since));
     return reviews.length ? reviews[reviews.length - 1].body ?? null : null;
@@ -64,43 +74,34 @@ export const TECH_LEAD_ESCALATE_MARKER = "<!-- tech-lead:escalate";
 
 export type ReviewFact = { id: number; state: string; at: string; escalate: boolean };
 export type CommentFact = { at: string; head: string };
-/** Where a PR stands against its last EM scope ruling. */
-export type RulingState = {
-  /** CHANGES_REQUESTED reviews submitted after the last ruling (all of them when there is none). */
-  roundsSinceRuling: number;
-  /** The newest review's id, null when there is none: an escalation is made once per id. */
-  latestReviewId: number | null;
-  /** The newest review asks for changes, came after the last ruling, and carries the Tech Lead's escalate marker. */
-  escalateRequested: boolean;
-  /** When the last ruling was posted, null when there is none. */
-  rulingAt: string | null;
-};
 
-/** Pure: a PR's reviews and comments → its ruling state. */
+/** A QA FAIL report (qaGateBody): the marker line carries the verdict, inside the first 140 characters. */
+const QA_FAIL_PATTERN = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=FAIL -->/;
+/** A reused QA FAIL that sent the same head back again (qaFailStandsBody): a round with no new report. */
+const QA_FAIL_STANDS_PATTERN = /^<!-- foreman-qa-fail-stands sha=\S+ -->/;
+
+/** Pure: a PR's reviews and comments → its ruling state. A QA FAIL, new or standing, sends the PR back like a CHANGES_REQUESTED review. */
 export function rulingState(reviews: ReadonlyArray<ReviewFact>, comments: ReadonlyArray<CommentFact>): RulingState {
   const rulings = comments.filter((c) => EM_RULING_PATTERN.test(c.head)).map((c) => c.at).sort();
   const rulingAt = rulings.length ? rulings[rulings.length - 1]! : null;
   const after = reviews.filter((r) => r.at && (rulingAt === null || r.at > rulingAt));
   const latest = [...reviews].filter((r) => r.at).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id - b.id)).pop();
   return {
-    roundsSinceRuling: after.filter((r) => r.state === "CHANGES_REQUESTED").length,
+    roundsSinceRuling: after.filter((r) => r.state === "CHANGES_REQUESTED").length
+      + comments.filter((c) => (QA_FAIL_PATTERN.test(c.head) || QA_FAIL_STANDS_PATTERN.test(c.head)) && (rulingAt === null || c.at > rulingAt)).length,
     latestReviewId: latest?.id ?? null,
     escalateRequested: !!latest && latest.state === "CHANGES_REQUESTED" && latest.escalate && (rulingAt === null || latest.at > rulingAt),
     rulingAt,
+    latestReviewAt: latest?.at ?? null,
   };
 }
 
-/** A PR's ruling state, read from its reviews and comments. Null on a failed read. */
-export function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): RulingState | null {
-  try {
+/** A PR's ruling state, read from its reviews and comments. Throws on a failed read (EM#1244 f5). */
+export async function readRulingState(repo: string, pr: number, cwd: string, logger: Logger): Promise<RulingState> {
     const lines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
-    const reviews = lines(gh(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
+    const reviews = lines(await ghAsync(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq",
       `.[] | {id, state, at: (.submitted_at // ""), escalate: ((.body // "") | contains("${TECH_LEAD_ESCALATE_MARKER}"))} | @json`], cwd)) as ReviewFact[];
-    const comments = lines(gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
-      `.[] | {at: .created_at, head: ((.body // "") | .[0:80])} | @json`], cwd)) as CommentFact[];
+    const comments = lines(await ghAsync(["api", "--paginate", `repos/${repo}/issues/${pr}/comments?per_page=100`, "--jq",
+      `.[] | {at: .created_at, head: ((.body // "") | .[0:140])} | @json`], cwd)) as CommentFact[];
     return rulingState(reviews, comments);
-  } catch (err) {
-    logger.debug(`readRulingState: PR #${pr} failed: ${formatGhError(err).message}`);
-    return null;
-  }
 }

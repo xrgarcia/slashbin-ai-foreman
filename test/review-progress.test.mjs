@@ -3,6 +3,7 @@
 // (Paperclip cannot edit a comment), gated by the comment toggles, and never
 // able to fail a review. Fake Tech Lead, fake Paperclip — no network.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,10 +11,13 @@ import { join } from "node:path";
 import {
   ReviewProgressRelay, centralTime, milestoneChecklist, milestoneReader, parseProgressLine, withoutProgressLines,
 } from "../dist/review-progress.js";
-import { reviewViaTechLead } from "../dist/agent.js";
+import { reviewViaTechLead } from "../dist/plugins/tech-lead.js";
 import { PaperclipClient } from "../dist/paperclip/client.js";
 import { PaperclipMirror } from "../dist/paperclip/mirror.js";
 import { sessionComment, DEFAULT_COMMENTS } from "../dist/paperclip/comments.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const line = (milestone, at, detail) => `TECH_LEAD_PROGRESS ${JSON.stringify({ milestone, at, ...(detail ? { detail } : {}) })}`;
 const M = (milestone, at, detail) => ({ milestone, at, ...(detail ? { detail } : {}) });
@@ -133,7 +137,7 @@ const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return t
 process.env.TECHLEAD_GITHUB_KEY ||= "test-token-not-real";
 
 function fakeTechLead(script) {
-  const dir = mkdtempSync(join(tmpdir(), "fake-tech-lead-"));
+  const dir = mkTmp("fake-tech-lead-");
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/tech-lead.mjs"), script);
   return { techLeadPath: dir, emRepoPath: "/em", reviewMaxDurationMs: 30_000 };
@@ -253,9 +257,9 @@ test("the review's end comment carries the whole checklist, final check complete
 test("the review phase hands the relay to the Tech Lead and closes it before the end comment", async () => {
   const { orchestratorSource } = await import("./source-text.mjs");
   const src = orchestratorSource();
-  assert.match(src, /reviewViaTechLead\([^)]*transcriptPath, onProgress\)/);
+  assert.match(src, /\.reviewPr\([^)]*transcriptPath, onProgress(, noMerge)?\)/);
   const close = src.indexOf("progress.close();");
-  const end = src.indexOf('await emit({ kind: "session", session: { ...session, ...ended, reviewer');
+  const end = src.indexOf('await emit(rt, { kind: "session", session: { ...session, ...ended, reviewer');
   assert.ok(close > 0 && end > close, "closed first, so no stage post lands after the end comment");
   assert.match(src, /kind: "reviewProgress"/);
 });

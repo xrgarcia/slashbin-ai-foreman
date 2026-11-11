@@ -23,7 +23,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OUT = join(root, "docs", "configuration.md");
 const CONFIG_SRC = join(root, "src", "config.ts");
 const BACKOFF_SRC = join(root, "src", "backoff.ts");
-const GITHUB_SRC = join(root, "src", "github", "conventions.ts");
+const GITHUB_SRC = join(root, "src", "config-schema", "github.ts");
 const builtConfig = join(root, "dist", "config.js");
 const builtBackoff = join(root, "dist", "backoff.js");
 
@@ -89,7 +89,7 @@ const top = readBlock(configSrc, "configSchema", "src/config.ts");
 const repo = readBlock(configSrc, "repoEntrySchema", "src/config.ts");
 const labels = readBlock(configSrc, "lifecycleLabelsSchema", "src/config.ts");
 const backoff = readBlock(backoffSrc, "backoffConfigSchema", "src/backoff.ts");
-const github = readBlock(readFileSync(GITHUB_SRC, "utf8"), "githubConventionsSchema", "src/github/conventions.ts");
+const github = readBlock(readFileSync(GITHUB_SRC, "utf8"), "githubConventionsSchema", "src/config-schema/github.ts");
 
 const load = configSrc.match(/export function loadConfig\([\s\S]*?\n\}/);
 if (!load) fail("could not find `export function loadConfig` in src/config.ts.");
@@ -116,7 +116,7 @@ const undocumented = [
 ];
 if (undocumented.length) fail(`no comment above: ${undocumented.join(", ")} — describe each setting where it is declared.`);
 for (const k of Object.keys(shape)) if (!top.fields.some((f) => f.key === k)) fail(`configSchema.${k} was not found in the source block.`);
-for (const k of Object.keys(DEFAULT_GITHUB_CONVENTIONS)) if (!github.fields.some((f) => f.key === k)) fail(`github.${k} was not found in src/github/conventions.ts.`);
+for (const k of Object.keys(DEFAULT_GITHUB_CONVENTIONS)) if (!github.fields.some((f) => f.key === k)) fail(`github.${k} was not found in src/config-schema/github.ts.`);
 for (const k of Object.keys(DEFAULT_BACKOFF)) if (!backoff.fields.some((f) => f.key === k)) fail(`backoff.${k} was not found in src/backoff.ts.`);
 
 // --- Rendering ---
@@ -172,8 +172,9 @@ out(
   "",
   "- **Where it lives.** `.ai-agent.json` (or `ai-agent.config.json`) in the daemon's working directory,",
   "  or the file named by `--config <path>`. Start from `.ai-agent.example.json`.",
-  "- **Precedence.** An environment variable beats the file; the file beats the default. Every key is",
-  "  optional except `repos[].name` and `repos[].repoPath`.",
+  "- **Precedence.** An environment variable beats the file; the file beats the selected `profile`; the profile",
+  "  beats the neutral default ([profiles](config-guide.md#profiles)). Every key is optional except",
+  "  `repos[].name` and `repos[].repoPath`.",
   "- **Validation.** The whole file is checked when it loads. A wrong type or out-of-range value stops",
   "  the daemon at start with the key named, never mid-run.",
   "- **Hot reload.** The daemon re-reads the file at the start of every cycle, so an edit takes effect",
@@ -325,7 +326,17 @@ out(
   "- `stages`: the stage list and custom stages, [pipeline.md](pipeline.md#pipeline-stages-stages) and `src/stages.ts`.",
   "- `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).",
   "- `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).",
+  "- `metrics`: [metrics.md](metrics.md).",
   "- The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).",
+  "",
+  "## Environment-only variables",
+  "",
+  "Read from the daemon's environment, with no config key:",
+  "",
+  "- `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY`, `EM_GITHUB_TOKEN`: the GitHub accounts ([security.md](security.md#two-github-identities)).",
+  "- `FOREMAN_STATE_DIR`: where the state files (`.github-state.json`, the legacy `.agent-state.json`, the default metrics database) live. Default: the daemon's working directory.",
+  "- `AI_AGENT_SHUTDOWN_DRAIN_MS`: the graceful-stop drain window. Default: the longest `maxDurationMs` or `reviewMaxDurationMs`.",
+  "- `FOREMAN_SYSTEMD_UNIT`: the user unit `npm start`, `stop` and `restart` drive. Default: `slashbin-foreman.service`.",
   "",
 );
 

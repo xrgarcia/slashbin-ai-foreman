@@ -8,7 +8,7 @@
 //      because it now performs a real write instead of only logging.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReviewTrailerRecords } from "../dist/agent.js";
+import { parseReviewTrailerRecords } from "../dist/plugins/agent-cli.js";
 import { labelFromTrailer } from "../dist/orchestrator.js";
 
 test("the original four-field trailer parses unchanged (backward compat)", () => {
@@ -134,7 +134,7 @@ test("label mapping never yields the production authorization", () => {
 // 2000 chars had its outcome silently cut off, and the caller reported a
 // complete review as having declared nothing. Real case: slashbin-io-worker
 // PR #589 — 3,672-char result, trailer at index 3,571.
-import { extractStreamResult, SUMMARY_DISPLAY_LIMIT } from "../dist/agent.js";
+import { extractStreamResult, SUMMARY_DISPLAY_LIMIT } from "../dist/session/protocol.js";
 
 const streamLine = (resultText) =>
   JSON.stringify({ type: "result", result: resultText, uuid: "x" });

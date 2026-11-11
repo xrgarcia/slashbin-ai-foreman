@@ -1,19 +1,14 @@
 // The gh CLI runner: retries transient failures, signals upstream limits, and
 // runs as the Tech Lead identity when a review needs it.
 
-import { execFileSync } from "node:child_process";
-import { ghResource, recordGhCall } from "../gh-usage.js";
-import { isUpstreamBlocked, signalUpstreamLimit, UpstreamBackoffError } from "../upstream-backoff.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { ghResource, recordGhCall, type GhResource } from "../gh-usage.js";
+import { isUpstreamBlocked, setUpstreamProbe, signalUpstreamLimit, UpstreamBackoffError, type UpstreamProbeResult } from "../upstream-backoff.js";
 import { formatGhError, invalidateSnapshotIfMutating } from "./cache.js";
 import { backoffDelay, backoffSettings } from "../backoff.js";
 
 
-
-/** Block the thread for `ms` without busy-waiting. Only hit on the rare retry
- *  path; keeps the gh() wrapper synchronous so no caller signature changes. */
-export function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
-}
 
 /**
  * A gh failure is *transient* (safe to retry) only when it's network/connectivity
@@ -32,6 +27,7 @@ export function isTransientGhError(err: unknown): boolean {
     blob.includes("enotfound") || blob.includes("eai_again") ||
     blob.includes("dial tcp") ||
     blob.includes("bad gateway") || blob.includes("service unavailable") ||
+    blob.includes("http 500") || blob.includes("internal server error") ||
     blob.includes("http 502") || blob.includes("http 503") || blob.includes("http 504")
   );
 }
@@ -60,7 +56,7 @@ export function isRateLimitGhError(err: unknown): boolean {
 }
 
 /**
- * An expected refusal from `runGh` while the GitHub back-off is active — no gh
+ * An expected refusal from `runGhAsync` while the GitHub back-off is active — no gh
  * was spawned. Lookups log it at debug: a deliberate pause is not an outage
  * (2026-10-02: 330 ERROR lines in one morning, every one of them this).
  */
@@ -68,49 +64,53 @@ export function isBackoffRefusal(err: unknown): err is UpstreamBackoffError {
   return err instanceof UpstreamBackoffError;
 }
 
+/**
+ * The HTTP status GitHub answered a failed `gh api --include` call with, from the status line gh prints
+ * ahead of the body; null when there was no response (a network error) or the call did not use --include.
+ */
+export function ghHttpStatus(err: unknown): number | null {
+  const out = (err as { stdout?: Buffer | string } | null)?.stdout;
+  const first = (typeof out === "string" ? out : out?.toString() ?? "").split("\n", 1)[0] ?? "";
+  const m = /^HTTP\/\S+ (\d{3})\b/.exec(first);
+  return m ? Number(m[1]) : null;
+}
+
 /** The most output one gh call may return before it fails: 64 MiB. */
 export const GH_MAX_BUFFER = 64 * 1024 * 1024;
 
-/** execFileSync gh with retry+backoff on transient (network/5xx/timeout) failures. */
-export function runGh(args: string[], cwd: string, token: string): string {
-  // A limit is account-wide: while GitHub is backing off, spawning gh only
-  // spends more of a spent quota. The module's own probe decides when to resume.
+const execFileAsync = promisify(execFile);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * `gh` with retry+backoff on transient (network/5xx/timeout) failures, never blocking the
+ * event loop: `execFile` and a timer between attempts, so a slow GitHub cannot starve
+ * the observer queue. Refuses while GitHub is backing off; a rate limit is signalled
+ * and not retried.
+ */
+export async function runGhAsync(args: string[], cwd: string, token: string): Promise<string> {
   if (isUpstreamBlocked("github")) throw new UpstreamBackoffError("GitHub back-off active");
   let lastErr: unknown;
   const retry = backoffSettings().gh;
   for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
     try {
       recordGhCall(args);
-      return execFileSync("gh", args, {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 30_000,
-        // execFileSync's default is 1 MiB, and exceeding it fails the call as
-        // ENOBUFS. The fleet-wide startup snapshot (github-state.ts, every open
-        // PR body in 22 repos) crossed it on 2026-10-14: every gh read in every
-        // repo failed from the restart on, and nothing ran.
-        maxBuffer: GH_MAX_BUFFER,
-        env: { ...process.env, GH_TOKEN: token },
-      }).trim();
+      const { stdout } = await execFileAsync("gh", args, {
+        cwd, encoding: "utf-8", timeout: 30_000, maxBuffer: GH_MAX_BUFFER, env: { ...process.env, GH_TOKEN: token },
+      });
+      return stdout.trim();
     } catch (err) {
       lastErr = err;
       if (isRateLimitGhError(err)) {
-        // Deliberately not retried: the budget is already gone. Name it loudly
-        // and once, then let the caller's own error path handle the cycle.
         console.warn(`[gh] RATE LIMIT EXHAUSTED — GitHub API quota is spent, skipping: gh ${args.slice(0, 3).join(" ")}`);
         const { message, stderr } = formatGhError(err);
-        signalUpstreamLimit("github", stderr.split("\n")[0] || message.split("\n")[0], {
-          token,
-          resource: ghResource(args),
-        });
+        signalUpstreamLimit("github", stderr.split("\n")[0] || message.split("\n")[0], { token, resource: ghResource(args) });
         throw err;
       }
       if (attempt < retry.maxAttempts && isTransientGhError(err)) {
         const wait = backoffDelay(attempt, retry);
         const { message, stderr } = formatGhError(err);
         console.warn(`[gh] transient failure (attempt ${attempt}/${retry.maxAttempts}), retrying in ${wait}ms: ${stderr.split("\n")[0] || message}`);
-        sleepSync(wait);
+        await sleep(wait);
         continue;
       }
       throw err;
@@ -119,12 +119,12 @@ export function runGh(args: string[], cwd: string, token: string): string {
   throw lastErr;
 }
 
-/** Run gh CLI using the Foreman token (slashbin-foreman account). */
-export function gh(args: string[], cwd: string): string {
+/** Run gh CLI using the Foreman token (slashbin-foreman account), off the event loop. */
+export async function ghAsync(args: string[], cwd: string): Promise<string> {
   const foremanToken = process.env.FOREMAN_GITHUB_TOKEN;
   if (!foremanToken) throw new Error("FOREMAN_GITHUB_TOKEN not set — cannot operate as Foreman");
   invalidateSnapshotIfMutating(args);
-  return runGh(args, cwd, foremanToken);
+  return runGhAsync(args, cwd, foremanToken);
 }
 
 /**
@@ -136,9 +136,51 @@ export function gh(args: string[], cwd: string): string {
  * and does not review (Ray, 2026-10-10). A sync PR's head is `main`, so the
  * approval vouches for no new code.
  */
-export function ghAsTechLead(args: string[], cwd: string): string {
+export async function ghAsTechLeadAsync(args: string[], cwd: string): Promise<string> {
   const token = process.env.TECHLEAD_GITHUB_KEY;
   if (!token) throw new Error("TECHLEAD_GITHUB_KEY not set — cannot approve or merge a sync PR");
   invalidateSnapshotIfMutating(args);
-  return runGh(args, cwd, token);
+  return runGhAsync(args, cwd, token);
 }
+
+interface RateResource {
+  remaining?: number;
+  reset?: number;
+}
+
+const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining resetAt}}"];
+
+/**
+ * Probe the bucket that tripped, with the token that tripped it — deliberately
+ * NOT via `runGhAsync` (which refuses while blocked) and not counted as usage.
+ *  - graphql: `gh api graphql` rateLimit. Clears only on remaining > 0; on 0
+ *    its resetAt bounds the next window. A refused probe lands in catch.
+ *  - core (or unknown): `gh api rate_limit` resources.core, as before.
+ * No stored token (ambient gh auth): probe with the ambient auth.
+ * A probe that itself fails never clears; it extends on the computed window.
+ */
+export async function probeGitHub(trip: { token?: string; resource?: GhResource }): Promise<UpstreamProbeResult> {
+  const env = trip.token ? { ...process.env, GH_TOKEN: trip.token } : { ...process.env };
+  // execFile, like every gh call here: a probe against a GitHub that is not answering
+  // (2026-11-06, TLS handshake timeouts) must not freeze every lane and observer.
+  const opts = { encoding: "utf-8" as const, timeout: 30_000, env };
+  const run = async (args: string[]) => (await execFileAsync("gh", args, opts)).stdout;
+  try {
+    if (trip.resource === "graphql") {
+      const rl = JSON.parse(await run(PROBE_GRAPHQL))?.data?.rateLimit;
+      if (typeof rl?.remaining === "number" && rl.remaining > 0) return { clear: true };
+      const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
+      return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
+    }
+    const core = JSON.parse(await run(["api", "rate_limit"]))?.resources?.core as RateResource | undefined;
+    if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
+    return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
+  } catch (err) {
+    console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    return { clear: false };
+  }
+}
+
+// Every gh call that can trip the GitHub back-off runs through this module, so it
+// is loaded whenever a GitHub window can end.
+setUpstreamProbe("github", probeGitHub);

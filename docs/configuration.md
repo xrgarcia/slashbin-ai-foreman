@@ -21,8 +21,9 @@ Every setting the Foreman reads, with its default, its environment override and 
 
 - **Where it lives.** `.ai-agent.json` (or `ai-agent.config.json`) in the daemon's working directory,
   or the file named by `--config <path>`. Start from `.ai-agent.example.json`.
-- **Precedence.** An environment variable beats the file; the file beats the default. Every key is
-  optional except `repos[].name` and `repos[].repoPath`.
+- **Precedence.** An environment variable beats the file; the file beats the selected `profile`; the profile
+  beats the neutral default ([profiles](config-guide.md#profiles)). Every key is optional except
+  `repos[].name` and `repos[].repoPath`.
 - **Validation.** The whole file is checked when it loads. A wrong type or out-of-range value stops
   the daemon at start with the key named, never mid-run.
 - **Hot reload.** The daemon re-reads the file at the start of every cycle, so an edit takes effect
@@ -67,7 +68,13 @@ The branch promotion PRs target; branch sync merges it back into baseBranch.
 
 Type: string · Default: `"features"` · Env: `AI_AGENT_FEATURE_BRANCH` · Per repo: yes, falls back to this value
 
-The branch implement and revise sessions commit to.
+LEGACY (#208). Nothing is built on this branch any more; a PR whose head equals it is still Foreman-owned so PRs open at the cutover drain. Removed once no repo has an open one.
+
+### `branchPrefix`
+
+Type: string · Default: `"foreman/"` · Env: `AI_AGENT_BRANCH_PREFIX` · Per repo: yes, falls back to this value
+
+Every issue is built on its own branch `<branchPrefix><issue>-<slug>` cut from baseBranch. A PR is Foreman-owned iff its head starts with this (or equals the legacy featureBranch).
 
 ### `skillPath`
 
@@ -108,6 +115,12 @@ Type: object[] · Default: none
 One entry per repo: `{ name, repoPath, ... }` plus any key marked per repo. When set, the top-level repoPath is ignored.
 
 ## Global settings
+
+### `profile`
+
+Type: string · Default: none
+
+A named set of defaults for one operator's fleet (src/profiles/): each key it sets replaces the neutral default below, and a key this file sets still wins. `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name stops startup, naming the valid ones.
 
 ### `pollIntervalMs`
 
@@ -157,6 +170,12 @@ Every wait before the Foreman tries something again — declined issues, failed 
 
 See [Back-offs](#back-offs) below for every group.
 
+### `runner`
+
+Type: object · Default: see `src/config.ts`
+
+The agent CLI builder sessions run on, and how it says it has refused work (a usage, token or rate limit) rather than failed: `name`, `refusalPatterns`, `refusalExitCodes`, `resetPattern`. A refusal is never charged to a retry and pauses that runner daemon-wide until the limit lifts; the EM's unstick calls are read the same way. Claude's by default. See src/refusal.ts.
+
 ### `issueCacheTtlMs`
 
 Type: integer · Default: `30000` (30 s) · Env: `AI_AGENT_ISSUE_CACHE_TTL_MS`
@@ -203,7 +222,7 @@ MCP client config handed to implement/revise sessions (`--mcp-config`), so a bui
 
 Type: string[] · Default: `[]`
 
-Env var names a Claude session inherits from the daemon, on top of the essentials every session gets (SESSION_ENV_ESSENTIALS in agent.ts). Nothing else from the daemon's env reaches a session: the production daemon runs under `doppler run`, and on 2026-10-01 a session that listed its env printed FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix denylist misses names like SYSTEM_SUDO_PW and WORKER_POSTGRES_URL. One list for the fleet, never per repo. May not name a GitHub token (see loadConfig).
+Env var names a Claude session inherits from the daemon, on top of the essentials every session gets (SESSION_ENV_ESSENTIALS in session/env.ts). Nothing else from the daemon's env reaches a session: the production daemon runs under `doppler run`, and on 2026-10-01 a session that listed its env printed FOREMAN_GITHUB_TOKEN into its transcript. Allowlist, not denylist — a suffix denylist misses names like SYSTEM_SUDO_PW and WORKER_POSTGRES_URL. One list for the fleet, never per repo. May not name a GitHub token (see loadConfig).
 
 ### `logFormat`
 
@@ -233,19 +252,67 @@ The EM checkout. The unstick stage runs `bin/em.mjs unstick` here (cwd) for stuc
 
 Type: string · Default: none · Env: `AI_AGENT_UNSTICK_ESCALATION_OWNER`
 
-GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105).
+GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman#105). Unset = no one is mentioned: the hold stays at its failed cap and the log says so.
+
+### `epicRefLabel`
+
+Type: string · Default: none
+
+The name issue bodies give the epic tracker in `<label> #N` references (the `## References` convention). When an issue closes in production, each epic it names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
+
+### `epicRepo`
+
+Type: string · Default: none
+
+The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about: the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
 
 ### `techLeadPath`
 
 Type: string · Default: none · Env: `AI_AGENT_TECH_LEAD_PATH`
 
-The Tech Lead (xrgarcia/slashbin_ai_tech_lead, EM#427): when set, each review is offered to it FIRST — Codex judges, its code posts and merges. It exits 3 when Codex cannot take the review and nothing was written; the review phase then runs the Claude /review-all-prs session exactly as before. Unset = the Claude path only, unchanged. Additive + OSS-safe.
+The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each review runs through it — Codex judges, its code posts and merges. It exits 3 when it cannot take the review and nothing was written; the PR waits and the review retries after a backoff wait. Unset = no review runs.
 
 ### `srePath`
 
 Type: string · Default: none · Env: `AI_AGENT_SRE_PATH`
 
-The SRE (xrgarcia/slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved. Unset = no verify stage: the review run verifies and labels as before.
+The SRE (slashbin_ai_sre, EM#440/#441): when set, review ends at the merge (issue → lifecycleLabels.prMerged) and the `verify` stage runs `bin/sre.mjs verify` for each merged PR, moving its issues to prApproved. Unset = no verify stage: the review run verifies and labels as before.
+
+### `qaPath`
+
+Type: string · Default: none · Env: `AI_AGENT_QA_PATH`
+
+The QA agent (slashbin_ai_qa): when set, a PR the SRE's dev verify passes in a `qaRepos` repo is also checked once by `bin/qa.mjs check`, and the result is posted on the PR as "## QA Report (report-only)". It never gates: the card moves to prApproved first and nothing waits on QA. Unset = no QA. Needs `emRepoPath` and `qaSecretsRunner` (which supplies DEV_SESSION_MINT_KEY and the registry bearer, `qaBearerKey`).
+
+### `qaRepos`
+
+Type: string[] · Default: `[]`
+
+GitHub repos (owner/name) QA applies to. Default none. Override: covered even when QA says no. Any other repo is covered when `bin/qa.mjs covers --repo R` exits 0 (EM#794).
+
+### `qaSecretsRunner`
+
+Type: string · Default: none
+
+The script in the EM checkout (relative to emRepoPath) that runs QA's dev check with its secrets, DEV_SESSION_MINT_KEY and the registry bearer (`qaBearerKey`), handed to that child alone. The local check and the `covers` question get the bearer only. Unset = the dev and local checks report `errored` instead of running.
+
+### `qaBearerKey`
+
+Type: string · Default: `"EM_SLASHBIN_MCP_ROUTER_BEARER"`
+
+The registry bearer's key for the runner's --keys, as `NAME` or `NAME@project` (a pin lists that one Doppler project instead of every one). It lives only in `prd`.
+
+### `qaGate`
+
+Type: boolean · Default: `false`
+
+Whether QA gates delivery. false (default) = report-only: the card advances on the SRE's pass and QA is posted after. true = QA runs BEFORE the advance: PASS advances, FAIL (a regression) takes the visual-QA rework path, HELD or a crash holds the card like an SRE hold. Needs `qaPath`. A config flip, reversible.
+
+### `qaBeforeMerge`
+
+Type: boolean · Default: `false`
+
+QA before the merge (EM#923: development, code review, then QA; the SRE never sees what QA fails). true = for a `qaRepos` repo the Tech Lead approves WITHOUT merging, QA runs `bin/qa.mjs check --local` on the approved head (it boots the PR itself; only the registry bearer), and only a PASS has the Tech Lead merge; the SRE's dev verify follows. A FAIL goes back to the builder. Supersedes `qaGate`/the report-only run for those repos. false (default) = unchanged. Needs `qaPath` and `techLeadPath`. A config flip, reversible.
 
 ### `sreDeployMaxDurationMs`
 
@@ -258,12 +325,6 @@ The release stage's ceiling on one `sre.mjs deploy`: a pre-deploy Codex run and 
 Type: boolean · Default: `false` · Per repo: yes, falls back to this value
 
 Run the review stage. Off by default; per repo too, where it wins.
-
-### `reviewSkillPath`
-
-Type: string · Default: none · Per repo: yes, falls back to this value
-
-No longer read: review runs through the Tech Lead (techLeadPath), which carries its own review procedure. Accepted so an older config still loads.
 
 ### `reviewModel`
 
@@ -305,9 +366,9 @@ NOT z.coerce.boolean(): env vars arrive as strings and Boolean("false") is true,
 
 ### `reviewAllowedTools`
 
-Type: string[] · Default: see `src/config.ts`
+Type: string[] · Default: `["Read","Write","Edit","Bash","Glob","Grep","WebFetch"]`
 
-Broad tool surface — the skill drives GitHub, Postgres, Redis, Railway, and the knowledge index via MCP, plus shell scripts and file reads.
+The review session's tools: file and shell tools, plus any MCP servers (`mcp__<server>__*`) your fleet's review needs. Default the file and shell tools only.
 
 ### `reviewerLogin`
 
@@ -325,15 +386,27 @@ The names of the labels that carry a PR through its lifecycle (the block below).
 
 ### `stages`
 
-Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick`
+Type: object[] · Default: the built-ins in order: `reconcile` → `review` → `verify` → `promote` → `release` → `revise` → `implement` → `branch-sync` → `dependabot` → `unstick` → `skill-deliver`
 
-The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the ten built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
+The stages the Foreman runs (see src/stages.ts), grouped into lanes (src/lanes.ts): revise+implement form the `build` lane, promote+release the `release` lane, every other built-in a lane of its own, and each (repo, lane) pair polls on its own loop. Order matters only inside a lane. Omitted, it is the eleven built-ins in order; `release` runs only when both srePath and techLeadPath are set and is skipped with a startup warning otherwise. Listing `release` explicitly without both is refused at startup. A custom stage is `{ id, skillPath }`: one Claude session on that skill, in the lane of the built-in listed after it (its own lane when last); a blocked verdict holds the rest of that lane only. Global, never per repo — the stages hand work to each other by label, one pipeline for the fleet.
 
 ### `github`
 
 Type: object · Default: see [GitHub conventions](#github-conventions-github)
 
 The other GitHub names the Foreman reads and writes: the blocked label, the priority labels, the dependency-PR branch prefixes, and the titles and signature of the PRs and issues it files. Set any subset; each default is what the Foreman always used. Global, like lifecycleLabels. See [GitHub conventions](#github-conventions-github).
+
+### `workSource`
+
+Type: string · Default: `"github"`
+
+Where the Foreman's work comes from: the id of the work-source plugin that selects issues and records their moves. `github` (default) is GitHub issues, the only one today; any other value turns GitHub off, and the Foreman refuses to start until a plugin of that id is installed.
+
+### `codeHost`
+
+Type: string · Default: `"github"`
+
+Where the Foreman's PRs, branches, merges, comments and labels live: the id of the code-host plugin. `github` (default) is the only one today; any other value turns GitHub's code host off, and the Foreman refuses to start until a plugin of that id is installed.
 
 ### `paperclip`
 
@@ -355,13 +428,22 @@ Type: object · Default: `{"securityOnly":true}`
 
 The Dependabot stage's selection. Global, like `github`. `securityOnly` (default true) batches and lands only security updates: a Dependabot PR is one iff a package it bumps has an OPEN Dependabot alert on the repo. Other version-update PRs are left alone (not batched, merged or closed). When the alerts API cannot be read (404 with alerts disabled, a network error) the cycle batches nothing. Set `{ "securityOnly": false }` to batch every Dependabot PR.
 
+## Metrics
+
+### `metrics`
+
+Type: object · Default: `{"enabled":false,"retentionDays":90}`
+
+The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle stage advances in a local SQLite file, read back with `npm run metrics:report`. Global. Off unless `enabled`.
+
 ## Per-repo entries (`repos[]`)
 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
 
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
-- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label. Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
+- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label and the production grant label `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for prod release` per issue). Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
 - `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
+- `syncOnly`: A human-lane repo (registry lane `human`): the Foreman does not implement, review, revise, release or label anything there. It only delivers the golden skills, per `approved-for-human` issue, as a `feature/<N>-<slug>` branch the person's direct-mode session resumes. Needs skillSync.
 
 ```json
 {
@@ -400,7 +482,10 @@ which only means it retries sooner.
 | `releaseRetry` | 5 min, 10 min, 20 min, 40 min, 1.3 h, 2 h | none |
 | `prodVerifyRetry` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 5.3 h, 6 h | none |
 | `upstream` | 2 min, 4 min, 8 min, 16 min, 32 min, 1 h | none |
+| `handoff` | 10 min, 30 min, 1.5 h, 4.5 h, 13.5 h, 24 h | `maxRecalls` 3 |
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
+| `paperclip` | 1 s, 1 s | `maxAttempts` 3 |
+| `registry` | 1 s, 1 s | `maxAttempts` 3 |
 | `stuckMergeGraceMs` | 15 min | — |
 | `maxCiBounces` | — | `2` |
 
@@ -493,7 +578,7 @@ The release stage could not finish a release this pass for a passing reason: the
 
 ### `backoff.prodVerifyRetry`
 
-A release that merged but whose prod verification held or failed. The SRE re-verifies production after one window, longer each time, with no attempt cap: the issue stays open at `prod verification held` until a pass closes it or a person steps in. A `hold=wait-until-…` time the SRE reports wins when it is later. Default 10 min rising to 6 h.
+A release that merged but whose prod verification held or failed. The SRE re-verifies production after one window, longer each time, with no attempt cap: the issue stays open at `prod verification held` until a pass closes it or a person steps in. A `hold=wait-until-…` time the SRE reports wins when it is later. A new head on the production branch since the last attempt makes the release due now, once per head. Default 10 min rising to 6 h.
 
 | Field | Default | Env |
 |---|---|---|
@@ -503,13 +588,24 @@ A release that merged but whose prod verification held or failed. The SRE re-ver
 
 ### `backoff.upstream`
 
-GitHub's rate limit or Claude's session limit refused work. The whole daemon pauses that upstream; a GitHub reset time it reports wins over the window. Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` / `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
+GitHub's rate limit or the runner's limit (see `runner`) refused work. The whole daemon pauses that upstream; a reset time it reports wins over the window. Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` / `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
 
 | Field | Default | Env |
 |---|---|---|
 | `baseMs` | `120000` (2 min) | `AI_AGENT_BACKOFF_UPSTREAM_BASE_MS` |
 | `capMs` | `3600000` (1 h) | `AI_AGENT_BACKOFF_UPSTREAM_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_UPSTREAM_FACTOR` |
+
+### `backoff.handoff`
+
+A handoff the unstick stage made (the agent plugin said it was invoked) that has not moved the issue. The handoff is called again once a window has passed since the last call, longer each time, up to `maxRecalls` times; then the escalation owner is told, once. A seat that took the handoff and then died (out of tokens, crashed) leaves no trace but a stuck issue: this is the only thing that notices. 0 never recalls. Default 10 min, 30 min, 90 min, then 4.5 h before the owner is told (about 7 h in all), 3 recalls.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `600000` (10 min) | `AI_AGENT_BACKOFF_HANDOFF_BASE_MS` |
+| `capMs` | `86400000` (24 h) | `AI_AGENT_BACKOFF_HANDOFF_CAP_MS` |
+| `factor` | `3` | `AI_AGENT_BACKOFF_HANDOFF_FACTOR` |
+| `maxRecalls` | `3` | `AI_AGENT_BACKOFF_HANDOFF_MAX_RECALLS` |
 
 ### `backoff.gh`
 
@@ -521,6 +617,28 @@ One `gh` call that failed for a passing reason (network, 5xx, timeout) is retrie
 | `capMs` | `30000` (30 s) | `AI_AGENT_BACKOFF_GH_CAP_MS` |
 | `factor` | `3` | `AI_AGENT_BACKOFF_GH_FACTOR` |
 | `maxAttempts` | `3` | `AI_AGENT_BACKOFF_GH_MAX_ATTEMPTS` |
+
+### `backoff.paperclip`
+
+One Paperclip READ (a GET) that failed for a passing reason (no answer, a timeout, HTTP 408/429/500/502/503/504) is retried in place, up to `maxAttempts` tries in all. A write is never retried: a timeout does not prove it failed. Default 0.5 s, then 1 s.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `500` (1 s) | `AI_AGENT_BACKOFF_PAPERCLIP_BASE_MS` |
+| `capMs` | `5000` (5 s) | `AI_AGENT_BACKOFF_PAPERCLIP_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_PAPERCLIP_FACTOR` |
+| `maxAttempts` | `3` | `AI_AGENT_BACKOFF_PAPERCLIP_MAX_ATTEMPTS` |
+
+### `backoff.registry`
+
+One registry `repo_identity` request (the mirror's owner-free repo key) that failed for the same passing reasons is retried in place the same way. Default 0.5 s, then 1 s.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `500` (1 s) | `AI_AGENT_BACKOFF_REGISTRY_BASE_MS` |
+| `capMs` | `5000` (5 s) | `AI_AGENT_BACKOFF_REGISTRY_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_REGISTRY_FACTOR` |
+| `maxAttempts` | `3` | `AI_AGENT_BACKOFF_REGISTRY_MAX_ATTEMPTS` |
 
 ### `backoff.stuckMergeGraceMs`
 
@@ -581,9 +699,10 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 | `promotionTitle` | `"release: {title}"` | Title of a promotion PR (base → production) carrying one issue. {title} is the issue's title, {N} its number. |
 | `promotionBatchTitle` | `"release: promote {n} changes to production"` | Title of a promotion PR carrying several issues. {n} is how many. |
 | `syncTitle` | `"chore: sync {base} with {production} (merge commits backfill)"` | Title of the PR that merges production back into base after a promotion. {base} and {production} are the two branch names. |
-| `reconcileTitle` | `"feat: implement #{N}"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number. |
+| `reconcileTitle` | `"feat: implement (#{N})"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number, and it must appear as `(#{N})`: the strict matcher that decides a merged PR delivered its issue reads only a closing keyword or a `(#N)` title suffix, and the reconciler's body says only "Related to #N" (#239: every reconciled PR dead-ended at verify-no-pr). |
 | `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the feature branch. |
 | `releaseTagFormat` | `"release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"` | Name of the annotated git tag the release stage puts on a release PR's merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date, {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must appear so two releases never share a name. A plain annotated tag only, never a GitHub Release: jerky_shipping's desktop pipeline (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases and tags at HEAD to decide whether a commit is already released, so a Release on main's merge commit would suppress its desktop build. Never starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a `release-` name stays out of its version history. |
+| `signoffStatusContext` | `"foreman/em-sign-off"` | The commit status the Foreman puts on a release PR's head while it lists an open issue the EM has not signed off (no `ready for prod release` or later release-stage label). Failing while any is unsigned, passing once none is: add it to the production branch's required checks to hold a human merge too. |
 | `signature` | `"Automated by slashbin-ai-agent"` | The last line of every PR body the Foreman writes. Empty writes none. No "#<number>": every #N in a promotion PR's body is read as an issue it carries. |
 
 ## Elsewhere
@@ -591,4 +710,14 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 - `stages`: the stage list and custom stages, [pipeline.md](pipeline.md#pipeline-stages-stages) and `src/stages.ts`.
 - `paperclip`: every key of the board mirror, [paperclip.md](paperclip.md).
 - `skillSync`: every key of skill sync, [skill-sync.md](skill-sync.md).
+- `metrics`: [metrics.md](metrics.md).
 - The states an issue moves through and the events the Foreman reports, [lifecycle.md](lifecycle.md).
+
+## Environment-only variables
+
+Read from the daemon's environment, with no config key:
+
+- `FOREMAN_GITHUB_TOKEN`, `TECHLEAD_GITHUB_KEY`, `SRE_GITHUB_KEY`, `EM_GITHUB_TOKEN`: the GitHub accounts ([security.md](security.md#two-github-identities)).
+- `FOREMAN_STATE_DIR`: where the state files (`.github-state.json`, the legacy `.agent-state.json`, the default metrics database) live. Default: the daemon's working directory.
+- `AI_AGENT_SHUTDOWN_DRAIN_MS`: the graceful-stop drain window. Default: the longest `maxDurationMs` or `reviewMaxDurationMs`.
+- `FOREMAN_SYSTEMD_UNIT`: the user unit `npm start`, `stop` and `restart` drive. Default: `slashbin-foreman.service`.

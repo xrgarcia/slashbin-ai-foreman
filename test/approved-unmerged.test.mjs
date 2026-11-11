@@ -14,10 +14,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { findPRsNeedingReview } from "../dist/github.js";
+import { BackoffTracker } from "../dist/backoff.js";
 import { loadConfig } from "../dist/config.js";
 
 let tmp, ghState, savedPath, savedToken;
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return logger; } };
+// The code host's approved-but-unmerged waits, one tracker for the file as the plugin keeps one.
+const waits = new BackoffTracker();
 const TL = "slasbhin-techlead";
 const ago = (min) => new Date(Date.now() - min * 60_000).toISOString();
 
@@ -52,7 +55,7 @@ let n = 0;
 // A fresh repo name per case: open-issue and open-PR lists are cached per repo.
 function arrange({ approvedMinAgo = 300, state = "APPROVED", issues = [{ number: 1270, state: "OPEN", title: "t", labels: [{ name: "approved" }, { name: "pr under review" }] }] } = {}) {
   const repo = `example/r${++n}`;
-  const pr = { number: 1271, url: `https://github.com/${repo}/pull/1271`, title: "feat: implement #1270", body: "Closes #1270", headRefName: "features", baseRefName: "develop", headRefOid: "e389c50", updatedAt: ago(approvedMinAgo) };
+  const pr = { number: 1271, url: `https://github.com/${repo}/pull/1271`, title: "feat: implement #1270", body: "Closes #1270", headRefName: "foreman/1270-implement", baseRefName: "develop", headRefOid: "e389c50", updatedAt: ago(approvedMinAgo) };
   writeFileSync(ghState, JSON.stringify({ pr, issues, committed: ago(approvedMinAgo + 2),
     reviews: [{ author: { login: TL }, state, submittedAt: ago(approvedMinAgo) }] }));
   const p = join(tmp, `cfg${n}.json`);
@@ -60,26 +63,26 @@ function arrange({ approvedMinAgo = 300, state = "APPROVED", issues = [{ number:
   return loadConfig(p).repos[0];
 }
 
-test("the #1271 shape: approved five hours ago, still open — offered again", () => {
+test("the #1271 shape: approved five hours ago, still open — offered again", async () => {
   const cfg = arrange();
-  assert.deepEqual(findPRsNeedingReview(cfg, TL, logger), { prNumber: 1271, prUrl: `https://github.com/${cfg.githubRepo}/pull/1271`, issueNumbers: [1270], adopted: [] });
+  assert.deepEqual(await findPRsNeedingReview(cfg, TL, logger, waits, () => false), { prNumber: 1271, prUrl: `https://github.com/${cfg.githubRepo}/pull/1271`, issueNumbers: [1270], adopted: [] });
 });
 
-test("once offered it waits a window before the next offer, so a held PR is not reviewed every cycle", () => {
+test("once offered it waits a window before the next offer, so a held PR is not reviewed every cycle", async () => {
   const cfg = arrange();
-  assert.ok(findPRsNeedingReview(cfg, TL, logger));
-  assert.equal(findPRsNeedingReview(cfg, TL, logger), null);
+  assert.ok(await findPRsNeedingReview(cfg, TL, logger, waits, () => false));
+  assert.equal(await findPRsNeedingReview(cfg, TL, logger, waits, () => false), null);
 });
 
-test("an approval younger than the window is a merge still settling — not offered", () => {
-  assert.equal(findPRsNeedingReview(arrange({ approvedMinAgo: 2 }), TL, logger), null);
+test("an approval younger than the window is a merge still settling — not offered", async () => {
+  assert.equal(await findPRsNeedingReview(arrange({ approvedMinAgo: 2 }), TL, logger, waits, () => false), null);
 });
 
-test("an unlinked approved PR that never merged is offered with no issues", () => {
+test("an unlinked approved PR that never merged is offered with no issues", async () => {
   const cfg = arrange({ issues: [] });
-  assert.deepEqual(findPRsNeedingReview(cfg, TL, logger)?.issueNumbers, []);
+  assert.deepEqual((await findPRsNeedingReview(cfg, TL, logger, waits, () => false))?.issueNumbers, []);
 });
 
-test("a current CHANGES_REQUESTED is not an approval waiting on merge", () => {
-  assert.equal(findPRsNeedingReview(arrange({ state: "CHANGES_REQUESTED" }), TL, logger)?.stranded, true);
+test("a current CHANGES_REQUESTED is not an approval waiting on merge", async () => {
+  assert.equal((await findPRsNeedingReview(arrange({ state: "CHANGES_REQUESTED" }), TL, logger, waits, () => false))?.stranded, true);
 });

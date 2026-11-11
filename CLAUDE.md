@@ -6,74 +6,86 @@ merged work — across many repos from a single process.
 
 ## Changing this repo
 
-Commit straight to `features` in this checkout; it accumulates the changes we want. When they
-are ready, `features` merges to `develop` as the pre-release. No branch per change and no PR
-into `features` (Ray, 2026-10-18).
+Since 2026-10-29, changes reach this repo's `features` branch only by branch, PR and a Tech Lead
+`review-pr` run. After the merge, restart with `scripts/restart-drained.sh`. `features` merges to
+`develop` as the pre-release. That is how *this* repo ships; the repos the Foreman manages are
+built on per-issue branches (see **Branches**), never a shared `features`.
 
 ## Cycle
 
 Each poll cycle runs the configured `stages` across every configured repo
-(`src/stages.ts`; `docs/pipeline.md`). Omitted, they are the ten built-ins
+(`src/stages.ts`; `docs/pipeline.md`). Omitted, they are the eleven built-ins
 in this order, so labels set in one phase are consumed by the right phase next cycle:
 
 ```
-Reconcile → Review → Verify → Revise → Implement → Branch Sync → Dependabot → Promote → Release → Unstick
+Reconcile → Review → Verify → Promote → Release → Revise → Implement → Branch Sync → Dependabot → Unstick → Skill Deliver
 ```
 
-Verify runs only when `srePath` is set: the SRE checks each merged PR in dev. Release runs
-only when both `srePath` and `techLeadPath` are set (skipped with a startup warning
-otherwise; an explicit `release` without both is refused).
+Stages run in lanes (`src/lanes.ts`): `build` = revise + implement, `release` = promote +
+release, every other stage has its own. The daemon runs one loop per (repo, lane); each item is
+handled once at a time. `skill-deliver` runs only on a `syncOnly` repo, which runs no other stage.
 
-A dev visual QA FAIL (`hold=visual-qa-failed`) goes back to the Foreman, not a timer retry: it files an
-`approved` "Visual QA rework K for #N — follow-up to #N", builds it first (the verifying issue holds the
-repo), and re-verifies #N once it merges. Rounds count against `verifyRetry.maxAttempts`; every other
-hold (infrastructure, sign-in) is unchanged. (EM#485, PO decision 2026-10-24.)
+Agents are plugin roles (`src/plugins/registry.ts`). Verify needs `srePath`; Release needs
+`techLeadPath` and `srePath` (else skipped with a warning; an explicit `release` is refused).
+With no reviewer a person merges, and Reconcile closes the issue if nothing releases it.
+
+A dev visual QA FAIL (`hold=visual-qa-failed`) is the EM's decision: the Foreman files nothing, holds the
+issue at its cap and raises unstick kind `rework-decision` that cycle (PR, touched files, verdict, evidence).
+A charged failure with a verdict calls the EM the same way on its first failure, retries still running. The
+EM's fix linked to #N (#N blocked by it, or a sub-issue of #N; `docs/em-coordination.md` §2) or a spec edit releases the hold. (Ray, 2026-10-31; replaces EM#485.)
 
 A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
-one Claude session on that skill against the open feature PR. A custom stage that
+one Claude session on that skill against the open Foreman PR. A custom stage that
 reports `blocked` or no verdict stops the later stages for that repo's pass.
 
-1. **Reconcile** — detect orphaned commits on the feature branch with no PR; open one.
-2. **Review** *(opt-in, `reviewEnabled`)* — for repos with an open feature PR whose
-   linked issue is labeled `pr under review`, invoke a **review skill** that reviews,
-   merges clean PRs to the base branch, verifies, and transitions labels itself. Runs
+1. **Reconcile** — detect orphaned commits on a Foreman branch with no PR; open one.
+2. **Review** *(opt-in, `reviewEnabled`)* — for repos with an open Foreman PR whose
+   linked issue is labeled `pr under review`, call the reviewer plugin (the Tech Lead), which
+   reviews, merges clean PRs to the base branch and transitions labels itself. Runs
    first among PR-acting phases so it only acts on PRs labeled in a *prior* cycle
    (labels settled → no same-cycle race). See **Review phase** below.
-3. **Revise** — for issues labeled `pr pending actions` with an open feature PR, invoke
+3. **Verify** — the SRE verifies each merge in dev; success writes `pr approved`.
+4. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues
+   and move them to `release pending`; branch sync lives here too.
+5. **Release** (`src/phases/release.ts`, no Claude session) — Tech Lead `approve-promotion`
+   at the PR head → SRE `deploy` (merge, deploy, verify) → annotated tag on the merge commit
+   (never a GitHub Release, never a `v` prefix) → close each issue on a passed prod
+   verification, or `prod verification held` and re-verify on a back-off; then a 30-minute
+   soak. A release PR listing an issue without `ready for prod release` (or a label it moves on
+   to) is held: no approval, no merge, a failing `github.signoffStatusContext` status and a comment
+   naming the issues; it clears itself once the EM signs them (foreman#128). Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
+   Discord. See docs/lifecycle.md.
+6. **Revise** — for issues labeled `pr pending actions` with an open Foreman PR, invoke
    the revision skill to address review feedback. Prioritized over new implementation.
-4. **Implement** — the work source (`WorkSourceAdapter`; GitHub issues via
+7. **Implement** — the work source (`WorkSourceAdapter`; GitHub issues via
    `GitHubIssueConnector`) offers every `approved` issue with no delivering PR; the
    implementation skill is handed all of them (less backed-off ones) to choose from by
    priority, while the Foreman's own per-issue bookkeeping uses a capped ascending batch
    (`discoveryBatch`); on success label the issue `pr under review`.
-5. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
-6. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
-   with `dependencyPreApproved`: owner authorization covers every Foreman-managed repo for
+8. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
+9. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
+   with `dependencyPreApproved`: filed with `approved` and `deliver-to-prod`; owner authorization covers every Foreman-managed repo for
    slashbin.io, jerky.com and cmneb as of 2026-10-24; opt-in per repo, default off).
-7. **Promote** — create `develop → main` promotion PRs for `ready for prod release` issues
-   and move them to `release pending`.
-8. **Release** (`src/phases/release.ts`, no Claude session) — Tech Lead `approve-promotion`
-   at the PR head → SRE `deploy` (merge, deploy, verify) → annotated tag on the merge commit
-   (never a GitHub Release, never a `v` prefix) → close each issue on a passed prod
-   verification, or `prod verification held` and re-verify on a back-off; then a 30-minute
-   soak. Adopts promotion PRs merged by anyone else in the last 48h. Sends nothing to
-   Discord. See docs/lifecycle.md.
-9. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
-   `emRepoPath`, Paperclip or not) — calls `bin/em.mjs unstick` in the EM checkout for each stuck
-   issue; the outcome is `RepoState.unstick`. See docs/pipeline.md.
+10. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
+    `emRepoPath`) — the EM plugin's `bin/em.mjs unstick` takes each stuck issue; the outcome is
+    the `unstick` record. See docs/pipeline.md.
+11. **Skill Deliver** (`src/phases/skill-deliver.ts`, `syncOnly` repos) — delivers the golden
+    skill copies to a human-lane repo. See docs/skill-sync.md.
 
-Priority within a cycle is encoded by stage order. Only one Claude session runs at a
-time (`implementing` mutex) for git-state safety.
+Priority within a cycle is encoded by stage order. Git safety is locks, not a global mutex:
+a per-repo checkout lock (`lanes.ts`; reconcile, revise, implement and custom hold it), a
+(repo, lane) lock, and an optional `maxConcurrentSessions` ceiling (`withSessionSlot`).
 
 ## Review phase
 
 The Review phase is categorically different from Implement/Revise, because review is a
 decision-layer workflow rather than an in-repo edit:
 
-- **Runs as the Tech Lead, only.** `reviewViaTechLead` runs `bin/tech-lead.mjs
-  review-pr` in `techLeadPath`; when it cannot take a review the PR waits a
-  `backoff.agentUnavailable` window — there is no Claude review session.
-  `reviewSkillPath` is accepted but no longer read; `emRepoPath` is (the Unstick stage and the contract reader).
+- **Runs as the Tech Lead, only.** The phase reaches the reviewer through
+  `roleFor("reviewer", config)`; `reviewViaTechLead` (`src/plugins/tech-lead.ts`) runs
+  `bin/tech-lead.mjs review-pr` in `techLeadPath`. When it cannot take a review the PR waits a
+  `backoff.agentUnavailable` window — there is no Claude review session. `emRepoPath` is read
+  by the EM, QA and Tech Lead plugins and the Unstick stage.
 - **Runs under a separate token.** Reviews/merges are attributed to `TECHLEAD_GITHUB_KEY`
   (distinct from `FOREMAN_GITHUB_TOKEN`) — reviewer identity ≠ implementer identity.
 - **Owns its own outcomes.** The reviewer posts the verdict, merges approved PRs, and
@@ -86,36 +98,47 @@ comment the failing checks on the PR and relabel `pr pending actions` so revise
 fixes them, no review spent (capped at 2 bounces since the last review, then it
 reviews anyway). Running → wait a pass. No CI → review as before.
 
-Gating (`findPRsNeedingReview`): an open `featureBranch → baseBranch` PR whose linked
-issue is `pr under review` (not `pr pending actions`) and with no review by
-`reviewerLogin` newer than the PR's latest commit (freshness guard against re-review
-loops). A feature PR that names no open approved issue is reviewed with none —
-implement queues everything behind any open feature PR, so one review ignored holds
-the repo. Every run's full turn-by-turn interaction (`--output-format stream-json`) is
-written to `logs/review/<repo>-cycle<N>-<ts>.log` for debugging.
+Gating (`findPRsNeedingReview`): an open Foreman-owned PR (`isForemanOwnedHead`) into
+`baseBranch` whose linked issue is `pr under review` (not `pr pending actions`) and with no
+review by `reviewerLogin` newer than the PR's latest commit (freshness guard against re-review
+loops). A Foreman PR that names no open approved issue is reviewed with none, so one review
+ignored cannot hold the repo. Every run's full turn-by-turn interaction
+(`--output-format stream-json`) is written to `logs/review/<repo>-cycle<N>-<ts>.log`.
 
 Disabled by default; opt in per repo with `reviewEnabled`, which needs `techLeadPath`
 (startup fails without it). `reviewerLogin` cascades per repo like `model`. See
 `docs/review.md` for the full config table.
 
-## State (persisted to disk)
+## State
 
-Durable state lives in `.agent-state.json` in the daemon's directory (not the target
-repo), written after every change and loaded on startup so the daemon survives restarts.
+Durable state is records in the work source (EM#1244), only through `src/issue-records.ts`: one
+marker comment per issue and per PR, and one on a closed Foreman-owned anchor issue for the repo
+(`src/github/record-store.ts`). A load answers found, absent or **unavailable**; unavailable is
+never read as absent, so the caller leaves the item alone (fail closed). There is no
+`.agent-state.json`; `src/legacy-records.ts` moves a leftover one in once and deletes it.
 
-- `implemented` — issue numbers already delivered by a PR (self-heals when a tracked
-  entry has no delivering PR — see `docs/implemented-cache-self-heal.md`).
-- `skipped` — per-issue back-off records for issues the agent deliberately declined
-  (investigation-only, blocked-on-external-verification); cleared on success or after
-  the `backoff.skip` window. Some transient skip reasons are re-checked and admitted early.
-- `verifyHeld` — merged PRs whose dev verification failed, with their attempt count;
-  re-verified per `backoff.verifyRetry`.
-- `failed` / failure counters — per-repo consecutive-failure counts. After
-  `backoff.repoFailure.maxFailures` in a row the stage pauses for an exponential window.
-  A run refused by an upstream limit (GitHub rate limit, Claude session limit) is never charged.
+- Issue record: `failed`, `skipped` (back-off for declined issues, cleared on success or after
+  `backoff.skip`), `held`, `verifyHeld` (re-verified per `backoff.verifyRetry`), `unstick`,
+  `prodVerified`, `promotionStallNoted`, `divergenceTold`.
+- PR record: release stage, tracked, no-commit streak, rejected head.
+- Repo record: `unstick` questions naming no issue, `divergenceRuled`, `cardBlocks`, `dependencyBatches` (the outcome of each dependency batch by PRs + head SHAs).
+- Derived, never stored: `implemented` (labels and `selectWork`).
 
-In-memory only: the `implementing` mutex, the repo-failure and agent-unavailable waits, and
-the upstream back-off state (all reset on restart — safe, it only retries sooner).
+Local files are caches or logs only: `.github-state.json` (rebuildable snapshot), the metrics
+SQLite file when `metrics.enabled`, the PID file, `logs/`. In memory only, reset on restart (safe:
+it only retries sooner or repeats one note): `PhaseMemory` (`src/phase-memory.ts`), the upstream
+back-off state, the locks.
+
+**New per-daemon state is a field on `ForemanRuntime`** (`src/runtime.ts`), passed daemon → lane
+pass → phase; only composition roots (cli, daemon, tests) import it as a value, the rest
+`import type`. A module-level singleton needs a `Process-wide:` comment saying why.
+
+## Branches
+
+Each issue is built on `<branchPrefix><issue>-<slug>` (`foreman/` by default), cut from
+`baseBranch`. `isForemanOwnedHead` (`src/foreman-branch.ts`) is the one ownership test; revise,
+reconcile and branch deletion all use it, so never push to, revise or delete a head it rejects.
+The legacy shared `featureBranch` is honored only to drain PRs open at the cutover.
 
 ## Back-offs
 
@@ -130,46 +153,23 @@ phase.** Groups, defaults and env names: `docs/configuration.md` (generated).
 
 Every label, branch prefix, title and signature the Foreman reads or writes on GitHub
 is config: the trigger label, `lifecycleLabels`, or the `github` block
-(`src/github/conventions.ts`), each defaulting to the name it always had. Phases pass
+(`src/config-schema/github.ts`), each defaulting to the name it always had. Phases pass
 `repoConfig.github`; `src/github/*` functions take it as a trailing parameter defaulting
 to `DEFAULT_GITHUB_CONVENTIONS`. Sessions get every label name as `FOREMAN_*_LABEL(S)`
-env vars (`setLabelEnv` in `agent.ts`), so no skill types one. **A new GitHub name is a
+env vars (`setLabelEnv` in `src/session/env.ts`), so no skill types one. **A new GitHub name is a
 key there, never a literal.** The markers the Foreman and its skills talk through
 (`FOREMAN_RESULT`, `FOREMAN_REVIEW`, `<!-- foreman-ci-gate -->`, "Related to #N") stay
 fixed on purpose.
 
 ## Architecture
 
-```
-src/
-├── cli.ts           # CLI entry point (--once, --repo, --help, --version, paperclip:doctor)
-├── config.ts        # Zod-validated config from .ai-agent.json + env vars
-├── logger.ts        # Structured logging (JSON/text, levels, child contexts)
-├── lifecycle.ts     # THE state machine: stages, moves, session stages (generates docs/lifecycle.md)
-├── adapters.ts      # The data contract: WorkEvent, WorkSourceAdapter, WorkObserver (no source-specific code)
-├── work-source.ts   # emit()/advance(): one event → the work source records it, observers are told
-├── github.ts        # gh-CLI public surface; the code is in github/, one file per concern
-│                    #   (gh runner, caches, discovery, review queue, lifecycle scans, CI gate, promotion, …)
-├── github-work-source.ts # GitHubIssueConnector: a move → its `gh issue edit`; labels → stages for snapshot
-├── redact.ts / review-report.ts # Core helpers shared by the agent runner and plugins
-├── agent.ts         # Spawns claude CLI (implement / revise / review)
-├── claude-trust.ts  # Claude Code workspace trust for every checkout a session runs in (`trustManagedRepos`)
-├── backoff.ts       # Every retry wait: the `backoff` config block, the one formula, BackoffTracker
-├── upstream-backoff.ts # Daemon-wide GitHub / Claude limit back-off (sole owner of that state)
-├── reconciler.ts    # Orphaned-commit reconciliation + branch-divergence checks
-├── state.ts         # Disk persistence (.agent-state.json)
-├── stages.ts        # Stage schema, default order, dispatch loop
-├── orchestrator.ts  # Stage pass per repo, failure cooldowns, the session slot; dispatches to phases/
-├── phases/          # One file per stage: reconcile, implement, revise, verify, review, promote, custom;
-│                    #   common.ts holds what they share. Each reports every step via emit/advance
-├── daemon.ts        # Poll loop, config hot-reload, Discord bridge, graceful shutdown
-├── paperclip/config.ts # The plugin's config block: schema, AI_AGENT_PAPERCLIP_* overrides, checks
-├── paperclip/client.ts # Paperclip HTTP client (issues, comments, agents); no retry
-├── paperclip/agent.ts  # Registers the Foreman agent, wake paths off (`npm run paperclip:register`)
-├── paperclip/mirror.ts # PaperclipMirror: a WorkObserver (plugin) — each event → the issue's card; best-effort
-├── paperclip/doctor.ts # Read-only check of the integration, six named PASS/FAIL checks (`npm run paperclip:doctor`)
-└── index.ts         # Public API exports
-```
+Layout, plugin model and boundary: `docs/architecture.md`. The modules a change usually touches:
+
+- `plugins/` — `contract.ts` (roles), `registry.ts` (the core's only way in), `index.ts` (composition root), one file per plugin.
+- `lifecycle.ts` (the state machine; generates `docs/lifecycle.md`), `work-source.ts` (`emit()`/`advance()`), `adapters.ts` (the data contract), `code-host.ts` (typed, no raw `gh`).
+- `runtime.ts` + `phase-memory.ts`, `issue-records.ts` + `record-store.ts`, `profiles/`, `foreman-branch.ts`.
+- `stages.ts`, `lanes.ts`, `orchestrator.ts`, `daemon.ts`, `phases/` (`*-workflow.ts` run the Claude session), `dependency-batch/`, `session/` (runner, env, secret-gate, protocol).
+- Plugin code, off-limits to the core: `github.ts`, `github/`, `github-work-source.ts`, `github-state.ts`, `paperclip/`, `metrics/`.
 
 ## Setup
 
@@ -191,17 +191,18 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
 
 ## Key design decisions
 
-- **Skills own the workflow; the Foreman just triggers.** Implement/revise/review logic
-  lives in skills (in the service repo for implement/revise, in `emRepoPath` for review),
-  not in TypeScript. The daemon discovers work, spawns Claude on the right skill, and
+- **Skills own the workflow; the Foreman just triggers.** Implement/revise logic
+  lives in the service repo's skills, review in the Tech Lead (reviewer plugin), not TypeScript. The daemon discovers work, spawns Claude on the right skill, and
   reconciles labels/state.
 - **One state machine, one call.** Every state change is a named move in `src/lifecycle.ts`;
   the orchestrator calls `advance(item, "<move>")` and reports everything else with `emit()`.
-  The work source (GitHub labels) records the event; observers (Paperclip, when enabled) get
-  the same event. Only `cli.ts` (the wiring) imports `paperclip/`, plus `config.ts` composing
-  the plugin's own block from `paperclip/config.ts`; the connector and the plugin never read
-  each other (a test walks every core file and enforces it). A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
-- **One Claude session at a time** — resource + git-state safety.
+  The work source (GitHub labels) records the event; observers (Paperclip, metrics, when enabled) get
+  the same event. No core file imports plugin code or runs `gh`; it goes through
+  `plugins/registry.ts` (`test/plugin-boundary.test.mjs`; its exception list is empty and stays
+  empty). A new state change is a row in `MOVES`, never a `(from, to)` pair at a call site.
+- **Every GitHub call is async** (`ghAsync`, `src/github/gh.ts`); the sync runner is gone. A sync
+  child process on the event loop (`reconciler.ts`'s `git()` still is one) can freeze the daemon, as on 2026-11-06.
+- **Concurrency is per (repo, lane)**, not one session at a time.
 - **Phase order is the priority order** — reconcile and review settle prior-cycle state
   before new implementation starts. The default `stages` keeps it; a config that
   reorders the built-ins gives that up.
@@ -209,5 +210,6 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
   `.ai-agent.json` files keep working unchanged. Every key is commented where it is
   declared; `docs/configuration.md` is generated from those comments and the generator
   fails on an uncommented key. `docs/README.md` is the docs index.
-- **Disk persistence** — `.agent-state.json` survives restarts; the daemon resumes where
-  it left off.
+- **Profiles** — operator-specific values (logins, repo names, header names) live in `src/profiles/`, nowhere else in `src/`.
+- **Metrics** — the opt-in `metrics` observer logs stage advances to SQLite; `npm run metrics:report` reads it (`docs/metrics.md`).
+- **Persistence** — work-source records survive restarts; the daemon resumes where it left off.

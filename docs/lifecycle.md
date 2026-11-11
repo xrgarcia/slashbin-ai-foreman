@@ -21,13 +21,13 @@ event too, through the same `emit()`.
 
 Each event goes to two kinds of listener, and neither reads the other:
 
-- **The work source** (`WorkSourceAdapter.record`) — today GitHub issues (`src/github-work-source.ts`),
+- **The work source** (`WorkSourceAdapter.record`) — the GitHub plugin's issues (`src/plugins/github.ts`, `src/github-work-source.ts`),
   which turns each move into exactly one `gh issue edit` of lifecycle labels. Other events write nothing there.
 - **Observers** (`WorkObserver.onEvent`) — optional plugins, queued and best-effort: the Paperclip
-  board mirror (`src/paperclip/`, on when `paperclip.enabled`) and the daemon's activity log. An
+  board plugin (`src/plugins/paperclip.ts`, on when `paperclip.enabled`) and the daemon's activity log. An
   observer that fails or hangs never stops the Foreman.
 
-So the core calls one interface; GitHub is updated, and Paperclip too when it is enabled.
+So the core calls one interface (`src/plugins/registry.ts`); GitHub is updated, and Paperclip too when it is enabled.
 
 ## Stages
 
@@ -35,7 +35,7 @@ Where an item can be. The `…ing` stages exist only while a session runs.
 
 On a GitHub issue each stage is one label. Where an issue carries more than one, the stage is
 the first that applies in `issueStage` (`src/github-work-source.ts`): `blocked`, `done`,
-`prodVerifyHeld`, `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on
+`prodVerifyHeld`, `awaitingSignoff` / `releasing`, `releaseAuthorized`, `awaitingRelease`, `pendingVerification`, and so on
 back to `approved`. The Foreman writes every label except the EM's `ready for prod release`;
 `pendingVerification` is the one stage waiting on the EM.
 
@@ -49,14 +49,16 @@ back to `approved`. The Foreman writes every label except the EM's `ready for pr
 | `revising` | — (a session holds it) | A revise session is addressing the review. |
 | `merged` | `pr merged` | Merged to the base branch; waiting for dev verification. |
 | `verifying` | — (a session holds it) | A verify session is checking it in dev. |
+| `qaReviewing` | — (a session holds it) | QA is running its visual and behaviour checks. qaBeforeMerge on: on the Tech Lead-approved PR, run locally, before it merges (a PASS merges it, a FAIL goes back to the builder, the SRE never sees it). qaGate on: on dev, after the SRE passed it and before it advances. |
 | `pendingVerification` | `pr approved` | Dev-verified (or merged with no verify stage); awaiting EM verification, which ends in the release authorization. |
 | `releaseAuthorized` | `ready for prod release` | The EM verified it and authorized production; the promote stage puts it in a release PR next. |
 | `awaitingRelease` | an open release PR names it | In an open release PR the release stage does not own (no release label: opened by hand, or before the release stage ran). |
 | `releasing` | `release pending` | In a release PR the Foreman owns: the Tech Lead approves it, then the SRE merges, deploys and verifies it in production. |
+| `awaitingSignoff` | `release pending` while the release PR's EM sign-off status fails | In a release PR the Foreman owns, but the PR's EM sign-off status is failing: an issue in it lacks `ready for prod release`. The Tech Lead's approval and the SRE's deploy wait; the EM signs the issue off or takes it out of the release. |
 | `prodVerifyHeld` | `prod verification held` | Deployed to production, but the SRE's prod verification held or failed; the Foreman re-verifies it on a back-off. |
 | `needsRuling` | — (a session holds it) | Its PR is not converging under review (sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question); revision waits for the EM's scope ruling. Or a skipped issue used up backoff.skip.maxAttempts sessions; it runs again once a person changes the issue (an agent's edit or label buys one session; its comment releases nothing). |
 | `blocked` | `blocked` | Needs a person: blocked on the source, or the Foreman declined it or ran out of retries. |
-| `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed. |
+| `done` | closed or `ready to close` | Closed by the Foreman after the SRE's prod verification passed (or, with no reviewer, verifier, deployer or promote stage, once a person merged it). |
 
 ## Moves
 
@@ -70,13 +72,18 @@ Every state change the Foreman makes. *From* is the state the caller knows the i
 | `alreadyApproved` | new | approved | `pendingVerification` | Implement found the work already merged and there is no verify stage. |
 | `alreadyMerged` | new | merged | `merged` | Implement found the work already merged; dev verification is next. |
 | `reviewApproved` | inReview | approved | `pendingVerification` | The review approved and merged, and there is no verify stage. |
-| `reviewMerged` | inReview | merged | `merged` | The review approved and merged; dev verification is next. |
-| `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, or a stranded changes-requested verdict is caught up. |
+| `reviewMerged` | inReview | merged | `merged` | The review approved and merged (qaBeforeMerge on: after QA passed the approved head); dev verification is next. |
+| `changesRequested` | inReview | changesRequested | `changesRequested` | The review asked for changes, its CI is red, QA failed the approved head (qaBeforeMerge on), or a stranded changes-requested verdict is caught up. |
 | `revised` | changesRequested | inReview | `inReview` | A revise session pushed changes; back to review. |
+| `qaRerunRevise` | changesRequested | inReview | `inReview` | The EM asked for QA again on the open PR (a PR comment opening `**EM QA re-run`, newer than every QA Report for its head) while it waited for a revise session: no session runs, and it goes back to review and QA. |
 | `verifyPassed` | merged | approved | `pendingVerification` | Dev verification passed; the EM verifies next, and authorizes production with `ready for prod release`. |
+| `qaRerun` | approved | merged | `merged` | The EM asked for QA again on the merged PR (a PR comment opening `**EM QA re-run`): dev verification and the QA gate run again (slashbin-ai-foreman#158). |
 | `recoverPassed` | unknown | approved | `pendingVerification` | Dead-zone recovery: a merged PR left its issue unadvanced, and a fresh verification passed. |
 | `recoverFailed` | unknown | changesRequested | `changesRequested` | Dead-zone recovery: a fresh verification failed. |
 | `recoverMerged` | unknown | merged | `merged` | Dead-zone recovery with a verify stage: the merge is recorded and verification follows. |
+| `humanMerged` | unknown | merged | `merged` | No reviewer is enabled, so a person reviewed and merged the PR: the merge is recorded, and dev verification follows when a verifier is enabled. |
+| `humanMergedApproved` | merged | approved | `pendingVerification` | A person merged it, and there is no verifier: it goes straight on. |
+| `closedNoRelease` | approved | released | `done` | A person merged it, and there is no verifier, no deployer and no promote stage: nothing else will release it, so it is commented and closed. |
 | `release` | unknown | queued | `approved` | An orphan: in review with no open PR; released back to the queue. |
 | `releaseQueued` | releaseAuthorized | releasing | `releasing` | The promote stage put an EM-authorized item in the release PR (opened, updated, or already listing it), or found its work already in production with no prod verification on record. |
 | `alreadyReleased` | releaseAuthorized | released | `done` | Authorized, its work already in production, and a passed prod verification on record for it: closed. |
@@ -95,10 +102,15 @@ stateDiagram-v2
   inReview --> merged: reviewMerged
   inReview --> changesRequested: changesRequested
   changesRequested --> inReview: revised
+  changesRequested --> inReview: qaRerunRevise
   merged --> approved: verifyPassed
+  approved --> merged: qaRerun
   unknown --> approved: recoverPassed
   unknown --> changesRequested: recoverFailed
   unknown --> merged: recoverMerged
+  unknown --> merged: humanMerged
+  merged --> approved: humanMergedApproved
+  approved --> released: closedNoRelease
   unknown --> queued: release
   releaseAuthorized --> releasing: releaseQueued
   releaseAuthorized --> released: alreadyReleased
@@ -117,6 +129,7 @@ While a session runs it holds its items in a stage; when it ends with nothing ne
 | implement | `implementing` | `approved` |
 | review | `reviewing` | `inReview` |
 | verify | `verifying` | `merged` |
+| qa | `qaReviewing` | `merged` |
 | revise | `revising` | `changesRequested` |
 
 ## Releases
@@ -139,12 +152,20 @@ lifecycle label; the one label a person writes is the EM's `ready for prod relea
 1. **Promote** moves each `ready for prod release` issue into the release PR and to `release pending`
    (also when it updates an existing PR). When the base branch has nothing to promote (a 0-file diff),
    the issue's work is already in production: it is closed only on evidence (a passed prod verification
-   the release stage recorded for it, in `.agent-state.json`, at the commit production is at now);
+   the release stage recorded for it, in the issue's record, at the commit production is at now);
    otherwise it gets `release pending` and the release stage verifies it.
+   A release PR promotes all of the base branch (features accumulating there go out together), so before
+   promote opens or updates it, it reads the merges the base branch carries that production lacks. Each
+   issue those merges implement that is not already in the release is adopted: it is listed under
+   "Issues included" and gets one "Carried to production in release PR #N" comment, but it is listed,
+   not signed: the release does not deploy until the EM applies `ready for prod release` to every listed
+   issue (foreman#128; a failing EM sign-off status shows meanwhile). A merge with no linked issue is listed by
+   PR number under "Merges with no linked issue" (foreman#90).
 2. **Tech Lead** approves the release PR at its exact head (`tech-lead.mjs approve-promotion`). A refusal
    blocks the PR's issues with a comment; anything other than approve or refuse backs off (`backoff.releaseRetry`).
 3. **SRE** merges, deploys and verifies (`sre.mjs deploy`, up to `sreDeployMaxDurationMs`). Its
-   `SRE_DEPLOY` trailer decides the outcome: only `hold=predeploy-stop` blocks; every other hold, and
+   `SRE_DEPLOY` trailer decides the outcome: `hold=predeploy-stop`, `merge-refused-repeatedly` and
+   `merge-blocked-check` block (`DEPLOY_STOPS`, src/phases/release.ts); every other hold, and
    any run without a trailer, is retried.
 4. **Tag.** Once merged, the merge commit gets an annotated tag named by `github.releaseTagFormat`
    (reused if one is already there). Never a GitHub Release object, never a `v` prefix.
@@ -152,6 +173,15 @@ lifecycle label; the one label a person writes is the EM's `ready for prod relea
    labels and closes it. A hold or fail labels it `prod verification held`, reopens it if GitHub's
    keywords closed it, comments the reason, and re-verifies (`sre.mjs verify --mode prod`) on
    `backoff.prodVerifyRetry`. No issue is ever left closed-but-unverified or open-but-unlabelled.
+   **Each issue is graded on its own row (foreman#117).** The SRE's v1 line (verifier, and deployer when its
+   prod verify did not pass) carries `issue_acceptance: [{issue, state}]`, `state` PASS, FAIL or NOT-VERIFIED.
+   When the hold is an acceptance hold and every issue of the release has a row, at least one FAIL and at
+   least one PASS, only the issues not PASS are held; the PASS ones close on their own evidence and the
+   release record narrows to the held issues, which re-verify alone. A FAIL row that belongs to an issue the
+   record no longer tracks still counts, so a re-tracked issue whose own row passed closes. An adopted release's
+   Production Verification comment is read the same way: a result row naming an issue (`Acceptance #5`) is that
+   issue's row. Any other shape (no rows, a row missing, no FAIL, a hold that is not about acceptance, a
+   malformed list) holds the whole release as before.
 6. **Soak.** At least 30 minutes after the merge, the stage runs `sre.mjs verify --mode soak` once;
    a hold or fail reopens the issues to `prod verification held`.
 
@@ -161,6 +191,13 @@ an existing `## Production Verification` comment), the tag, the soak, and the sa
 Issues the SRE's promotion-verify sweep marked `blocked` ("**Production release check needs a person.**")
 are moved to `prod verification held`. The SRE's promotion-verify-sweep (a systemd timer on the owner's
 desktop) is retired once this ships.
+
+**Net-zero issues.** An open `release pending` issue whose own merged PR changed no file, and whose merge
+commit is not on the production branch, shipped nothing and no release carries it. It is never joined to the
+release at production's head (that would hand it a verdict about someone else's changes): it is closed with a
+"Closed: nothing to verify in production" comment naming the PR. If GitHub cannot say, it is left alone for the
+next scan. A net-zero merge that is on production is carried as before. The same ends an issue already joined
+to a held release: it is closed, leaves the release's record, and the release stays held for the rest.
 
 The promote and release path sends nothing to Discord: what needs a person is a comment and a label
 on the issue, which also moves its Paperclip card.
@@ -187,22 +224,21 @@ give the reason. A skip's comment names what it waits on.
 | Block | Why the Foreman stopped | Released by (any one, checked in this order) |
 |---|---|---|
 | `skip` | The implement session declined the issue: a precondition outside the repo, investigation only, or already done. Its comment on the issue says what it waits on. | Clear the condition the skip named (reconcile the branch, close the blocking PR).<br>Close or merge the issue or PR the skip named in `waiting_on`.<br>Edit, comment on or label the issue (anyone but the Foreman). Escalated: see below. |
-| `divergence` | The feature branch diverged from its base. | Reconcile the feature branch with its base. |
 | `verify-no-pr` | The issue is labelled merged, but no merged PR closes it. | Merge a PR into the base branch that closes the issue. |
 | `verify-held` | Dev verification failed and is waiting out its back-off; it retries by itself. | Edit the issue's body (the spec the SRE verifies against). |
-| `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch. |
+| `verify-exhausted` | Dev verification failed its last attempt. | Edit the issue's body (the spec the SRE verifies against).<br>Land a fix on the base branch.<br>Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own.<br>Nothing: an SRE `## Dev Verification Evidence` PASS for the merge, newer than the hold, advances a deploy failure.<br>Repair the dev environment: a SUCCESS dev deployment of the merge, newer than the hold, reopens a deploy failure. |
 | `revision-exhausted` | Revision of the issue's PR failed its retries. | Push a commit to the PR. |
-| `revision-stalemate` | The reviser and the reviewer disagree, and the reviser pushed nothing. | Push a commit to the PR. |
+| `revision-stalemate` | The reviser and the reviewer disagree, and the reviser pushed nothing. | Push a commit to the PR.<br>Post an `**EM scope ruling` comment on the PR (one more revise against it). |
 | the `blocked` label | A person or tool labelled the issue `blocked`: the Foreman never picks it up. | Remove the label. |
 | `needsRuling`: PR not converging | The PR was sent back REVIEW_ROUNDS_ALERT times since the last ruling, or the Tech Lead flagged a spec question. | Post a comment on the PR whose first line opens `**EM scope ruling`. |
 | `needsRuling`: skip escalated | A skip used up `backoff.skip.maxAttempts` sessions in a row. | See below. |
 
 **A stop that holds other issues up** tells them. When a skip's cause will not clear by itself (not a
-diverged or occupied feature branch) and GitHub records open issues as blocked by the skipped issue
+wait on an open PR) and GitHub records open issues as blocked by the skipped issue
 (`/dependencies/blocking`), the Foreman comments on each dependent naming the dead blocker, labels it
 `blocked`, and escalates it for the EM; the skipped issue is labelled `blocked` too. Each dependent is told
 once (`deadBlockerTold` in the skip's state). Remove the `blocked` label on a dependent to release it.
-The opposite outcome, the work **already on the feature branch**, ends `FOREMAN_RESULT: landed issue=N`:
+The opposite outcome, the work **already on the base branch**, ends `FOREMAN_RESULT: landed issue=N`:
 the Foreman closes the issue as completed with the evidence, which releases its dependents
 (`src/github/dead-blocker.ts`; gateway#222 / skuvault#478, 2026-10-26).
 

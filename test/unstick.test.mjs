@@ -1,28 +1,40 @@
 // The unstick stage (foreman#103): what is stuck, and the EM call. Run with
-// `npm test`. The whole-pass behaviour is proved by the EM's acceptance script
-// (scripts/slashbin-ai/foreman-103-unstick-acceptance.mjs); these pin the parts.
+// `npm test`. These pin the parts; the EM's side of the call is covered by the EM's
+// own `bin/em.mjs unstick` acceptance (slashbin-engineering-manager).
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, openEntry, unstickKey,
+  UNSTICK_KINDS, UNSTICK_MAX_ATTEMPTS, derivedCandidates, needsCall, nextStep, handoffGiveUpComment, openEntry, unstickKey, releaseGateReason, releaseGateCandidateReason,
 } from "../dist/unstick.js";
-import { unstickViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS } from "../dist/agent.js";
+import { applyOutcome } from "../dist/phases/unstick.js";
+import { DEFAULT_BACKOFF } from "../dist/backoff.js";
+import { unstickViaEm, grantStateViaEm, buildEmEnv, EM_UNSTICK_MAX_DURATION_MS, emUnstickMaxDurationMs } from "../dist/plugins/em.js";
 import { unstickStageReady } from "../dist/config.js";
+import { startAgentPlugins } from "./agent-plugins.mjs";
+
+await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 const repo = { name: "r", githubRepo: "o/r" };
-const opts = { verifyMaxAttempts: 3, isDeployFailureHold: (r) => r === "dev-verify-failed" || r.startsWith("deploy="), divergenceReason: () => "features diverged" };
+const opts = { verifyMaxAttempts: 3, isDeployFailureHold: (r) => r === "dev-verify-failed" || r.startsWith("deploy=") };
 const held = (reason, attempts, prNumber = 5) => ({ heldAt: "2026-10-20T10:00:00Z", prNumber, reason, attempts });
 
 test("the kinds are the EM contract, verbatim", () => {
   assert.deepEqual([...UNSTICK_KINDS], [
     "skip", "divergence", "verify-held", "verify-exhausted", "verify-no-pr", "revision-exhausted",
-    "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate",
+    "revision-stalemate", "needs-ruling", "dead-zone", "deploy-failed", "release-gate", "rework-decision",
+    "unrelated-error",
+    "epic-ready-to-close",
+    "dependency-batch-loop",
+    "unlinked-fix",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
+  assert.equal(emUnstickMaxDurationMs("skip"), 20 * 60_000);
+  assert.equal(emUnstickMaxDurationMs("rework-decision"), 40 * 60_000);
 });
 
 test("a hold with retries left is not stuck; one at its cap is, by kind", () => {
@@ -36,12 +48,6 @@ test("a hold with retries left is not stuck; one at its cap is, by kind", () => 
 test("a no-merged-pr hold is stuck at once (it is born at its cap)", () => {
   const c = derivedCandidates({ verifyHeld: { 12: held("no-merged-pr", 0, 0) } }, opts);
   assert.equal(c[0].kind, "verify-no-pr");
-});
-
-test("divergence: once per announced issue, or issue 0 when none", () => {
-  const block = (announced) => ({ featureBranch: "features", baseBranch: "develop", ahead: 1, behind: 2, since: "t", announced });
-  assert.deepEqual(derivedCandidates({ branchBlock: block([7, 8]) }, opts).map((c) => [c.issue, c.kind]), [[7, "divergence"], [8, "divergence"]]);
-  assert.deepEqual(derivedCandidates({ branchBlock: block([]) }, opts).map((c) => [c.issue, c.kind]), [[0, "divergence"]]);
 });
 
 test("an escalated skip is stuck; an unescalated one is not", () => {
@@ -75,7 +81,7 @@ test("unstickStageReady needs only emRepoPath, not Paperclip", () => {
 });
 
 function fakeEm(script) {
-  const dir = mkdtempSync(join(tmpdir(), "fake-em-"));
+  const dir = mkTmp("fake-em-");
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/em.mjs"), script);
   return { emRepoPath: dir, sessionEnv: [] };
@@ -83,7 +89,7 @@ function fakeEm(script) {
 
 test("unstickViaEm: argv, cwd and token; exit codes map to outcomes", async () => {
   process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
-  const log = join(mkdtempSync(join(tmpdir(), "em-log-")), "argv.json");
+  const log = join(mkTmp("em-log-"), "argv.json");
   const body = (code) => `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), token: Boolean(process.env.EM_GITHUB_TOKEN), foreman: Boolean(process.env.FOREMAN_GITHUB_TOKEN) })); console.log("done"); process.exit(${code});`;
   for (const [code, kind] of [[0, "invoked"], [2, "escalated"], [3, "declined"], [1, "failed"], [7, "failed"]]) {
     const cfg = fakeEm(body(code));
@@ -114,4 +120,156 @@ test("buildEmEnv carries the EM token and no other agent's", () => {
   const env = buildEmEnv({ sessionEnv: [] });
   assert.equal(env.EM_GITHUB_TOKEN, "em-token-not-real");
   assert.equal(env.TECHLEAD_GITHUB_KEY, undefined);
+});
+
+// The handoff watch (SLA-3693, 2026-11-05): the EM answered "invoked" to a
+// release gate, its seat ran out of tokens, and nothing ever looked again.
+const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+const gate = { issue: 5, kind: "release-gate", reason: "at pr approved" };
+const at = (ms) => new Date(ms).toISOString();
+
+test("nextStep: an invoked handoff that never moved is called again on a growing window, then given up", () => {
+  const t0 = 1_000_000;
+  let e = { ...gate, status: "pending", attempts: 0, since: at(t0) };
+  assert.equal(nextStep(e, gate, t0, H), "call");
+  e = applyOutcome(e, { kind: "invoked", detail: "handed to the PO" }, t0, DEFAULT_BACKOFF.upstream);
+  assert.equal(e.recalls, 0);
+  assert.equal(nextStep(e, gate, t0 + 999, H), "wait");
+  assert.equal(nextStep(e, gate, t0 + 1_000, H), "call", "window 1 passed");
+  e = applyOutcome(e, { kind: "invoked", detail: "again" }, t0 + 1_000, DEFAULT_BACKOFF.upstream);
+  assert.equal(e.recalls, 1);
+  assert.equal(nextStep(e, gate, t0 + 1_000 + 1_999, H), "wait", "window 2 is longer");
+  assert.equal(nextStep(e, gate, t0 + 3_000, H), "call");
+  e = applyOutcome(e, { kind: "invoked", detail: "again" }, t0 + 3_000, DEFAULT_BACKOFF.upstream);
+  assert.equal(e.recalls, 2);
+  assert.equal(nextStep(e, gate, t0 + 3_000 + 4_000, H), "give-up", "recalls spent: tell the owner");
+  assert.equal(nextStep({ ...e, gaveUpAt: at(t0) }, gate, t0 + 1e9, H), "wait", "given up once, never again");
+  assert.equal(nextStep(e, { ...gate, reason: "new" }, t0, H), "call", "a changed reason is a new question");
+});
+
+test("nextStep: maxRecalls 0 keeps the old rule (an answer is final)", () => {
+  const e = { ...gate, status: "invoked", attempts: 1, since: at(0), lastCallAt: at(0), recalls: 0 };
+  assert.equal(nextStep(e, gate, 1e12, { ...H, handoff: { ...H.handoff, maxRecalls: 0 } }), "wait");
+  assert.equal(needsCall(e, gate), false, "needsCall carries no handoff watch");
+});
+
+test("a refusal spends no attempt and waits for the stated reset, else the upstream window", () => {
+  const t0 = 5_000_000;
+  const up = { baseMs: 100, capMs: 1_000, factor: 2 };
+  let e = { ...gate, status: "failed", attempts: 2, since: at(t0) };
+  e = applyOutcome(e, { kind: "refused", detail: "You've hit your limit" }, t0, up);
+  assert.equal(e.status, "refused");
+  assert.equal(e.attempts, 2, "not charged");
+  assert.equal(e.waitUntil, at(t0 + 100));
+  assert.equal(nextStep(e, gate, t0 + 99, H), "wait");
+  assert.equal(nextStep(e, gate, t0 + 100, H), "call");
+  e = applyOutcome(e, { kind: "refused", detail: "again" }, t0 + 100, up);
+  assert.equal(e.waitUntil, at(t0 + 100 + 200), "longer each refusal in a row");
+  e = applyOutcome(e, { kind: "refused", detail: "again", resetAtMs: t0 + 60_000 }, t0 + 300, up);
+  assert.equal(e.waitUntil, at(t0 + 60_000), "a stated reset wins");
+  e = applyOutcome(e, { kind: "invoked", detail: "ok" }, t0 + 60_000, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.refusals, undefined, "an answer clears the refusal run");
+  assert.equal(e.waitUntil, undefined);
+});
+
+test("the handoff give-up comment names the owner, the kind and the last answer", () => {
+  const c = handoffGiveUpComment("ray", { kind: "release-gate", reason: "r", attempts: 3, since: "s", lastCallAt: "l", detail: "d" });
+  assert.match(c, /@ray/);
+  assert.match(c, /`release-gate`/);
+  assert.match(c, /acted 3 times/);
+});
+
+test("unstickViaEm: a run that ends in the runner's refusal is refused, whatever its exit", async () => {
+  process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
+  for (const code of [0, 1]) {
+    const r = await unstickViaEm(repo, fakeEm(`console.log("You've hit your session limit · resets 9am (America/Chicago)"); process.exit(${code});`), 9, "release-gate", "why", logger);
+    assert.equal(r.kind, "refused", `exit ${code}`);
+    assert.match(r.detail, /hit your session limit/);
+    assert.ok(r.resetAtMs > Date.now());
+  }
+  const esc = await unstickViaEm(repo, fakeEm(`console.log("You've hit your session limit"); process.exit(2);`), 9, "skip", "why", logger);
+  assert.equal(esc.kind, "escalated", "an explicit escalation stands");
+});
+
+test("a recall the EM declines as already answered keeps the handoff watched", () => {
+  const t0 = Date.parse("2026-11-05T12:00:00Z");
+  const up = DEFAULT_BACKOFF.upstream;
+  let e = { issue: 7, kind: "release-gate", reason: "r", status: "pending", attempts: 0, since: "t" };
+  e = applyOutcome(e, { kind: "declined", detail: "no" }, t0, up);
+  assert.equal(e.status, "declined", "a decline on a question never handed off is final");
+  e = { issue: 7, kind: "release-gate", reason: "r", status: "pending", attempts: 0, since: "t" };
+  e = applyOutcome(e, { kind: "invoked", detail: "handed off" }, t0, up);
+  e = applyOutcome(e, { kind: "declined", detail: "already answered this reason; nothing written" }, t0 + 1, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1, "it counts as a recall");
+  assert.equal(e.attempts, 2);
+});
+
+test("an invoked entry recorded before recalls existed is a standing handoff: a duplicate decline or a refusal keeps it watched", () => {
+  const t0 = Date.parse("2026-11-05T12:00:00Z");
+  const up = DEFAULT_BACKOFF.upstream;
+  const legacy = { issue: 7, kind: "release-gate", reason: "r", status: "invoked", attempts: 1, since: "t", lastCallAt: "2026-11-05T10:00:00Z" };
+  let e = applyOutcome(legacy, { kind: "declined", detail: "already answered this reason; nothing written" }, t0, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1);
+  e = applyOutcome(legacy, { kind: "refused", detail: "You've hit your limit" }, t0, up);
+  assert.equal(e.recalls, 0, "the refusal keeps the handoff marked");
+  e = applyOutcome(e, { kind: "declined", detail: "already answered" }, t0 + 1, up);
+  assert.equal(e.status, "invoked");
+  assert.equal(e.recalls, 1);
+  e = applyOutcome(legacy, { kind: "invoked", detail: "again" }, t0, up);
+  assert.equal(e.recalls, 1, "a second handoff on a legacy entry is its first recall");
+});
+
+// A grant landing at the gate re-calls the EM (jerky_ops#201, 2026-11-05): the reason
+// carries the labels, so an answered gate with a new label is a new question.
+test("releaseGateReason: a new label changes the reason, so an answered release gate is called again", () => {
+  const before = releaseGateReason(["pr approved", "approved"]);
+  const after = releaseGateReason(["approved", "pr approved", "deliver-to-prod"]);
+  assert.equal(before, releaseGateReason(["approved", "pr approved", "approved"]), "order and repeats do not matter");
+  assert.notEqual(before, after);
+  const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+  const answered = { issue: 5, kind: "release-gate", reason: before, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
+  assert.equal(nextStep(answered, { issue: 5, kind: "release-gate", reason: after }, 1, H), "call");
+});
+
+const H0 = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 10_000, factor: 2, maxRecalls: 2 } };
+test("releaseGateReason: the EM's grant-state answer changes the reason though the child's labels do not (PR #222 S2)", () => {
+  const labels = ["pr approved", "approved"];
+  const no = releaseGateCandidateReason(labels, '{"granted": false, "missing": ["o/em#900 lacks `deliver-to-prod`"]}');
+  const yes = releaseGateCandidateReason(labels, '{"granted": true, "missing": []}');
+  assert.notEqual(no, yes);
+  assert.match(yes, /\[grant: \{"granted": true/);
+  const answered = { issue: 201, kind: "release-gate", reason: no, status: "invoked", attempts: 1, since: "t", lastCallAt: new Date(0).toISOString(), recalls: 2 };
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: yes }, 1, H0), "call");
+  assert.equal(nextStep(answered, { issue: 201, kind: "release-gate", reason: no }, 1, H0) === "call", false);
+});
+
+test("releaseGateCandidateReason: no grant answer keeps the prior reason; with no prior it drops the grant part", () => {
+  const labels = ["pr approved"];
+  const prior = releaseGateCandidateReason(labels, '{"granted": false, "missing": []}');
+  assert.equal(releaseGateCandidateReason(labels, null, prior), prior, "a flaky read is not a new question");
+  assert.equal(releaseGateCandidateReason(labels, null), releaseGateReason(labels));
+  assert.doesNotMatch(releaseGateCandidateReason(labels, null), /grant:/);
+});
+
+test("grantStateViaEm: exit 0 gives the trimmed stdout; non-zero, empty, tokenless or unconfigured is null", async () => {
+  process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
+  const log = join(mkTmp("em-gs-"), "argv.json");
+  const ok = fakeEm(`import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() })); console.log('  {"granted": true, "missing": []}  ');`);
+  assert.equal(await grantStateViaEm(repo, ok, 9, logger), '{"granted": true, "missing": []}');
+  const seen = JSON.parse(readFileSync(log, "utf8"));
+  assert.deepEqual(seen.argv, ["grant-state", "--repo", "o/r", "--issue", "9"]);
+  assert.equal(seen.cwd, ok.emRepoPath);
+  assert.equal(await grantStateViaEm(repo, fakeEm('console.log("{}"); process.exit(1)'), 9, logger), null, "non-zero");
+  assert.equal(await grantStateViaEm(repo, fakeEm("process.exit(0)"), 9, logger), null, "no output");
+  assert.equal(await grantStateViaEm(repo, {}, 9, logger), null, "no emRepoPath");
+  const saved = process.env.EM_GITHUB_TOKEN;
+  delete process.env.EM_GITHUB_TOKEN;
+  try {
+    assert.equal(await grantStateViaEm(repo, ok, 9, logger), null, "no token");
+  } finally {
+    if (saved !== undefined) process.env.EM_GITHUB_TOKEN = saved;
+  }
 });

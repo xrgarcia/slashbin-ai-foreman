@@ -20,15 +20,19 @@ import { loadConfig } from "../dist/config.js";
 import { lanesFor, withCheckoutLock, withLaneLock, withSessionSlot, setSessionLimit, stageNeedsCheckout } from "../dist/lanes.js";
 import { runRepoPass, runLanePass, requestShutdown, drainInFlight, getActiveLanePasses, getActiveRunCount } from "../dist/orchestrator.js";
 import { configureIssueCache } from "../dist/github.js";
-import { setStatePath, loadRepoState, saveRepoState } from "../dist/state.js";
+import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { createLogger } from "../dist/logger.js";
+import { startGitHubWorkSource } from "./agent-plugins.mjs";
+import { ForemanRuntime } from "../dist/runtime.js";
+let rt = new ForemanRuntime();
 
 const logger = createLogger({ format: "text", level: "error" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let tmp, F, saved;
 
-before(() => {
+before(async () => {
+  await startGitHubWorkSource();
   tmp = mkdtempSync(join(tmpdir(), "foreman-lanes-test-"));
   const bin = join(tmp, "bin");
   mkdirSync(bin);
@@ -47,6 +51,10 @@ fs.appendFileSync(${JSON.stringify(F.ghLog)}, JSON.stringify(args) + "\\n");
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(F.ghState)}, "utf8"));
 if (args[0] === "pr" && args[1] === "list") {
   process.stdout.write(JSON.stringify(args.includes("--head") ? st.featurePrs : st.openPrs));
+} else if (args[0] === "pr" && args[1] === "view") {
+  // foreman#208: the open Foreman PR is read by number (\`pr view N\`), not by the shared head.
+  const p = st.openPrs.find((x) => String(x.number) === args[2]);
+  process.stdout.write(JSON.stringify(p ?? {}));
 } else {
   process.stdout.write("[]");
 }
@@ -91,13 +99,14 @@ function load(cfg, repos) {
   return loadConfig(p);
 }
 
+// foreman#208: the Foreman finds its PRs by listing the open ones and checking ownership of the head, so the fixture's PR names its head (the legacy shared branch, still owned) and its base.
 const SHA = "a".repeat(40);
 const prAt = (sha) => ({ number: 7, title: "feat: x (#3)", body: "", commits: [], headRefOid: sha });
 
 function arrange({ featurePrs = [prAt(SHA)], claudeOut = "FOREMAN_STAGE pass\n", hold = false } = {}) {
   writeFileSync(F.ghLog, "");
   writeFileSync(F.claudeLog, "");
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs: [] }));
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs, openPrs: featurePrs.map((p) => ({ ...p, headRefName: "features", baseRefName: "develop" })) }));
   writeFileSync(F.claudeOut, claudeOut);
   if (hold) writeFileSync(F.hold, "");
   else if (existsSync(F.hold)) rmSync(F.hold);
@@ -129,7 +138,7 @@ function intervals() {
 
 // --- Lane grouping ----------------------------------------------------------
 
-test("default stages form eight lanes: build = revise→implement, release = promote→release", () => {
+test("default stages form nine lanes: build = revise→implement, release = promote→release", () => {
   const lanes = lanesFor(load({}, [{ name: "defaults" }]).stages);
   assert.deepEqual(lanes.map((l) => [l.name, l.stages.map((s) => s.type)]), [
     ["reconcile", ["reconcile"]],
@@ -140,6 +149,7 @@ test("default stages form eight lanes: build = revise→implement, release = pro
     ["branch-sync", ["branch-sync"]],
     ["dependabot", ["dependabot"]],
     ["unstick", ["unstick"]],
+    ["skill-deliver", ["skill-deliver"]],
   ]);
 });
 
@@ -204,36 +214,18 @@ test("maxConcurrentSessions: 0 is unbounded; N caps concurrent sessions at N", a
   assert.equal(peak, 6);
 });
 
-// --- State written by concurrent lanes ------------------------------------------
-
-test("state: two lanes saving one repo keep each other's fields", () => {
-  const build = loadRepoState("statesafe");
-  const rel = loadRepoState("statesafe");
-  build.implemented.push(41);
-  saveRepoState("statesafe", build);
-  // The release lane loaded before the build saved, and saves a field of its own.
-  saveRepoState("statesafe", { ...rel, prodVerified: { 41: { pr: 9, mergeSha: SHA, at: "2026-10-14T00:00:00Z" } } });
-  const after = loadRepoState("statesafe");
-  assert.deepEqual(after.implemented, [41], "the release lane's stale copy did not erase the build's record");
-  assert.equal(after.prodVerified[41].pr, 9);
-  // A copy saved twice diffs from its own last save.
-  build.implemented.push(42);
-  saveRepoState("statesafe", build);
-  assert.deepEqual(loadRepoState("statesafe").implemented, [41, 42]);
-  assert.equal(loadRepoState("statesafe").prodVerified[41].pr, 9);
-});
-
 // --- (a) a long build does not delay the same repo's release --------------------
 
 test("(a) a build session in flight on repo A does not hold repo A's release lane", async () => {
   arrange({ hold: true });
   const config = load({ stages: [{ id: "slow", skillPath: "/opt/slow/SKILL.md" }, { type: "implement" }, { type: "promote" }] }, [{ name: "lanes-a" }]);
-  const pass = runRepoPass(config.repos[0], config, logger);
+  const pass = runRepoPass(rt, config.repos[0], config, logger);
   await until(() => starts().length === 1, "the build session to start");
   await until(promoteRan, "promote to run beside the build");
+  // The lane's reads are async now: it finishes a few ticks after promote ran.
+  await until(() => !getActiveLanePasses().includes("lanes-a/release"), "the release lane to finish beside the build");
   assert.ok(!claudeEvents().some((e) => e.event === "end"), "the build session was still running when promote ran");
   assert.ok(getActiveLanePasses().includes("lanes-a/build"));
-  assert.ok(!getActiveLanePasses().includes("lanes-a/release"), "the release lane finished while the build ran");
   release();
   await pass;
 });
@@ -246,7 +238,7 @@ test("(b) two lanes that change the clone never overlap on one repo", async () =
     { id: "lockA", skillPath: "/opt/a/SKILL.md" }, { type: "implement" }, { type: "promote" }, { id: "lockB", skillPath: "/opt/b/SKILL.md" },
   ] }, [{ name: "lanes-b" }]);
   assert.deepEqual(lanesFor(config.stages).map((l) => l.name), ["build", "release", "lockB"]);
-  const pass = runRepoPass(config.repos[0], config, logger);
+  const pass = runRepoPass(rt, config.repos[0], config, logger);
   await until(() => starts().length === 1, "the first clone session");
   await until(promoteRan, "promote to run while the clone is locked");
   await sleep(300);
@@ -263,7 +255,7 @@ test("(b) two lanes that change the clone never overlap on one repo", async () =
 test("(c) one lane runs on every repo at once", async () => {
   arrange({ hold: true });
   const config = load({ stages: [{ id: "wide", skillPath: "/opt/w/SKILL.md" }] }, [{ name: "lanes-c1" }, { name: "lanes-c2" }]);
-  const passes = config.repos.map((r) => runRepoPass(r, config, logger));
+  const passes = config.repos.map((r) => runRepoPass(rt, r, config, logger));
   await until(() => starts().length === 2, "both repos' sessions in the same lane at once");
   assert.deepEqual(new Set(starts().map((s) => s.repo)), new Set(["example/lanes-c1", "example/lanes-c2"]));
   release();
@@ -274,11 +266,11 @@ test("(c) a second pass of the same (repo, lane) waits for the first, then takes
   arrange({ hold: true });
   const config = load({ stages: [{ id: "one", skillPath: "/opt/o/SKILL.md" }] }, [{ name: "lanes-c3" }]);
   const [lane] = lanesFor(config.stages);
-  const first = runLanePass(config.repos[0], config, lane, logger, "never");
+  const first = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await until(() => starts().length === 1, "the first pass's session");
   // New work lands while the first item is in flight.
-  writeFileSync(F.ghState, JSON.stringify({ featurePrs: [prAt("b".repeat(40))], openPrs: [] }));
-  const second = runLanePass(config.repos[0], config, lane, logger, "never");
+  writeFileSync(F.ghState, JSON.stringify({ featurePrs: [prAt("b".repeat(40))], openPrs: [{ ...prAt("b".repeat(40)), headRefName: "features", baseRefName: "develop" }] }));
+  const second = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await sleep(300);
   assert.equal(starts().length, 1, "no second item while the first is in flight");
   release();
@@ -299,7 +291,7 @@ test("(d) drain waits for a lane pass that holds no session (the release lane af
   // pass is in flight with no run registered.
   let free;
   const held = withCheckoutLock("lanes-d1", () => new Promise((r) => { free = r; }));
-  const pass = runLanePass(config.repos[0], config, lane, logger, "never");
+  const pass = runLanePass(rt, config.repos[0], config, lane, logger, "never");
   await until(() => getActiveLanePasses().includes("lanes-d1/drainA"), "the lane pass to be in flight");
   assert.equal(getActiveRunCount(), 0, "no session registered");
   requestShutdown();

@@ -18,6 +18,7 @@ review, verification, release, or a Paperclip board when you need them.
 
 | You are here | Read next |
 |---|---|
+| Upgrading an existing install from `main` | [Upgrading to this release](upgrading.md): what to change before restart, what happens to old state, how to roll back |
 | Evaluating whether Foreman solves your problem | [README: what happens after approval](../README.md#what-happens-after-you-approve-an-issue) |
 | Ready to get a first PR | [README: starter configuration](../README.md#start-with-one-repo), then [setup](setup.md) for prerequisites and checks |
 | Already using Paperclip | [Paperclip setup](paperclip.md#set-up). GitHub remains the work source; the board mirrors it. |
@@ -35,17 +36,20 @@ its own section contents and links back here.
 |---|---|
 | [Setup](setup.md) | What tools, accounts, local checkouts, and branches do I need? How do I configure and check an install? |
 | [Repo onboarding](onboarding.md) | What happens when I add a repo, and before its first build? |
+| [Upgrading to this release](upgrading.md) | What must I change before restarting an install running `main`? What happens to its saved state, and how do I roll back? |
 | [Running the daemon](running.md) | How do I start, stop, inspect, and restart it? How do retries and GitHub API use work? |
-| [Repos and labels](config-guide.md) | How do single-repo and multi-repo configs work? How do I use my own labels and branches? |
+| [Repos and labels](config-guide.md) | How do single-repo and multi-repo configs work? How do I use my own labels and branches, or a config profile? |
 | [Configuration reference](configuration.md) *(generated)* | What does each setting mean, what is its default, and which environment variable overrides it? |
 | [Pipeline](pipeline.md) | Which stages run, what do they require, and how do lanes and custom gates work? |
 | [Review](review.md) | How does the Tech Lead review and merge? How are missing outcome labels and deliberate holds handled? |
 | [Lifecycle reference](lifecycle.md) *(generated)* | What state is an issue in, what moves it, how is a Blocked card released, and what constitutes a verified release? |
+| [EM coordination map](em-coordination.md) | What must the Engineering Manager do, or leave alone, at each stage and hold? (Test-checked against the source.) |
 | [Paperclip](paperclip.md) *(generated)* | How do I enable the board mirror, map roles and stages, verify it, or remove it? |
 | [Skills](skills.md) | What instructions does a session receive? How do built-ins, overlays, prompt variables, and images work? |
 | [Skill sync](skill-sync.md) | How do repo skill copies pick up a shared version as approved work arrives? |
 | [Session security](security.md) | Which credentials and files can a session access? What do the secret gate and log redaction cover? |
-| [Architecture](architecture.md) | How do the work source, observers, and orchestrator fit together? What can I import? |
+| [Architecture](architecture.md) | Which plugin fills which role, how the core reaches GitHub and Paperclip, and what can I import? |
+| [Metrics](metrics.md) | How do I record and read how long work spends in each stage? |
 | [Cache self-heal design](implemented-cache-self-heal.md) | Why was the implemented-work cache changed? This is a historical design note. |
 
 For contributor context, see [CLAUDE.md](../CLAUDE.md). For the included execution
@@ -57,7 +61,7 @@ instructions, see [implement](../skills/implement/SKILL.md) and
 | Command | Does |
 |---|---|
 | `npm run setup` | Install, build, create missing labels, and run the doctor. Requires a config; safe to rerun. |
-| `npm run doctor` | Read-only readiness check: tools, tokens, config, checkouts, branches, skills, and labels. Exits nonzero on a FAIL. |
+| `npm run doctor` | Read-only readiness check: tools, tokens, config, work source and code host, checkouts, base and production branches, skills, and labels. Exits nonzero on a FAIL. |
 | `npm run build` | Compile `src/` to `dist/`. Operational commands run the built code. |
 | `npm start` / `npm stop` / `npm restart` | Manage the daemon in the background. |
 | `npm run status` / `npm run logs` | Inspect the running daemon and its log. |
@@ -65,7 +69,9 @@ instructions, see [implement](../skills/implement/SKILL.md) and
 | `npm run labels:install` | Create missing trigger, lifecycle, and blocked labels on configured repos; leave existing labels unchanged. |
 | `npm run paperclip:register` | Register Foreman and configured roles in Paperclip; write their IDs into the local config. |
 | `npm run paperclip:doctor` | Check the Paperclip integration read-only; exit nonzero on a FAIL. |
-| `npm test` | Build, then run the tests in `test/`. |
+| `npm run metrics:report` | Read the metrics log (`-- --repo`, `--issue`, `--since <days>`, `--json`). See [metrics](metrics.md). |
+| `npm test` | Build, then run the tests in `test/` with `FOREMAN_STATE_DIR` set to a temp directory. |
+| `npm run acceptance` | Build, then run every script in `scripts/acceptance/` (fakes and temp dirs only). Include it beside `npm test` in a PR's Run evidence. |
 | `npm run docs:generate` / `npm run docs:check` | Rebuild generated references, or check whether they are current. Build first. |
 
 CLI: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`; use `--help`
@@ -99,6 +105,6 @@ npm run docs:check
 ```
 
 The code owns the contracts: named lifecycle moves in `src/lifecycle.ts`, retry
-policies in `src/backoff.ts`, GitHub names in `src/github/conventions.ts`, and
+policies in `src/backoff.ts`, GitHub names in `src/config-schema/github.ts`, and
 settings in `src/config.ts`. Each setting's description lives with its declaration;
 the configuration generator rejects undocumented keys.

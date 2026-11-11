@@ -15,6 +15,17 @@ export interface WorkItem {
 }
 
 /**
+ * How one work item relates to others, in domain terms (slashbin-ai-foreman#267). `corrects`: the items this one
+ * fixes, strongest signal first; a held verification lets the items that correct it build ahead of the queue.
+ * `mentions`: the items its description names, which never make it a fix. Only a work-source plugin fills it, from
+ * its own native links (GitHub: blocked-by, sub-issue, the legacy title); the core never reads a title for it.
+ */
+export interface Relation {
+  corrects: readonly number[];
+  mentions: readonly number[];
+}
+
+/**
  * The states the Foreman itself may move a work item into. There is no
  * ready-for-release member, on purpose: the release gate is the EM's
  * verification and signature (separation of duties, 2026-07-27), and a
@@ -31,10 +42,11 @@ export type WorkState =
  * tells the connector to read the current state first and move only what is
  * actually there (dead-zone recovery, orphan release). `releaseAuthorized` is
  * the EM's release authorization: a state the Foreman reads, never writes.
- * `released` is a closed item whose 30-minute soak then held (EM#578).
+ * `released` is a closed item whose 30-minute soak then held (EM#578). `approved` is a dev-verified item the
+ * EM sent back for a QA re-run (slashbin-ai-foreman#158).
  */
 export type PriorState =
-  | "new" | "inReview" | "changesRequested" | "merged" | "unknown"
+  | "new" | "inReview" | "changesRequested" | "merged" | "approved" | "unknown"
   | "releaseAuthorized" | "releasing" | "prodVerifyHeld" | "released";
 
 /**
@@ -55,6 +67,20 @@ export interface WorkSourceAdapter {
     config: AgentConfig,
     logger: Logger,
   ): Promise<WorkItem[]>;
+
+  /**
+   * The items `selectWork` last left out because of a hold the source judged on the
+   * item itself (an unmet acceptance requirement), each with its reason, for the
+   * cycle's waiting set. Optional: a source with no such holds omits it.
+   */
+  heldWork?(repoConfig: RepoConfig): ReadonlyArray<WaitingItem>;
+
+  /**
+   * Every item approved and free to build, without `selectWork`'s open-PR
+   * cross-check and batch cap: implement labels a PR against it, review counts
+   * it to keep a checkout. Optional; never throws (a failed read gives []).
+   */
+  selectEligible?(repoConfig: RepoConfig, logger: Logger): Promise<WorkItem[]>;
 
   /**
    * Record `event` on the source. Resolves `true` when the source recorded a
@@ -93,7 +119,45 @@ export interface WorkSourceAdapter {
    * A number that cannot be read is left out. Optional. Never throws.
    */
   states?(repoConfig: RepoConfig, issueNumbers: readonly number[], logger: Logger): Promise<Map<number, ItemState>>;
+
+  /**
+   * The durable record kept for one issue, PR or repo (EM#1244 f1, f4). `found` carries it,
+   * `absent` means the source was read and holds none, `unavailable` means the
+   * source could not be read after its own retries: a caller must never treat
+   * that as `absent`. Never throws.
+   */
+  loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad>;
+
+  /**
+   * Replace the durable record for one issue, PR or repo. Resolves `true` when the
+   * source holds exactly `record` afterwards (a record already identical makes no
+   * write), `false` when it could not be stored; a failed save leaves what a
+   * later `loadRecord` returns unchanged. Never throws.
+   */
+  saveRecord(key: RecordKey, record: ItemRecord, repoConfig: RepoConfig): Promise<boolean>;
 }
+
+/**
+ * What a record is kept for: an issue, a pull request, or the repo itself (EM#1244 f4: the facts no issue or PR
+ * owns). A repo record's number is always 0.
+ */
+export type RecordKind = "issue" | "pr" | "repo";
+
+/** One record's address: repo, kind and number. An issue #5 and a PR #5 never share a record. */
+export interface RecordKey {
+  readonly repo: string;
+  readonly kind: RecordKind;
+  readonly number: number;
+}
+
+/** A durable record: one JSON object per issue or PR. */
+export type ItemRecord = Readonly<Record<string, unknown>>;
+
+/** The result of reading a record. `unavailable` is never an empty record. */
+export type RecordLoad =
+  | { readonly status: "found"; readonly record: ItemRecord }
+  | { readonly status: "absent" }
+  | { readonly status: "unavailable"; readonly reason: string };
 
 /** An item open, or how it closed. */
 export type ItemState = "open" | "completed" | "not_planned";
@@ -118,6 +182,16 @@ export interface SnapshotHold {
   readonly author?: string | null;
 }
 
+/**
+ * The release PR whose failing EM sign-off status holds a `release pending` issue, read live each pass: its number and
+ * link, and the listed open issues that carry no sign-off label (empty when the status fails for another reason).
+ */
+export interface SignoffHold {
+  readonly pr: number;
+  readonly url: string;
+  readonly unsigned: readonly number[];
+}
+
 /** One item as the work source shows it at the end of a cycle. */
 export interface SnapshotCard {
   readonly item: WorkItem;
@@ -129,6 +203,10 @@ export interface SnapshotCard {
   readonly stage: StageOrDone | null;
   /** An open held item's reason, when it was read. */
   readonly hold?: SnapshotHold;
+  /** An open item's labels in the source's own terms, for a mirror that assigns by them (a human hold). */
+  readonly labels?: readonly string[];
+  /** Set on a card at `awaitingSignoff`: what holds it. */
+  readonly signoff?: SignoffHold;
 }
 
 /** One lifecycle item as the work source shows it at the end of a cycle. */
@@ -146,6 +224,8 @@ export interface SnapshotItem {
    * behind it is stale. Absent: not read; nothing is inferred.
    */
   readonly foremanHeld?: boolean;
+  /** Set on an item at `awaitingSignoff`: the release PR and the unsigned issues that hold it. */
+  readonly signoff?: SignoffHold;
 }
 
 /**
@@ -160,8 +240,8 @@ export type WorkEvent =
   | { readonly kind: "claim"; readonly item: WorkItem }
   | ({ readonly kind: "transition"; readonly item: WorkItem; readonly observed: boolean } & Readonly<Transition>)
   | { readonly kind: "prLink"; readonly item: WorkItem; readonly prUrl: string }
-  /** `owner`: who the hold belongs to when not the stage's owner (the EM): `sre` for a failed dev deploy, which is infrastructure. */
-  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre"; readonly stuck?: UnstickKind }
+  /** `owner`: who the hold belongs to when not the stage's owner (the EM): `sre` for a failed dev deploy, which is infrastructure. `at`: the stage the block belongs to, so GitHub moving the issue off it releases the block (a review failure: `inReview`); default, the stage last seen. */
+  | { readonly kind: "blocked"; readonly item: WorkItem; readonly reason: string; readonly owner?: "sre"; readonly stuck?: UnstickKind; readonly at?: "inReview" }
   /**
    * Dev verification of `item` waits on something that clears by itself (the deploy
    * is still building, or the SRE could not run) and resumes on its own. Not a
@@ -230,6 +310,14 @@ export interface WorkObserver {
   onEvent(event: WorkEvent, logger: Logger): Promise<void>;
   /** True when this observer writes every card itself and needs a snapshot's `cards`. */
   wantsCards?(): boolean;
+  /**
+   * Declared interests. Each costs the Foreman GitHub reads that serve no one
+   * else, so an observer that omits one (or answers false) is never given it:
+   * `wantsSessionReports` is a session's goals, PR digest and review progress;
+   * `wantsSnapshot` is the board snapshot each pass (`wantsCards` implies it).
+   */
+  wantsSessionReports?(): boolean;
+  wantsSnapshot?(): boolean;
 }
 
 /**
@@ -251,7 +339,7 @@ export interface ReleaseEvent {
 }
 
 /** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */
-export type SessionPhase = "implement" | "revise" | "review" | "verify";
+export type SessionPhase = "implement" | "revise" | "review" | "verify" | "qa";
 
 /**
  * A session's lifecycle. `handoff` is a review passing from one reviewer to
@@ -265,7 +353,15 @@ export interface SessionEvent {
   readonly items: ReadonlyArray<WorkItem>;
   readonly pr?: number;
   readonly reviewer?: string;
+  /** On a `qa` session: it runs before the merge (config.qaBeforeMerge), so the card's fallback is review, not `merged`. */
+  readonly qaBeforeMerge?: boolean;
   readonly detail?: string;
+  /**
+   * On a verify end that is a scheduled wait, not a failure (the SRE says the PR is not observable yet, or could
+   * not run): the ISO time the Foreman retries, and why. Observers render it as a schedule.
+   */
+  readonly resumeAt?: string;
+  readonly waitReason?: string;
   /**
    * On an implement end: the items the session actually worked — built,
    * skipped, or failed on. A session handed several items builds one, so the

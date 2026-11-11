@@ -9,7 +9,12 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
+import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { PaperclipClient, PaperclipClientError, createPaperclipClient } from "../dist/paperclip/client.js";
+import { slashbinProfile } from "../dist/profiles/slashbin.js";
+
+/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
+const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-paperclip-test-"));
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -39,7 +44,7 @@ test("no paperclip block: mirror off, every default applied", () => {
   const { board, stageLabels, roles, ...rest } = paperclip;
   assert.deepEqual(roles, {}, "no roles: the Foreman holds every card");
   assert.ok(Object.values(board).every((s) => s.owner === "foreman"));
-  assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "blocked", "changesRequested", "inReview", "merged", "needsRuling", "pendingVerification", "prodVerifyHeld", "releaseAuthorized", "releasing"]);
+  assert.deepEqual(Object.keys(stageLabels).sort(), ["awaitingRelease", "awaitingSignoff", "blocked", "changesRequested", "inReview", "merged", "needsRuling", "pendingVerification", "prodVerifyHeld", "qaReviewing", "releaseAuthorized", "releasing"]);
   assert.deepEqual({ ...rest }, {
     liveLeaseMinutes: 15,
     publishConfig: true,
@@ -76,10 +81,10 @@ test("paperclip placement, title and scope: file and env set them; a bad value s
     () => loadConfig(cfg({ paperclip: { projectId: "p-1" } })).paperclip);
   assert.equal(env.projectId, "p-env");
   assert.equal(env.taskTitleFormat, "#{N}");
-  assert.throws(() => loadConfig(cfg({ paperclip: { taskTitleFormat: "{repo}" } })), /must contain \{N\}/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["example/typo"] } })), /"example\/typo" is not a configured githubRepo/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { repos: ["no-owner"] } })));
-  assert.throws(() => loadConfig(cfg({ paperclip: { repos: [] } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, taskTitleFormat: "{repo}" } })), /must contain \{N\}/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: ["example/typo"] } })), /"example\/typo" is not a configured githubRepo/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: ["no-owner"] } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: [] } })));
 });
 
 test("paperclip.comments: a partial block keeps the other defaults; a bad maxLength stops startup", () => {
@@ -89,7 +94,7 @@ test("paperclip.comments: a partial block keeps the other defaults; a bad maxLen
   assert.equal(paperclip.comments.events.progress, false);
   assert.equal(paperclip.comments.events.reviewEnd, true);
   assert.equal(paperclip.comments.includeDiffStat, true);
-  assert.throws(() => loadConfig(cfg({ paperclip: { comments: { maxLength: 10 } } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, comments: { maxLength: 10 } } })));
 });
 
 test("block with only companyId keeps the other defaults", () => {
@@ -147,13 +152,13 @@ test("enabled without a companyId fails to load", () => {
 });
 
 test("identityKeyFormat must name both {repo} and {N}", () => {
-  assert.throws(() => loadConfig(cfg({ paperclip: { identityKeyFormat: "source: {repo}" } })), /identityKeyFormat/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, identityKeyFormat: "source: {repo}" } })), /identityKeyFormat/);
 });
 
 test("statusMap overrides only the buckets it names; unknown buckets are rejected", () => {
   const { paperclip } = loadConfig(cfg({ paperclip: { statusMap: { in_review: "review", blocked: "on_hold" } } }));
   assert.deepEqual({ ...paperclip.statusMap }, { in_review: "review", blocked: "on_hold" });
-  assert.throws(() => loadConfig(cfg({ paperclip: { statusMap: { paused: "x" } } })));
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, statusMap: { paused: "x" } } })));
 });
 
 // --- client ---
@@ -179,7 +184,7 @@ test("listIssues fetches the next page only after a full 1000-row page", async (
     return [200, Array.from({ length: offset === 0 ? 1000 : 2 }, (_, i) => ({ id: `i${offset + i}`, title: "t", status: "todo" }))];
   });
   const ids = [];
-  for await (const i of make(fn).listIssues()) ids.push(i.id);
+  for await (const i of make(fn).listIssues({ statuses: ["todo"] })) ids.push(i.id);
   assert.equal(ids.length, 1002);
   assert.equal(ids[1001], "i1001");
   assert.deepEqual(calls.map((c) => [c.path, c.search.get("limit"), c.search.get("offset")]), [
@@ -191,7 +196,7 @@ test("listIssues fetches the next page only after a full 1000-row page", async (
 test("listIssues stops after one request when the first page is short", async () => {
   const { fn, calls } = fakeFetch(() => [200, [{ id: "a", title: "t", status: "todo" }]]);
   const ids = [];
-  for await (const i of make(fn).listIssues()) ids.push(i.id);
+  for await (const i of make(fn).listIssues({ statuses: ["todo"] })) ids.push(i.id);
   assert.deepEqual(ids, ["a"]);
   assert.equal(calls.length, 1);
 });
@@ -238,11 +243,86 @@ for (const status of [404, 500]) {
   });
 }
 
-test("a network failure throws PaperclipClientError with status 0, no retry", async () => {
+// Tiny waits so the retries run at once; the real windows are backoff.paperclip's.
+configureBackoff({ ...DEFAULT_BACKOFF, paperclip: { ...DEFAULT_BACKOFF.paperclip, baseMs: 1, capMs: 2 } });
+
+test("a GET with no answer is tried backoff.paperclip.maxAttempts times, then throws PaperclipClientError with status 0", async () => {
   let calls = 0;
   const fn = async () => { calls++; throw new TypeError("fetch failed"); };
   await assert.rejects(make(fn).listAgents(), (err) => err instanceof PaperclipClientError && err.status === 0);
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
+});
+
+test("a GET is retried on each transient status and succeeds on a later try; the warn names the retry", async () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) {
+    let calls = 0;
+    const warned = [];
+    const fn = async () => (++calls < 3 ? new Response("busy", { status }) : new Response("[]", { status: 200 }));
+    const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: fn, warn: (m) => warned.push(m) });
+    assert.deepEqual(await c.listAgents(), [], `status ${status}`);
+    assert.equal(calls, 3);
+    assert.equal(warned.length, 2);
+  }
+});
+
+test("a GET refused for a reason that is not passing (400, 401, 403, 404, 422) is not retried", async () => {
+  for (const status of [400, 401, 403, 404, 422]) {
+    let calls = 0;
+    const fn = async () => { calls++; return new Response("no", { status }); };
+    await assert.rejects(make(fn).listAgents(), (err) => err.status === status);
+    assert.equal(calls, 1, `status ${status}`);
+  }
+});
+
+test("a write is never retried: a timeout, a rejection or a 503 sends it once", async () => {
+  const c = (fn) => make(fn);
+  for (const fn of [
+    async () => { throw new TypeError("fetch failed"); },
+    async () => new Response("busy", { status: 503 }),
+    async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); },
+  ]) {
+    for (const write of [
+      (x) => x.createIssue({ title: "t", status: "todo" }),
+      (x) => x.updateIssue("i", { status: "done" }),
+      (x) => x.createComment("i", "hi"),
+      (x) => x.createLabel({ name: "n", color: "#000" }),
+      (x) => x.createAgent({ name: "a" }),
+    ]) {
+      let calls = 0;
+      await assert.rejects(write(c(async (...a) => { calls++; return fn(...a); })), PaperclipClientError);
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test("a request that never answers rejects at timeoutMs with status 0 and is retried as a GET", async () => {
+  let calls = 0;
+  const hang = (_url, init) => { calls++; return new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason))); };
+  const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: hang, timeoutMs: 15 });
+  await assert.rejects(c.listAgents(), (err) => err.status === 0 && /timeout/i.test(err.body));
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(c.createIssue({ title: "t", status: "todo" }), (err) => err.status === 0);
+  assert.equal(calls, 1, "a write that timed out is not re-sent");
+});
+
+test("listIssues needs a status filter: a call without one throws before any request", async () => {
+  let calls = 0;
+  const c = make(async () => { calls++; return new Response("[]", { status: 200 }); });
+  await assert.rejects(async () => { for await (const _ of c.listIssues({})) { /* none */ } }, /status filter/);
+  await assert.rejects(async () => { for await (const _ of c.listIssues({ statuses: [] })) { /* none */ } }, /status filter/);
+  assert.equal(calls, 0);
+});
+
+test("listIssues sends the status filter and q, and counts GETs and rows read", async () => {
+  const urls = [];
+  const fn = async (url) => { urls.push(String(url)); return new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }); };
+  const c = make(fn);
+  const got = [];
+  for await (const r of c.listIssues({ q: "jerky ops", statuses: ["todo", "in_review"] })) got.push(r.id);
+  assert.deepEqual(got, ["a", "b"]);
+  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&status=todo,in_review&q=jerky%20ops&sortField=id&sortDir=asc"));
+  assert.deepEqual({ ...c.reads }, { calls: 1, rows: 2 });
 });
 
 test("a 2xx body that is not JSON throws PaperclipClientError", async () => {
@@ -258,9 +338,9 @@ test("board: a partial stage keeps its defaults; an unknown owner, label or repo
   assert.deepEqual({ ...paperclip.board.inReview }, { owner: "reviewer", status: "in_review", label: "inReview" });
   assert.equal(paperclip.board.approved.owner, "foreman");
   assert.equal(paperclip.roles.reviewer.role, "engineer");
-  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { owner: "nobody" } } } })), /nobody/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { board: { inReview: { label: "nope" } } } })), /nope/);
-  assert.throws(() => loadConfig(cfg({ paperclip: { agentReportsTo: "ghost" } })), /ghost/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, board: { inReview: { owner: "nobody" } } } })), /nobody/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, board: { inReview: { label: "nope" } } } })), /nope/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, agentReportsTo: "ghost" } })), /ghost/);
 });
 
 // EM#512: an instance that requires sign-in gets the key as a bearer on every request.
@@ -310,13 +390,13 @@ test("client: a comment's credited author rides only on a write that posts one; 
   const seen = [];
   let refuse = null;
   const fetch = async (url, init = {}) => {
-    const author = init.headers?.["x-slashbin-comment-author"] ?? null;
+    const author = init.headers?.[HEADER] ?? null;
     seen.push(`${init.method} ${author}`);
     if (author && refuse) return new Response(JSON.stringify({ error: "no", code: refuse.code }), { status: refuse.status });
     return new Response(JSON.stringify({ id: "x" }), { status: 200 });
   };
   const warned = [];
-  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, warn: (m) => warned.push(m) });
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, warn: (m) => warned.push(m), commentAuthorHeader: HEADER });
   await c.updateIssue("i", { status: "blocked" }, { commentAuthor: "agent:a" });
   await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:a" });
   await c.createComment("i", "hi", { commentAuthor: "agent:a" });
@@ -338,10 +418,10 @@ test("client: a comment's credited author rides only on a write that posts one; 
 test("client: with actingAs, every write is credited to it unless the call names an author or null; reads never are", async () => {
   const seen = [];
   const fetch = async (url, init = {}) => {
-    seen.push(`${init.method} ${init.headers?.["x-slashbin-comment-author"] ?? null}`);
+    seen.push(`${init.method} ${init.headers?.[HEADER] ?? null}`);
     return new Response(JSON.stringify(init.method === "GET" ? [] : { id: "x" }), { status: 200 });
   };
-  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman" });
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman", commentAuthorHeader: HEADER });
   await c.updateIssue("i", { status: "blocked" });
   await c.updateIssue("i", { status: "blocked", comment: "hi" });
   await c.updateIssue("i", { status: "blocked", comment: "hi" }, { commentAuthor: "agent:sre" });
@@ -354,4 +434,25 @@ test("client: with actingAs, every write is credited to it unless the call names
     "PATCH agent:foreman", "PATCH agent:foreman", "PATCH agent:sre", "PATCH null",
     "POST agent:foreman", "POST agent:foreman", "PATCH agent:foreman", "GET null",
   ]);
+});
+
+test("client: with no commentAuthorHeader, no credit header is ever sent, whatever the author", async () => {
+  const sent = [];
+  const fetch = async (url, init = {}) => {
+    sent.push(Object.keys(init.headers ?? {}).sort().join(","));
+    return new Response(JSON.stringify(init.method === "GET" ? [] : { id: "x" }), { status: 200 });
+  };
+  const c = new PaperclipClient({ url: "http://pc.test", companyId: CID, fetch, actingAs: "agent:foreman" });
+  await c.updateIssue("i", { status: "blocked", comment: "hi" });
+  await c.createComment("i", "hi", { commentAuthor: "agent:sre" });
+  await c.getAgent("a");
+  assert.deepEqual(sent, ["accept,content-type", "accept,content-type", "accept"]);
+});
+
+test("paperclip.repos: with a registry, either owner of a configured repo's name loads; an unrelated repo still does not", () => {
+  const reg = "http://registry.test/mcp";
+  const { paperclip } = loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, registryUrl: reg, repos: ["other-owner/r"] } }));
+  assert.deepEqual(paperclip.repos, ["other-owner/r"]);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, registryUrl: reg, repos: ["other-owner/typo"] } })), /is not a configured githubRepo/);
+  assert.throws(() => loadConfig(cfg({ paperclip: { enabled: true, companyId: CID, repos: ["other-owner/r"] } })), /is not a configured githubRepo/, "no registry, exact match as before");
 });

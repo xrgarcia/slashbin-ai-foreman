@@ -6,9 +6,9 @@ description: Implement ONE of the work items the Foreman selected (highest prior
 
 The Foreman runs this skill non-interactively inside a checkout of the repository
 it manages. Work autonomously and do not ask questions. The prompt that carried
-this skill names the repository, its **feature branch** and the **base branch**
-pull requests target — use those names wherever this file says `<feature>` and
-`<base>`.
+this skill names the repository and the **base branch** pull requests target — use
+that name wherever this file says `<base>`. Every issue is built on **its own branch**,
+`<branch>`, cut from `origin/<base>` (see Phase 1.5).
 
 ## Labels come from the environment
 
@@ -28,35 +28,16 @@ you finish. You only read them.
 
 ## Phase 0: Sync
 
-1. `git checkout <feature>`
-2. `git pull origin <feature>`
-3. If the pull fails, STOP. Do not resolve merge conflicts automatically. Nothing is
-   selected yet, so this is the one stop whose trailer carries no `issue=`. Read the
-   first line of the git error and count both directions:
+1. `git fetch origin`
+2. If the fetch fails, STOP. Nothing is selected yet, so this is the one stop whose
+   trailer carries no `issue=`. Keep the whole trailer on one line, closing quote included:
 
    ```
-   git rev-list --count origin/<feature>..<feature>   # ahead
-   git rev-list --count <feature>..origin/<feature>   # behind
+   FOREMAN_RESULT: skipped reason="Phase 0 sync failed — <first line of the git error, no quotes>"
    ```
 
-   - The error says the **histories disagree** (`non-fast-forward`, `divergent branches`,
-     `unrelated histories`, `CONFLICT`, `Automatic merge failed`) **and** a count is non-zero:
-
-     ```
-     FOREMAN_RESULT: skipped reason="diverged from origin/<feature> — <first line of the git error, no quotes>"
-     ```
-
-   - Anything else (merge or rebase in progress, stale `index.lock`, dirty tree, network
-     failure), whatever the counts say:
-
-     ```
-     FOREMAN_RESULT: skipped reason="Phase 0 sync failed on <feature> — <first line of the git error, no quotes>"
-     ```
-
-   The `diverged from origin/<branch>` wording is machine-read: the Foreman re-checks it
-   and clears the hold as soon as local and origin level out. Use it only for a real
-   divergence, or a cause the counts cannot see will clear its own back-off and repeat
-   every cycle. Keep the whole trailer on one line, closing quote included.
+   There is no shared branch to pull and no divergence to repair: each issue starts from
+   the tip of `origin/<base>`.
 
 ## Phase 1: Inventory
 
@@ -69,6 +50,28 @@ you finish. You only read them.
 3. Read each named item in full: `gh issue view <number>`.
 4. Select exactly ONE of them by the Phase 2 priority rules. Do not loop — the Foreman
    invokes you again next cycle for the next issue.
+
+## Phase 1.5: Cut the issue's branch
+
+Once Phase 2 has chosen the issue, give it its own branch. `FOREMAN_BRANCHES` is a JSON
+object of issue number to branch name (`foreman/<N>-<slug>`); read the chosen issue's:
+
+```
+node -e 'console.log(JSON.parse(process.env.FOREMAN_BRANCHES)[<N>])'
+```
+
+The Foreman supplies the exact start ref in `FOREMAN_START_REF` (and in the prompt's branch
+contract): `origin/<base>` as a SHA, plus this session's own skill-sync commit when it made one.
+Never start from, merge or push your local `<base>`.
+
+1. Fresh branch: `git checkout -B <branch> "$FOREMAN_START_REF"`.
+2. If `origin/<branch>` already exists (a prior attempt), do NOT rebase:
+   `git checkout -B <branch> origin/<branch> && git merge --no-edit "$FOREMAN_START_REF"`. A merge
+   keeps the published commits, so a normal push works. On a conflict, `git merge --abort`, comment,
+   and end with `FOREMAN_RESULT: skipped issue=<N> reason="merge conflict: <files>"`. Never force-push.
+
+Never build on, commit to or push to another issue's branch, `<base>`, or a branch you
+did not cut here.
 
 ## Phase 2: Analysis & Ordering
 
@@ -98,7 +101,7 @@ records a failed attempt and hands you the same issue next cycle.
 Whenever you stop **on an issue you have selected**:
 
 1. **Comment on the issue** saying what is missing and what would unblock it.
-2. **End your output with this exact line and nothing after it:**
+2. **End your output with this exact line, followed only by the `FOREMAN_RESULT_V1` line (see the end of this skill):**
 
    ```
    FOREMAN_RESULT: skipped issue=<the issue number you stopped on> reason="<one line: what stopped you>"
@@ -108,7 +111,7 @@ Whenever you stop **on an issue you have selected**:
 the Foreman was tracking for this repo.
 
 When the stop is waiting on another issue or PR — a dependency not merged yet, a file
-another PR delivers — add `waiting_on="<owner/repo#N>"` (or `#N` in this repo):
+another PR delivers, or a PR occupying the feature branch (name the occupying PR) — add `waiting_on="<owner/repo#N>"` (or `#N` in this repo):
 
 ```
 FOREMAN_RESULT: skipped issue=127 waiting_on="acme/site#166" reason="refund_policy.md is on unmerged PR #166"
@@ -127,13 +130,13 @@ right answer is the same stop and the same trailer.
 A build that opens no PR is never "nothing happened" — others may be waiting on the issue
 (GitHub "blocked by"). End on exactly one of:
 
-- **Everything the issue asks for is already on the feature branch** (a dependency-landing chore
+- **Everything the issue asks for is already on `<base>`** (a dependency-landing chore
   whose PRs are all present, say). The issue is done. Comment the evidence (what you checked, the
   SHAs/PRs), then end with this line. The Foreman closes the issue as completed, which releases
   everything blocked by it. `issue=` is required; the branch must not have moved:
 
   ```
-  FOREMAN_RESULT: landed issue=<N> reason="<one line of evidence: e.g. all 16 PRs already on features>"
+  FOREMAN_RESULT: landed issue=<N> reason="<one line of evidence: e.g. all 16 PRs already on <base>>"
   ```
 
 - **It cannot land and a person must act** (every PR fails `npm ci`, a prerequisite is missing).
@@ -203,22 +206,21 @@ Implement the single chosen issue, then:
 5. **Commit and push:**
    - Stage the specific files (never `git add .` or `git add -A`).
    - Commit: `fix|feat|chore: <description> (#<issue-number>)` — one commit per issue.
-   - `git push origin <feature>`
+   - `git push -u origin <branch>`
 6. **If the smoke test fails:** fix the code (never the tests) and re-run, at most twice.
    Still red → revert this issue's changes. Both outcomes — reverted, or a build broken
    beyond this issue — are stops: comment and end with the `FOREMAN_RESULT` trailer.
 
 ## Phase 4: Pull Request
 
-1. Check for an open PR from `<feature>` to `<base>`:
+1. Check for an open PR from `<branch>` to `<base>`:
 
    ```
-   gh pr list --head <feature> --base <base> --state open --json number
+   gh pr list --head <branch> --base <base> --state open --json number
    ```
 
-   If one exists and it is for a different issue, STOP and report it — never add another
-   issue's changes to an existing PR.
-2. Create the PR from `<feature>` to `<base>` — one PR per issue:
+   If one exists, your push already updated it: skip step 2.
+2. Create the PR from `<branch>` to `<base>` — one PR per issue:
    - Title: `<type>: <description> (#<issue-number>)`
    - Body: `Related to #<N>`, a summary of the change, the smoke-test results, and one
      line per acceptance row naming the change that serves it (`no change — baseline /
@@ -240,3 +242,20 @@ fails, note it and continue with the text.
 - One issue, one commit, one PR. Each commit leaves the checks passing.
 - Only implement work items the prompt names — refuse any other.
 - An issue meant for a different repository or service is skipped, with a comment.
+
+## Structured result (contract v1)
+
+After the trailer above (or, when you opened a PR, as your last line), print one more line:
+`FOREMAN_RESULT_V1` and one JSON object, on a single line. The Foreman reads this line first;
+the `FOREMAN_RESULT:` lines stay until every agent has moved. Prose goes only in `reason_text`
+and decides nothing. Examples, one per outcome:
+
+```
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"pr-opened","pr":42,"issues_named":[127]}
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"skipped","skipped_issue":127,"waiting_on":"acme/site#166","reason_text":"refund_policy.md is on unmerged PR #166"}
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"skipped","skipped_issue":127,"waiting_on":"#88","reason_text":"the feature branch is occupied by open PR #88"}
+FOREMAN_RESULT_V1 {"schema":1,"role":"implementer","outcome":"landed","landed_issue":127,"reason_text":"all 16 PRs already on develop"}
+```
+
+`waiting_on` names the issue or PR the skip waits on (`#N` here, `owner/repo#N` elsewhere): the skip clears when it closes or merges.
+The schema is `schemas/implementer.v1.json` in the Foreman package.

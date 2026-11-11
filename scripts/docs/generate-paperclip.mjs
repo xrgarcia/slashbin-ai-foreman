@@ -7,8 +7,8 @@
 // Nothing a reader needs to trust is written down here:
 //   - the config fields, their types and defaults come from the BUILT
 //     `configSchema` (its `paperclip` block, parsed from `{}`);
-//   - each field's description is the comment above it in `src/paperclip/config.ts`;
-//   - each env override is read from `mergePaperclip` in `src/paperclip/config.ts`;
+//   - each field's description is the comment above it in `src/config-schema/paperclip.ts`;
+//   - each env override is read from `mergePaperclip` in `src/config-schema/paperclip.ts`;
 //   - the six status buckets come from the schema's `statusMap` keys;
 //   - every step's move and note text come from `PAPERCLIP_STEPS` in the
 //     built `src/paperclip/mirror.ts`, the table the mirror itself runs on;
@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OUT = join(root, "docs", "paperclip.md");
-const CONFIG_SRC = join(root, "src", "paperclip", "config.ts");
+const CONFIG_SRC = join(root, "src", "config-schema", "paperclip.ts");
 const MIRROR_SRC = join(root, "src", "paperclip", "mirror.ts");
 const builtConfig = join(root, "dist", "config.js");
 const builtMirror = join(root, "dist", "paperclip", "mirror.js");
@@ -60,7 +60,7 @@ if (buckets.length !== 6) fail(`expected exactly six status buckets in paperclip
 
 const configSrc = readFileSync(CONFIG_SRC, "utf8");
 const block = configSrc.match(/const paperclipConfigSchema = z\.object\(\{\n([\s\S]*?)\n\}\);/);
-if (!block) fail("could not find `const paperclipConfigSchema = z.object({ ... });` in src/paperclip/config.ts.");
+if (!block) fail("could not find `const paperclipConfigSchema = z.object({ ... });` in src/config-schema/paperclip.ts.");
 const descriptions = {};
 let pending = [];
 for (const line of block[1].split("\n")) {
@@ -73,11 +73,11 @@ for (const line of block[1].split("\n")) {
   }
 }
 const merge = configSrc.match(/function mergePaperclip\([\s\S]*?\n\}/);
-if (!merge) fail("could not find `function mergePaperclip` in src/paperclip/config.ts.");
+if (!merge) fail("could not find `function mergePaperclip` in src/config-schema/paperclip.ts.");
 const envOf = {};
 for (const [, field, env] of merge[0].matchAll(/^\s+(\w+): process\.env\.(\w+),/gm)) envOf[field] = env;
 
-for (const f of fields) if (!descriptions[f]) fail(`paperclip.${f} has no comment above it in src/paperclip/config.ts.`);
+for (const f of fields) if (!descriptions[f]) fail(`paperclip.${f} has no comment above it in src/config-schema/paperclip.ts.`);
 for (const f of Object.keys(envOf)) if (!fields.includes(f)) fail(`mergePaperclip maps ${envOf[f]} to paperclip.${f}, which the schema does not have.`);
 
 // --- The steps ---
@@ -103,7 +103,7 @@ const WHEN = {
   releaseClosed: "That release pull request is closed without merging; the task stays in review until the next one.",
   backoffPause: "A GitHub or Claude limit pauses the build in progress.",
   backoffResume: "The build in progress resumes after that limit clears.",
-  waiting: "The Foreman holds the issue back this cycle (an occupied branch, a branch divergence). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner.",
+  waiting: "The Foreman holds the issue back this cycle (an open PR holding the repo, a dev verification in progress). Written once per reason, not once per cycle. A skip in its back-off is not a wait: it stays in the `blocked` stage with that stage's owner.",
   resumed: "An issue the Foreman had moved to blocked is no longer held back.",
   implementFinished: "The build session for the issue ends (a pull request, commits on the open one, or a skip with its reason).",
   implementFailed: "The build session for the issue fails.",
@@ -119,7 +119,7 @@ const WHEN = {
   verifyWaiting: "Dev verification waits on something that clears by itself (the deploy is still building, or the SRE could not run) and resumes on its own. The card stays in review; Blocked is for holds a person must clear.",
   verifyStarted: "A dev-verification session starts on the merged pull request; the note names the verifier.",
   verifyFinished: "Dev verification passes; the issue moves on to release.",
-  verifyFailed: "Dev verification holds or errors; the issue is blocked with the reason and retried hourly, three times at most.",
+  verifyFailed: "Dev verification holds or errors; the issue is blocked with the reason and retried after 10 minutes, then 20, then left blocked for a person (`backoff.verifyRetry`); tooling and `wait-until` holds charge no attempt.",
 };
 const stepIds = Object.keys(PAPERCLIP_STEPS);
 const unknown = stepIds.filter((s) => !(s in WHEN));
@@ -142,10 +142,12 @@ const STAGE_WHEN = {
   revising: "A revision session is running on it.",
   merged: "Merged to the base branch; waiting for dev verification.",
   verifying: "A dev-verification session is running on it.",
+  qaReviewing: "The QA gate (qaGate on) is running its checks on dev, after the SRE passed it.",
   pendingVerification: "Dev-verified (`pr approved`); waiting for the EM's verification and `ready for prod release`.",
   releaseAuthorized: "The EM authorized the release (`ready for prod release`); promote puts it in the release pull request next.",
   awaitingRelease: "In an open release pull request a person merges (the release stage is off); waiting for the release to merge.",
   releasing: "In the release pull request the Foreman owns (`release pending`): Tech Lead approval, SRE deploy and prod verification.",
+  awaitingSignoff: "In the release pull request the Foreman owns, but its `foreman/em-sign-off` status is failing: an issue in it lacks `ready for prod release`. The EM signs it off or takes it out of the release.",
   prodVerifyHeld: "Merged to production, but prod verification held (`prod verification held`); the SRE re-verifies it on a back-off.",
   needsRuling: "Paused for the EM's ruling: a revision (the ruling comment on the PR resumes it), or a skip out of attempts (a person changing the issue resumes it; an agent's edit or label buys one session).",
   blocked: "Needs a person: the issue is labelled `blocked`, or the Foreman declined it or ran out of retries.",
@@ -244,14 +246,16 @@ company: each GitHub issue it builds gets a Paperclip task whose holder, status 
 follow the issue through its lifecycle, and which gets a note at every step.
 
 GitHub stays the only work source. Paperclip only ever shows what the Foreman is doing; nothing
-set in Paperclip starts, stops or changes a build. The mirror is off by default, and a config
-without a \`paperclip\` block runs exactly as it would without this feature.
+set in Paperclip starts, stops or changes a build. The mirror is the Paperclip plugin
+(\`src/plugins/paperclip.ts\`, an observer); it is off by default, and off it is never started:
+the Foreman makes no Paperclip call. It is self-sufficient: each pass's snapshot is enough to put
+every card where GitHub says, with no other writer's help.
 
 ## Configuration
 
 The \`paperclip\` block sits at the top level of \`.ai-agent.json\` (never per repo: one Foreman
 is one Paperclip agent). Each environment variable, when set, overrides the file's value for
-that one field. The block is read once at startup — restart the daemon after changing it.
+that one field. A reload applies the block: enabling it starts the mirror, disabling it stops it.
 
 | Field | Type | Env override | Default | Description |
 |---|---|---|---|---|
@@ -259,6 +263,7 @@ ${configRows.join("\n")}
 
 \`enabled\` is a boolean; given as a string (as the env var always is) it takes \`true\` / \`false\`,
 \`1\` / \`0\`, \`yes\` / \`no\` or \`on\` / \`off\`, and any other value stops the Foreman at startup.
+A block that is off (or absent) is never validated, so a stale or partial one cannot stop startup.
 \`companyId\` is required once \`enabled\` is true; the Foreman refuses to start without it.
 The mirror runs only when \`enabled\` is true **and** both \`companyId\` and \`agentId\` are set;
 with \`agentId\` missing the daemon logs that it is skipping the mirror and runs without it.
@@ -274,8 +279,8 @@ ${exampleBlock}
 
 A task is matched to its GitHub issue by the **first line of the task's description**, built
 from \`identityKeyFormat\` (default ${code(defaults.identityKeyFormat)}): \`{repo}\` is the issue's
-full \`owner/name\` and \`{N}\` its number. Before creating a task the Foreman scans the company's
-tasks for one whose description starts with that line, and adopts it if found — so a task
+full \`owner/name\` and \`{N}\` its number. Before creating a task the Foreman reads that repo's tasks
+in play for one whose description starts with that line, and adopts it if found — so a task
 another tool created for the same issue is reused, not duplicated, **provided both use the same
 format**. A task the Foreman creates is titled from \`taskTitleFormat\` (default
 ${code(defaults.taskTitleFormat)}; \`{owner}\` and \`{name}\` are the two halves of \`{repo}\`), its
@@ -285,7 +290,24 @@ ever written at creation, and never used to find a task, so changing the format 
 
 When two tasks carry the same identity line, the card is the oldest one that is not cancelled
 (else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
-the receiver's sync the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+another writer the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+
+### What the plugin reads
+
+The plugin reads **one repo at a time, and only cards in play**: a list request filtered to the
+statuses backlog, todo, in_progress, in_review and blocked, and to the repo's name. It **never
+reads a done or cancelled card** and never reads the whole company board; the client refuses a
+list request without a status filter. Each repo's rows replace that repo's data in full. A failed
+read (a Paperclip timeout, a registry outage) places nothing for that repo on that pass, and every
+other repo carries on; the next snapshot retries. The "Paperclip looks down" warning is logged
+once per outage, so the per-repo "cards not read" line is the signal.
+
+The plugin is the only writer of a Foreman card's status, placement and terminal state. A close
+or reopen comes only from the Foreman's own GitHub reads of the repo: a closed issue whose card is
+still in play moves to done (completed) or cancelled (not planned) on the next snapshot, and the
+card is then forgotten, so a reopened issue gets a fresh card. Nothing else is needed or assumed.
+Before this, the first company-wide read after a restart (about 3,450 rows) timed out, restarted
+at row 0, and stopped every repo; a card (SLA-3778) was never moved again (Foreman #100, 2026-11-05).
 
 ## Who writes which card
 
@@ -304,7 +326,7 @@ the snapshot of the repo:
   \`GitHub: open · not approved\` or \`GitHub: closed completed|not_planned\` (at a stage a role
   holds, then \`Next: <role> — <action>\`; see **Handoffs**), a blank line, the issue's URL (\`stage awaitingRelease\` when an open PR into the production branch names it);
 - not approved: \`backlog\`, nobody's, no stage label; closed: \`done\`, or \`cancelled\` when
-  not planned, no stage label, the last holder kept; approved: the lifecycle stage, as before;
+  not planned, no stage label, nobody holding it; approved: the lifecycle stage, as before;
 - held by the blocked label: the holder's reason as the unblock descriptor
   (\`blocked: on GitHub — <their comment's first line> (<login>, <date>) <url>\`), and their
   comment copied once, never on another agent's card;
@@ -312,8 +334,9 @@ the snapshot of the repo:
   line rewritten to \`duplicate of <card> (<key>)\` so nothing adopts it again.
 
 Another writer may set where one of these cards is filed (project, project workspace, goal,
-parent, priority) and nothing else. With \`ownsCards\` off the Foreman creates a card only on a
-claim and moves it by its own steps, and leaves a card's content to whoever wrote it.
+parent, priority) and nothing else. With \`ownsCards\` off the Foreman still creates a card for an
+issue at a lifecycle stage that has none (once GitHub reads it open, within the same 20 writes),
+moves it by its own steps and the snapshot, and leaves a card's content to whoever wrote it.
 
 ### A closed issue's card
 
@@ -435,6 +458,19 @@ wake checking the card out. A \`needsRuling\` owner whose agent wakes on assignm
 \`blocked\` cards: every escalation arrives \`blocked\`, and one that refuses blocked work leaves
 the ruling unmade.
 
+The Foreman does not re-move a card while a run of its assignee is in flight. Assigning a card to a
+seat that wakes opens a run whose checkout flips the card to \`in_progress\`; a second write that sets
+any other status and reassigns makes Paperclip cancel that run, and the cancel leaves an execution
+hold that freezes the card (SLA-2959, 2026-10-29). So a move reads the card first: with
+\`executionRunId\` or \`checkoutRunId\` set on a card held by another agent, the move is deferred and
+retried at the end of the next snapshot. A move whose status is \`in_progress\` is never deferred.
+The retry decides the move again and reads the card live first: a seat's or a person's hold put on
+it while the move waited is newer and wins, over a Foreman block or ruling too, and a stage move is
+also dropped when a hold outranks it or GitHub has moved the issue to another stage (that snapshot
+placed the card). A needs-ruling block re-delivered after a lost write is read live the same way.
+Replayed blind, a move deferred during the EM seat's run undid the escalation the run made (SLA-4308
+left Blocked for in_review, 2026-11-06).
+
 | Stage | Meaning | Default owner | Default status | Default stage label |
 |---|---|---|---|---|
 ${stageRows.join("\n")}
@@ -499,8 +535,8 @@ whenever a reload changes the file. The sha256 is of the file less its trailing 
 that places the same cards reads its board mapping from there, so it never runs a copy the
 Foreman has moved on from. A file with a secret-shaped key (\`apiKey\`, \`token\`, \`secret\`,
 \`password\`) or a known secret value is not published, and the Foreman logs why. A reload that
-changes \`enabled\`, \`url\`, \`companyId\`, \`agentId\` or \`identityKeyFormat\` needs a
-restart: until then the mirror and the published config keep the old file.
+changes \`url\`, \`companyId\`, \`agentId\` or \`identityKeyFormat\` restarts the mirror on
+the new file.
 
 ## Assignment
 
@@ -517,8 +553,9 @@ Release the block on GitHub, where the Foreman looks, and the card follows on it
 ### Cards held by a person
 
 A card labelled ${code(HUMAN_HOLD_LABEL)} waits on a person, not on a stage's owner. The plugin
-never reads GitHub labels, so a sync supplies them: \`assigneeFor(cfg, { labels, repo })\` in
-\`board.ts\`, a pure function. The Foreman's own moves never call it, and are unchanged.
+never reads GitHub; the work source's cards carry each open issue's labels, and the card sync
+(\`syncCard\` in \`snapshot-sync.ts\`, with \`ownsCards\` on) asks \`assigneeFor(cfg, { labels, repo })\` in
+\`board.ts\` who holds a card that is in no lifecycle stage. A closed card stays nobody's.
 
 | The item | Assignee |
 |---|---|
@@ -573,8 +610,8 @@ The mirror is best-effort and never blocks the Foreman. Every Paperclip call is 
 failure logs one warning when an outage starts (\`Paperclip mirror: … failed, notes are skipped
 until Paperclip answers again\`) and one info line when the next call succeeds. Notes and status
 changes due during the outage are skipped, not queued, and builds, reviews and promotions carry
-on unaffected. A skipped status is set again at the issue's next status-setting step; an issue
-picked up while Paperclip was down gets no task, because only the pick-up creates one.
+on unaffected. The first snapshot after the outage moves each card to its issue's stage, and
+creates the card of an issue picked up while Paperclip was down.
 
 ## Set up
 
@@ -609,7 +646,7 @@ picks it up, its Paperclip task appears, in progress and assigned to the Foreman
 ## Remove
 
 Set \`paperclip.enabled\` to \`false\` (or \`AI_AGENT_PAPERCLIP_ENABLED=false\`), or delete the
-block, and restart the daemon. The Foreman then makes no Paperclip call at all. Tasks and notes
+block (a reload is enough). The Foreman then makes no Paperclip call, snapshot or session-report read. Tasks and notes
 already written stay in Paperclip; delete the Foreman agent there if you no longer want it.
 `;
 

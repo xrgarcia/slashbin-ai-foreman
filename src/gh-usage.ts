@@ -5,8 +5,8 @@ import type { Logger } from "./logger.js";
  *
  * 2026-10-02: the Foreman spent ~4,770 GraphQL points an hour against a 5,000
  * cap while its startup estimate said 1,200, and nothing recorded which calls
- * spent it. Quota is spent per spawn, so `runGh` counts immediately before
- * each `execFileSync` — a retried spawn counts twice, a refused call (back-off
+ * spent it. Quota is spent per spawn, so `runGhAsync` counts immediately before
+ * each `execFile` — a retried spawn counts twice, a refused call (back-off
  * active, nothing spawned) counts zero.
  *
  * A leaf module on purpose: `upstream-backoff.ts` imports `ghResource`, and
@@ -21,8 +21,11 @@ export function ghResource(args: string[]): GhResource {
   return "graphql";
 }
 
+/** Process-wide: the gh call counters measure the process's one GitHub token budget. */
 let counts = { graphql: 0, core: 0 };
+/** Process-wide: per-subcommand gh counts for the same process-wide budget. */
 let bySubcommand: Record<string, number> = {};
+/** Process-wide: the one usage-report timer. */
 let timer: ReturnType<typeof setInterval> | null = null;
 
 /** Count one spawned `gh` process. */

@@ -34,7 +34,7 @@
  */
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { gitResult } from "./git-exec.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 
@@ -42,8 +42,10 @@ export function checkoutPathFor(config: AgentConfig, repoConfig: RepoConfig): st
   return join(config.reviewCheckoutRoot, repoConfig.name);
 }
 
-function git(args: string[], cwd: string, timeoutMs = 300_000) {
-  return spawnSync("git", args, { cwd, encoding: "utf8", timeout: timeoutMs });
+/** Async with a timeout; resolves with `status` (0 on success) and the decoded `stderr`, never rejects. */
+async function git(args: string[], cwd: string, timeoutMs = 300_000): Promise<{ status: number | null; stderr: string }> {
+  const r = await gitResult(args, cwd, { timeoutMs });
+  return { status: r.status, stderr: r.stderr };
 }
 
 /**
@@ -53,11 +55,11 @@ function git(args: string[], cwd: string, timeoutMs = 300_000) {
  * than skipped — the session has `gh` and can fall back — so every failure
  * here returns null and is logged, rather than taking the phase down.
  */
-export function prepareReviewCheckout(
+export async function prepareReviewCheckout(
   config: AgentConfig,
   repoConfig: RepoConfig,
   logger: Logger,
-): string | null {
+): Promise<string | null> {
   const path = checkoutPathFor(config, repoConfig);
   const slug = repoConfig.githubRepo;
   if (!slug) return null;
@@ -68,7 +70,7 @@ export function prepareReviewCheckout(
     if (existsSync(join(path, ".git"))) {
       // Reuse. `--prune` matters: without it, branches deleted upstream linger
       // and a stale ref can be checked out as though it were live.
-      const fetched = git(["fetch", "--all", "--prune", "--quiet"], path);
+      const fetched = await git(["fetch", "--all", "--prune", "--quiet"], path);
       if (fetched.status === 0) {
         logger.debug(`Review checkout refreshed: ${path}`);
         return path;
@@ -84,7 +86,7 @@ export function prepareReviewCheckout(
     // verbatim into .git/config, which leaves the token sitting at rest in a
     // world-readable directory for as long as the checkout lives. gh's
     // credential helper covers auth for a public-or-permitted clone.
-    const cloned = git(["clone", "--quiet", `https://github.com/${slug}.git`, path], config.reviewCheckoutRoot);
+    const cloned = await git(["clone", "--quiet", `https://github.com/${slug}.git`, path], config.reviewCheckoutRoot);
     if (cloned.status !== 0) {
       logger.warn(`Review checkout clone failed for ${slug} — the session will have to fetch its own code`, {
         stderr: (cloned.stderr || "").slice(0, 400),

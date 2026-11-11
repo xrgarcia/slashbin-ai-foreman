@@ -19,10 +19,17 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(root, "hooks", "session-secret-gate.mjs");
 const { violation, fileViolation } = await import(HOOK);
-const { implementApprovedIssues, revisePRFeedback, runCustomStage, sessionSettings, SESSION_SECRET_GATE } =
-  await import(join(root, "dist/agent.js"));
+const { implementApprovedIssues } = await import(join(root, "dist/phases/implement-workflow.js"));
+const { revisePRFeedback } = await import(join(root, "dist/phases/revise-workflow.js"));
+const { runCustomStage } = await import(join(root, "dist/phases/custom-workflow.js"));
+const { sessionSettings, SESSION_SECRET_GATE } = await import(join(root, "dist/session/secret-gate.js"));
 const { loadConfig } = await import(join(root, "dist/config.js"));
+const { ClaudeTrust } = await import(join(root, "dist/claude-trust.js"));
+const trust = new ClaudeTrust();
 const { createLogger } = await import(join(root, "dist/logger.js"));
+const { setCodeHost } = await import(join(root, "dist/plugins/registry.js"));
+const { githubCodeHost } = await import(join(root, "dist/plugins/github.js"));
+setCodeHost(githubCodeHost());
 const logger = createLogger({ format: "text", level: "error" });
 const DUMMY = "test-dummy-value-not-a-token";
 
@@ -133,7 +140,7 @@ before(() => {
   writeFileSync(join(bin, "claude"),
     `#!/usr/bin/env node\nrequire("fs").appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
     `process.stdout.write("done\\n");\n`);
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho '[]'\n");
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\ncase \"$*\" in *branches/*) printf 0000000000000000000000000000000000000000;; *) echo '[]';; esac\n");
   chmodSync(join(bin, "claude"), 0o755);
   chmodSync(join(bin, "gh"), 0o755);
   saved = { PATH: process.env.PATH, token: process.env.FOREMAN_GITHUB_TOKEN, cwd: process.cwd() };
@@ -167,9 +174,9 @@ const settingsArg = async (fn) => {
 };
 
 for (const [name, fn] of [
-  ["implement", () => implementApprovedIssues(repo(), logger)],
-  ["revise", () => revisePRFeedback(repo(), logger, undefined, 7, [3])],
-  ["custom stage", () => runCustomStage(repo(), { id: "lint", skillPath: "/opt/lint/SKILL.md" },
+  ["implement", () => implementApprovedIssues(trust, repo(), logger)],
+  ["revise", () => revisePRFeedback(trust, repo(), logger, undefined, 7, [3])],
+  ["custom stage", () => runCustomStage(trust, repo(), { id: "lint", skillPath: "/opt/lint/SKILL.md" },
     { prNumber: 7, headSha: "a".repeat(40), issueNumbers: [3] }, logger)],
 ]) {
   test(`${name}: the session is spawned with the secret gate`, async () => {

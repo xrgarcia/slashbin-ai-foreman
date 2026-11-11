@@ -2,37 +2,11 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import { byReviewer } from "./review-freshness.js";
 import { backoffSettings } from "../backoff.js";
-
-
-// --- CI gate in front of review ---------------------------------------------
-//
-// A review is a full EM session (median 13 min). Spending one on a PR whose own
-// CI is red buys a REQUEST_CHANGES that says "CI is red" — the builder could have
-// learned that for free. So the review phase reads the PR's checks first:
-// red → straight back to revise with the failing checks named, still running →
-// wait a pass, green or no CI at all → review as before.
-
-/** One entry of `gh pr view --json statusCheckRollup`: a CheckRun or a StatusContext. */
-export interface CheckRollupEntry {
-  __typename?: string;
-  name?: string;
-  context?: string;
-  status?: string;
-  conclusion?: string;
-  state?: string;
-  detailsUrl?: string;
-  targetUrl?: string;
-}
-
-export interface CheckVerdict {
-  /** `none` = the repo runs no CI on this PR; review proceeds exactly as before. */
-  state: "none" | "pending" | "passing" | "failing";
-  failing: { name: string; url?: string }[];
-  pending: string[];
-}
+import type { CheckRollupEntry, CheckVerdict } from "../code-host.js";
+export type { CheckRollupEntry, CheckVerdict } from "../code-host.js";
 
 export const FAILING_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
 export const PENDING_STATES = new Set(["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED", "EXPECTED"]);
@@ -75,9 +49,9 @@ export function summarizeCheckRollup(rollup: CheckRollupEntry[]): CheckVerdict {
 }
 
 /** Read the PR's checks. A lookup failure answers `none`, i.e. review as before. */
-export function getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): CheckVerdict {
+export async function getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: Logger): Promise<CheckVerdict> {
   try {
-    const raw = gh([
+    const raw = await ghAsync([
       "pr", "view", String(prNumber),
       "--repo", config.githubRepo,
       "--json", "statusCheckRollup",
@@ -86,6 +60,21 @@ export function getPRCheckVerdict(config: RepoConfig, prNumber: number, logger: 
     return summarizeCheckRollup(data.statusCheckRollup ?? []);
   } catch (err) {
     logger.warn(`${config.name}: could not read checks on PR #${prNumber} — reviewing without the CI gate: ${err instanceof Error ? err.message : String(err)}`);
+    return { state: "none", failing: [], pending: [] };
+  }
+}
+
+/**
+ * The verdict of the one check or status named `context` on a PR: `none` when the PR carries no such entry or the
+ * read fails (never a guess). Used for the release PR's EM sign-off status.
+ */
+export async function getContextVerdict(config: RepoConfig, prNumber: number, context: string, logger: Logger): Promise<CheckVerdict> {
+  try {
+    const raw = await ghAsync(["pr", "view", String(prNumber), "--repo", config.githubRepo, "--json", "statusCheckRollup"], config.repoPath);
+    const data = JSON.parse(raw || "{}") as { statusCheckRollup?: CheckRollupEntry[] };
+    return summarizeCheckRollup((data.statusCheckRollup ?? []).filter((e) => (e.context ?? e.name) === context));
+  } catch (err) {
+    logger.debug(`${config.name}: could not read ${context} on PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
     return { state: "none", failing: [], pending: [] };
   }
 }
@@ -101,14 +90,14 @@ export const CI_GATE_MARKER = "<!-- foreman-ci-gate -->";
  * How many CI-gate bounces this PR has had since the reviewer last reviewed it.
  * A reviewer verdict resets the count: it means the PR reached review.
  */
-export function countCiBouncesSinceReview(
+export async function countCiBouncesSinceReview(
   config: RepoConfig,
   prNumber: number,
   reviewerLogin: string | undefined,
   logger: Logger,
-): number {
+): Promise<number> {
   try {
-    const raw = gh([
+    const raw = await ghAsync([
       "pr", "view", String(prNumber),
       "--repo", config.githubRepo,
       "--json", "comments,reviews",
@@ -151,12 +140,12 @@ export function ciBounceComment(verdict: CheckVerdict): string {
  * through its work source (on GitHub: `pr under review` → `pr pending actions`,
  * the label the revise phase picks up). The comment is PR-level and stays here.
  */
-export function bounceForRedCI(
+export async function bounceForRedCI(
   config: RepoConfig,
   prNumber: number,
   verdict: CheckVerdict,
-): void {
-  gh([
+): Promise<void> {
+  await ghAsync([
     "pr", "comment", String(prNumber),
     "--repo", config.githubRepo,
     "--body", ciBounceComment(verdict),
@@ -168,8 +157,8 @@ export function bounceForRedCI(
  * code host rather than the work source — a diverged feature branch (foreman#44)
  * is a git fact, so it is said on GitHub whatever source supplied the work.
  */
-export function commentOnIssue(config: RepoConfig, issueNumber: number, body: string): void {
-  gh([
+export async function commentOnIssue(config: RepoConfig, issueNumber: number, body: string): Promise<void> {
+  await ghAsync([
     "issue", "comment", String(issueNumber),
     "--repo", config.githubRepo,
     "--body", body,

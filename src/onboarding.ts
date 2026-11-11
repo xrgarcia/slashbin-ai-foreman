@@ -18,10 +18,9 @@
 // one paginated GET, one POST per missing name, never a PATCH or DELETE, so an
 // existing label's colour, description and issues are never touched.
 
-import { formatGhError } from "./github/cache.js";
-import { gh } from "./github/gh.js";
 import { requiredLabels, type RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import { codeHost } from "./plugins/registry.js";
 
 /** GitHub's own default label colour; colour is not configurable. */
 const COLOR = "ededed";
@@ -31,49 +30,46 @@ export const labelsFor = requiredLabels;
 
 type Entry = { done: true } | { done: false; inFlight: Promise<boolean> };
 
-// Keyed by repo and label set, so renaming a label in the config onboards again.
-const onboarded = new Map<string, Entry>();
-
 function keyOf(repo: RepoConfig): string {
   return `${repo.githubRepo}\n${labelsFor(repo).join("\n")}`;
 }
 
-/** Test hook: forget every repo onboarded in this process. */
-export function resetOnboarding(): void {
-  onboarded.clear();
-}
+/** The repos one runtime has onboarded. */
+export class Onboarding {
+  /** Keyed by repo and label set, so renaming a label in the config onboards again. */
+  private readonly onboarded = new Map<string, Entry>();
 
-/**
- * True once `repo` carries every label it needs. The first call does the work;
- * later calls answer from memory, and every lane of the repo shares one attempt.
- * A failure is forgotten, so the repo's next pass tries again.
- */
-export async function onboardRepo(repo: RepoConfig, logger: Logger): Promise<boolean> {
-  const key = keyOf(repo);
-  const entry = onboarded.get(key);
-  if (entry?.done) return true;
-  if (entry) return entry.inFlight;
+  /**
+   * True once `repo` carries every label it needs. The first call does the work;
+   * later calls answer from memory, and every lane of the repo shares one attempt.
+   * A failure is forgotten, so the repo's next pass tries again.
+   */
+  async onboardRepo(repo: RepoConfig, logger: Logger): Promise<boolean> {
+    const key = keyOf(repo);
+    const entry = this.onboarded.get(key);
+    if (entry?.done) return true;
+    if (entry) return entry.inFlight;
 
-  const log = logger.child({ repo: repo.name, phase: "onboard" });
-  const attempt = Promise.resolve().then(() => installLabels(repo, log));
-  onboarded.set(key, { done: false, inFlight: attempt });
-  const ok = await attempt;
-  if (ok) onboarded.set(key, { done: true });
-  else onboarded.delete(key);
-  return ok;
+    const log = logger.child({ repo: repo.name, phase: "onboard" });
+    const attempt = Promise.resolve().then(async () => await installLabels(repo, log));
+    this.onboarded.set(key, { done: false, inFlight: attempt });
+    const ok = await attempt;
+    if (ok) this.onboarded.set(key, { done: true });
+    else this.onboarded.delete(key);
+    return ok;
+  }
 }
 
 function firstLine(err: unknown): string {
-  const { message, stderr } = formatGhError(err);
+  const { message, stderr } = codeHost().formatGhError(err);
   return (stderr || message).split("\n")[0];
 }
 
-function installLabels(repo: RepoConfig, log: Logger): boolean {
+async function installLabels(repo: RepoConfig, log: Logger): Promise<boolean> {
   const wanted = labelsFor(repo);
   let existing: Set<string>;
   try {
-    const out = gh(["api", "-X", "GET", `repos/${repo.githubRepo}/labels`, "--paginate", "--jq", ".[].name"], repo.repoPath);
-    existing = new Set(out.split("\n").map((l) => l.trim()).filter(Boolean));
+    existing = new Set(await codeHost().labelNames(repo));
   } catch (err) {
     log.warn(`Onboarding: could not read ${repo.githubRepo}'s labels — no work starts on this repo until it can (${firstLine(err)})`);
     return false;
@@ -88,10 +84,10 @@ function installLabels(repo: RepoConfig, log: Logger): boolean {
   const failed: string[] = [];
   for (const name of missing) {
     try {
-      gh(["api", "-X", "POST", `repos/${repo.githubRepo}/labels`, "-f", `name=${name}`, "-f", `color=${COLOR}`], repo.repoPath);
+      await codeHost().createLabel(repo, name, COLOR);
     } catch (err) {
       // Created by someone else between the read and this write: present, so fine.
-      const { message, stderr } = formatGhError(err);
+      const { message, stderr } = codeHost().formatGhError(err);
       if (/already_exists/i.test(`${stderr} ${message}`)) continue;
       failed.push(`"${name}" (${firstLine(err)})`);
     }

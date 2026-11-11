@@ -13,7 +13,7 @@
 //
 // It writes nothing to Paperclip itself: its Paperclip seat has no heartbeat
 // runs, so its keys are refused there. The Foreman reads the lines as they
-// stream (agent.ts reviewViaTechLead) and relays them with its own.
+// stream (plugins/tech-lead.ts reviewViaTechLead) and relays them with its own.
 //
 // HOW MANY COMMENTS. Paperclip has no comment edit (its routes offer GET and
 // DELETE on a comment, no PATCH), so the checklist cannot be one comment
@@ -101,6 +101,16 @@ export function withoutProgressLines(text: string): string {
 }
 
 const CLOCK = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" });
+
+const STAMP = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+/** "Mon Nov 9, 10:59 am CT": a scheduled time, in Central time, 12-hour; the input as given when it is not a time. */
+export function centralStamp(at: string): string {
+  const t = Date.parse(at);
+  if (Number.isNaN(t)) return at;
+  const parts = Object.fromEntries(STAMP.formatToParts(new Date(t)).map((p) => [p.type, p.value]));
+  return `${parts.weekday} ${parts.month} ${parts.day}, ${parts.hour}:${parts.minute} ${String(parts.dayPeriod).toLowerCase()} CT`;
+}
 
 /** "9:02 AM CT": the time a milestone was reached, in Central time. */
 export function centralTime(at: string): string {

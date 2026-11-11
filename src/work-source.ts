@@ -1,15 +1,15 @@
-import { GitHubIssueConnector } from "./github-work-source.js";
-import type { WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
+import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
-import { loadRepoState, type RepoState } from "./state.js";
-import { clearUnstick, noteStuck } from "./unstick.js";
+import { fieldTable } from "./issue-records.js";
+import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
+import type { ForemanRuntime } from "./runtime.js";
 
 /**
- * The work source each repo selects from and reports to. GitHub issues unless
- * a source has been registered. Kept out of adapters.ts so that module never
- * imports a connector.
+ * The work source each repo selects from and reports to: the one the registry
+ * resolves (the enabled `workSource` plugin, GitHub by default, or one set
+ * directly). The core never constructs a connector itself (EM#1150 f4).
  *
  * Also the one dispatch point for observers (EM#417). The orchestrator reports
  * every event through `emit` (a lifecycle move through `advance`), never
@@ -17,22 +17,32 @@ import { clearUnstick, noteStuck } from "./unstick.js";
  * miss the observers. The orchestrator never knows whether any observer — the
  * Paperclip plugin or another — is registered.
  */
-let registered: WorkSourceAdapter | null = null;
-
 export function registerWorkSource(adapter: WorkSourceAdapter | null): void {
-  registered = adapter;
+  setWorkSource(adapter);
 }
 
-/** The active adapter. The orchestrator uses `emit` / `advance` instead. */
+/** The active adapter. The orchestrator uses `emit` / `advance` instead. Throws when none is enabled; startup refuses first. */
 export function workSourceFor(_repoConfig: RepoConfig): WorkSourceAdapter {
-  return registered ?? new GitHubIssueConnector();
+  const source = activeWorkSource();
+  if (!source) throw new Error(workSourceRefusal(undefined) ?? "no work source");
+  return source;
 }
 
-const observers: WorkObserver[] = [];
+/**
+ * Why the Foreman cannot run, or null: no work-source plugin is started. The CLI
+ * refuses to start on it, and logs it after a reload that switched the source off.
+ */
+export function workSourceRefusal(config: Pick<AgentConfig, "workSource"> | undefined): string | null {
+  if (activeWorkSource()) return null;
+  const id = config ? ` (workSource: "${config.workSource ?? "github"}")` : "";
+  return `no work source is enabled${id}: no plugin of that id is installed and started, ` +
+    `so the Foreman has nothing to select work from. Set "workSource" to "github" (the default) or install the plugin.`;
+}
+
 
 /**
  * Per-observer, per-event limit. Generous because observers run OFF the build
- * path (see `enqueue`): the daemon's gh calls are execFileSync and block the
+ * path (see `enqueue`): the daemon's gh calls were once synchronous and blocked the
  * event loop, so a 5 s limit expired on a healthy Paperclip during the
  * startup sweep and dropped the note (2026-10-01, first mirror run). A hung
  * observer now delays only the notes queued behind it, never a build step.
@@ -69,10 +79,11 @@ export function loopTimeout(limitMs: number, onExpire: () => void, tickMs = OBSE
 }
 
 /** Events are delivered in order, one at a time, behind the build. */
+/** Process-wide: one delivery order for every observer, whatever runtime raised the event. */
 let queue: Promise<void> = Promise.resolve();
 
 function enqueue(event: WorkEvent, logger: Logger): void {
-  if (observers.length === 0) return;
+  if (registryObservers().length === 0) return;
   queue = queue.then(() => fanOut(event, logger));
 }
 
@@ -86,17 +97,22 @@ export function drainObservers(): Promise<void> {
  * is a boot-path bug, and doubled events make it visible instead of hiding it.
  */
 export function addObserver(o: WorkObserver): void {
-  observers.push(o);
+  addRegistryObserver(o);
 }
 
-/** True when any observer is registered: a session's report costs GitHub reads, spent only for someone. */
-export function hasObservers(): boolean {
-  return observers.length > 0;
+/** True when an enabled observer wants session reports: they cost GitHub reads, spent only for someone who uses them. */
+export function wantsSessionReports(): boolean {
+  return observersWantSessionReports();
+}
+
+/** True when an enabled observer wants the board snapshot, which costs GitHub reads each pass. */
+export function wantsSnapshot(): boolean {
+  return observersWantSnapshot();
 }
 
 /** True when an observer writes every card itself (`WorkObserver.wantsCards`). */
 export function wantsCards(): boolean {
-  return observers.some((o) => {
+  return registryObservers().some((o) => {
     try {
       return o.wantsCards?.() === true;
     } catch {
@@ -112,7 +128,7 @@ export function wantsCards(): boolean {
  * observers after it. Never rejects.
  */
 async function fanOut(event: WorkEvent, logger: Logger): Promise<void> {
-  for (const obs of observers) {
+  for (const obs of [...registryObservers()]) {
     let stop: (() => void) | undefined;
     try {
       await Promise.race([
@@ -143,19 +159,33 @@ export async function selectWork(
   return workSourceFor(repoConfig).selectWork(repoConfig, config, logger);
 }
 
+/** What the last `selectWork` held back for a reason about the item itself, for the waiting set. */
+export function heldWork(repoConfig: RepoConfig): ReadonlyArray<WaitingItem> {
+  return workSourceFor(repoConfig).heldWork?.(repoConfig) ?? [];
+}
+
+/**
+ * Tell the observers about an event that belongs to no repo (an upstream
+ * back-off): no record is written and no handoff is touched, so no runtime is needed.
+ */
+export async function emitProcessEvent(event: WorkEvent, logger: Logger): Promise<boolean> {
+  enqueue(event, logger);
+  return false;
+}
+
 /**
  * The one way an event leaves the core. With a repo, the work source records
  * it first (an `observed` transition excepted: the source already shows it);
  * then every observer is told, in order, off the build path. Resolves what
  * the source returned: `true` when it recorded a change.
  */
-export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logger: Logger): Promise<boolean> {
+export async function emit(rt: ForemanRuntime, event: WorkEvent, repoConfig: RepoConfig | null, logger: Logger): Promise<boolean> {
   // Stuck work the unstick stage should take to the EM (src/unstick.ts), and the
   // end of it. State only; the stage reads it on its next pass.
   if (repoConfig) {
     try {
-      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) noteStuck(repoConfig.name, event.item.issueNumber, event.stuck, event.reason);
-      else if (event.kind === "unblocked") clearUnstick(repoConfig.name, event.item.issueNumber);
+      if ((event.kind === "blocked" || event.kind === "escalated") && event.stuck) await rt.handoffs.noteStuck(repoConfig, event.item.issueNumber, event.stuck, event.reason);
+      else if (event.kind === "unblocked") await rt.handoffs.clearUnstick(repoConfig, event.item.issueNumber);
     } catch (err) {
       logger.debug(`unstick record skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -173,46 +203,53 @@ export async function emit(event: WorkEvent, repoConfig: RepoConfig | null, logg
  * the outcome label itself), so only observers hear of it.
  */
 export function advance(
+  rt: ForemanRuntime,
   item: WorkItem,
   move: Move,
   repoConfig: RepoConfig,
   logger: Logger,
   opts: { observed?: boolean } = {},
 ): Promise<boolean> {
-  return emit({ kind: "transition", item, observed: opts.observed === true, ...transition(move) }, repoConfig, logger);
+  return emit(rt, { kind: "transition", item, observed: opts.observed === true, ...transition(move) }, repoConfig, logger);
 }
 
 /**
- * Whether the Foreman's own state holds issue `n` back. A recorded branch
- * divergence holds every issue.
+ * Whether the Foreman holds issue `n` back, for each of `numbers`. An unfinished release that names it, and any hold, skip, failure or EM question
+ * in its record. An issue whose record cannot be read is held: the answer is unknown, and a card must not
+ * be moved on an unknown (fail closed).
  */
-export function foremanHolds(state: RepoState): (n: number) => boolean {
-  if (state.branchBlock) return () => true;
+export async function foremanHolds(rt: ForemanRuntime, repoConfig: RepoConfig, numbers: readonly number[], logger: Logger): Promise<(n: number) => boolean> {
+  // A release whose record cannot be read may be holding any issue: unknown, so every card is held.
+  const releases = await rt.releases.loadReleases(repoConfig, logger);
+  if (!releases || releases.unreadable.size > 0) return () => true;
   const out = new Set<number>();
-  for (const table of [state.skipped, state.held, state.verifyHeld, state.failed]) for (const k of Object.keys(table ?? {})) out.add(Number(k));
-  for (const e of Object.values(state.unstick ?? {})) out.add(e.issue);
-  for (const r of Object.values(state.prodReleases ?? {})) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
+  const loaded = await rt.records.loadIssueRecords(repoConfig, numbers);
+  for (const n of loaded.unavailable) out.add(n);
+  for (const [n, r] of loaded.records) if (r.skipped || r.held || r.verifyHeld || r.failed || Object.keys(r.unstick ?? {}).length > 0) out.add(n);
+  for (const r of releases.releases) if (r.phase !== "merged") for (const n of r.issues) out.add(n);
   return (n) => out.has(n);
 }
 
 /**
  * Tell observers where every open item stands on the source, so a card the
  * Foreman stopped acting on is put back where it belongs. Reads the source
- * only when someone is listening.
+ * only when an enabled observer wants a snapshot.
  */
-export async function publishSnapshot(repoConfig: RepoConfig, logger: Logger): Promise<void> {
-  if (!hasObservers()) return;
+export async function publishSnapshot(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  if (!wantsSnapshot()) return;
+  // A sync-only (human-lane) repo is never mirrored: no snapshot reaches an observer, so no card is made for it.
+  if (repoConfig.syncOnly) return;
   const source = workSourceFor(repoConfig);
   const items = await source.snapshot(repoConfig, logger);
   // Every card, not only the lifecycle's, read only when an observer writes them all.
   const cards = source.cards && wantsCards() ? await source.cards(repoConfig, logger) : undefined;
   // Otherwise the closed items alone: a card the Foreman moved follows its issue to done.
   const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
-  const repoState = loadRepoState(repoConfig.name);
-  const held = repoState.verifyHeld ?? {};
-  const holds = foremanHolds(repoState);
+  const numbers = items.map((i) => i.item.issueNumber);
+  const holds = await foremanHolds(rt, repoConfig, numbers, logger);
+  const held = fieldTable(await rt.records.loadIssueRecords(repoConfig, numbers), "verifyHeld");
   const read = source.states?.bind(source);
-  await emit({
+  await emit(rt, {
     kind: "snapshot",
     repo: repoConfig.githubRepo,
     items: items.map((i) => ({ ...(held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i), foremanHeld: holds(i.item.issueNumber) })),

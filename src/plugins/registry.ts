@@ -1,0 +1,274 @@
+import type { WorkObserver, WorkSourceAdapter } from "../adapters.js";
+import type { AgentConfig, RepoConfig } from "../config.js";
+import type { AgentRole, CodeHost, ForemanPlugin, PluginCommand, PluginContext, PluginRole, QaRunner } from "./contract.js";
+
+/**
+ * The plugin registry (EM#1150): the core's only way to reach a plugin.
+ * Plugins are registered once (`plugins/index.ts`), the enabled ones started
+ * once at startup, and every role is resolved here. Holds no plugin's code.
+ */
+/** Process-wide: the plugin registry is the process's wiring, set once at startup. */
+const registered: ForemanPlugin[] = [];
+/** Process-wide: the plugins started in this process. */
+const started: ForemanPlugin[] = [];
+/** The observer each started plugin contributed, so stopping it can take it back out. */
+/** Process-wide: the observers the started plugins contributed. */
+const startedObservers = new Map<ForemanPlugin, WorkObserver>();
+
+/** Observers in delivery order: started plugins' and directly added ones, as they arrived. */
+/** Process-wide: every observer in the process hears every event. */
+const observerList: WorkObserver[] = [];
+/** A work source set directly (tests, an embedding host); wins over a plugin's. */
+/** Process-wide: a host-set work source replaces the plugin's for the process. */
+let workSourceOverride: WorkSourceAdapter | null = null;
+/** A code host set directly (tests, an embedding host); wins over a plugin's. */
+/** Process-wide: a host-set code host replaces the plugin's for the process. */
+let codeHostOverride: CodeHost | null = null;
+/** The config plugins were last started or reconfigured with, for `fills`. */
+/** Process-wide: the config the plugins were started with. */
+let currentConfig: AgentConfig | undefined;
+
+/** Whether `p` fills `role` under `config` (or the current one): listed, and selected when it says which. */
+function fills(p: ForemanPlugin, role: PluginRole, config: AgentConfig | undefined = currentConfig): boolean {
+  if (!p.roles.includes(role)) return false;
+  return !p.fills || !config || p.fills(role, config);
+}
+
+export function registerPlugin(p: ForemanPlugin): void {
+  if (registered.some((r) => r.id === p.id)) throw new Error(`plugin "${p.id}" is registered twice`);
+  registered.push(p);
+}
+
+export function registeredPlugins(): readonly ForemanPlugin[] {
+  return registered;
+}
+
+/** Start every registered plugin this config enables, in registration order. */
+export async function startPlugins(config: AgentConfig, ctx: PluginContext): Promise<readonly ForemanPlugin[]> {
+  currentConfig = config;
+  for (const p of registered) {
+    if (started.includes(p)) continue;
+    if (!p.enabled(config)) {
+      const why = p.disabledReason?.(config);
+      if (why) ctx.logger.info(why);
+      continue;
+    }
+    await startOne(p, config, ctx);
+  }
+  return started;
+}
+
+/**
+ * Apply a reloaded config (EM#1150): a plugin it newly enables starts, one it
+ * disables stops and leaves the fan-out, one that stays on is reconfigured.
+ * One plugin's failure never stops the rest.
+ */
+export async function reconfigurePlugins(config: AgentConfig, ctx: PluginContext): Promise<void> {
+  currentConfig = config;
+  for (const p of registered) {
+    let action = "reload";
+    try {
+      const on = started.includes(p);
+      const want = p.enabled(config);
+      if (on && !want) {
+        await stopOne(p);
+        ctx.logger.info(`plugin ${p.id} switched off by config reload`);
+      } else if (on) {
+        action = "reconfigure";
+        await p.reconfigure?.(config, ctx);
+        syncObserver(p);
+      } else if (want) {
+        await startOne(p, config, ctx);
+        ctx.logger.info(`plugin ${p.id} switched on by config reload`);
+      }
+    } catch (err) {
+      ctx.logger.warn(`plugin ${p.id} ${action} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+async function startOne(p: ForemanPlugin, config: AgentConfig, ctx: PluginContext): Promise<void> {
+  await p.start?.(config, ctx);
+  started.push(p);
+  const o = p.roles.includes("observer") ? p.observer : undefined;
+  if (o) {
+    observerList.push(o);
+    startedObservers.set(p, o);
+  }
+}
+
+/**
+ * A reconfigure may replace the plugin's observer (Paperclip restarts its mirror
+ * when the company, agent, URL or identity changes). The fan-out follows: the new
+ * observer takes the old one's place in delivery order, and the old one hears nothing more.
+ */
+function syncObserver(p: ForemanPlugin): void {
+  const before = startedObservers.get(p);
+  const now = p.roles.includes("observer") ? p.observer : undefined;
+  if (before === now) return;
+  const i = before ? observerList.indexOf(before) : -1;
+  if (now) {
+    if (i >= 0) observerList[i] = now;
+    else observerList.push(now);
+    startedObservers.set(p, now);
+  } else {
+    if (i >= 0) observerList.splice(i, 1);
+    startedObservers.delete(p);
+  }
+}
+
+async function stopOne(p: ForemanPlugin): Promise<void> {
+  started.splice(started.indexOf(p), 1);
+  const o = startedObservers.get(p);
+  startedObservers.delete(p);
+  if (o) {
+    const i = observerList.indexOf(o);
+    if (i >= 0) observerList.splice(i, 1);
+  }
+  await p.stop?.();
+}
+
+export async function stopPlugins(): Promise<void> {
+  for (const p of [...started].reverse()) {
+    try {
+      await stopOne(p);
+    } catch {
+      // stopping is best-effort
+    }
+  }
+}
+
+/** The started plugins that fill `role`. */
+export function pluginsFor(role: PluginRole): readonly ForemanPlugin[] {
+  return started.filter((p) => fills(p, role));
+}
+
+/**
+ * The agent filling `role` for this config: a started plugin that this config
+ * enables, or undefined when none does (the stage then does not run). The
+ * phases reach the Tech Lead, the SRE, QA and the EM only through this.
+ */
+export function roleFor<R extends AgentRole>(role: R, config: AgentConfig): NonNullable<ForemanPlugin[R]> | undefined {
+  for (const p of pluginsFor(role)) {
+    const impl = p[role];
+    if (impl && p.enabled(config)) return impl as NonNullable<ForemanPlugin[R]>;
+  }
+  return undefined;
+}
+
+/**
+ * The QA runner that covers `repo`, undefined when none does, or `"unknown"` when no plugin covers it
+ * and one could not say. Never compare the result for truthiness: `"unknown"` is truthy.
+ */
+export async function qaFor(repo: RepoConfig, config: AgentConfig): Promise<QaRunner | "unknown" | undefined> {
+  let unknown = false;
+  for (const p of pluginsFor("qa")) {
+    if (!p.qa || !p.enabled(config)) continue;
+    const covers = await p.qa.covers(repo, config);
+    if (covers === true) return p.qa;
+    if (covers === "unknown") unknown = true;
+  }
+  return unknown ? "unknown" : undefined;
+}
+
+/**
+ * Whether this config enables a registered plugin filling `role`, started or
+ * not: for startup warnings and the doctor, which judge a config without
+ * starting anything.
+ */
+export function enabledFor(role: PluginRole, config: AgentConfig): boolean {
+  return registered.some((p) => fills(p, role, config) && p.enabled(config));
+}
+
+/** A CLI command any registered plugin adds, or undefined. */
+export function pluginCommand(name: string): PluginCommand | undefined {
+  for (const p of registered) {
+    const c = p.commands?.[name];
+    if (c) return c;
+  }
+  return undefined;
+}
+
+/** Every CLI command name registered plugins add. */
+export function pluginCommandNames(): string[] {
+  return registered.flatMap((p) => Object.keys(p.commands ?? {}));
+}
+
+/** Add an observer outside any plugin. No de-duplication: a double registration doubles its events visibly. */
+export function addObserver(o: WorkObserver): void {
+  observerList.push(o);
+}
+
+export function observers(): readonly WorkObserver[] {
+  return observerList;
+}
+
+function anyObserver(ask: (o: WorkObserver) => boolean | undefined): boolean {
+  return observerList.some((o) => {
+    try {
+      return ask(o) === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Does any enabled observer want a session's report (goals, PR digest, review progress)? */
+export function observersWantSessionReports(): boolean {
+  return anyObserver((o) => o.wantsSessionReports?.());
+}
+
+/** Does any enabled observer want the board snapshot each pass? */
+export function observersWantSnapshot(): boolean {
+  return anyObserver((o) => o.wantsSnapshot?.() || o.wantsCards?.());
+}
+
+export function setWorkSource(adapter: WorkSourceAdapter | null): void {
+  workSourceOverride = adapter;
+}
+
+/** The directly set work source, else the first started plugin's, else null (the caller's default). */
+export function activeWorkSource(): WorkSourceAdapter | null {
+  return workSourceOverride ?? pluginsFor("workSource").find((p) => p.workSource)?.workSource ?? null;
+}
+
+export function setCodeHost(host: CodeHost | null): void {
+  codeHostOverride = host;
+}
+
+/** The directly set code host, else the first started plugin's, else null. */
+function activeCodeHost(): CodeHost | null {
+  return codeHostOverride ?? pluginsFor("codeHost").find((p) => p.codeHost)?.codeHost ?? null;
+}
+
+/**
+ * The code host (EM#1150 f5): the core's only way to reach PRs, branches, merges,
+ * comments and labels. Throws when none is enabled; startup refuses first.
+ */
+export function codeHost(): CodeHost {
+  const host = activeCodeHost();
+  if (!host) throw new Error(codeHostRefusal(undefined) ?? "no code host");
+  return host;
+}
+
+/**
+ * Why the Foreman cannot run, or null: no code-host plugin is started. The CLI
+ * refuses to start on it, and logs it after a reload that switched the host off.
+ */
+export function codeHostRefusal(config: Pick<AgentConfig, "codeHost"> | undefined): string | null {
+  if (activeCodeHost()) return null;
+  const id = config ? ` (codeHost: "${config.codeHost ?? "github"}")` : "";
+  return `no code host is enabled${id}: no plugin of that id is installed and started, ` +
+    `so the Foreman has nowhere to open, review or merge a PR. Set "codeHost" to "github" (the default) or install the plugin.`;
+}
+
+/** Tests only: forget every plugin and observer. */
+export function resetRegistryForTests(): void {
+  registered.length = 0;
+  started.length = 0;
+  startedObservers.clear();
+  observerList.length = 0;
+  workSourceOverride = null;
+  codeHostOverride = null;
+  currentConfig = undefined;
+}

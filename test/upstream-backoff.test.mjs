@@ -15,7 +15,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { detectUpstreamLimit, parseClaudeReset } from "../dist/agent.js";
+import { detectUpstreamLimit, parseClaudeReset } from "../dist/refusal.js";
 import { orchestratorSource } from "./source-text.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
@@ -67,7 +67,7 @@ function runCase(body, { baseMs = 200, capMs = 1600 } = {}) {
     const notes = [];
     const B = await import(${JSON.stringify(url("upstream-backoff.js"))});
     const G = await import(${JSON.stringify(url("github.js"))});
-    const call = () => { try { G.gh(["issue", "list", "--repo", "example/test"], ${JSON.stringify(dir)}); return "ok"; }
+    const call = async () => { try { await G.ghAsync(["issue", "list", "--repo", "example/test"], ${JSON.stringify(dir)}); return "ok"; }
       catch (e) { return e instanceof B.UpstreamBackoffError ? "backoff" : "error"; } };
     const BO = await import(${JSON.stringify(url("backoff.js"))});
     BO.configureBackoff({ ...BO.DEFAULT_BACKOFF, upstream: { baseMs: ${baseMs}, capMs: ${capMs}, factor: 2 } });
@@ -98,8 +98,8 @@ test("a GitHub rate limit enters the back-off once and stops every later gh spaw
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(0, nowSec() + 3600);
-    const first = call();
-    const refused = [call(), call(), call()];
+    const first = await call();
+    const refused = [await call(), await call(), await call()];
     console.log(JSON.stringify({ first, refused, work: work(), notes, blocked: B.isUpstreamBlocked("github") }));
   `);
   assert.equal(r.first, "error");
@@ -114,7 +114,7 @@ test("a GitHub rate limit enters the back-off once and stops every later gh spaw
 test("the entry window renders as 2 minutes at the default base", () => {
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
-    call();
+    await call();
     console.log(JSON.stringify({ notes }));
   `, { baseMs: 120_000, capMs: 3_600_000 });
   assert.match(r.notes[0].t, /^Foreman backing off GitHub for 2 minutes — /);
@@ -124,14 +124,14 @@ test("a failed probe extends with a doubled window; a passing probe clears and r
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(5000, nowSec(), 0);                // graphql exhausted, reset already past
-    call();
+    await call();
     writeFileSync(F.err, "");
     await sleep(300);                       // probe at ~200ms → still limited
     const afterFirstProbe = notes.length;
     rate(5000, nowSec() + 3600);
     await sleep(600);                       // probe at ~200+400ms → clear
     const resolved = await Promise.race([B.whenUpstreamClear("github").then(() => true), sleep(50).then(() => false)]);
-    console.log(JSON.stringify({ afterFirstProbe, notes, probes: probes(), resumed: call(), work: work(), resolved }));
+    console.log(JSON.stringify({ afterFirstProbe, notes, probes: probes(), resumed: await call(), work: work(), resolved }));
   `);
   assert.equal(r.afterFirstProbe, 2);
   assert.match(r.notes[1].t, /^Foreman still limited by GitHub — backing off .+ \(until \d\d:\d\d\)$/);
@@ -149,7 +149,7 @@ test("a stated GitHub reset later than the doubled window is honoured", () => {
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     const resetSec = nowSec() + 2;
     rate(0, resetSec);
-    call();
+    await call();
     await sleep(300);
     rate(5000, nowSec() + 3600);
     await sleep(2300);
@@ -163,7 +163,7 @@ test("the window doubles up to the cap and never past it", () => {
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(0, nowSec());
-    call();
+    await call();
     await sleep(100 + 200 + 400 + 400 + 400 + 150);
     const p = probes();
     console.log(JSON.stringify({ gaps: p.slice(1).map((t, i) => t - p[i]) }));
@@ -180,7 +180,7 @@ test("HTTP 429 enters the back-off; HTTP 404 does not", () => {
   ]) {
     const r = runCase(`
       writeFileSync(F.err, ${JSON.stringify(text)});
-      call();
+      await call();
       console.log(JSON.stringify({ blocked: B.isUpstreamBlocked("github") }));
     `);
     assert.equal(r.blocked, expect, text);
@@ -193,10 +193,10 @@ test("a re-entry soon after a clear continues the doubling; a later one starts a
   const reentry = (gapMs) => runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(5000, nowSec() + 3600);
-    call();                                  // enter at the base, 1000ms
+    await call();                                  // enter at the base, 1000ms
     await sleep(1050);                       // the probe clears
     await sleep(${gapMs});
-    call();
+    await call();
     console.log(JSON.stringify({ notes: notes.map((n) => n.t) }));
   `, { baseMs: 1000, capMs: 8000 });
   const soon = reentry(0);
@@ -207,18 +207,18 @@ test("a re-entry soon after a clear continues the doubling; a later one starts a
 
 test("Claude: blocked in the window, silent on concurrent refusals, one probe after, clear on success", () => {
   const r = runCase(`
-    B.reportClaudeResult(true, "You've hit your session limit");
-    const inWindow = [B.tryAcquire("claude"), B.isUpstreamBlocked("claude")];
-    B.reportClaudeResult(true, "You've hit your session limit");
+    B.reportRunResult("Claude", true, "You've hit your session limit");
+    const inWindow = [B.tryAcquire("Claude"), B.isUpstreamBlocked("Claude")];
+    B.reportRunResult("Claude", true, "You've hit your session limit");
     const notesInWindow = notes.length;
     await sleep(260);
-    const halfOpenBlocked = B.isUpstreamBlocked("claude");
-    const probe = B.tryAcquire("claude");
-    const second = B.tryAcquire("claude");
-    const probeOutBlocked = B.isUpstreamBlocked("claude");
-    B.reportClaudeResult(false);
+    const halfOpenBlocked = B.isUpstreamBlocked("Claude");
+    const probe = B.tryAcquire("Claude");
+    const second = B.tryAcquire("Claude");
+    const probeOutBlocked = B.isUpstreamBlocked("Claude");
+    B.reportRunResult("Claude", false);
     console.log(JSON.stringify({ inWindow, notesInWindow, halfOpenBlocked, probe, second, probeOutBlocked,
-      after: B.tryAcquire("claude"), notes }));
+      after: B.tryAcquire("Claude"), notes }));
   `);
   assert.deepEqual(r.inWindow, [false, true]);
   assert.equal(r.notesInWindow, 1);
@@ -235,15 +235,15 @@ test("Claude: blocked in the window, silent on concurrent refusals, one probe af
 
 test("Claude: a refused half-open probe extends; a stated reset holds the probe back until it passes", () => {
   const r = runCase(`
-    B.reportClaudeResult(true, "limit");
+    B.reportRunResult("Claude", true, "limit");
     await sleep(260);
-    B.tryAcquire("claude");
+    B.tryAcquire("Claude");
     const resetAt = Date.now() + 900;
-    B.reportClaudeResult(true, "limit", resetAt);    // probe refused → extend to the reset
+    B.reportRunResult("Claude", true, "limit", resetAt);    // probe refused → extend to the reset
     await sleep(500);
-    const beforeReset = B.tryAcquire("claude");
+    const beforeReset = B.tryAcquire("Claude");
     await sleep(600);
-    const afterReset = B.tryAcquire("claude");
+    const afterReset = B.tryAcquire("Claude");
     console.log(JSON.stringify({ beforeReset, afterReset, notes: notes.map((n) => n.t) }));
   `);
   assert.equal(r.beforeReset, false);
@@ -254,12 +254,12 @@ test("Claude: a refused half-open probe extends; a stated reset holds the probe 
 
 test("Claude: a later reset stated while blocked extends to it at window end", () => {
   const r = runCase(`
-    B.reportClaudeResult(true, "limit");
-    B.reportClaudeResult(true, "limit", Date.now() + 700);   // concurrent refusal names a reset
+    B.reportRunResult("Claude", true, "limit");
+    B.reportRunResult("Claude", true, "limit", Date.now() + 700);   // concurrent refusal names a reset
     await sleep(300);
-    const atWindowEnd = B.tryAcquire("claude");
+    const atWindowEnd = B.tryAcquire("Claude");
     await sleep(600);
-    console.log(JSON.stringify({ atWindowEnd, afterReset: B.tryAcquire("claude"), notes: notes.map((n) => n.t) }));
+    console.log(JSON.stringify({ atWindowEnd, afterReset: B.tryAcquire("Claude"), notes: notes.map((n) => n.t) }));
   `);
   assert.equal(r.atWindowEnd, false);
   assert.equal(r.afterReset, true);
@@ -326,4 +326,27 @@ test("each phase returns before its retry counter when the failure was an upstre
     // Returns before the counter — and moves the card to Blocked first (2026-10-05).
     assert.match(before, /if \(result\.upstreamLimit \|\| isUpstreamBlocked\("github"\)\)\s*\{[\s\S]{0,500}?kind: "blocked"[\s\S]{0,200}?return\b/, fn);
   }
+});
+
+test("a slow GitHub probe does not block the event loop; the window holds until it answers (foreman#236)", () => {
+  const r = runCase(`
+    writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
+    await call();
+    writeFileSync(F.err, "");
+    let answer;
+    B.setUpstreamProbe("github", () => new Promise((res) => { answer = res; }));
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 20);
+    await sleep(600);                        // window ends at ~200ms; the probe is still out
+    const duringProbe = { ticks, blocked: B.isUpstreamBlocked("github"), refused: await call() };
+    answer({ clear: true });
+    await sleep(20);
+    clearInterval(timer);
+    console.log(JSON.stringify({ duringProbe, afterBlocked: B.isUpstreamBlocked("github"), work: work() }));
+  `);
+  assert.ok(r.duringProbe.ticks >= 15, `the loop kept turning while the probe was out (${r.duringProbe.ticks} ticks)`);
+  assert.equal(r.duringProbe.blocked, true, "no call slips through while the probe is unanswered");
+  assert.equal(r.duringProbe.refused, "backoff");
+  assert.equal(r.afterBlocked, false, "the probe's answer clears the window");
+  assert.equal(r.work, 1);
 });
