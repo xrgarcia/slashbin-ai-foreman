@@ -22,6 +22,11 @@ export interface RevisionResult {
   landed?: boolean;
   landedIssue?: number;
   landedReason?: string;
+  /**
+   * A FOREMAN_RESULT_V1 line was present but invalid (a required field missing or malformed): `problem` names the
+   * field. The work is held for a person; no legacy trailer is read in its place.
+   */
+  contractInvalid?: string;
   /** The session's own final message, for observers (unredacted, uncapped). */
   summary?: string;
   /**
@@ -117,6 +122,11 @@ export interface ImplementationResult {
   landed?: boolean;
   landedIssue?: number;
   landedReason?: string;
+  /**
+   * A FOREMAN_RESULT_V1 line was present but invalid (a required field missing or malformed): `problem` names the
+   * field. The work is held for a person; no legacy trailer is read in its place.
+   */
+  contractInvalid?: string;
   /** The session's own final message, for observers (unredacted, uncapped). */
   summary?: string;
   /**

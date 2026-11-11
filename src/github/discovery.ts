@@ -2,7 +2,7 @@
 
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { ghAsync } from "./gh.js";
+import { git } from "../git-exec.js";
 
 
 /** discoveryBatch's size when the caller names none (the config's buildBatchSize decides it for a build). */
@@ -148,7 +148,7 @@ export async function discoveryBatch(
   let effectiveBatchSize = size;
   if (size > 1) {
     try {
-      const fileCount = (await ghAsync(["ls-files", "--cached"], config.repoPath)).split("\n").filter(Boolean).length;
+      const fileCount = (await git(["ls-files", "--cached"], config.repoPath)).split("\n").filter(Boolean).length;
       if (fileCount < 10) {
         effectiveBatchSize = 1;
         logger.info(`Greenfield repo detected (${fileCount} files) — limiting to 1 issue per cycle`);

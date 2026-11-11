@@ -136,13 +136,37 @@ export async function qaBeforeMergeApplies(repoConfig: RepoConfig, agentConfig: 
   return qaApplies(repoConfig, agentConfig);
 }
 
+/** A comment that reads as QA evidence: a QA report, or a body carrying a `foreman-qa` verdict marker. */
+const isQaEvidence = (body: string): boolean => body.startsWith(QA_HEADING) || body.startsWith(QA_GATE_HEADING) || body.includes("<!-- foreman-qa ");
+
+/**
+ * Pure: the comments QA may trust. A comment that reads as QA evidence (a report or a `foreman-qa` marker) counts
+ * only from `self`, the Foreman's own login: the repo is public, so anyone can paste a marker. Every other comment
+ * (the EM's re-run request, which only ever voids a verdict) passes. `self` unknown fails closed: no evidence.
+ */
+export function trustedQaComments(comments: readonly PrComment[], self: string | undefined): PrComment[] {
+  const me = self?.toLowerCase();
+  return comments.filter((c) => !isQaEvidence(c.body) || (!!me && c.author?.toLowerCase() === me));
+}
+
+/** The comment edges QA trusts, built over a comment read and the Foreman's own login. */
+export function trustedQaEdges(
+  read: (pr: number) => Promise<PrComment[]>,
+  self: () => Promise<string | undefined>,
+): Pick<QaDeps, "hasMarker" | "hasReport" | "comments"> {
+  const trusted = async (pr: number): Promise<PrComment[]> => trustedQaComments(await read(pr), await self());
+  return {
+    hasMarker: async (pr, marker) => (await trusted(pr)).some((c) => c.body.includes(marker)),
+    hasReport: async (pr) => (await trusted(pr)).some((c) => c.body.startsWith(QA_HEADING)),
+    comments: trusted,
+  };
+}
+
 /** The real edges: the PR's comments and files on the code host, and the QA plugin covering the repo, on dev. */
 export function realQaDeps(repoConfig: RepoConfig, agentConfig: AgentConfig, logger: Logger, local = false): QaDeps {
   return {
-    hasMarker: (pr, marker) => codeHost().hasCommentContaining(repoConfig, pr, marker),
-    hasReport: (pr) => codeHost().hasCommentStartingWith(repoConfig, pr, QA_HEADING),
+    ...trustedQaEdges((pr) => codeHost().commentsWithTimes(repoConfig, pr), () => codeHost().foremanLogin(repoConfig.repoPath)),
     post: (pr, body) => codeHost().commentOnPr(repoConfig, pr, body),
-    comments: (pr) => codeHost().commentsWithTimes(repoConfig, pr),
     changedFiles: async (pr) => await codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, logger),
     async run({ repo, pr, out }) {
       const qa = await qaFor(repoConfig, agentConfig);
@@ -354,7 +378,7 @@ export const EM_QA_RERUN_PATTERN = /^\s*\*\*EM QA re-run/;
 const QA_PASS_REPORT = /^## QA Report\n<!-- foreman-qa sha=\S+ verdict=PASS -->/;
 const reportShots = (body: string): number => Number(/^Shots: (\d+)$/m.exec(body)?.[1] ?? 0);
 
-export type PrComment = { at: string; body: string };
+export type PrComment = { at: string; body: string; author?: string };
 
 /**
  * Where a merged PR stands for QA. Pure. `rerunRequested`: the EM's newest re-run request is newer than every
