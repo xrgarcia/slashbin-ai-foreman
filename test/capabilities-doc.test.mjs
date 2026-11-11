@@ -22,3 +22,15 @@ test("docs/capabilities.md matches the catalog", () => {
   const r = spawnSync(process.execPath, ["scripts/capabilities-doc.mjs", "--check"], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
 });
+
+// A role's catalog must name every token startup will demand once its config is set,
+// including tokens of roles it turns on as a side effect (QA's emRepoPath turns on Unstick).
+test("each role's catalog env covers the tokens its own config makes startup require", async () => {
+  const { requiredCredentials } = await import("../dist/credentials.js");
+  registerBuiltinPlugins({ builds: { isInFlight: () => false } });
+  for (const p of registeredPlugins()) {
+    const config = Object.fromEntries(p.catalog.requires.config.map((k) => [k, k.endsWith("Path") ? "/x" : "x"]));
+    const missing = requiredCredentials(config).filter((t) => t !== "FOREMAN_GITHUB_TOKEN" && !p.catalog.requires.env.includes(t));
+    assert.deepEqual(missing, [], `${p.id}: catalog env omits ${missing.join(", ")}`);
+  }
+});

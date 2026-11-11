@@ -97,7 +97,8 @@ repo's entry instead of the top level):
     tests the running app before merge), **unstick** (an agent clears stuck or held work),
     and the **observers** (a board, metrics). For each yes, ask for exactly what its
     **Config** and **Env** lines name and write only that; a reviewer also sets
-    `reviewEnabled: true`. For each no, write nothing and tell the user its **When off**
+    `reviewEnabled: true`. A role whose **On when** line says it turns another on (QA
+    turns on Unstick) cannot be taken without that one: say so before writing it. For each no, write nothing and tell the user its **When off**
     line, so they know who does that step instead. A team with only GitHub is a valid
     setup: the Foreman builds and revises, and a person reviews and merges.
 11. **Model and limits** — offer the defaults (`docs/configuration.md`); set only what
