@@ -3,9 +3,14 @@
 // company agents, the company itself and server health. One instance talks to
 // one company.
 //
-// No retry and no back-off here: every failure — a non-2xx status, an
-// unreachable server, a 2xx body that is not JSON — throws PaperclipClientError
-// and the caller decides. Uses the global fetch (Node >= 18), no dependency.
+// Every failure — a non-2xx status, an unreachable server, a timeout, a 2xx body
+// that is not JSON — throws PaperclipClientError. A GET that failed for a passing
+// reason (no answer, a timeout, HTTP 408/429/500/502/503/504) is first retried in
+// place with `backoff.paperclip`; a write (POST, PATCH, PUT) is never retried,
+// because a timeout does not prove it failed and a retry could duplicate a card.
+// Uses the global fetch (Node >= 18), no dependency.
+
+import { backoffSettings, retryAsync } from "../backoff.js";
 
 export type PaperclipIssue = {
   id: string;
@@ -23,6 +28,10 @@ export type PaperclipIssue = {
   labelIds?: string[];
   /** The board's short name for the task (e.g. SLA-1500). */
   identifier?: string | null;
+  /** The run Paperclip has open on the task (an assignee's wake), null when none. */
+  executionRunId?: string | null;
+  /** The run that has the task checked out, null when none. */
+  checkoutRunId?: string | null;
   /** When the task was created (ISO): of two tasks for one issue, the older is the card. */
   createdAt?: string;
 };
@@ -97,15 +106,24 @@ export type PaperclipClientOptions = {
    * author overrides it; `null` there sends none.
    */
   actingAs?: string;
+  /** The header that carries the credited author (`paperclip.commentAuthorHeader`). Unset = credit is never sent. */
+  commentAuthorHeader?: string;
+  /** Per-request timeout in ms, so a hung connection rejects; default 30 000. */
+  timeoutMs?: number;
 };
 
-/**
- * Who a write is credited to: `agent:<agentId>` or `user:<userId>`. Sent as this
- * header by an instance-admin board key; the comment's author and the activity
- * row's actor change, nothing else (the Slashbin fork, slashbin/PATCHES.md
- * "Credited comment authors").
- */
-export const COMMENT_AUTHOR_HEADER = "x-slashbin-comment-author";
+/** What a GET is worth retrying on: no answer at all, or a status that is the server's passing trouble. */
+const TRANSIENT_STATUS = new Set([0, 408, 429, 500, 502, 503, 504]);
+export const isTransientPaperclipError = (err: unknown): boolean =>
+  err instanceof PaperclipClientError && TRANSIENT_STATUS.has(err.status);
+
+/** GETs sent and issue rows read since the client was made, for the scan's log line. */
+export type PaperclipReads = { calls: number; rows: number };
+
+// Who a write is credited to: `agent:<agentId>` or `user:<userId>`, sent in the
+// configured `commentAuthorHeader` by an instance-admin board key; the comment's
+// author and the activity row's actor change, nothing else. Only an instance that
+// implements the header (a fork; the profile names it) honours it.
 /** The board's refusals of that header: not an admin board key, or an author it cannot credit. */
 const COMMENT_AUTHOR_REFUSED = /comment_author_override_(denied|invalid)/;
 
@@ -137,6 +155,10 @@ export class PaperclipClient {
   private readonly apiKey: string | undefined;
   private readonly warn: (message: string) => void;
   private readonly actingAs: string | null;
+  private readonly commentAuthorHeader: string | undefined;
+  private readonly timeoutMs: number;
+  /** Every GET attempt (retries included) and every issue row `listIssues` yielded. */
+  readonly reads: PaperclipReads = { calls: 0, rows: 0 };
 
   constructor(opts: PaperclipClientOptions) {
     this.base = opts.url.replace(/\/+$/, "");
@@ -145,6 +167,8 @@ export class PaperclipClient {
     this.apiKey = opts.apiKey || undefined;
     this.warn = opts.warn ?? (() => {});
     this.actingAs = opts.actingAs || null;
+    this.commentAuthorHeader = opts.commentAuthorHeader || undefined;
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
   }
 
   /** `GET /api/health`: resolves when the server answers 2xx. */
@@ -157,16 +181,23 @@ export class PaperclipClient {
     return this.request("GET", this.companyPath());
   }
 
-  /** Every issue in the company, fetched a page at a time. */
-  async *listIssues(): AsyncIterableIterator<PaperclipIssue> {
+  /**
+   * The company's issues in one of `statuses`, fetched a page at a time; with `q`,
+   * only those the server's text search matches. `statuses` is required: a list
+   * with no status filter would read the terminal cards, which the plugin never does.
+   */
+  async *listIssues(opts: { q?: string; statuses: readonly string[] }): AsyncIterableIterator<PaperclipIssue> {
+    if (!opts.statuses?.length) throw new Error("listIssues needs a status filter: the plugin never reads terminal cards");
+    const filter = `&status=${opts.statuses.map(encodeURIComponent).join(",")}${opts.q ? `&q=${encodeURIComponent(opts.q)}` : ""}&sortField=id&sortDir=asc`; // a stable order: an offset page never skips or repeats a row when cards change between pages
     for (let offset = 0; ; offset += PAPERCLIP_PAGE_SIZE) {
       const page = await this.request<PaperclipIssue[]>(
         "GET",
-        `${this.companyPath()}/issues?limit=${PAPERCLIP_PAGE_SIZE}&offset=${offset}`,
+        `${this.companyPath()}/issues?limit=${PAPERCLIP_PAGE_SIZE}&offset=${offset}${filter}`,
       );
       if (!Array.isArray(page)) {
         throw new PaperclipClientError("Paperclip issue list is not an array", 200, JSON.stringify(page));
       }
+      this.reads.rows += page.length;
       yield* page;
       if (page.length < PAPERCLIP_PAGE_SIZE) return;
     }
@@ -238,7 +269,7 @@ export class PaperclipClient {
   private async request<T>(method: string, path: string, body?: unknown, credit?: string | null): Promise<T> {
     // Unnamed (undefined) → `actingAs` on a write; a named author, or null for none, wins.
     const commentAuthor = credit !== undefined ? credit : method === "GET" ? null : this.actingAs;
-    if (!commentAuthor) return this.send<T>(method, path, body, null);
+    if (!commentAuthor || !this.commentAuthorHeader) return this.send<T>(method, path, body, null);
     try {
       return await this.send<T>(method, path, body, commentAuthor);
     } catch (err) {
@@ -248,7 +279,20 @@ export class PaperclipClient {
     }
   }
 
-  private async send<T>(method: string, path: string, body: unknown, commentAuthor: string | null): Promise<T> {
+  /** One send; a GET is retried on a transient failure, a write never. */
+  private send<T>(method: string, path: string, body: unknown, commentAuthor: string | null): Promise<T> {
+    if (method !== "GET") return this.sendOnce<T>(method, path, body, commentAuthor);
+    const retry = backoffSettings().paperclip;
+    return retryAsync(() => this.sendOnce<T>(method, path, body, commentAuthor), {
+      window: retry,
+      maxAttempts: retry.maxAttempts,
+      isTransient: isTransientPaperclipError,
+      onRetry: (err, attempt, wait) => this.warn(`Paperclip ${method} ${path}: attempt ${attempt}/${retry.maxAttempts} failed (${err instanceof Error ? err.message : String(err)}); retrying in ${wait} ms`),
+    });
+  }
+
+  private async sendOnce<T>(method: string, path: string, body: unknown, commentAuthor: string | null): Promise<T> {
+    if (method === "GET") this.reads.calls++;
     const what = `${method} ${path}`;
     let res: Response;
     try {
@@ -256,17 +300,28 @@ export class PaperclipClient {
         ? { accept: "application/json" }
         : { accept: "application/json", "content-type": "application/json" };
       if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
-      if (commentAuthor) headers[COMMENT_AUTHOR_HEADER] = commentAuthor;
+      if (commentAuthor && this.commentAuthorHeader) headers[this.commentAuthorHeader] = commentAuthor;
       res = await this.fetchImpl(`${this.base}${path}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new PaperclipClientError(`Paperclip ${what} failed: ${msg}`, 0, msg);
     }
-    const text = await res.text().catch(() => "");
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      // A body cut off or timed out mid-read is no answer; on a refusal the body is only a detail.
+      if (res.ok) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new PaperclipClientError(`Paperclip ${what} failed: ${msg}`, 0, msg);
+      }
+      text = "";
+    }
     if (!res.ok) {
       throw new PaperclipClientError(`Paperclip ${what} returned ${res.status}`, res.status, text);
     }

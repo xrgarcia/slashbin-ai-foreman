@@ -1,16 +1,19 @@
 {
   "name": "slashbin-ai-agent",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Open-source daemon that watches GitHub repos for approved issues and implements them using Claude Code CLI",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "slashbin-ai-agent": "dist/cli.js"
+    "slashbin-ai-agent": "dist/cli.js",
+    "foreman-conformance": "dist/plugins/conformance-cli.js"
   },
   "files": [
     "dist",
     "hooks",
-    "skills"
+    "skills",
+    "schemas",
+    "conformance"
   ],
   "scripts": {
     "build": "tsc && node scripts/stamp-build.mjs",
@@ -28,14 +31,17 @@
     "start:fg": "node dist/cli.js",
     "once": "node dist/cli.js --once",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "acceptance": "npm run build && node scripts/acceptance/run-all.mjs",
+    "test": "npm run build && FOREMAN_STATE_DIR=$(mktemp -d) node --test test/*.test.mjs",
     "setup": "npm install && npm run build && node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "labels:install": "node scripts/install-labels.mjs",
     "paperclip:register": "node scripts/paperclip/agent.mjs",
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",
+    "metrics:report": "node dist/cli.js metrics:report",
     "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs",
-    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check"
+    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check",
+    "schemas": "npm run build && node scripts/contract/generate-schemas.mjs"
   },
   "engines": {
     "node": ">=22.12"

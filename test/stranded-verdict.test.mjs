@@ -21,8 +21,8 @@ const fn = github.slice(github.indexOf("function currentVerdictRequestsChanges")
 const body = fn.slice(0, fn.indexOf("\n}\n"));
 
 test("a current verdict is checked for CHANGES_REQUESTED before the PR is skipped", () => {
-  const find = github.slice(github.indexOf("export function findPRsNeedingReview"));
-  const guard = find.slice(find.indexOf("if (hasFreshReview("), find.indexOf("needs review (issues"));
+  const find = github.slice(github.indexOf("export async function findPRsNeedingReview"));
+  const guard = find.slice(find.indexOf("if (await hasFreshReview("), find.indexOf("needs review (issues"));
   const check = guard.indexOf("currentVerdictRequestsChanges(");
   assert.ok(check > 0, "without it a review that died after its verdict parks the PR forever");
   assert.ok(check > guard.indexOf("returnedToReviewSinceVerdict("), "a return to review still wins: that is a re-review");
@@ -30,20 +30,20 @@ test("a current verdict is checked for CHANGES_REQUESTED before the PR is skippe
   assert.match(guard, /stranded: true/);
 });
 
-test("only the latest verdict counts, and only CHANGES_REQUESTED strands", () => {
+test("only the latest review counts (a later COMMENTED holds), and only CHANGES_REQUESTED strands", () => {
   assert.match(body, /\.sort\(/);
-  assert.match(body, /verdicts\[verdicts\.length - 1\]\?\.state === "CHANGES_REQUESTED"/);
+  assert.match(body, /latest\[latest\.length - 1\]\?\.state === "CHANGES_REQUESTED"/);
   assert.match(body, /byReviewer\(r, reviewerLogin\)/);
 });
 
-test("lookup failure keeps the skip instead of sending work to revise blind", () => {
-  assert.match(body, /catch \(err\)[\s\S]*return false;/);
+test("a lookup failure throws and fails the pass instead of sending work to revise blind (EM#1244 f5)", () => {
+  assert.doesNotMatch(body, /catch \(/);
 });
 
 test("the review phase reports stranded issues inReview → changesRequested and does not review", () => {
   const phase = orchestrator.slice(orchestrator.indexOf("if (candidate.stranded)"));
   const block = phase.slice(0, phase.indexOf("\n  }\n"));
-  assert.match(block, /advance\(itemOf\(repoConfig, n\), "changesRequested"/);
+  assert.match(block, /advance\(rt, itemOf\(repoConfig, n\), "changesRequested"/);
   assert.match(block, /return false;/);
   assert.ok(orchestrator.indexOf("if (candidate.stranded)") < orchestrator.indexOf("getPRCheckVerdict(repoConfig, candidate.prNumber"),
     "before the CI gate and the review run");

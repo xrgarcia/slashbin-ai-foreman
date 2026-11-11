@@ -14,7 +14,9 @@ import { issueStage } from "../dist/github-work-source.js";
 import { buildDependencyBatchIssue, findDependencyPRs, findOpenDependencyBatchIssue } from "../dist/github/dependencies.js";
 import { createPromotionPR } from "../dist/github/promotion.js";
 import { createSyncPR } from "../dist/github/branch.js";
-import { buildSessionEnv, buildTechLeadEnv, buildSreEnv } from "../dist/agent.js";
+import { buildSessionEnv } from "../dist/session/env.js";
+import { buildTechLeadEnv } from "../dist/plugins/tech-lead.js";
+import { buildSreEnv } from "../dist/plugins/sre.js";
 
 const L = {
   prUnderReview: "pr under review", prMerged: "pr merged", prPendingActions: "pr pending actions",
@@ -42,7 +44,7 @@ test("defaults are the names the Foreman always used", () => {
   assert.equal(fillTitle(d.promotionTitle, { title: "Fix x", N: 5 }), "release: Fix x");
   assert.equal(fillTitle(d.promotionBatchTitle, { n: 3 }), "release: promote 3 changes to production");
   assert.equal(fillTitle(d.syncTitle, { base: "develop", production: "main" }), "chore: sync develop with main (merge commits backfill)");
-  assert.equal(fillTitle(d.reconcileTitle, { N: 7 }), "feat: implement #7");
+  assert.equal(fillTitle(d.reconcileTitle, { N: 7 }), "feat: implement (#7)");
   assert.equal(signed("body", d), "body\n\n---\nAutomated by slashbin-ai-agent");
   assert.ok(Object.isFrozen(d) && Object.isFrozen(d.priorityLabels) && Object.isFrozen(d.priorityLabels[0]));
 });
@@ -126,7 +128,7 @@ else process.stdout.write("[]");
   chmodSync(join(bin, "gh"), 0o755);
   savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
-  // runGh refuses without a Foreman token; the fake gh never reads it.
+  // runGhAsync refuses without a Foreman token; the fake gh never reads it.
   savedToken = process.env.FOREMAN_GITHUB_TOKEN;
   process.env.FOREMAN_GITHUB_TOKEN = "test-token";
 });
@@ -143,27 +145,27 @@ function arrange(st) {
 const calls = () => readFileSync(ghLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 const flag = (args, name) => args[args.indexOf(name) + 1];
 
-test("findDependencyPRs selects by the configured branch prefixes", () => {
+test("findDependencyPRs selects by the configured branch prefixes", async () => {
   const pr = (n, head) => ({ number: n, url: "u", title: "t", body: "", headRefName: head, baseRefName: "features" });
   arrange({ prs: [pr(1, "dependabot/npm/x"), pr(2, "renovate/y"), pr(3, "feature/z")] });
-  assert.deepEqual(findDependencyPRs("example/a", tmp, ["features"]).map((p) => p.number), [1]);
+  assert.deepEqual((await findDependencyPRs("example/a", tmp, ["features"])).map((p) => p.number), [1]);
   const c = { ...DEFAULT_GITHUB_CONVENTIONS, dependencyBranchPrefixes: ["renovate/"] };
-  assert.deepEqual(findDependencyPRs("example/b", tmp, ["features"], undefined, c).map((p) => p.number), [2]);
+  assert.deepEqual((await findDependencyPRs("example/b", tmp, ["features"], undefined, c)).map((p) => p.number), [2]);
 });
 
-test("findOpenDependencyBatchIssue matches the configured title prefix", () => {
+test("findOpenDependencyBatchIssue matches the configured title prefix", async () => {
   arrange({ issues: [{ number: 4, title: "deps: land 2 dependency updates", labels: [], body: "" }] });
   const c = { ...DEFAULT_GITHUB_CONVENTIONS, dependencyBatchTitlePrefix: "deps: land " };
   const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-  assert.equal(findOpenDependencyBatchIssue("example/c", tmp, logger), undefined);
-  assert.equal(findOpenDependencyBatchIssue("example/d", tmp, logger, c)?.number, 4);
+  assert.equal(await findOpenDependencyBatchIssue("example/c", tmp, logger), undefined);
+  assert.equal((await findOpenDependencyBatchIssue("example/d", tmp, logger, c))?.number, 4);
 });
 
-test("promotion and sync PRs carry the configured titles and signature", () => {
+test("promotion and sync PRs carry the configured titles and signature", async () => {
   const c = { ...DEFAULT_GITHUB_CONVENTIONS, promotionTitle: "ship #{N}: {title}", syncTitle: "sync {production} into {base}", signature: "by the bot" };
   arrange({});
-  createPromotionPR("example/a", "prod", "dev", [{ number: 12, title: "Fix x" }], tmp, undefined, c);
-  createSyncPR("example/a", "prod", "dev", 2, tmp, undefined, c);
+  await createPromotionPR("example/a", "prod", "dev", [{ number: 12, title: "Fix x" }], tmp, undefined, c);
+  await createSyncPR("example/a", "prod", "dev", 2, tmp, undefined, c);
   const [promo, sync] = calls().filter((a) => a[0] === "pr" && a[1] === "create");
   assert.equal(flag(promo, "--title"), "ship #12: Fix x");
   assert.match(flag(promo, "--body"), /- #12: Fix x\n\n---\nby the bot$/);
@@ -173,7 +175,7 @@ test("promotion and sync PRs carry the configured titles and signature", () => {
 
 test("no GitHub name is a literal outside conventions.ts", () => {
   const src = new URL("../src/", import.meta.url).pathname;
-  const files = readdirSync(src, { recursive: true }).filter((f) => f.endsWith(".ts") && f !== join("github", "conventions.ts"));
+  const files = readdirSync(src, { recursive: true }).filter((f) => f.endsWith(".ts") && f !== join("config-schema", "github.ts") && f !== join("github", "conventions.ts"));
   const banned = [/Automated by slashbin-ai-agent/, /`release: /, /`chore: sync /, /`feat: implement /, /"dependabot\/"/, /includes\("blocked"\)/, /hasLabel\([^,]+, "blocked"\)/];
   for (const f of files) {
     const text = readFileSync(join(src, f), "utf8");

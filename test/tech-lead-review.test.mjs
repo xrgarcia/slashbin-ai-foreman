@@ -4,17 +4,18 @@
 // Codex: exit 3 means "wrote nothing" and MUST come back as a fallback so the
 // Claude review runs; any other failure must NOT, because it may have written.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewViaTechLead } from "../dist/agent.js";
+import { reviewViaTechLead } from "../dist/plugins/tech-lead.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
 const repo = { name: "r", githubRepo: "o/r" };
 
 function fakeTechLead(script) {
-  const dir = mkdtempSync(join(tmpdir(), "fake-tech-lead-"));
+  const dir = mkTmp("fake-tech-lead-");
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/tech-lead.mjs"), script);
   return { techLeadPath: dir, emRepoPath: "/em", reviewMaxDurationMs: 30_000 };
@@ -62,4 +63,54 @@ test("the configured label names reach the Tech Lead as they reach Claude", asyn
   const r = await reviewViaTechLead(labelled, cfg, 5, logger);
   assert.equal(r.fallback, true);
   assert.match(r.reason, /labels go \{"prUnderReview":"in-review","prPendingActions":"needs-changes"\}/);
+});
+
+// foreman#180: a transient GitHub error inside the Tech Lead is a defer, never a charged failure.
+test("a non-zero exit whose stderr is a TLS handshake timeout is deferred like exit 3, flagged transient", async () => {
+  const cfg = fakeTechLead('console.error(\'review-pr failed: gh pr view 7: Post "https://api.github.com/graphql": net/http: TLS handshake timeout\'); process.exit(1);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.fallback, true);
+  assert.equal(r.unavailable, true);
+  assert.match(r.reason, /TLS handshake timeout/);
+});
+
+test("5xx, ECONNRESET, ENOTFOUND and dial tcp on stderr are deferred", async () => {
+  for (const msg of ["HTTP 502: Bad Gateway", "read ECONNRESET", "getaddrinfo ENOTFOUND api.github.com", "dial tcp 140.82.1.1:443: i/o timeout"]) {
+    const cfg = fakeTechLead(`console.error(${JSON.stringify(`review-pr failed: ${msg}`)}); process.exit(1);`);
+    const r = await reviewViaTechLead(repo, cfg, 7, logger);
+    assert.equal(r.fallback, true, msg);
+  }
+});
+
+test("auth, 404, 422 and rate-limit failures stay failures", async () => {
+  for (const msg of ["HTTP 401: Bad credentials", "HTTP 404: Not Found", "HTTP 422: Validation Failed", "API rate limit exceeded", "merge conflicts"]) {
+    const cfg = fakeTechLead(`console.error(${JSON.stringify(`review-pr failed: ${msg}`)}); process.exit(1);`);
+    const r = await reviewViaTechLead(repo, cfg, 7, logger);
+    assert.equal("fallback" in r, false, msg);
+    assert.equal(r.success, false, msg);
+  }
+});
+
+test("exit 3 from the Tech Lead's own github-unavailable is a transient defer; exit 3 for Codex stays the visible wait", async () => {
+  const cfg = fakeTechLead('console.log("GitHub unavailable after 4 attempts — nothing written; retry later."); process.exit(3);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.fallback, true);
+  assert.equal(r.unavailable, true);
+  const codex = fakeTechLead('console.log("Codex first read failed (signed-out) — nothing written"); process.exit(3);');
+  const c = await reviewViaTechLead(repo, codex, 7, logger);
+  assert.equal(c.fallback, true);
+  assert.equal(c.unavailable, undefined);
+});
+
+test("exit 3 with a TLS timeout on stderr is deferred the same as exit 1", async () => {
+  const cfg = fakeTechLead('console.error("gh pr view 7: net/http: TLS handshake timeout"); console.log("retry later"); process.exit(3);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.unavailable, true);
+});
+
+test("HTTP 500 on stderr is deferred, transient, not a failure", async () => {
+  const cfg = fakeTechLead('console.error("review-pr failed: gh pr view 7: HTTP 500: Internal Server Error"); process.exit(1);');
+  const r = await reviewViaTechLead(repo, cfg, 7, logger);
+  assert.equal(r.fallback, true);
+  assert.equal(r.unavailable, true);
 });

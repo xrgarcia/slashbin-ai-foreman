@@ -5,6 +5,8 @@
 ## Contents
 
 - [When a PR is reviewed](#when-a-pr-is-reviewed)
+- [The CI gate](#the-ci-gate)
+- [QA before the merge](#qa-before-the-merge)
 - [Outcome-label reconciliation](#outcome-label-reconciliation)
 - [Declaring a deliberate hold](#declaring-a-deliberate-hold)
 - [Review config](#review-config)
@@ -17,7 +19,8 @@ vanilla config keeps the original behavior, with no review step.
 It differs from Implementation and Revision in three ways, because review is a
 decision-layer workflow rather than an in-repo edit:
 
-- **Runs as a separate program.** The Foreman runs `bin/tech-lead.mjs review-pr` in
+- **Runs as a separate program.** The Tech Lead plugin (`src/plugins/tech-lead.ts`, the
+  `reviewer` role) runs `bin/tech-lead.mjs review-pr` in
   the Tech Lead's checkout, which carries its own review procedure. When it cannot
   take a review (its model is unavailable), the PR waits and is offered again after
   a `backoff.agentUnavailable` wait.
@@ -37,12 +40,41 @@ checks the work in dev ([pipeline.md](pipeline.md#the-stages)).
 ## When a PR is reviewed
 
 A PR is gated into review only when its linked issue is labeled `pr under review`,
-it has an open `featureBranch → baseBranch` PR, and there is no review by
+it has an open Foreman-owned PR into `baseBranch`, and there is no review by
 `reviewerLogin` newer than the PR's latest commit (a freshness guard against
 re-review loops).
 
+The EM's `blocked` label on the PR's issue pauses review: the Tech Lead is not offered the PR
+until the label is lifted. A PR that was merged or closed since the Foreman last read GitHub is
+not reviewed; the snapshot is dropped and the next pass starts clean. A PR that already has a
+current changes-requested review whose label never followed is sent to revise without a new review.
+
 Every review run's full turn-by-turn interaction (`--output-format stream-json`) is
 written verbatim to `logs/review/<repo>-cycle<N>-<timestamp>.log` for debugging.
+
+## The CI gate
+
+A review session is never spent on a PR its own CI already rejects. Before the Tech Lead is
+called, the Foreman reads the PR's checks (`src/github/ci-gate.ts`):
+
+- **Pending** (any check queued or running): the review waits for CI.
+- **Failing** (a check name with no passing run; cancelled, skipped and neutral runs do not
+  count): the PR goes back to the builder with a comment naming the red checks, and its issue moves to
+  `pr pending actions`. This is allowed `backoff.maxCiBounces` times (default 2) since the last review;
+  after that the PR is reviewed anyway, so a reviewer sees it.
+- **Green, or no checks**: review proceeds.
+
+## QA before the merge
+
+With `qaBeforeMerge: true` on a `qaRepos` repo, the Tech Lead is asked to approve with `--no-merge`
+and the merge waits for QA (`src/phases/qa-before-merge.ts`). The `blocked` pause and a CI gate
+apply here too, but a head still red after `maxCiBounces` is not booted: QA waits. QA runs `check
+--local` on the approved head. A PASS has the Tech Lead merge that exact head on its existing approval
+(a head pushed since, or no approval of it, merges nothing). A FAIL counts as a review round and goes
+to revise. A run with no verdict leaves the PR approved but unmerged and the card Blocked: a tooling
+hold retries after `backoff.agentUnavailable` and charges nothing, any other hold counts toward
+`backoff.repoFailure`. The Tech Lead is not offered the PR again meanwhile. Description of the rest:
+[pipeline.md](pipeline.md#the-stages) (Verify, QA).
 
 ## Outcome-label reconciliation
 
@@ -85,7 +117,7 @@ FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS hold=criterion-
 ```
 
 The Foreman then neither sets the label nor re-verifies behind it, and surfaces the
-issue as *held* rather than failed. The hold is persisted in `.agent-state.json`, so
+issue as *held* rather than failed. The hold is persisted in the issue's record, so
 it survives restarts, and clears automatically once the issue leaves the dead zone.
 
 Without this, a deliberate hold and a dropped label are the same observation, and
@@ -107,7 +139,7 @@ value wins. Every key in full: [configuration.md#review-phase](configuration.md#
 | `reviewModel` | — | Model override for review runs (independent of `model`) |
 | `reviewMaxTurns` | `200` | Max turns (review + verify is long-running) |
 | `reviewMaxDurationMs` | `3600000` (60 min) | Max review duration |
-| `reviewAllowedTools` | broad MCP + shell set | Tool surface for the review skill |
+| `reviewAllowedTools` | `Read, Write, Edit, Bash, Glob, Grep, WebFetch` (the `slashbin` profile adds its MCP servers) | Tool surface for the review skill |
 | `reviewerLogin` | — | GitHub login the review runs as (freshness guard). Unset = a verdict by any reviewer counts as current |
 | `reviewLabelReconcile` | `true` | Set the outcome label from the run's own trailer when the skill merged without labeling. Env: `AI_AGENT_REVIEW_LABEL_RECONCILE` |
 

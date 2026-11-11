@@ -1,7 +1,8 @@
 // GitHub, through the gh CLI. The code lives in src/github/, one file per concern;
 // this file is the public surface the rest of the Foreman imports, unchanged by the split.
 
-export { isBackoffRefusal, gh } from "./github/gh.js";
+export { isBackoffRefusal, ghAsync } from "./github/gh.js";
+export { hasCommentContaining } from "./github/pr-comments.js";
 export {
   type IssueSnapshot,
   configureIssueCache,
@@ -25,7 +26,11 @@ export {
   hasPendingRevisions,
   type ReviewCandidate,
   findPRsNeedingReview,
+  type QaPendingPr,
+  findQaPendingPr,
+  blockedAmong,
 } from "./github/review-queue.js";
+export { readPrHeadSha } from "./github/review-freshness.js";
 export {
   type MergedIssueRef,
   findIssuesMergedToBase,
@@ -66,7 +71,23 @@ export {
   stripReadyForProdLabel,
   createPromotionPR,
 } from "./github/promotion.js";
-export { issueTitles, readPrDigest, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
+export {
+  type SignoffGate,
+  unsignedIssues,
+  ReleaseSignoff,
+  SIGNOFF_MARK,
+} from "./github/release-signoff.js";
+export {
+  type CarriedMerge,
+  type ReleaseCarry,
+  NO_CARRY,
+  adoptCarried,
+  noteCarried,
+  listCarriedMerges,
+  planCarry,
+  mergedPrNumber,
+} from "./github/release-carry.js";
+export { issueTitles, readPrDigest, prChangedFiles, readLatestReviewBody, readRulingState, rulingState, EM_RULING_PATTERN, TECH_LEAD_ESCALATE_MARKER } from "./github/reports.js";
 export {
   checkPRHasChanges,
   getRemoteBranchSha,

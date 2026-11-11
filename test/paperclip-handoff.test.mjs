@@ -52,3 +52,9 @@ test("deployFailed variant: the SRE is told to get the merge deployed, re-verify
   assert.match(handoffNextLine("blocked", sre, DEFAULT_HANDOFF_LABELS, "deployFailed"), /^Next: SRE — get the merge deployed to dev/);
   assert.match(handoffComment("blocked", facts), /Clear the hold on example\/r#7/, "no variant: the stage's own text");
 });
+
+test("verifyScheduled names the resume time in Central, not the next verify pass", () => {
+  const text = handoffComment("merged", { ...facts, resumeAt: "2026-11-09T16:59:00.000Z" }, DEFAULT_HANDOFF_LABELS, "verifyScheduled");
+  assert.match(text, /resumes Mon Nov 9, 10:59 am CT/);
+  assert.doesNotMatch(text, /next verify pass|\{\w+\}/);
+});

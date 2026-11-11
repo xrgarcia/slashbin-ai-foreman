@@ -7,30 +7,16 @@ import { findConfigFile, loadConfig, type AgentConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
-import { configureClaudeTrust, trustManagedRepos } from "./claude-trust.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
-import { addObserver } from "./work-source.js";
-import { secretValues } from "./agent.js";
-import { PaperclipClient } from "./paperclip/client.js";
-import { PaperclipMirror } from "./paperclip/mirror.js";
-import { runDoctor } from "./paperclip/doctor.js";
+import { checkCredentials } from "./credentials.js";
+import { registerBuiltinPlugins } from "./plugins/index.js";
+import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
+import type { PluginContext } from "./plugins/contract.js";
+import { workSourceRefusal } from "./work-source.js";
+import { ForemanRuntime } from "./runtime.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * The session secrets plus the Paperclip key, so a refused response that echoes
- * the key is logged redacted. The key is kept out of `sessionEnv`, which would
- * hand it to agent sessions. Same 8-character floor and longest-first order as
- * secretValues.
- */
-function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | undefined): Array<{ name: string; value: string }> {
-  const out = secretValues(sessionEnv);
-  if (apiKey && apiKey.length >= 8 && !out.some((s) => s.value === apiKey)) {
-    out.push({ name: "AI_AGENT_PAPERCLIP_API_KEY", value: apiKey });
-  }
-  return out.sort((a, b) => b.value.length - a.value.length);
-}
 
 function getVersion(): string {
   try {
@@ -47,6 +33,7 @@ slashbin-ai-agent v${getVersion()}
 
 Usage: slashbin-ai-agent [options]
        slashbin-ai-agent paperclip:doctor [--config <path>]
+       slashbin-ai-agent metrics:report [--repo <name>] [--issue <n>] [--since <days>] [--json]
 
 Options:
   --config <path>  Path to .ai-agent.json config file
@@ -61,9 +48,10 @@ Commands:
                     checkout, branches, skills and labels (read-only; exits non-zero on any FAIL)
   paperclip:doctor  Check Paperclip reachability, company, agent registration, and config
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
+  metrics:report    Time each work item spent per lifecycle stage, from the metrics log (docs/metrics.md)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
-repoPath, githubRepo, baseBranch, featureBranch, triggerLabel, skillPath, prompt.
+repoPath, githubRepo, baseBranch, branchPrefix, triggerLabel, skillPath, prompt.
 Top-level values are defaults. Use --repo to run one repo per daemon instance.
 
 Single-repo (backward compat): omit repos[] and set repoPath/githubRepo directly.
@@ -77,7 +65,8 @@ Environment variables:
   AI_AGENT_ISSUE_SNAPSHOT_LIMIT Max open issues fetched per snapshot (default: 500)
   AI_AGENT_SKILL_PATH       Path to skill file
   AI_AGENT_BASE_BRANCH      PR target branch (default: develop)
-  AI_AGENT_FEATURE_BRANCH   Commit branch (default: features)
+  AI_AGENT_BRANCH_PREFIX    Prefix of each issue's own branch (default: foreman/)
+  AI_AGENT_FEATURE_BRANCH   Legacy shared branch, still Foreman-owned if a PR uses it (default: features)
   AI_AGENT_PRODUCTION_BRANCH  Production branch for sync/promotion (default: main)
   AI_AGENT_MAX_TURNS        Max agent turns (default: 30)
   AI_AGENT_LOG_FORMAT       json or text (default: text)
@@ -90,7 +79,7 @@ function getArg(args: string[], flag: string): string | undefined {
   return idx !== -1 ? args[idx + 1] : undefined;
 }
 
-async function main(): Promise<void> {
+async function main(rt: ForemanRuntime): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.includes("--version")) {
@@ -107,9 +96,12 @@ async function main(): Promise<void> {
   const repoFilter = getArg(args, "--repo");
   const once = args.includes("--once");
 
-  // Read-only Paperclip check. Handled here, before anything that needs a GitHub
-  // token, a logger or the PID file: the doctor needs only the config.
-  if (args[0] === "paperclip:doctor") {
+  // A plugin's own command (e.g. the read-only `paperclip:doctor`). Handled here,
+  // before anything that needs a GitHub token, a logger or the PID file: a
+  // plugin command needs only the config.
+  registerBuiltinPlugins(rt);
+  const command = args[0] ? pluginCommand(args[0]) : undefined;
+  if (command) {
     let doctorConfig;
     try {
       doctorConfig = loadConfig(configPath);
@@ -117,7 +109,7 @@ async function main(): Promise<void> {
       console.log(`FAIL: config-complete — the config does not load: ${err instanceof Error ? err.message : err}`);
       process.exit(1);
     }
-    const allPassed = await runDoctor(doctorConfig);
+    const allPassed = await command(doctorConfig);
     process.exit(allPassed ? 0 : 1);
   }
 
@@ -160,50 +152,47 @@ async function main(): Promise<void> {
 
   logger.info(`slashbin-ai-agent v${getVersion()}`);
 
-  // Paperclip mirror (EM#417): an observer of the Foreman's steps, never a work
-  // source. Read once at startup; a config reload does not add or drop it, but
-  // its board mapping follows the reload, and the file it runs is published on
-  // its agent for anything else that places the same cards.
-  let mirror: PaperclipMirror | null = null;
-  let mirroredText: string | null = null;
-  const configText = (): string | null => {
-    const p = findConfigFile(configPath);
-    return p ? readFileSync(p, "utf-8") : null;
+
+  // Plugins (EM#1150): every registered plugin this config enables is started
+  // here. A config reload starts one it newly enables, stops one it disables,
+  // and hands the reloaded config to one that stays on.
+  const pluginCtx: PluginContext = {
+    logger,
+    configText: () => {
+      const p = findConfigFile(configPath);
+      return p ? readFileSync(p, "utf-8") : null;
+    },
   };
-  if (config.paperclip.enabled) {
-    if (config.paperclip.agentId && config.paperclip.companyId) {
-      mirror = new PaperclipMirror(
-        new PaperclipClient({
-          url: config.paperclip.url,
-          companyId: config.paperclip.companyId,
-          apiKey: config.paperclip.apiKey,
-          warn: (m) => logger.warn(m),
-          // The activity feed names the Foreman for its own writes, not the key's user.
-          actingAs: config.paperclip.agentId ? `agent:${config.paperclip.agentId}` : undefined,
-        }),
-        config.paperclip,
-        mirrorSecrets(config.sessionEnv, config.paperclip.apiKey),
-        logger,
-        config.lifecycleLabels,
-      );
-      addObserver(mirror);
-      // Housekeeping off the observer queue: project backfill, retiring the old live task.
-      mirror.start();
-      mirroredText = configText();
-      if (mirroredText !== null) void mirror.publishConfig(mirroredText);
-      logger.info(`Paperclip mirror on: ${config.paperclip.url}`);
-    } else {
-      logger.info("paperclip mirror enabled but no agentId configured; run npm run paperclip:register");
-    }
+  await startPlugins(config, pluginCtx);
+  // Every stage selects and records through the work source, and opens, reads and
+  // merges through the code host; without either, refuse here rather than throw
+  // mid-pass. 78 (EX_CONFIG): a restart cannot fix a config.
+  const noSource = workSourceRefusal(config) ?? codeHostRefusal(config);
+  if (noSource) {
+    logger.error(`Refusing to start: ${noSource}`);
+    process.exit(78);
+  }
+
+  // Credentials before any cycle or PID claim (#43): a missing or
+  // rejected GitHub token otherwise failed every phase, every cycle, while the
+  // process looked healthy. 78 (EX_CONFIG): a restart cannot supply a token.
+  const creds = await checkCredentials(config, (token) => codeHost().probeToken(token));
+  if (creds.refusal) {
+    // stderr, like the config refusals above: the operator who started it by hand reads it there.
+    console.error(`Refusing to start: ${creds.refusal}`);
+    process.exit(78);
+  }
+  if (creds.unverified.length) {
+    logger.warn(`Could not reach GitHub to check ${creds.unverified.join(", ")}; starting anyway.`);
   }
 
   if (once) {
     // Single cycle mode. The daemon does this on start and reload; --once must
     // too, or trustManagedRepos: false would be ignored here.
-    configureClaudeTrust({ enabled: config.trustManagedRepos });
-    trustManagedRepos(config.repos, logger);
+    rt.trust.configure({ enabled: config.trustManagedRepos });
+    rt.trust.trustManagedRepos(config.repos, logger);
     try {
-      const { lastImplementation } = await runCycle(config, logger, 1);
+      const { lastImplementation } = await runCycle(rt, config, logger, 1);
       process.exit(lastImplementation?.success === false ? 1 : 0);
     } catch (err) {
       logger.error("Cycle failed", {
@@ -236,15 +225,14 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
-    // A reload whose file changed hands the mirror the new mapping, then publishes it.
     const onReload = (fresh: AgentConfig): void => {
-      if (!mirror) return;
-      const text = configText();
-      if (text === null || text === mirroredText) return;
-      mirroredText = text;
-      if (mirror.reconfigure(fresh.paperclip)) void mirror.publishConfig(text);
+      void reconfigurePlugins(fresh, pluginCtx).then(() => {
+        for (const lost of [workSourceRefusal(fresh), codeHostRefusal(fresh)]) {
+          if (lost) logger.error(`Config reload: ${lost}. Every pass fails until it is restored.`);
+        }
+      });
     };
-    const daemon = startDaemon(config, logger, { configPath, repoFilter, onReload });
+    const daemon = startDaemon(rt, config, logger, { configPath, repoFilter, onReload });
 
     const shutdown = async () => {
       await daemon.stop();
@@ -273,4 +261,4 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+main(new ForemanRuntime());

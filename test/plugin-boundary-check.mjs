@@ -1,0 +1,126 @@
+// Pure ratchet logic for test/plugin-boundary.test.mjs (EM#1150); no I/O.
+import { posix } from "node:path";
+
+/** Plugin code: GitHub, Paperclip, and each plugin implementation under src/plugins/. */
+const PLUGIN_FILES = [
+  /^github\//,
+  /^github\.ts$/,
+  /^github-work-source\.ts$/,
+  /^github-state\.ts$/,
+  /^paperclip\//,
+  /^plugins\/(?!contract\.ts$|registry\.ts$|index\.ts$)/,
+];
+export const isPlugin = (rel) => PLUGIN_FILES.some((re) => re.test(rel));
+/** The composition root names plugins; that is its job. */
+export const COMPOSITION_ROOT = "plugins/index.ts";
+
+/** The plugin files a src-relative file imports, given its import specifiers (relative ones only count). */
+export function pluginImportsOf(rel, specifiers) {
+  return specifiers
+    .filter((spec) => spec.startsWith("."))
+    .map((spec) => posix.normalize(posix.join(posix.dirname(rel), spec)).replace(/\.js$/, ".ts"))
+    .filter(isPlugin);
+}
+
+/** Each core file's count of imports into plugin code. `imports` maps src-relative file to its specifiers. */
+export function countViolations(imports) {
+  const out = {};
+  for (const [rel, specs] of Object.entries(imports)) {
+    if (isPlugin(rel) || rel === COMPOSITION_ROOT) continue;
+    const n = pluginImportsOf(rel, specs).length;
+    if (n > 0) out[rel] = n;
+  }
+  return out;
+}
+
+/**
+ * A plugin under src/plugins/ (the Tech Lead, SRE, QA, EM, Paperclip plugins and
+ * their shared runner). No allowlist ever covers core importing one (EM#1150 f3):
+ * the agents are reached only through the registry's roleFor/qaFor.
+ */
+export const isAgentPlugin = (rel) => /^plugins\/(?!contract\.ts$|registry\.ts$|index\.ts$)/.test(rel);
+
+/** The ratchet: the problems (empty when clean) of `imports` against the allowlist. */
+export function checkBoundary(imports, allowlist) {
+  const now = countViolations(imports);
+  const problems = [];
+  for (const [rel, specs] of Object.entries(imports)) {
+    if (isPlugin(rel) || rel === COMPOSITION_ROOT) continue;
+    for (const target of pluginImportsOf(rel, specs).filter(isAgentPlugin)) {
+      problems.push(`src/${rel} imports the plugin src/${target} directly; reach it through src/plugins/registry.ts (roleFor)`);
+    }
+  }
+  for (const [file, n] of Object.entries(now)) {
+    const allowed = allowlist[file];
+    if (allowed === undefined) problems.push(`src/${file} imports plugin code directly (${n}); call it through src/plugins/registry.ts`);
+    else if (n > allowed) problems.push(`src/${file} plugin imports grew ${allowed} -> ${n}; call the new ones through the registry`);
+  }
+  for (const [file, allowed] of Object.entries(allowlist)) {
+    const n = now[file] ?? 0;
+    if (n < allowed) problems.push(`src/${file} is down to ${n} plugin imports from ${allowed}: lower KNOWN_VIOLATORS to ${n}${n === 0 ? " (delete the line)" : ""}`);
+  }
+  return problems;
+}
+
+/** Files that may construct the GitHub work-source connector (EM#1150 f4): the GitHub plugin and the GitHub code. */
+export const mayConstructConnector = (rel) => rel === "plugins/github.ts" || /^github/.test(rel);
+
+/**
+ * Core files that construct `GitHubIssueConnector` or import it to do so, given
+ * each src-relative file's text. The core gets its work source only from the
+ * registry; no allowlist covers this. Comments are ignored.
+ */
+export function connectorProblems(sources) {
+  const problems = [];
+  for (const [rel, text] of Object.entries(sources)) {
+    if (mayConstructConnector(rel)) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    if (/\bnew\s+GitHubIssueConnector\b/.test(code)) {
+      problems.push(`src/${rel} constructs GitHubIssueConnector; get the work source from the registry (workSourceFor / activeWorkSource)`);
+    } else if (/^import\b[^;]*\bGitHubIssueConnector\b[^;]*from/m.test(code)) {
+      problems.push(`src/${rel} imports GitHubIssueConnector; get the work source from the registry (workSourceFor / activeWorkSource)`);
+    }
+  }
+  return problems;
+}
+
+/** Files that may run the `gh` CLI (EM#1150 f5): the GitHub code and the GitHub plugin. */
+export const maySpawnGh = (rel) => rel === "plugins/github.ts" || /^github/.test(rel);
+
+/**
+ * Core files that run `gh` themselves, given each src-relative file's text. The
+ * core reaches GitHub only through the code host (`codeHost()` in the registry);
+ * no allowlist covers this. Comments are ignored.
+ */
+export function ghSpawnProblems(sources) {
+  const problems = [];
+  for (const [rel, text] of Object.entries(sources)) {
+    if (maySpawnGh(rel)) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    if (/\b(?:execFileSync|execFile|execFileAsync|spawnSync|spawn|execSync|exec)\s*\(\s*["'`]gh\b/.test(code)) {
+      problems.push(`src/${rel} runs gh directly; call the code host instead (codeHost() in src/plugins/registry.ts)`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Core files that read an issue title for a relation (slashbin-ai-foreman#267), given each src-relative file's
+ * text: the `follow-up to #N` phrase anywhere in code, or a line that touches a title and an issue-number pattern
+ * (`#\d` / `#(\d+)`). The relation comes from the code host (`relationsOf`); only plugin code reads a title for
+ * it. No allowlist covers this. Comments are ignored.
+ */
+export function titleRelationProblems(sources) {
+  const problems = [];
+  for (const [rel, text] of Object.entries(sources)) {
+    if (isPlugin(rel)) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+    if (/follow-up\s+to\s+#/i.test(code)) {
+      problems.push(`src/${rel} parses a title for "follow-up to #N"; ask the code host (codeHost().relationsOf) instead`);
+      continue;
+    }
+    const line = code.split("\n").find((l) => /\btitles?\b/i.test(l) && /#\(?\\d/.test(l));
+    if (line) problems.push(`src/${rel} reads an issue title for an issue number (${line.trim().slice(0, 80)}); ask the code host (codeHost().relationsOf) instead`);
+  }
+  return problems;
+}

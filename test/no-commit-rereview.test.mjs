@@ -20,8 +20,8 @@ const fn = github.slice(github.indexOf("function returnedToReviewSinceVerdict"))
 const body = fn.slice(0, fn.indexOf("\n}\n"));
 
 test("a fresh verdict is overridden only when the issue was returned to review after it", () => {
-  const find = github.slice(github.indexOf("export function findPRsNeedingReview"));
-  const guard = find.slice(find.indexOf("if (hasFreshReview("), find.indexOf("needs review (issues"));
+  const find = github.slice(github.indexOf("export async function findPRsNeedingReview"));
+  const guard = find.slice(find.indexOf("if (await hasFreshReview("), find.indexOf("needs review (issues"));
   assert.match(guard, /returnedToReviewSinceVerdict\(/,
     "without it a no-commit revision deadlocks: relabelled, never re-reviewed");
   assert.ok(guard.indexOf("returnedToReviewSinceVerdict") < guard.indexOf("return null"),
@@ -37,8 +37,8 @@ test("the reply is the configured prUnderReview label, applied strictly after th
   assert.match(body, /> verdictMs/);
 });
 
-test("lookup failure keeps the old behaviour instead of reviewing every cycle", () => {
-  assert.match(body, /catch \(err\)[\s\S]*return false;/);
+test("a lookup failure throws and fails the pass: no catch, no guess (EM#1244 f5)", () => {
+  assert.doesNotMatch(body, /catch \(/);
 });
 
 test("paginated label events are parsed line by line, not as one JSON document", () => {

@@ -3,19 +3,29 @@
 
 import type { LifecycleLabels, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { closedPrVersion, dropIssueSnapshot, findOpenPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel, type IssueSnapshot } from "./cache.js";
+import { closedPrVersion, dropIssueSnapshot, findOpenForemanPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel, type IssueSnapshot } from "./cache.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
-import { backoffSettings } from "../backoff.js";
 
-
-export interface MergedIssueRef {
-  issueNumber: number;
-  prNumber: number;
-  prUrl: string;
-  mergedAt: string;
+/**
+ * The issues covered by every open Foreman-owned PR into the base branch (a `foreman/...` head, or the legacy
+ * features head). `null` when a PR is open but its references cannot be read: callers fail closed on that.
+ * A human-named PR is not Foreman's work and conceals nothing.
+ */
+async function issuesOnOpenForemanPrs(config: RepoConfig, logger: Logger): Promise<number[] | null> {
+  const open = await findOpenForemanPrs(config, 20);
+  const covered: number[] = [];
+  for (const pr of open) {
+    const referenced = await getReferencedIssuesFromOpenPR(config.githubRepo, pr.headRefName, config.baseBranch, config.repoPath, logger);
+    if (referenced === null) return null;
+    covered.push(...referenced);
+  }
+  return covered;
 }
+import { backoffSettings } from "../backoff.js";
+import type { MergedIssueRef, StuckMergedIssue, ReviewOutcome } from "../code-host.js";
+export type { MergedIssueRef, StuckMergedIssue, ReviewOutcome } from "../code-host.js";
 
 /**
  * THE shared primitive: of `candidates`, which issues' work is already MERGED to
@@ -34,15 +44,15 @@ export interface MergedIssueRef {
  * Conservative: returns [] on any lookup failure — under-advancing is safe
  * (status quo), over-advancing marks unbuilt work as done.
  */
-export function findIssuesMergedToBase(
+export async function findIssuesMergedToBase(
   config: RepoConfig,
   candidates: number[],
   logger: Logger,
-): MergedIssueRef[] {
+): Promise<MergedIssueRef[]> {
   if (candidates.length === 0) return [];
   try {
     // The merged set only grows when a PR merges, which the fleet state sees.
-    const json = ghKeyed(`merged:${config.githubRepo}:${config.baseBranch}`, () => closedPrVersion(config.githubRepo), [
+    const json = await ghKeyed(`merged:${config.githubRepo}:${config.baseBranch}`, async () => await closedPrVersion(config.githubRepo), [
       "pr", "list",
       "--repo", config.githubRepo,
       "--state", "merged",
@@ -97,8 +107,6 @@ export function findIssuesMergedToBase(
   }
 }
 
-export type StuckMergedIssue = MergedIssueRef;
-
 /** Grace window before a merged-but-unadvanced issue is treated as dead-zoned,
  *  giving an in-flight post-merge verify time to advance it. Prevents flapping
  *  on freshly-merged PRs the review agent is still finishing. */
@@ -149,15 +157,14 @@ export function isPastReview(config: RepoConfig, issue: IssueSnapshot): boolean 
   return laterStageLabels(config).some((l) => hasLabel(issue, l));
 }
 
-export function findStuckMergedIssues(
+export async function findStuckMergedIssues(
   config: RepoConfig,
   logger: Logger,
-): StuckMergedIssue[] {
-  if (config.baseBranch === config.featureBranch) return [];
+): Promise<StuckMergedIssue[]> {
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
     const lifecycle = Object.values(config.lifecycleLabels);
-    const issues = getOpenIssues(config.githubRepo, config.repoPath, logger)
+    const issues = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) =>
         hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions) ||
         // Trigger label only, no lifecycle label: implement skips it as covered
@@ -185,35 +192,19 @@ export function findStuckMergedIssues(
     // Fail CLOSED on an unreadable reference list: if we cannot tell which
     // issues the open PR covers, suppress the whole repo as before rather than
     // risk "recovering" an issue whose PR is still open and under review.
-    const openFeaturePrs = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
-    let reviewPending: number[] = [];
-    if (openFeaturePrs.length > 0) {
-      const referenced = getReferencedIssuesFromOpenPR(
-        config.githubRepo,
-        config.featureBranch,
-        config.baseBranch,
-        config.repoPath,
-        logger,
-      );
-      if (referenced === null) {
-        logger.debug(
-          `${config.name}: open feature PR present but its referenced issues are unreadable — suppressing dead-zone detection this pass`,
-        );
-        return [];
-      }
-      reviewPending = referenced;
+    const referenced = await issuesOnOpenForemanPrs(config, logger);
+    if (referenced === null) {
+      logger.debug(`${config.name}: open Foreman PR present but its referenced issues are unreadable — suppressing dead-zone detection this pass`);
+      return [];
     }
+    const reviewPending: number[] = referenced;
     const unowned = candidates.filter((i) => !reviewPending.includes(i.number));
     if (unowned.length === 0) return [];
 
     // Resolve merged work via the SHARED strict primitive — not a bare `#N` scan.
     // A bare-`#N` match would false-positive on an incidental prose mention
     // (slashbin-ai-foreman#28), flagging issues that were never actually merged.
-    const merged = findIssuesMergedToBase(
+    const merged = await findIssuesMergedToBase(
       config,
       unowned.map((i) => i.number),
       logger,
@@ -263,14 +254,13 @@ export function findStuckMergedIssues(
  *  - requires the issue to have been in this state longer than the grace window,
  *    so a PR being opened right now is never mistaken for one that never was
  */
-export function findOrphanedLifecycleIssues(
+export async function findOrphanedLifecycleIssues(
   config: RepoConfig,
   logger: Logger,
-): number[] {
-  if (config.baseBranch === config.featureBranch) return [];
+): Promise<number[]> {
   try {
     const { prUnderReview, prPendingActions, prMerged, prApproved, readyForProd } = config.lifecycleLabels;
-    const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
+    const open = await getOpenIssues(config.githubRepo, config.repoPath, logger);
     const candidates = open.filter(
       (i) =>
         (hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions)) &&
@@ -280,33 +270,18 @@ export function findOrphanedLifecycleIssues(
     );
     if (candidates.length === 0) return [];
 
-    const openFeaturePrs = findOpenPrs(config.githubRepo, config.repoPath, {
-      head: config.featureBranch,
-      base: config.baseBranch,
-      limit: 1,
-    });
-    let reviewPending: number[] = [];
-    if (openFeaturePrs.length > 0) {
-      const referenced = getReferencedIssuesFromOpenPR(
-        config.githubRepo,
-        config.featureBranch,
-        config.baseBranch,
-        config.repoPath,
-        logger,
-      );
-      // Unreadable reference list — cannot tell what the open PR covers, so
-      // releasing anything risks re-implementing work that is in flight.
-      if (referenced === null) return [];
-      reviewPending = referenced;
-    }
-
+    // Unreadable reference list — cannot tell what the open PR covers, so
+    // releasing anything risks re-implementing work that is in flight.
+    const referenced = await issuesOnOpenForemanPrs(config, logger);
+    if (referenced === null) return [];
+    const reviewPending: number[] = referenced;
     const unowned = candidates.filter((i) => !reviewPending.includes(i.number));
     if (unowned.length === 0) return [];
 
     // Anything already merged belongs to findStuckMergedIssues, which re-verifies
     // rather than re-queues. Only what NEVER landed is an orphan.
     const merged = new Set(
-      findIssuesMergedToBase(config, unowned.map((i) => i.number), logger).map((m) => m.issueNumber),
+      (await findIssuesMergedToBase(config, unowned.map((i) => i.number), logger)).map((m) => m.issueNumber),
     );
 
     return unowned.filter((i) => !merged.has(i.number)).map((i) => i.number);
@@ -335,15 +310,15 @@ export function findOrphanedLifecycleIssues(
  * Returns [] on any lookup failure: a check that cannot see the truth must not
  * assert one.
  */
-export function findIssuesStillUnderReview(
+export async function findIssuesStillUnderReview(
   config: RepoConfig,
   issueNumbers: number[],
   logger: Logger,
-): number[] {
+): Promise<number[]> {
   if (issueNumbers.length === 0) return [];
   try {
     dropIssueSnapshot(config.githubRepo);
-    const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
+    const open = await getOpenIssues(config.githubRepo, config.repoPath, logger);
     return issueNumbers.filter((num) => {
       const issue = open.find((i) => i.number === num);
       // Absent from the open set = closed. The review closed it out; not stuck.
@@ -364,13 +339,6 @@ export function findIssuesStillUnderReview(
     return [];
   }
 }
-
-/**
- * The lifecycle states a review can end in, as `LifecycleLabels` keys.
- * `prMerged` when dev verification is its own stage (EM#440): the reviewer
- * merged, and `pr approved` waits on the verifier.
- */
-export type ReviewOutcome = "prApproved" | "prMerged" | "prPendingActions";
 
 /**
  * The outcome each of `issueNumbers` carries in `issues`: `pr approved` or
@@ -400,15 +368,15 @@ export function reviewOutcomesOf(
  * The outcome labels a review run left on its issues, read fresh from GitHub.
  * Empty when the read fails: the caller only reports, never decides, on it.
  */
-export function readReviewOutcomes(
+export async function readReviewOutcomes(
   config: RepoConfig,
   issueNumbers: number[],
   logger: Logger,
-): Map<number, ReviewOutcome> {
+): Promise<Map<number, ReviewOutcome>> {
   if (issueNumbers.length === 0) return new Map();
   try {
     dropIssueSnapshot(config.githubRepo);
-    return reviewOutcomesOf(config, getOpenIssues(config.githubRepo, config.repoPath, logger), issueNumbers);
+    return reviewOutcomesOf(config, await getOpenIssues(config.githubRepo, config.repoPath, logger), issueNumbers);
   } catch (err) {
     logger.debug(`readReviewOutcomes failed for ${config.name}: ${err instanceof Error ? err.message : String(err)}`);
     return new Map();
@@ -420,11 +388,11 @@ export function readReviewOutcomes(
  * yet `prApproved` / `ready for prod`. Read fresh — the reviewer that wrote the
  * label is a foreign process. [] on a failed read: nothing is verified blind.
  */
-export function findIssuesAwaitingVerify(config: RepoConfig, logger: Logger): number[] {
+export async function findIssuesAwaitingVerify(config: RepoConfig, logger: Logger): Promise<number[]> {
   try {
     const { prMerged, prApproved, readyForProd } = config.lifecycleLabels;
     dropIssueSnapshot(config.githubRepo);
-    return getOpenIssues(config.githubRepo, config.repoPath, logger)
+    return (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) => hasLabel(i, prMerged) && !hasLabel(i, prApproved) && !hasLabel(i, readyForProd))
       .map((i) => i.number)
       .sort((a, b) => a - b);
@@ -484,12 +452,12 @@ export function wasGateRevokedSince(
  * path costs nothing beyond the open-issue snapshot already in hand. Returns []
  * on any failure — a lookup that fails must never manufacture authorization.
  */
-export function findRevokedEmGates(
+export async function findRevokedEmGates(
   config: RepoConfig,
   issueNumbers: number[],
   sinceIso: string,
   logger: Logger,
-): number[] {
+): Promise<number[]> {
   if (issueNumbers.length === 0) return [];
   const since = Date.parse(sinceIso);
   if (Number.isNaN(since)) return [];
@@ -497,7 +465,7 @@ export function findRevokedEmGates(
   const revoked: number[] = [];
   try {
     dropIssueSnapshot(config.githubRepo);
-    const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
+    const open = await getOpenIssues(config.githubRepo, config.repoPath, logger);
 
     for (const num of issueNumbers) {
       const issue = open.find((i) => i.number === num);
@@ -505,7 +473,7 @@ export function findRevokedEmGates(
       if (!issue || hasLabel(issue, config.lifecycleLabels.readyForProd)) continue;
 
       try {
-        const raw = gh([
+        const raw = await ghAsync([
           "api", `repos/${config.githubRepo}/issues/${num}/timeline?per_page=100`,
           "-H", "Accept: application/vnd.github.mockingbird-preview+json",
         ], config.repoPath);
@@ -582,17 +550,17 @@ export function planEmGateRestore(
  *
  * Returns the issues actually restored (usually none — the healthy path).
  */
-export function restoreEmGate(
+export async function restoreEmGate(
   config: RepoConfig,
   hadGate: number[],
   logger: Logger,
-): number[] {
+): Promise<number[]> {
   if (hadGate.length === 0) return [];
   const { readyForProd, prApproved } = config.lifecycleLabels;
   const restored: number[] = [];
   try {
     dropIssueSnapshot(config.githubRepo);
-    const open = getOpenIssues(config.githubRepo, config.repoPath, logger);
+    const open = await getOpenIssues(config.githubRepo, config.repoPath, logger);
     for (const step of planEmGateRestore(hadGate, open, config.lifecycleLabels)) {
       const { number: num, dropPrApproved } = step;
       const args = [
@@ -604,7 +572,7 @@ export function restoreEmGate(
       if (dropPrApproved) args.push("--remove-label", prApproved);
 
       try {
-        gh(args, config.repoPath);
+        await ghAsync(args, config.repoPath);
         restored.push(num);
         logger.warn(
           `Restored "${readyForProd}" on #${num} — the review run removed it. ` +
