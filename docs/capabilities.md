@@ -12,7 +12,7 @@ for each one left off, **When off** says what the Foreman does instead. `npm run
 | Metrics (`metrics`) | `observer` | `metrics.enabled` |
 | Tech Lead (`tech-lead`) | `reviewer` | `techLeadPath` is set (and `reviewEnabled` turns the review stage on) |
 | SRE (`sre`) | `verifier`, `deployer` | `srePath` is set |
-| QA (`qa`) | `qa` | `qaPath` is set (covers `qaRepos`) |
+| QA (`qa`) | `qa` | `qaPath` is set (covers `qaRepos`). It also needs `emRepoPath`, the Unstick agent's checkout, so turning QA on turns on Unstick too and needs its token |
 | Unstick (EM) (`em`) | `unstick` | `emRepoPath` is set |
 
 ## GitHub (`github`)
@@ -70,9 +70,9 @@ An agent verifies each merged change in dev and, after release, in production, a
 An agent runs visual and behaviour checks on a PR before it merges (`qaBeforeMerge`) or on dev after verification (`qaGate`), for the repos in `qaRepos`.
 
 - **Roles:** `qa`
-- **On when:** `qaPath` is set (covers `qaRepos`)
+- **On when:** `qaPath` is set (covers `qaRepos`). It also needs `emRepoPath`, the Unstick agent's checkout, so turning QA on turns on Unstick too and needs its token
 - **Config:** `qaPath`, `emRepoPath`, `qaRepos`, `qaGate`, `qaBeforeMerge`, `qaSecretsRunner`, `qaBearerKey`
-- **Env:** `DEV_SESSION_MINT_KEY`
+- **Env:** `DEV_SESSION_MINT_KEY`, `EM_GITHUB_TOKEN`
 - **When off:** No QA gate: a PR moves on review and verification alone.
 
 ## Unstick (EM) (`em`)

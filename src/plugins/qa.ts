@@ -104,8 +104,8 @@ export class QaPlugin implements ForemanPlugin {
   readonly catalog: PluginCatalogEntry = {
     name: "QA",
     purpose: "An agent runs visual and behaviour checks on a PR before it merges (`qaBeforeMerge`) or on dev after verification (`qaGate`), for the repos in `qaRepos`.",
-    onWhen: "`qaPath` is set (covers `qaRepos`)",
-    requires: { config: ["qaPath", "emRepoPath", "qaRepos", "qaGate", "qaBeforeMerge", "qaSecretsRunner", "qaBearerKey"], env: ["DEV_SESSION_MINT_KEY"] },
+    onWhen: "`qaPath` is set (covers `qaRepos`). It also needs `emRepoPath`, the Unstick agent's checkout, so turning QA on turns on Unstick too and needs its token",
+    requires: { config: ["qaPath", "emRepoPath", "qaRepos", "qaGate", "qaBeforeMerge", "qaSecretsRunner", "qaBearerKey"], env: ["DEV_SESSION_MINT_KEY", "EM_GITHUB_TOKEN"] },
     whenOff: "No QA gate: a PR moves on review and verification alone.",
   };
   readonly qa: QaRunner;
