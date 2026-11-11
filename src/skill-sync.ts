@@ -309,7 +309,11 @@ export type DeliverOutcome =
   | { status: "exists"; branch: string }
   | { status: "skipped"; reason: string }
   | { status: "failed"; error: string }
-  | { status: "delivered"; branch: string; sha: string; skills: string[]; subject: string };
+  | { status: "delivered"; branch: string; sha: string; skills: string[]; subject: string }
+  | { status: "refreshed"; branch: string; sha: string; skills: string[]; subject: string };
+
+/** The one line every Foreman delivery commit carries in its body; with the subject and the author it marks a commit as the Foreman's. */
+export const DELIVERY_MARKER = "Copied byte for byte by the Foreman's skill sync (src/skill-sync.ts) onto this issue's branch,";
 
 /**
  * The exact ref a session's issue branch starts from: the skill-sync commit THIS session's sync just made, else
@@ -537,10 +541,11 @@ export class SkillSync {
    *
    * It touches NO working tree, index, local branch or checkout: the commit is built with git
    * plumbing in a throwaway index on top of `origin/<base>` and pushed as a new branch. The clone
-   * may be the person's own, so nothing here may move under them. It never force-pushes, and it
-   * does nothing when `origin/<base>` already carries the current skills or when the issue already
-   * has a `feature/<N>-*` branch on origin (the person started it, or it was delivered before: the
-   * direct-mode skill resumes that branch, and a second push would diverge it).
+   * may be the person's own, so nothing here may move under them. It force-updates exactly one
+   * kind of branch (see `refreshUntouched`: only Foreman delivery commits, no PR) and never anything else. It
+   * does nothing when `origin/<base>` already carries the current skills, and leaves an existing
+   * `feature/<N>-*` branch alone unless that one case holds (the person started it: the direct-mode
+   * skill resumes that branch, and a second push would diverge it).
    *
    * Never throws: anything it cannot do is `skipped` or `failed`, and the issue is untouched.
    */
@@ -549,6 +554,8 @@ export class SkillSync {
     repo: SkillSyncRepo,
     issue: { number: number; title: string },
     logger: Logger,
+    /** Every PR (any state) whose head is this branch. Without it an existing branch is never refreshed. Throws on a failed read. */
+    prsForBranch?: (branch: string) => Promise<{ number: number; state: string }[]>,
   ): Promise<DeliverOutcome> {
     const golden = await this.currentGolden(cfg, logger);
     if (!golden) return { status: "skipped", reason: "golden source unreadable" };
@@ -566,10 +573,40 @@ export class SkillSync {
       if (stale.length === 0) return { status: "current" };
 
       const existing = await git(["ls-remote", "--heads", "origin", `feature/${issue.number}-*`], cwd);
-      if (existing) return { status: "exists", branch: existing.split("\n")[0].split("\t")[1]?.replace(/^refs\/heads\//, "") ?? `feature/${issue.number}-*` };
+      if (existing) {
+        const rows = existing.split("\n").map((l) => l.split("\t"));
+        const branch = rows[0][1]?.replace(/^refs\/heads\//, "") ?? `feature/${issue.number}-*`;
+        if (rows.length === 1 && prsForBranch) {
+          const refreshed = await this.refreshUntouched({ cwd, golden, names, target, baseSha, stale, have, issue, branch, oldSha: rows[0][0], prsForBranch, logger });
+          if (refreshed) return refreshed;
+        }
+        return { status: "exists", branch };
+      }
 
-      // A throwaway index: the clone's own index and working tree are never read or written.
-      scratch = mkdtempSync(join(tmpdir(), "foreman-skill-deliver-"));
+      const built = await this.buildDeliveryCommit(cwd, golden, target, baseSha, stale, have, issue.number);
+      scratch = built.scratch;
+      const { sha, subject } = built;
+      const branch = `feature/${issue.number}-${slugify(issue.title) || "issue"}`;
+      // No force: a branch that appeared since the check above makes this fail, which is the right answer.
+      await git(["push", "--quiet", "origin", `${sha}:refs/heads/${branch}`], cwd);
+      logger.info(`Skill delivery: ${subject} — pushed ${sha.slice(0, 9)} to ${branch} (no PR; the person's direct-mode session resumes it)`);
+      return { status: "delivered", branch, sha, skills: stale, subject };
+    } catch (err) {
+      const error = firstLine(err);
+      logger.warn(`Skill delivery to ${repo.name} #${issue.number} failed: ${error}`);
+      return { status: "failed", error };
+    } finally {
+      if (scratch) { try { rmSync(scratch, { recursive: true, force: true }); } catch { /* a temp dir */ } }
+    }
+  }
+
+  /** One `chore(skills): sync` commit on `baseSha`, built with plumbing in a throwaway index. The caller removes `scratch`. */
+  private async buildDeliveryCommit(
+    cwd: string, golden: Golden, target: string, baseSha: string, stale: string[],
+    have: Map<string, Map<string, Buffer>>, issueNumber: number,
+  ): Promise<{ sha: string; subject: string; scratch: string }> {
+    const scratch = mkdtempSync(join(tmpdir(), "foreman-skill-deliver-"));
+    try {
       const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
       const gi = (args: string[], input?: Buffer): Promise<string> => runGit(args, cwd, { env, input, timeoutMs: 60_000 });
       await gi(["read-tree", baseSha]);
@@ -583,22 +620,60 @@ export class SkillSync {
         }
       }
       const tree = await gi(["write-tree"]);
-      const subject = `chore(skills): sync ${stale.join(", ")} from ${golden.label}@${golden.version} (#${issue.number})`;
+      const subject = `chore(skills): sync ${stale.join(", ")} from ${golden.label}@${golden.version} (#${issueNumber})`;
       const body =
         stale.map((s) => `${target}/${s} <- ${golden.label}:${golden.origin.get(s)} @ ${golden.version}`).join("\n") +
-        "\n\nCopied byte for byte by the Foreman's skill sync (src/skill-sync.ts) onto this issue's branch,\n" +
+        `\n\n${DELIVERY_MARKER}\n` +
         "so the direct-mode session starts on the current skills. Do not hand-edit this copy:\n" +
         "change the golden source, and the next issue here brings it over.";
       const sha = await git(["commit-tree", tree, "-p", baseSha, "-m", subject, "-m", body], cwd);
-      const branch = `feature/${issue.number}-${slugify(issue.title) || "issue"}`;
-      // No force: a branch that appeared since the check above makes this fail, which is the right answer.
-      await git(["push", "--quiet", "origin", `${sha}:refs/heads/${branch}`], cwd);
-      logger.info(`Skill delivery: ${subject} — pushed ${sha.slice(0, 9)} to ${branch} (no PR; the person's direct-mode session resumes it)`);
-      return { status: "delivered", branch, sha, skills: stale, subject };
+      return { sha, subject, scratch };
     } catch (err) {
-      const error = firstLine(err);
-      logger.warn(`Skill delivery to ${repo.name} #${issue.number} failed: ${error}`);
-      return { status: "failed", error };
+      try { rmSync(scratch, { recursive: true, force: true }); } catch { /* a temp dir */ }
+      throw err;
+    }
+  }
+
+  /**
+   * An existing `feature/<N>-*` branch the Foreman delivered and nobody touched, carrying skills that differ from the
+   * golden, is rebuilt as one fresh sync commit on `origin/<base>` and force-updated. Safe because only the Foreman has
+   * written it: every commit beyond the base is a Foreman delivery commit (subject, body marker, and the author the
+   * Foreman commits as), none is a merge, and no PR from it exists in any state. The push is a lease on the sha just
+   * read, so a commit that lands in between wins and the push fails. Returns null to leave the branch alone.
+   */
+  private async refreshUntouched(a: {
+    cwd: string; golden: Golden; names: string[]; target: string; baseSha: string; stale: string[];
+    have: Map<string, Map<string, Buffer>>; issue: { number: number; title: string }; branch: string; oldSha: string;
+    prsForBranch: (branch: string) => Promise<{ number: number; state: string }[]>; logger: Logger;
+  }): Promise<DeliverOutcome | null> {
+    const { cwd, issue, branch, oldSha, logger } = a;
+    let scratch: string | null = null;
+    try {
+      await git(["fetch", "--quiet", "origin", `refs/heads/${branch}`], cwd);
+      const tip = await git(["rev-parse", "FETCH_HEAD"], cwd);
+      if (tip !== oldSha) return null; // moved since ls-remote: someone is writing to it
+      const log = await git(["log", "--format=%H%x1f%P%x1f%an <%ae>%x1f%s%x1f%b%x1e", `${a.baseSha}..${tip}`], cwd);
+      const commits = log.split("\x1e").map((c) => c.trim()).filter(Boolean).map((c) => c.split("\x1f"));
+      if (commits.length === 0) return null;
+      const me = (await git(["var", "GIT_AUTHOR_IDENT"], cwd)).replace(/ \d+ [+-]\d{4}$/, "");
+      const subjectRe = new RegExp(`^chore\\(skills\\): sync .+ \\(#${issue.number}\\)$`);
+      for (const [, parents, author, subject, body] of commits) {
+        if (parents.trim().split(/\s+/).length !== 1) return null; // a merge: the person brought the base in
+        if (author !== me || !subjectRe.test(subject) || !body.includes(DELIVERY_MARKER)) return null; // not the Foreman's
+      }
+      const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
+      if (carried.length === 0) return null; // the branch already carries the golden
+      const prs = await a.prsForBranch(branch);
+      if (prs.length > 0) return null;
+      const built = await this.buildDeliveryCommit(cwd, a.golden, a.target, a.baseSha, a.stale, a.have, issue.number);
+      scratch = built.scratch;
+      await git(["push", "--quiet", `--force-with-lease=refs/heads/${branch}:${oldSha}`, "origin", `${built.sha}:refs/heads/${branch}`], cwd);
+      logger.info(`Skill delivery: ${built.subject} — refreshed ${branch} ${oldSha.slice(0, 9)} -> ${built.sha.slice(0, 9)} (only Foreman delivery commits, no PR)`);
+      return { status: "refreshed", branch, sha: built.sha, skills: a.stale, subject: built.subject };
+    } catch (err) {
+      // Not provably the Foreman's alone: leave it exactly as it was.
+      logger.warn(`Skill delivery to ${issue.number}: could not refresh ${branch}, left alone: ${firstLine(err)}`);
+      return null;
     } finally {
       if (scratch) { try { rmSync(scratch, { recursive: true, force: true }); } catch { /* a temp dir */ } }
     }

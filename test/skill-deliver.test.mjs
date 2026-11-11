@@ -59,6 +59,15 @@ function makeGolden(tmp) {
   return work;
 }
 
+/** A second golden (own dir) whose implement skill differs. */
+function makeGoldenAt(dir, impl) {
+  mkdirSync(dir, { recursive: true });
+  const g = makeGolden(dir);
+  put(g, ".claude/skill-templates/foreman-lane/implement-approved-issues/SKILL.md", impl);
+  git(g, "add", "-A"); git(g, "commit", "--quiet", "-m", "g2"); git(g, "push", "--quiet", "origin", "develop");
+  return g;
+}
+
 /** A service repo: bare origin with `develop`, and the Foreman's clone on it. */
 function makeRepo(tmp, files) {
   const bare = join(tmp, "svc.git");
@@ -149,6 +158,99 @@ test("deliver: an existing feature/<N>-* branch (the person's, or an earlier del
   assert.equal(git(join(tmp, "svc.git"), "rev-parse", first.branch), first.sha, "no force, no second commit");
   // Issue 4 is not issue 42: `feature/4-*` must not match `feature/42-...`.
   assert.equal((await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), { number: 4, title: "Other" }, logger())).status, "delivered");
+});
+
+// --- Refreshing an untouched delivery branch ---
+
+const noPr = async () => [];
+/** Golden moves on: the base is still stale, and the branch (delivered earlier) carries the older golden. */
+async function deliveredThenGoldenMoves() {
+  const golden = makeGolden(tmp);
+  const cfg = cfgFor(golden);
+  const clone = makeRepo(tmp, STALE);
+  const first = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
+  assert.equal(first.status, "delivered");
+  put(golden, ".claude/skill-templates/foreman-lane/implement-approved-issues/SKILL.md", "implement v3\n");
+  put(golden, ".claude/skill-templates/shared/ship/SKILL.md", "ship v1\n");
+  git(golden, "add", "-A"); git(golden, "commit", "--quiet", "-m", "golden v3"); git(golden, "push", "--quiet", "origin", "develop");
+  skillSync = new ss.SkillSync(); // the golden is cached per instance; a new one reads the moved source
+  return { cfg, clone, first, bare: join(tmp, "svc.git") };
+}
+
+test("refresh: an untouched Foreman delivery with stale skills and no PR is rebuilt as one fresh commit on origin/<base>", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const lg = logger();
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, lg, noPr);
+  assert.equal(out.status, "refreshed", lg.lines.join("\n"));
+  assert.equal(out.branch, first.branch);
+  assert.notEqual(out.sha, first.sha);
+  assert.equal(git(bare, "rev-parse", first.branch), out.sha);
+  assert.equal(git(bare, "rev-parse", `${out.sha}~1`), git(bare, "rev-parse", "develop"), "one commit on the base's tip");
+  assert.equal(git(bare, "show", `${out.sha}:.claude/skills/implement-approved-issues/SKILL.md`), "implement v3");
+  assert.equal(git(bare, "show", `${out.sha}:.claude/skills/ship/SKILL.md`), "ship v1");
+  // Run again: the branch is now current, nothing more happens.
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), out.sha);
+});
+
+test("refresh: an untouched delivery that already carries the current golden is left alone", async () => {
+  const cfg = cfgFor(makeGolden(tmp));
+  const clone = makeRepo(tmp, STALE);
+  const first = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr);
+  assert.deepEqual(out, { status: "exists", branch: first.branch });
+  assert.equal(git(join(tmp, "svc.git"), "rev-parse", first.branch), first.sha);
+});
+
+test("refresh: a human commit on the branch (or a merge of the base) means it is not touched", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = join(tmp, "person");
+  git(tmp, "clone", "--quiet", "-b", first.branch, bare, work);
+  put(work, "feature.txt", "the person's work\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "-m", "wip: the actual feature");
+  git(work, "push", "--quiet", "origin", first.branch);
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+});
+
+test("refresh: a sync-looking commit by someone else is not the Foreman's", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr);
+  assert.equal(out.status, "refreshed");
+  skillSync = new ss.SkillSync();
+  const other = { ...env, GIT_AUTHOR_NAME: "Someone", GIT_AUTHOR_EMAIL: "s@s", GIT_COMMITTER_NAME: "Someone", GIT_COMMITTER_EMAIL: "s@s" };
+  const work = join(tmp, "person2");
+  git(tmp, "clone", "--quiet", "-b", first.branch, bare, work);
+  execFileSync("git", ["commit", "--quiet", "--allow-empty", "-m", "chore(skills): sync x from y@z (#42)", "-m", "Copied byte for byte by the Foreman's skill sync (src/skill-sync.ts) onto this issue's branch,"], { cwd: work, env: other });
+  git(work, "push", "--quiet", "origin", first.branch);
+  // Make the golden move again so the branch is stale.
+  const tip = git(bare, "rev-parse", first.branch);
+  const cfg2 = cfgFor(makeGoldenAt(join(tmp, "g2"), "implement v9\n"));
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg2, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+});
+
+test("refresh: a PR from the branch (open, merged or closed), an unreadable PR list, or no PR lookup means it is not touched", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  for (const prs of [async () => [{ number: 7, state: "OPEN" }], async () => [{ number: 7, state: "MERGED" }], async () => { throw new Error("gh down"); }, undefined]) {
+    assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), prs), { status: "exists", branch: first.branch });
+    assert.equal(git(bare, "rev-parse", first.branch), first.sha);
+  }
+});
+
+test("refresh: the push is a lease on the sha read, so a commit that lands in between wins", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = join(tmp, "racer");
+  git(tmp, "clone", "--quiet", "-b", first.branch, bare, work);
+  put(work, "late.txt", "late\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "-m", "late human commit");
+  const lateSha = git(work, "rev-parse", "HEAD");
+  // The PR lookup is the last step before the push: the human pushes during it.
+  const prs = async () => { git(work, "push", "--quiet", "origin", first.branch); return []; };
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), prs);
+  assert.equal(out.status, "exists");
+  assert.equal(git(bare, "rev-parse", first.branch), lateSha);
 });
 
 test("deliver: the branch is what the direct-mode skill looks for (feature/<N>-*), and an empty slug still has a dash", async () => {
