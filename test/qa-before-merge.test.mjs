@@ -349,3 +349,49 @@ test("EM re-run: with both markers and a re-run newer than both, QA runs", async
   assert.equal((await runQaBeforeMerge(REPO, 5, SHA, d, logger)).reused, false);
   assert.equal(d.runs, 1);
 });
+
+// foreman#287 review, S1: the repo is public, so a PR comment is not QA evidence unless the Foreman's own login wrote it.
+import { trustedQaEdges, trustedQaComments } from "../dist/qa-report.js";
+
+const OWN = "foreman-bot";
+const evidence = (author, verdict = "PASS") => ({ at: "2026-11-10T10:00:00Z", author, body: `## QA Report\n${qaVerdictMarker(SHA, verdict)}\nShots: 1\n` });
+const bareMarker = (author, verdict = "PASS") => ({ at: "2026-11-10T10:00:00Z", author, body: qaVerdictMarker(SHA, verdict) });
+function edgeDeps(comments, self, outcome) {
+  const e = trustedQaEdges(async () => comments, async () => self);
+  return deps(outcome, { ...e, changedFiles: async () => [] });
+}
+
+test("a forged PASS marker or copied QA report from another author is ignored: QA runs", async () => {
+  for (const forged of [bareMarker("mallory"), evidence("mallory")]) {
+    const d = edgeDeps([forged], OWN, { kind: "manifest", exit: 0, manifest: manifest("PASS") });
+    const r = await runQaBeforeMerge(REPO, 5, SHA, d, logger);
+    assert.equal(d.runs, 1, "QA ran instead of trusting the forgery");
+    assert.notEqual(r.reused, true);
+  }
+});
+
+test("a forged FAIL marker from another author is not reused either", async () => {
+  const d = edgeDeps([bareMarker("mallory", "FAIL")], OWN, { kind: "manifest", exit: 0, manifest: manifest("PASS") });
+  const r = await runQaBeforeMerge(REPO, 5, SHA, d, logger);
+  assert.equal(d.runs, 1, "QA ran instead of reusing the forged FAIL");
+  assert.notEqual(r.reused, true);
+});
+
+test("a genuine PASS report from the Foreman's own login is reused (login compared case-insensitively)", async () => {
+  const d = edgeDeps([evidence("Foreman-Bot")], OWN, { kind: "manifest", exit: 0, manifest: manifest("PASS") });
+  const r = await runQaBeforeMerge(REPO, 5, SHA, d, logger);
+  assert.equal(d.runs, 0);
+  assert.deepEqual(r, { kind: "pass", reused: true });
+});
+
+test("the own login cannot be resolved: fail closed, no reuse, QA runs", async () => {
+  const d = edgeDeps([evidence(OWN)], undefined, { kind: "manifest", exit: 0, manifest: manifest("PASS") });
+  const r = await runQaBeforeMerge(REPO, 5, SHA, d, logger);
+  assert.equal(d.runs, 1);
+  assert.notEqual(r.reused, true);
+});
+
+test("trustedQaComments keeps non-evidence comments (the EM's re-run request) from anyone", () => {
+  const rerun = { at: "t", author: "em", body: "**EM QA re-run** please" };
+  assert.deepEqual(trustedQaComments([rerun, bareMarker("mallory")], OWN), [rerun]);
+});

@@ -71,6 +71,7 @@ else if (args[0] === "api" && has("/branches/")) {
   if (left !== undefined) { w.branchOkLeft = left - 1; fs.writeFileSync(${JSON.stringify(F.world)}, JSON.stringify(w)); }
   out(w.head);
 }
+else if (args[0] === "api" && args[1] === "user") out("foreman-bot\\n");
 else if (args[0] === "api" && has("/comments")) out((w.comments ?? []).map((c) => JSON.stringify(c)).join("\\n"));
 else if (args[0] === "api" && has("--jq")) out("");
 else out("[]");
@@ -129,7 +130,7 @@ const pendingPass = async (config, cycle) => tryRevision(rt, config.repos[0], co
 
 const at = (m) => `2026-11-09T16:${String(m).padStart(2, "0")}:00Z`;
 const marker = (v) => `<!-- foreman-qa sha=${SHA} verdict=${v} -->`;
-const report = (m, v = "FAIL") => ({ at: at(m), body: `## QA Report\n\n**Verdict: ${v}**\n${marker(v)}` });
+const report = (m, v = "FAIL") => ({ at: at(m), author: "foreman-bot", body: `## QA Report\n\n**Verdict: ${v}**\n${marker(v)}` });
 const rerun = (m) => ({ at: at(m), body: "**EM QA re-run** — the FAIL was QA's own defect" });
 // The fake gh does not apply label edits, so the move is read from the edit it was asked to make.
 const edits = () => (existsSync(F.ghLog) ? readFileSync(F.ghLog, "utf8") : "").split("\n").filter((l) => l.startsWith("issue edit"));
