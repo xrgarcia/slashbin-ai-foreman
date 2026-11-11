@@ -1,12 +1,13 @@
-import { execFileSync } from "node:child_process";
 import type { GhResource } from "./gh-usage.js";
 import type { Logger } from "./logger.js";
-import { emit } from "./work-source.js";
+import { emitProcessEvent } from "./work-source.js";
 import { backoffDelay, backoffSettings } from "./backoff.js";
 
 /**
  * Daemon-wide back-off for upstreams that refuse work: the GitHub API rate limit
- * (primary or secondary) and the Claude account session limit.
+ * (primary or secondary) and the agent runner's usage limit. The runner is
+ * whatever CLI the config names (`runner.name`, src/refusal.ts; Claude by
+ * default): this module keys its state by that name and knows nothing about it.
  *
  * A limit is a property of the ACCOUNT, not of one call. Once one `gh` call is
  * refused, every call on that token is refused until the reset; once one Claude
@@ -21,14 +22,19 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
  * This module is the ONLY owner of that state — one entry per upstream, shared
  * by every repo loop. Nothing else stores a limit, a window or a probe result.
  *
- *  - github: `runGh` refuses to spawn while blocked; at each window end the
+ *  - github: `runGhAsync` refuses to spawn while blocked; at each window end the
  *    module itself probes the bucket that tripped, with the token that tripped
  *    it, and either clears or extends. A GraphQL trip is probed on the GraphQL
  *    endpoint itself: `/rate_limit` reports a different bucket (2026-10-02:
  *    2 used there vs 3,614 on the endpoint, same token, same second).
- *  - claude: there is no free probe, so the next real launch IS the probe. At
+ *  - a runner: there is no free probe, so the next real launch IS the probe. At
  *    window end the state goes half-open and `tryAcquire` admits exactly one
  *    caller; its result clears or extends.
+ *
+ * In memory, on purpose: a restart during a runner limit costs exactly the one
+ * launch the half-open probe would spend anyway, and a refusal is never charged
+ * to a retry counter, so nothing is lost. Persisting it would put the limit
+ * tracker behind GitHub, itself an upstream that can be the one limited.
  *
  * One Discord message per transition per upstream (enter, extend, clear) —
  * never per repo or per refused call. Work observers (EM#417) get the two real
@@ -36,9 +42,10 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
  * episode continuing, and half-open is not yet clear.
  */
 
-export type Upstream = "github" | "claude";
+/** `"github"`, or a runner's configured name. */
+export type Upstream = string;
 
-/** Thrown by `runGh` while GitHub is backing off — no `gh` process was spawned. */
+/** Thrown by `runGhAsync` while GitHub is backing off — no `gh` process was spawned. */
 export class UpstreamBackoffError extends Error {
   constructor(message: string) {
     super(message);
@@ -56,9 +63,9 @@ interface UpstreamState {
   until: number;
   lastClearedAt: number;
   lastWindowMs: number;
-  /** A stated reset (Claude "resets 12:10pm (...)") not yet reached. */
+  /** A stated reset (a runner's "resets 12:10pm (...)") not yet reached. */
   resetAtMs?: number;
-  /** claude only: the single half-open launch has been handed out. */
+  /** runners only: the single half-open launch has been handed out. */
   probeOut: boolean;
   /** github only: the token and bucket of the call that tripped this episode. */
   trippedToken?: string;
@@ -67,8 +74,9 @@ interface UpstreamState {
   waiters: (() => void)[];
 }
 
-const NAMES: Record<Upstream, string> = { github: "GitHub", claude: "Claude" };
+const nameOf = (u: Upstream): string => (u === "github" ? "GitHub" : u);
 
+/** Process-wide: the daemon's notifier for back-off windows. */
 let notifyFn: ((text: string, level: Level) => void) | undefined;
 
 /** Fallback until the daemon supplies its own; observer errors land here at info. */
@@ -79,12 +87,17 @@ const consoleLogger: Logger = {
   error: (msg) => console.error(`[upstream] ${msg}`),
   child: () => consoleLogger,
 };
+/** Process-wide: where back-off observer errors are logged. */
 let observerLogger: Logger = consoleLogger;
 
-const states: Record<Upstream, UpstreamState> = {
-  github: freshState(),
-  claude: freshState(),
-};
+/** Process-wide: GitHub and each runner are limited per process (one token, one login), not per runtime. */
+const states = new Map<Upstream, UpstreamState>();
+
+function stateOf(u: Upstream): UpstreamState {
+  let s = states.get(u);
+  if (!s) states.set(u, (s = freshState()));
+  return s;
+}
 
 function freshState(): UpstreamState {
   return {
@@ -139,7 +152,7 @@ function formatClock(ms: number): string {
 }
 
 function schedule(u: Upstream, windowMs: number): void {
-  const s = states[u];
+  const s = stateOf(u);
   if (s.timer) clearTimeout(s.timer);
   s.until = Date.now() + windowMs;
   s.lastWindowMs = windowMs;
@@ -153,7 +166,7 @@ function schedule(u: Upstream, windowMs: number): void {
 }
 
 function enter(u: Upstream, reason: string, resetAtMs?: number): void {
-  const s = states[u];
+  const s = stateOf(u);
   const now = Date.now();
   // A re-entry soon after a clear (a secondary limit the probe cannot see)
   // continues the doubling; a later one starts again at the base.
@@ -163,31 +176,31 @@ function enter(u: Upstream, reason: string, resetAtMs?: number): void {
   s.resetAtMs = resetAtMs !== undefined && resetAtMs > now ? resetAtMs : undefined;
   const windowMs = windowFor(s.consecutive);
   schedule(u, windowMs);
-  notify(`Foreman backing off ${NAMES[u]} for ${formatDuration(windowMs)} — ${reason}`, "warn");
+  notify(`Foreman backing off ${nameOf(u)} for ${formatDuration(windowMs)} — ${reason}`, "warn");
   // Not awaited: the state machine is synchronous and must not wait on an
   // observer. The fan-out awaits each observer under its own timeout and never
   // rejects.
-  void emit({ kind: "backoff", upstream: u, paused: true, reason }, null, observerLogger);
+  void emitProcessEvent({ kind: "backoff", upstream: u, paused: true, reason }, observerLogger);
 }
 
 function extend(u: Upstream, resetAtMs?: number): void {
-  const s = states[u];
+  const s = stateOf(u);
   const now = Date.now();
   s.consecutive++;
   s.state = "blocked";
   s.probeOut = false;
   const stated = resetAtMs !== undefined && resetAtMs > now ? resetAtMs : undefined;
-  s.resetAtMs = u === "claude" ? stated : undefined;
+  s.resetAtMs = u !== "github" ? stated : undefined;
   const windowMs = Math.max(windowFor(s.consecutive), stated !== undefined ? stated - now : 0);
   schedule(u, windowMs);
   notify(
-    `Foreman still limited by ${NAMES[u]} — backing off ${formatDuration(windowMs)} (until ${formatClock(now + windowMs)})`,
+    `Foreman still limited by ${nameOf(u)} — backing off ${formatDuration(windowMs)} (until ${formatClock(now + windowMs)})`,
     "warn",
   );
 }
 
 function clear(u: Upstream): void {
-  const s = states[u];
+  const s = stateOf(u);
   if (s.timer) clearTimeout(s.timer);
   s.timer = null;
   s.state = "clear";
@@ -196,71 +209,70 @@ function clear(u: Upstream): void {
   s.trippedToken = undefined;
   s.trippedResource = undefined;
   s.lastClearedAt = Date.now();
-  notify(`Foreman ${NAMES[u]} back-off cleared — resuming`, "info");
-  void emit({ kind: "backoff", upstream: u, paused: false }, null, observerLogger);
+  notify(`Foreman ${nameOf(u)} back-off cleared — resuming`, "info");
+  void emitProcessEvent({ kind: "backoff", upstream: u, paused: false }, observerLogger);
   releaseWaiters(u);
 }
 
 function releaseWaiters(u: Upstream): void {
-  const waiters = states[u].waiters.splice(0);
+  const waiters = stateOf(u).waiters.splice(0);
   for (const w of waiters) w();
 }
 
 function onWindowEnd(u: Upstream): void {
   if (u === "github") {
-    const probe = probeGitHub();
-    if (probe.clear) clear("github");
-    else extend("github", probe.resetAtMs);
+    // Awaited off the timer: the probe spawns gh, and a GitHub that does not
+    // answer must not stall the event loop while it waits. The state stays
+    // "blocked" until the probe settles, so no call slips through meanwhile.
+    const s = stateOf("github");
+    const settle = (probe: UpstreamProbeResult) => {
+      // A reset (tests) or a new window scheduled while the probe ran wins.
+      if (stateOf("github") !== s || s.state !== "blocked" || s.timer) return;
+      if (probe.clear) clear("github");
+      else extend("github", probe.resetAtMs);
+    };
+    void probeGitHub().then(settle, () => settle({ clear: false }));
     return;
   }
-  const s = states.claude;
+  const s = stateOf(u);
   const now = Date.now();
   if (s.resetAtMs !== undefined && s.resetAtMs > now) {
-    // Claude said when it resets; probing before then only spends a launch.
+    // The runner said when it resets; probing before then only spends a launch.
     const windowMs = s.resetAtMs - now;
-    schedule("claude", windowMs);
-    notify(`Foreman still limited by Claude — backing off until ${formatClock(s.resetAtMs)}`, "warn");
+    schedule(u, windowMs);
+    notify(`Foreman still limited by ${nameOf(u)} — backing off until ${formatClock(s.resetAtMs)}`, "warn");
     return;
   }
   s.state = "half-open";
   s.probeOut = false;
-  releaseWaiters("claude");
+  releaseWaiters(u);
 }
 
-interface RateResource {
-  remaining?: number;
-  reset?: number;
+/** What a GitHub probe answers: clear, or still limited (until `resetAtMs` when known). */
+export interface UpstreamProbeResult {
+  clear: boolean;
+  resetAtMs?: number;
 }
 
-const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining resetAt}}"];
+/** The code host's own probe of the bucket that tripped, with the token that tripped it. */
+export type GitHubProbe = (trip: { token?: string; resource?: GhResource }) => Promise<UpstreamProbeResult> | UpstreamProbeResult;
+
+/** Process-wide: the code host's probe of the bucket that tripped. */
+let githubProbe: GitHubProbe | undefined;
 
 /**
- * Probe the bucket that tripped, with the token that tripped it — deliberately
- * NOT via `runGh` (which refuses while blocked) and not counted as usage.
- *  - graphql: `gh api graphql` rateLimit. Clears only on remaining > 0; on 0
- *    its resetAt bounds the next window. A refused probe lands in catch.
- *  - core (or unknown): `gh api rate_limit` resources.core, as before.
- * No stored token (ambient gh auth): probe with the ambient auth.
- * A probe that itself fails never clears; it extends on the computed window.
+ * Register how the end of a GitHub window is probed. The GitHub module registers
+ * it where it loads (github/gh.ts), so the core spawns no `gh` itself. With none
+ * registered, the probe counts as failed: the window extends, it never clears blind.
  */
-function probeGitHub(): { clear: boolean; resetAtMs?: number } {
-  const s = states.github;
-  const env = s.trippedToken ? { ...process.env, GH_TOKEN: s.trippedToken } : { ...process.env };
-  const opts = { encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"], timeout: 30_000, env };
-  try {
-    if (s.trippedResource === "graphql") {
-      const rl = JSON.parse(execFileSync("gh", PROBE_GRAPHQL, opts))?.data?.rateLimit;
-      if (typeof rl?.remaining === "number" && rl.remaining > 0) return { clear: true };
-      const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
-      return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
-    }
-    const core = JSON.parse(execFileSync("gh", ["api", "rate_limit"], opts))?.resources?.core as RateResource | undefined;
-    if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
-    return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
-  } catch (err) {
-    console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
-    return { clear: false };
-  }
+export function setUpstreamProbe(u: "github", probe: GitHubProbe | undefined): void {
+  if (u === "github") githubProbe = probe;
+}
+
+async function probeGitHub(): Promise<UpstreamProbeResult> {
+  const s = stateOf("github");
+  if (!githubProbe) return { clear: false };
+  return githubProbe({ token: s.trippedToken, resource: s.trippedResource });
 }
 
 /**
@@ -272,7 +284,7 @@ export function signalUpstreamLimit(
   reason: string,
   opts?: number | { resetAtMs?: number; token?: string; resource?: GhResource },
 ): void {
-  const s = states[u];
+  const s = stateOf(u);
   if (s.state !== "clear") return;
   const o = typeof opts === "number" ? { resetAtMs: opts } : (opts ?? {});
   s.trippedToken = o.token;
@@ -280,9 +292,9 @@ export function signalUpstreamLimit(
   enter(u, reason, o.resetAtMs);
 }
 
-/** True while blocked, and for claude also while the half-open probe is out. */
+/** True while blocked, and for a runner also while the half-open probe is out. */
 export function isUpstreamBlocked(u: Upstream): boolean {
-  const s = states[u];
+  const s = stateOf(u);
   if (s.state === "blocked") return true;
   return s.state === "half-open" && s.probeOut;
 }
@@ -291,17 +303,17 @@ export function isUpstreamBlocked(u: Upstream): boolean {
 export function whenUpstreamClear(u: Upstream): Promise<void> {
   if (!isUpstreamBlocked(u)) return Promise.resolve();
   return new Promise<void>((resolve) => {
-    states[u].waiters.push(resolve);
+    stateOf(u).waiters.push(resolve);
   });
 }
 
 /**
- * Permission to launch a Claude session. False while blocked or while the
+ * Permission to launch a session on runner `u`. False while blocked or while the
  * half-open probe is out; true exactly once when half-open (that launch is the
- * probe, and its `reportClaudeResult` decides clear vs extend).
+ * probe, and its `reportRunResult` decides clear vs extend).
  */
-export function tryAcquire(u: "claude"): boolean {
-  const s = states[u];
+export function tryAcquire(u: Upstream): boolean {
+  const s = stateOf(u);
   if (s.state === "clear") return true;
   if (s.state === "half-open" && !s.probeOut) {
     s.probeOut = true;
@@ -311,14 +323,14 @@ export function tryAcquire(u: "claude"): boolean {
 }
 
 /**
- * Report a finished Claude launch. `limited` = the run was refused by the
- * session limit. Concurrent sessions refused in the same window produce one
+ * Report a finished launch on runner `u`. `limited` = the runner refused it
+ * (src/refusal.ts). Concurrent sessions refused in the same window produce one
  * message and one window; only the half-open probe's result can clear or extend.
  */
-export function reportClaudeResult(limited: boolean, reason?: string, resetAtMs?: number): void {
-  const s = states.claude;
+export function reportRunResult(u: Upstream, limited: boolean, reason?: string, resetAtMs?: number): void {
+  const s = stateOf(u);
   if (s.state === "clear") {
-    if (limited) enter("claude", reason ?? "Claude session limit", resetAtMs);
+    if (limited) enter(u, reason ?? `${nameOf(u)} usage limit`, resetAtMs);
     return;
   }
   if (s.state === "blocked") {
@@ -328,6 +340,6 @@ export function reportClaudeResult(limited: boolean, reason?: string, resetAtMs?
     return;
   }
   // half-open
-  if (limited) extend("claude", resetAtMs);
-  else clear("claude");
+  if (limited) extend(u, resetAtMs);
+  else clear(u);
 }

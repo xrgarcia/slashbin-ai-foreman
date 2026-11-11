@@ -26,6 +26,9 @@ if (!existsSync(built)) {
   process.exit(1);
 }
 const { loadConfig, findConfigFile, releaseStageReady, releaseStageWarning, requiredLabels } = await import(built);
+// The release-stage checks judge roles (reviewer, deployer), so the built-in plugins must be registered.
+(await import(join(root, "dist", "plugins", "index.js"))).registerBuiltinPlugins();
+const { enabledFor } = await import(join(root, "dist", "plugins", "registry.js"));
 const { claudeConfigPath, claudeTrustStatus } = await import(join(root, "dist", "claude-trust.js"));
 const { readGolden, skillsFor, driftAt, describeDrift } = await import(join(root, "dist", "skill-sync.js"));
 
@@ -88,18 +91,19 @@ try {
   line("FAIL", "config", `${configFile ?? "AI_AGENT_* env"} does not load: ${err?.message ?? err}`);
   process.exit(1);
 }
+// The daemon refuses to start (exit 78) without a work source or a code host (EM#1150).
+for (const [role, needs] of [["workSource", "select work from"], ["codeHost", "open, review or merge a PR on"]]) {
+  const id = config[role] ?? "github";
+  if (enabledFor(role, config)) line("PASS", role, `"${id}"`);
+  else line("FAIL", role, `no installed plugin is "${id}", so the Foreman has nothing to ${needs} and refuses to start. Set "${role}" to "github" (the default).`);
+}
 
 // --- Tokens (set or unset; a value is never printed) ---
 
 if (process.env.FOREMAN_GITHUB_TOKEN) {
   line("PASS", "FOREMAN_GITHUB_TOKEN", "set — gh runs as the Foreman's account");
-} else if (haveGh) {
-  try {
-    run("gh", ["auth", "status"]);
-    line("WARN", "FOREMAN_GITHUB_TOKEN", "unset — the Foreman will act as the account gh is logged in as. Set it to give the Foreman its own GitHub identity.");
-  } catch {
-    line("FAIL", "FOREMAN_GITHUB_TOKEN", "unset, and gh is not logged in. Set FOREMAN_GITHUB_TOKEN or run `gh auth login`.");
-  }
+} else {
+  line("FAIL", "FOREMAN_GITHUB_TOKEN", "unset — every Foreman gh call throws \"FOREMAN_GITHUB_TOKEN not set\" (src/github/gh.ts); there is no fallback to gh's login. Set it in the daemon's environment.");
 }
 const anyReview = config.repos.some((r) => r.reviewEnabled);
 const syncs = config.stages.some((s) => s.type === "branch-sync");
@@ -110,6 +114,17 @@ if (config.srePath) {
   if (process.env.SRE_GITHUB_KEY) line("PASS", "SRE_GITHUB_KEY", "set");
   else line("FAIL", "SRE_GITHUB_KEY", "unset, and srePath is set — the verify stage refuses to run without it.");
 }
+// QA report (report-only): needs the QA checkout and the EM checkout's qaSecretsRunner, which supplies its secrets (the mint key and the registry bearer).
+if (config.qaPath) {
+  const qaOk = existsSync(join(config.qaPath, "bin/qa.mjs"));
+  const runner = config.qaSecretsRunner;
+  const runnerOk = Boolean(runner && config.emRepoPath && existsSync(join(config.emRepoPath, runner)));
+  const runnerWhy = !runner ? "qaSecretsRunner is not set (it supplies DEV_SESSION_MINT_KEY and the registry bearer EM_SLASHBIN_MCP_ROUTER_BEARER / SLASHBIN_MCP_ROUTER_BEARER). " : `emRepoPath has no ${runner} (it supplies DEV_SESSION_MINT_KEY and the registry bearer EM_SLASHBIN_MCP_ROUTER_BEARER / SLASHBIN_MCP_ROUTER_BEARER). `;
+  if (qaOk && runnerOk) line("PASS", "QA report", `on for ${config.qaRepos.join(", ")}`);
+  else line("FAIL", "QA report", `${!qaOk ? "qaPath has no bin/qa.mjs. " : ""}${!runnerOk ? runnerWhy : ""}QA reports will post as errored.`.trim());
+}
+if (config.qaGate && !config.qaPath) line("FAIL", "QA gate", "qaGate is true but qaPath is not set, so QA never runs and nothing is gated.");
+else if (config.qaGate) line("PASS", "QA gate", "on: QA runs before a verify pass advances the card");
 // The release stage (EM#578): the Tech Lead approves the release PR, the SRE deploys it.
 const releaseWarning = releaseStageWarning(config);
 if (releaseWarning) line("WARN", "release stage", releaseWarning);
@@ -125,7 +140,7 @@ else if (config.stages.some((s) => s.type === "release") && releaseStageReady(co
 let golden = null;
 if (config.skillSync.enabled) {
   try {
-    golden = readGolden(config.skillSync, { fetch: false });
+    golden = await readGolden(config.skillSync, { fetch: false });
     line("PASS", "skill sync", `on — golden ${golden.label}@${golden.version}: ${[...golden.skills.keys()].sort().join(", ")}`);
     const unknown = config.skillSync.skills.filter((n) => !golden.skills.has(n));
     if (unknown.length) line("WARN", "skill sync", `skillSync.skills names ${unknown.join(", ")}, which the golden does not have — never synced.`);
@@ -172,7 +187,7 @@ for (const repo of config.repos) {
     line("PASS", `${at}: github`, `${repo.githubRepo}, write access`);
   }
 
-  const branches = [["base", repo.baseBranch], ["feature", repo.featureBranch], ["production", repo.productionBranch]];
+  const branches = [["base", repo.baseBranch], ["production", repo.productionBranch]];
   const missing = [];
   for (const [role, b] of branches) {
     try {
@@ -181,7 +196,7 @@ for (const repo of config.repos) {
       missing.push(`${role} "${b}"`);
     }
   }
-  if (missing.length) line("FAIL", `${at}: branches`, `missing on GitHub: ${missing.join(", ")}. Create them, or set baseBranch / featureBranch / productionBranch.`);
+  if (missing.length) line("FAIL", `${at}: branches`, `missing on GitHub: ${missing.join(", ")}. Create them, or set baseBranch / productionBranch.`);
   else line("PASS", `${at}: branches`, branches.map(([role, b]) => `${role} ${b}`).join(", "));
 
   for (const [key, path] of [["skillPath", repo.skillPath], ["revisionSkillPath", repo.revisionSkillPath]]) {
@@ -198,12 +213,12 @@ for (const repo of config.repos) {
   // approved issue here syncs it (docs/skill-sync.md).
   if (golden) {
     const names = skillsFor(config.skillSync, golden, repo.skillSyncSkills);
-    const ref = `origin/${repo.featureBranch}`;
+    const ref = `origin/${repo.baseBranch}`;
     if (names.length === 0) {
       line("PASS", `${at}: skill sync`, "opted out (skillSyncSkills is empty)");
     } else {
       try {
-        const stale = describeDrift(driftAt(repo.repoPath, ref, config.skillSync, golden, names));
+        const stale = describeDrift(await driftAt(repo.repoPath, ref, config.skillSync, golden, names));
         if (stale) line("WARN", `${at}: skill sync`, `${ref} is behind ${golden.label}@${golden.version}: ${stale} — synced with the next approved issue here.`);
         else line("PASS", `${at}: skill sync`, `${names.join(", ")} current at ${ref}`);
       } catch (err) {

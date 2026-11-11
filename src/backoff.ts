@@ -87,15 +87,32 @@ export const backoffConfigSchema = z.object({
   // when it is later. A new head on the production branch since the last attempt
   // makes the release due now, once per head. Default 10 min rising to 6 h.
   prodVerifyRetry: z.object(win(600_000, 21_600_000, 2)).prefault({}),
-  // GitHub's rate limit or Claude's session limit refused work. The whole daemon
-  // pauses that upstream; a GitHub reset time it reports wins over the window.
+  // GitHub's rate limit or the runner's limit (see `runner`) refused work. The
+  // whole daemon pauses that upstream; a reset time it reports wins over the window.
   // Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` /
   // `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
   upstream: z.object(win(120_000, 3_600_000, 2)).prefault({}),
+  // A handoff the unstick stage made (the agent plugin said it was invoked) that
+  // has not moved the issue. The handoff is called again once a window has passed
+  // since the last call, longer each time, up to `maxRecalls` times; then the
+  // escalation owner is told, once. A seat that took the handoff and then died
+  // (out of tokens, crashed) leaves no trace but a stuck issue: this is the only
+  // thing that notices. 0 never recalls. Default 10 min, 30 min, 90 min, then
+  // 4.5 h before the owner is told (about 7 h in all), 3 recalls.
+  handoff: z.object({ ...win(600_000, 86_400_000, 3), maxRecalls: z.coerce.number().int().nonnegative().default(3) }).prefault({}),
   // One `gh` call that failed for a passing reason (network, 5xx, timeout) is
   // retried in place, up to `maxAttempts` tries in all. A rate limit is never
   // retried here (that is `upstream`). Default 1 s, then 3 s.
   gh: z.object({ ...win(1_000, 30_000, 3), maxAttempts: count(3) }).prefault({}),
+  // One Paperclip READ (a GET) that failed for a passing reason (no answer, a
+  // timeout, HTTP 408/429/500/502/503/504) is retried in place, up to `maxAttempts`
+  // tries in all. A write is never retried: a timeout does not prove it failed.
+  // Default 0.5 s, then 1 s.
+  paperclip: z.object({ ...win(500, 5_000, 2), maxAttempts: count(3) }).prefault({}),
+  // One registry `repo_identity` request (the mirror's owner-free repo key) that
+  // failed for the same passing reasons is retried in place the same way.
+  // Default 0.5 s, then 1 s.
+  registry: z.object({ ...win(500, 5_000, 2), maxAttempts: count(3) }).prefault({}),
   // How long after a PR merged before its issue, still unadvanced, is reported as
   // stuck (the dead zone). Shorter flags a merge the review is still settling.
   stuckMergeGraceMs: ms.default(900_000),
@@ -116,6 +133,28 @@ export function backoffDelay(n: number | undefined, w: BackoffWindow): number {
   const k = Math.max(1, Math.floor(n ?? 1));
   // Past ~50 doublings the product is beyond any cap; stop before Infinity.
   return Math.min(w.baseMs * w.factor ** Math.min(k - 1, 50), w.capMs);
+}
+
+/**
+ * Run `op`, retrying in place while `isTransient(err)` holds, up to `maxAttempts`
+ * tries in all, waiting `backoffDelay(attempt, window)` between tries. The one retry
+ * loop for the Paperclip and registry clients; the caller says what is safe to retry.
+ * `onRetry` is told the attempt that failed and the wait that follows.
+ */
+export async function retryAsync<T>(
+  op: () => Promise<T>,
+  o: { window: BackoffWindow; maxAttempts: number; isTransient: (err: unknown) => boolean; onRetry?: (err: unknown, attempt: number, waitMs: number) => void },
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      if (attempt >= o.maxAttempts || !o.isTransient(err)) throw err;
+      const wait = backoffDelay(attempt, o.window);
+      o.onRetry?.(err, attempt, wait);
+      await new Promise<void>((r) => setTimeout(r, wait));
+    }
+  }
 }
 
 /** A wait's length for a log line: "45 s", "5 min", "1.5 h". */
@@ -177,6 +216,7 @@ export function mergeBackoff(fromFile: unknown, legacyFile: LegacyBackoffKeys = 
 // scans and the upstream back-off are module-level and take no config, so the
 // daemon hands them the same block here at start and on every config reload.
 
+/** Process-wide: the live back-off windows, handed over by the daemon at start and reload. */
 let active: BackoffConfig = DEFAULT_BACKOFF;
 
 /** Apply the loaded `backoff` block daemon-wide. Until called, the defaults stand. */
@@ -204,6 +244,17 @@ export class BackoffTracker {
     const wait = backoffDelay(count, w);
     this.by.set(key, { until: now + wait, count });
     return wait;
+  }
+
+  /**
+   * Wait for `key` until a time the agent named (a hold that clears by itself,
+   * e.g. a STOP that only needs the deploy window). Keeps the count: waiting for
+   * a clock is not another failure in a row. Returns the wait in ms.
+   */
+  waitUntil(key: string, untilMs: number, now = Date.now()): number {
+    const count = this.by.get(key)?.count ?? 0;
+    this.by.set(key, { until: Math.max(now, untilMs), count });
+    return Math.max(0, untilMs - now);
   }
 
   /** Whether `key` is inside a wait right now. */

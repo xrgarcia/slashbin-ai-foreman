@@ -17,7 +17,9 @@
 //    the EM's escalation — rather than waiting silently on a build that will not come.
 
 import type { RepoConfig } from "../config.js";
-import { gh } from "./gh.js";
+import { ghAsync } from "./gh.js";
+import type { Announced } from "../code-host.js";
+export type { Announced } from "../code-host.js";
 
 /** An issue as `GET /repos/{o}/{r}/issues/{n}/dependencies/blocking` returns it. */
 export interface Dependent {
@@ -29,8 +31,8 @@ export interface Dependent {
 }
 
 /** Every issue GitHub records as blocked BY `issue`. Throws on a gh failure. */
-export function dependentsOf(repo: string, issue: number, cwd: string): Dependent[] {
-  return JSON.parse(gh(["api", `repos/${repo}/issues/${issue}/dependencies/blocking`], cwd) || "[]");
+export async function dependentsOf(repo: string, issue: number, cwd: string): Promise<Dependent[]> {
+  return JSON.parse(await ghAsync(["api", `repos/${repo}/issues/${issue}/dependencies/blocking`], cwd) || "[]");
 }
 
 /** `owner/repo` of a dependent, defaulting to `own` when the API row names none. */
@@ -47,11 +49,12 @@ export function dependentRef(d: Dependent, own: string): string {
 /**
  * A skip is a dead blocker only when its cause is outside the build and will not
  * clear by itself. A diverged feature branch resolves on its own. The other
- * transient wait, an open PR occupying the branch, is recognised by the caller
- * with `prBlockingSkip` (phases/implement.ts), which owns that wording.
+ * transient wait, an open PR occupying the branch, is recognised by the caller:
+ * from the typed `waitingOn` when the skip has one, else (legacy) by `prBlockingSkip`
+ * (phases/implement.ts), which owns that wording.
  */
 export function isDeadBlockerReason(reason: string): boolean {
-  return !/diverged from origin\//i.test(reason);
+  return true;
 }
 
 /** The comment left on a dependent whose blocker will not land. */
@@ -78,17 +81,9 @@ export function alreadyLandedComment(reason: string, baseBranch: string): string
 }
 
 /** Close `num` as completed, commenting the evidence first. Throws on a failed write. */
-export function closeAlreadyLanded(config: RepoConfig, num: number, reason: string): void {
-  gh(["issue", "comment", String(num), "--repo", config.githubRepo, "--body", alreadyLandedComment(reason, config.featureBranch)], config.repoPath);
-  gh(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
-}
-
-/** What `announceDeadBlocker` did for one dependent. */
-export interface Announced {
-  /** `#N` or `owner/repo#N`. */
-  ref: string;
-  repo: string;
-  number: number;
+export async function closeAlreadyLanded(config: RepoConfig, num: number, reason: string): Promise<void> {
+  await ghAsync(["issue", "comment", String(num), "--repo", config.githubRepo, "--body", alreadyLandedComment(reason, config.baseBranch)], config.repoPath);
+  await ghAsync(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
 }
 
 /**
@@ -99,13 +94,13 @@ export interface Announced {
  * on one dependent never stops the next; the failures are returned, never lost.
  * Throws only when the dependents cannot be read at all.
  */
-export function announceDeadBlocker(
+export async function announceDeadBlocker(
   config: RepoConfig,
   blocker: number,
   reason: string,
   already: readonly string[] = [],
-): { told: Announced[]; failed: { ref: string; error: string }[]; open: Announced[] } {
-  const open = dependentsOf(config.githubRepo, blocker, config.repoPath).filter((d) => d.state !== "closed");
+): Promise<{ told: Announced[]; failed: { ref: string; error: string }[]; open: Announced[] }> {
+  const open = (await dependentsOf(config.githubRepo, blocker, config.repoPath)).filter((d) => d.state !== "closed");
   const told: Announced[] = [];
   const everyOpen: Announced[] = open.map((d) => ({ ref: dependentRef(d, config.githubRepo), repo: dependentRepo(d, config.githubRepo), number: d.number }));
   const failed: { ref: string; error: string }[] = [];
@@ -114,9 +109,9 @@ export function announceDeadBlocker(
     if (already.includes(ref)) continue;
     const repo = dependentRepo(d, config.githubRepo);
     try {
-      gh(["issue", "comment", String(d.number), "--repo", repo, "--body", deadBlockerComment(`${config.githubRepo}#${blocker}`, reason, config.github.blockedLabel)], config.repoPath);
+      await ghAsync(["issue", "comment", String(d.number), "--repo", repo, "--body", deadBlockerComment(`${config.githubRepo}#${blocker}`, reason, config.github.blockedLabel)], config.repoPath);
       if (!d.labels.some((l) => l.name === config.github.blockedLabel)) {
-        gh(["issue", "edit", String(d.number), "--repo", repo, "--add-label", config.github.blockedLabel], config.repoPath);
+        await ghAsync(["issue", "edit", String(d.number), "--repo", repo, "--add-label", config.github.blockedLabel], config.repoPath);
       }
       told.push({ ref, repo, number: d.number });
     } catch (err) {
@@ -127,6 +122,6 @@ export function announceDeadBlocker(
 }
 
 /** Add the blocked label to the blocker itself, so the Foreman never re-picks a build it cannot finish. Throws on a failed write. */
-export function holdBlocker(config: RepoConfig, num: number): void {
-  gh(["issue", "edit", String(num), "--repo", config.githubRepo, "--add-label", config.github.blockedLabel], config.repoPath);
+export async function holdBlocker(config: RepoConfig, num: number): Promise<void> {
+  await ghAsync(["issue", "edit", String(num), "--repo", config.githubRepo, "--add-label", config.github.blockedLabel], config.repoPath);
 }

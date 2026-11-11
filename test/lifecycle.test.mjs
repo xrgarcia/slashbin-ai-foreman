@@ -78,8 +78,12 @@ const LABELS = [
   ["changesRequested", "pr merged", true, ["--remove-label", "pr under review", "--add-label", "pr pending actions"]],
   ["revised", "pr under review", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
   ["revised", "pr merged", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
+  ["qaRerunRevise", "pr under review", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
+  ["qaRerunRevise", "pr merged", true, ["--remove-label", "pr pending actions", "--add-label", "pr under review"]],
   ["verifyPassed", "pr under review", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
   ["verifyPassed", "pr merged", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
+  // slashbin-ai-foreman#158: the EM's QA re-run sends a dev-verified issue back to verification.
+  ["qaRerun", "pr approved", true, ["--remove-label", "pr approved", "--add-label", "pr merged"]],
   ["recoverPassed", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr approved"]],
   ["recoverPassed", "pr merged", true, ["--add-label", "pr approved"]],
   ["recoverFailed", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr pending actions"]],
@@ -87,6 +91,11 @@ const LABELS = [
   ["recoverMerged", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr merged"]],
   // Was a flagless edit (GitHub rejects it: false); fixed 2026-10-10 to make no call.
   ["recoverMerged", "pr merged", false, null],
+  // No reviewer (EM#1150 f3): a person merged the PR; the merge is recorded, then approved, then closed.
+  ["humanMerged", "pr under review", true, ["--remove-label", "pr under review", "--add-label", "pr merged"]],
+  ["humanMerged", "pr merged", false, null],
+  ["humanMergedApproved", "pr merged", true, ["--remove-label", "pr merged", "--add-label", "pr approved"]],
+  ["closedNoRelease", "pr approved", true, ["--remove-label", "pr approved"]],
   ["release", "pr under review", true, ["--remove-label", "pr under review"]],
   ["release", "pr merged", false, null],
   // The release lifecycle (EM#578). Each reads the issue first and writes only what is missing.
@@ -168,13 +177,14 @@ test("core never imports the Paperclip plugin, and the plugin never imports the 
   const core = readdirSync(join(root, "src"), { recursive: true })
     .filter((n) => n.endsWith(".ts") && !n.startsWith("paperclip"));
   assert.ok(core.some((n) => n.startsWith("phases")) && core.some((n) => n.startsWith("github/")), "the walk reaches the subdirectories");
-  // cli.ts wires the plugin in; config.ts composes the plugin's own config block, and nothing else of it.
-  const ALLOWED = { "cli.ts": () => true, "config.ts": (p) => p === "./paperclip/config.js" };
+  // plugins/paperclip.ts is the plugin's entry (registered by plugins/index.ts, EM#1150); config.ts composes
+  // the plugin's own config block, and nothing else of it.
+  const ALLOWED = { [join("plugins", "paperclip.ts")]: () => true, "config.ts": () => false };
   for (const f of core) {
     const bad = importsOf(join(root, "src", f))
       .filter((p) => /^(\.\/|\.\.\/)paperclip\//.test(p))
       .filter((p) => !(ALLOWED[f]?.(p)));
-    assert.deepEqual(bad, [], `src/${f} imports the plugin; only cli.ts wires it in`);
+    assert.deepEqual(bad, [], `src/${f} imports the plugin; only plugins/paperclip.ts wraps it`);
   }
   for (const f of readdirSync(join(root, "src", "paperclip")).filter((n) => n.endsWith(".ts"))) {
     const bad = importsOf(join(root, "src", "paperclip", f)).filter((p) => /^\.\.\/(github|orchestrator|state|phases)/.test(p));

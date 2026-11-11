@@ -17,7 +17,6 @@ test("a passing check resolves; false and unknown keep the block", () => {
   assert.equal(passingCheck("revision-exhausted", { prHeadMoved: true }), "prHeadMoved");
   assert.equal(passingCheck("revision-exhausted", { prHeadMoved: false }), null);
   assert.equal(passingCheck("verify-exhausted", { baseAdvanced: undefined }), null);
-  assert.equal(passingCheck("divergence", {}), null);
 });
 
 test("a check only releases the kinds it is listed for", () => {
@@ -34,17 +33,19 @@ test("an edited spec releases a failed verify, held or exhausted; unknown keeps 
 });
 
 test("the card note names the check", () => {
-  assert.match(unblockedReason("divergenceCleared"), /^unblocked: .*diverge/);
+  assert.match(unblockedReason("prHeadMoved"), /^unblocked: /);
 });
 
 test("every block kind is wired into the orchestrator", () => {
   for (const kind of Object.keys(UNBLOCK_CHECKS)) {
-    assert.match(src, new RegExp(`releaseIfResolved\\(\\s*"${kind}"|kind: BlockKind = [^;]*"${kind}"`), kind);
+    assert.match(src, new RegExp(`releaseIfResolved\\(\\s*rt,\\s*"${kind}"|kind: BlockKind = [^;]*"${kind}"`), kind);
   }
 });
 
 test("a stopped revision records the head it stopped on, and resumes before the retry-cap skip", () => {
-  assert.equal((src.match(/revisionStoppedHead\.set\(repoName, pending\.pr\.headRefOid\)/g) ?? []).length, 2);
+  // Retries exhausted: in memory. A no-commit stalemate: its persisted streak's head (src/no-commit-streak.ts).
+  assert.equal((src.match(/rt\.memory\.revisionStoppedHead\.set\(repoName, pending\.pr\.headRefOid\)/g) ?? []).length, 1);
+  assert.match(src, /rt\.memory\.revisionStoppedHead\.get\(repoName\) \?\? stalemateHead\(streak\)/);
   const resume = src.indexOf("A stopped revision resumes when someone pushes");
   const cap = src.indexOf("Check if this repo has exceeded revision failure retries");
   assert.ok(resume > 0 && resume < cap);

@@ -6,7 +6,7 @@ description: Revise a PR with pending review feedback — read the review, fix e
 
 The Foreman runs this skill non-interactively inside a checkout of the repository it
 manages, after a review asked for changes. Work autonomously and do not ask questions.
-The prompt that carried this skill names the repository, its **feature branch**, the
+The prompt that carried this skill names the repository, its **branch prefix**, the
 **base branch**, and normally the PR number and linked issues — use those.
 
 ## Labels come from the environment
@@ -30,7 +30,7 @@ whether you pushed.
    ```
    PENDING=$(node -e 'console.log(JSON.parse(process.env.FOREMAN_LIFECYCLE_LABELS).prPendingActions)')
    gh issue list --label "$PENDING" --state open --json number,title
-   gh pr list --head <feature> --base <base> --state open --json number,title,url,headRefName,body
+   gh pr list --base <base> --state open --json number,title,url,headRefName,body
    ```
 
 3. If either list is empty, report that nothing is pending revision and stop.
@@ -54,11 +54,24 @@ whether you pushed.
    PR's own CI is red. The checklist is: make each named failing check pass. Read
    `.github/workflows/` for the exact command each check runs, reproduce it locally, fix
    the code (never the test), and confirm it passes before pushing.
-5. **Build to the required outcome, not the suggested route.** If a finding states the
+5. **A comment starting `<!-- foreman-empty-diff sha=<sha> -->` is current only while it
+   matches the PR.** Compare its `sha=` with the PR's head now (`gh pr view --json
+   headRefOid,files`). When they differ, or the PR now changes files, the comment is
+   history: ignore it and work the checklist from the review. When it matches and the PR
+   still changes no files, there is nothing to review, so the review sent it here. Read the
+   newest comment starting `**EM scope ruling` and land exactly what it asks. With no
+   ruling, or a ruling that asks for nothing, push nothing: end with the no-commit trailer
+   and comment why nothing can land. Never invent a change to give the PR a diff.
+6. **Prefer a revert; fix only what this PR introduced.** When a finding is about a change
+   this PR made and the change is not needed, undo it (revert the commit or delete the hunk)
+   instead of patching around it. Fix only defects this PR introduced. A defect that was
+   already in the base branch is not this PR's to fix: note it in the PR comment and leave
+   it, because widening the diff to chase it is what keeps a revision from converging.
+7. **Build to the required outcome, not the suggested route.** If a finding states the
    result the next review checks, aim at that result. A suggested route the reviewer did
    not verify is a hint — if the code shows it would not produce the outcome, reach the
    outcome another way and say why in your PR comment.
-6. **Fix the class, not the instance.** For each finding, grep the repository for every
+8. **Fix the class, not the instance.** For each finding, grep the repository for every
    other site with the same defect and fix them all in this revision.
 
 ## Phase 2: Implement Fixes
@@ -99,7 +112,22 @@ whether you pushed.
    gh pr comment <number> --body "Addressed review feedback: <summary>"
    ```
 
-3. **If no code change is needed** — the review asked for none, or the branch already
+3. **Keep the PR description true to the branch (foreman#116).** If this revision drops or
+   reverts anything the PR body claims delivered (a bump, a file, a table row marked
+   "Landed"), rewrite the body so it matches the branch's final diff, and only then say the
+   body is current:
+
+   ```
+   gh pr view <number> --json body --jq .body > /tmp/pr-body.md   # edit it: remove or strike the dropped claims
+   gh pr edit <number> --body-file /tmp/pr-body.md
+   ```
+
+   If `gh pr edit` fails (it can fail on a Projects-classic error), use
+   `gh api --method PATCH repos/{owner}/{repo}/pulls/<number> -F body=@/tmp/pr-body.md`.
+   Report `"pr_body_stale":false` only after the body was rewritten. Otherwise report
+   `"outcome":"reverted"` with `"pr_body_stale":true` and `"reverted_items"` naming each dropped
+   claim; the Foreman then strikes those lines and adds a `## Reverted in revision` section itself.
+4. **If no code change is needed** — the review asked for none, or the branch already
    satisfies every finding — do not invent one. End your output with the no-commit
    trailer the prompt describes. Without it, a run that pushes nothing is treated as a
    failed revision.
@@ -119,3 +147,17 @@ fails, note it and continue with the text.
 - Revise only the PR you were given, or PRs carrying the pending-revision label from
   `FOREMAN_LIFECYCLE_LABELS`.
 - A fix that needs changes outside this repository is skipped and noted in the PR comment.
+
+## Structured result (contract v1)
+
+End with one more line: `FOREMAN_RESULT_V1` and one JSON object, on a single line. The Foreman
+reads it first; the `FOREMAN_REVISION` trailer stays until every agent has moved. Prose goes only
+in `reason_text` and decides nothing. Examples:
+
+```
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"pushed","changed":["code","tests"]}
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"no-commit","reason_text":"the branch already satisfies every finding"}
+FOREMAN_RESULT_V1 {"schema":1,"role":"reviser","outcome":"reverted","changed":["revert"],"reverted_findings":[2],"reverted_items":["#696"],"pr_body_stale":true}
+```
+
+`no-commit` requires `reason_text`. The schema is `schemas/reviser.v1.json` in the Foreman package.

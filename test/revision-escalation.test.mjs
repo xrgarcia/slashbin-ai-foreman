@@ -16,9 +16,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const orchestrator = orchestratorSource();
 
 test("exhausted revision retries escalate instead of going quiet", () => {
-  assert.match(orchestrator, /const revisionEscalated = new Set<string>\(\)/,
+  assert.match(readFileSync(join(root, "src/phase-memory.ts"), "utf-8"), /revisionEscalated = new Set<string>\(\)/,
     "no escalation bookkeeping");
-  const block = orchestrator.slice(orchestrator.indexOf("newCount >= maxFailures && !revisionEscalated"));
+  const block = orchestrator.slice(orchestrator.indexOf("newCount >= maxFailures && !rt.memory.revisionEscalated"));
   assert.match(block.slice(0, 1500), /events\.push/,
     "hitting the cap must emit a notifier event, not just a log line");
   assert.match(block.slice(0, 1500), /level: "error"/, "a stuck PR is an error-level condition");
@@ -27,9 +27,9 @@ test("exhausted revision retries escalate instead of going quiet", () => {
 });
 
 test("the escalation clears when the repo recovers", () => {
-  assert.match(orchestrator, /revisionEscalated\.delete\(repoName\)/,
+  assert.match(orchestrator, /rt\.memory\.revisionEscalated\.delete\(repoName\)/,
     "never clearing means a repo escalates once and then goes silent forever");
-  const deletes = orchestrator.match(/revisionEscalated\.delete\(repoName\)/g) ?? [];
+  const deletes = orchestrator.match(/rt\.memory\.revisionEscalated\.delete\(repoName\)/g) ?? [];
   assert.ok(deletes.length >= 2,
     `both recovery paths (success, feedback cleared) must clear it — found ${deletes.length}`);
 });

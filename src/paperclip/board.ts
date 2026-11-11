@@ -11,10 +11,11 @@
 import {
   PAPERCLIP_FOREMAN_ROLE,
   paperclipBoardDefaults,
+  sameRepoName,
   type PaperclipConfig,
   type PaperclipStage,
 } from "./config.js";
-import type { SESSION_STAGE } from "../lifecycle.js";
+import type { SESSION_STAGE, Stage } from "../lifecycle.js";
 import type { PaperclipClient } from "./client.js";
 
 /** A Paperclip status bucket; `statusMap` may rename each one. */
@@ -66,17 +67,20 @@ export const BACKLOG_STATUS = "backlog";
  * other card (the EM repo's, an epic's, a repo the Foreman does not serve) is
  * another writer's. On the Foreman's cards another writer may set where the card
  * is filed (project, workspace, goal, parent, priority) and nothing else.
+ * With a registry (`registryUrl`), a repo matches under either owner spelling
+ * (`sameRepoName`), so a card survives an org move (#177).
  */
 export function foremanOwnsCard(
-  pcfg: { readonly ownsCards?: boolean; readonly repos?: readonly string[] | null },
+  pcfg: { readonly ownsCards?: boolean; readonly repos?: readonly string[] | null; readonly registryUrl?: string },
   servedRepos: readonly string[],
   repo: string,
 ): boolean {
-  return pcfg.ownsCards === true && servedRepos.includes(repo) && (!pcfg.repos || pcfg.repos.includes(repo));
+  const has = (list: readonly string[]) => list.includes(repo) || (!!pcfg.registryUrl && list.some((r) => sameRepoName(r, repo)));
+  return pcfg.ownsCards === true && has(servedRepos) && (!pcfg.repos || has(pcfg.repos));
 }
 
 /** The lease: the cards a running session holds in progress, renewed while any runs. */
-export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE }> };
+export type LiveLease = { leaseAt: string; rows: Array<{ id: string; phase: keyof typeof SESSION_STAGE; fallback?: Stage }> };
 
 /** The board settings a mapping needs; missing ones take the defaults. */
 type BoardConfig = Pick<PaperclipConfig, "agentId"> & Partial<Pick<PaperclipConfig, "board" | "roles" | "stageLabels" | "statusMap" | "humanUserId">>;
@@ -132,8 +136,8 @@ export const HUMAN_HOLD_LABEL = "approved-for-human";
 export type CardAssignee = { assigneeAgentId: string | null; assigneeUserId: string | null };
 
 /**
- * Who holds an item's card by its labels, for a caller (a sync) that reads
- * them; this plugin never reads GitHub. Pure: the same item and config always
+ * Who holds an item's card by its labels, which the work source's cards carry
+ * (the card sync, mirror.ts syncCard); this plugin never reads GitHub. Pure: the same item and config always
  * give the same answer.
  *
  * - labelled `approved-for-human` → the `humanUserId` user (unset → both null,
@@ -170,6 +174,22 @@ export const ISSUE_LABEL = { name: "issue", color: "#0d9488" } as const;
 /** `labelIds` with the issue label id present exactly once; the same array contents when it already is. */
 export function withIssueLabel(labelIds: readonly string[], issueLabelId: string): string[] {
   return labelIds.includes(issueLabelId) ? [...labelIds] : [...labelIds, issueLabelId];
+}
+
+/** The marker a service-repo card carries when its GitHub issue names no registry customer. */
+export const NO_CUSTOMER_LABEL = { name: "no customer label", color: "#9ca3af" } as const;
+const CUSTOMER_COLOR = "#6366f1";
+
+/** Every registry customer label among `issueLabels` (exact name match), once each, ascending; empty when none. */
+export function customerLabelsOf(issueLabels: readonly string[], registryNames: readonly string[]): string[] {
+  const known = new Set(registryNames);
+  return [...new Set(issueLabels.filter((l) => known.has(l)))].sort();
+}
+
+/** `labelIds` without any customer or marker id (`customerIds`), then `wantIds` appended; every other id kept in order. */
+export function withCustomerLabels(labelIds: readonly string[], customerIds: ReadonlySet<string> | readonly string[], wantIds: readonly string[]): string[] {
+  const drop = new Set(customerIds);
+  return [...labelIds.filter((id) => !drop.has(id)), ...wantIds];
 }
 
 /**
@@ -221,4 +241,11 @@ export async function ensureStageLabels(client: LabelClient, cfg: BoardConfig): 
 /** The id of the company's `issue` label, created when missing (same 409 handling). Throws on failure. */
 export async function ensureIssueLabel(client: LabelClient): Promise<string | undefined> {
   return (await ensureNamed(client, [ISSUE_LABEL])).get(ISSUE_LABEL.name);
+}
+
+/** Name -> id for each registry customer label and the `no customer label` marker, creating the missing ones (same 409 handling). Throws on failure. */
+export async function ensureCustomerLabels(client: LabelClient, names: readonly string[]): Promise<Map<string, string>> {
+  const want = [...names, NO_CUSTOMER_LABEL.name].map((name) => ({ name, color: name === NO_CUSTOMER_LABEL.name ? NO_CUSTOMER_LABEL.color : CUSTOMER_COLOR }));
+  const have = await ensureNamed(client, want);
+  return new Map(want.flatMap((l) => (have.has(l.name) ? [[l.name, have.get(l.name)!] as [string, string]] : [])));
 }

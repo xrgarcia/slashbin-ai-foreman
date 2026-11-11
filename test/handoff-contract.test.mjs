@@ -2,14 +2,16 @@
 // Tech Lead and SRE envs, and a builder prompt block is the contract or an
 // explicit CONTRACT UNAVAILABLE — never empty, never a throw.
 import test from "node:test";
+import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { contractBlock, contractReaderPath, CONTRACT_READER_ENV } from "../dist/handoff-contract.js";
-import { buildTechLeadEnv, buildSreEnv } from "../dist/agent.js";
+import { buildTechLeadEnv } from "../dist/plugins/tech-lead.js";
+import { buildSreEnv } from "../dist/plugins/sre.js";
 
-const em = mkdtempSync(join(tmpdir(), "em-"));
+const em = mkTmp("em-");
 const reader = join(em, "scripts", "process", "handoff-contract-snapshot.mjs");
 mkdirSync(join(em, "scripts", "process"), { recursive: true });
 
@@ -43,7 +45,7 @@ test("no checkout, a relative reader, or no loadable client is CONTRACT UNAVAILA
   assert.match(contractBlock(undefined), /CONTRACT UNAVAILABLE: no EM checkout configured/);
   assert.match(contractBlock("relative.mjs"), /CONTRACT UNAVAILABLE: contract reader not found/);
   assert.match(contractBlock(join(tmpdir(), "no-em-here", "reader.mjs")), /CONTRACT UNAVAILABLE: contract client did not load beside/);
-  const broken = mkdtempSync(join(tmpdir(), "em-broken-"));
+  const broken = mkTmp("em-broken-");
   writeFileSync(join(broken, "handoff-contract-client.mjs"), "throw new Error('boom');\n");
   assert.match(contractBlock(join(broken, "handoff-contract-snapshot.mjs")), /CONTRACT UNAVAILABLE: contract client did not load beside .*boom/);
 });
