@@ -1,6 +1,6 @@
 {
   "name": "slashbin-ai-agent",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Open-source daemon that watches GitHub repos for approved issues and implements them using Claude Code CLI",
   "type": "module",
   "main": "dist/index.js",
