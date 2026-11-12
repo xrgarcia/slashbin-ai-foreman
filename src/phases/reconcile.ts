@@ -172,7 +172,7 @@ export async function settleHumanMerge(
   if (!commented) {
     try {
       await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, merged.issueNumber,
-        `PR #${merged.prNumber} was merged to \`${repoConfig.baseBranch}\` by a person. No reviewer, verifier, deployer or promote stage is configured, so nothing further will release this issue: closing it as done.\n\n${HUMAN_MERGE_CLOSE_MARK}`);
+        `PR #${merged.prNumber} was merged to \`${repoConfig.baseBranch}\`${roleFor("reviewer", config) ? "" : " by a person"}. No ${roleFor("reviewer", config) ? "" : "reviewer, "}verifier, deployer or promote stage is configured, so nothing further will release this issue: closing it as done.\n\n${HUMAN_MERGE_CLOSE_MARK}`);
     } catch (err) {
       // Never close without the comment: stay at approved, and the next pass's resume posts it and closes.
       logger.warn(`Could not comment on #${merged.issueNumber}, so not closing it this pass: ${err instanceof Error ? err.message : String(err)}`);
@@ -192,7 +192,8 @@ export async function settleHumanMerge(
  * no verifier too, nothing else moves an issue at `pr merged` (step 2); with
  * nothing to release it, nothing moves one at `pr approved` (step 3). Reads the
  * shared open-issue snapshot and the cached merged-PR list the dead-zone scan
- * already uses: no new scan. A no-op whenever a reviewer is enabled.
+ * already uses: no new scan. With a reviewer enabled, it labels its own merges, so only steps 2
+ * and 3 run.
  */
 export async function resumeHumanMerges(
   rt: ForemanRuntime,
@@ -201,7 +202,9 @@ export async function resumeHumanMerges(
   logger: Logger,
   deps: HumanMergeDeps & { openIssues?: CodeHost["getOpenIssues"]; mergedToBase?: CodeHost["findIssuesMergedToBase"] } = {},
 ): Promise<{ issueNumber: number; prNumber: number; settled: "merged" | "approved" | "closed" }[]> {
-  if (roleFor("reviewer", config)) return [];
+  // A reviewer labels its own merges `pr merged`, so only the in-review bucket is skipped with one on;
+  // with no verifier, nothing else ever moves an issue on from `pr merged` (foreman#285's reviewer-only setup).
+  const reviewer = !!roleFor("reviewer", config);
   const l = repoConfig.lifecycleLabels;
   const later = [l.readyForProd, l.releasePending, l.prodVerifyHeld, l.readyToClose, repoConfig.github.blockedLabel];
   const open = (await (deps.openIssues ?? codeHost().getOpenIssues)(repoConfig.githubRepo, repoConfig.repoPath, logger))
@@ -210,7 +213,7 @@ export async function resumeHumanMerges(
   const atApproved = !roleFor("verifier", config) && nothingReleases(repoConfig, config)
     ? open.filter((i) => codeHost().hasLabel(i, l.prApproved) && !codeHost().hasLabel(i, l.prMerged)).map((i) => i.number)
     : [];
-  const inReview = open
+  const inReview = reviewer ? [] : open
     .filter((i) => (codeHost().hasLabel(i, l.prUnderReview) || codeHost().hasLabel(i, l.prPendingActions)) && !codeHost().hasLabel(i, l.prMerged) && !codeHost().hasLabel(i, l.prApproved))
     .map((i) => i.number);
   if (atMerged.length + atApproved.length + inReview.length === 0) return [];

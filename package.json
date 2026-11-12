@@ -39,8 +39,8 @@
     "paperclip:register": "node scripts/paperclip/agent.mjs",
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",
     "metrics:report": "node dist/cli.js metrics:report",
-    "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs",
-    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check",
+    "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs && node scripts/capabilities-doc.mjs",
+    "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check && node scripts/capabilities-doc.mjs --check",
     "schemas": "npm run build && node scripts/contract/generate-schemas.mjs"
   },
   "engines": {

@@ -8,7 +8,7 @@ import type { Logger } from "../logger.js";
 import { stateDir } from "../state-dir.js";
 import { MetricsRecorder, openMetricsDb, readRows, sqlite } from "../metrics/recorder.js";
 import { aggregate, buildTimelines, formatReport } from "../metrics/report.js";
-import type { ForemanPlugin, PluginContext } from "./contract.js";
+import type { ForemanPlugin, PluginContext, PluginCatalogEntry } from "./contract.js";
 
 /** The database file: `metrics.path` (`~` expanded), else `foreman-metrics.db` in the state directory. */
 export function metricsPath(config: AgentConfig): string {
@@ -63,6 +63,13 @@ class MetricsObserver implements WorkObserver {
 export class MetricsPlugin implements ForemanPlugin {
   readonly id = "metrics";
   readonly roles = ["observer"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "Metrics",
+    purpose: "Records how long each stage takes and how each item ends, for `npm run metrics:report`.",
+    onWhen: "`metrics.enabled`",
+    requires: { config: ["metrics.enabled", "metrics.path", "metrics.retentionDays"], env: [] },
+    whenOff: "Nothing is recorded; the lifecycle is unchanged.",
+  };
   readonly commands = {
     "metrics:report": (config: AgentConfig) => runReport(config),
   };
