@@ -7,7 +7,7 @@ import { createCardBlockStore } from "../card-blocks.js";
 import { createRepoIdentity } from "../paperclip/repo-identity.js";
 import type { IssueRecordStore } from "../issue-records.js";
 import type { LegacyImport } from "../legacy-records.js";
-import type { ForemanPlugin, PluginContext } from "./contract.js";
+import type { ForemanPlugin, PluginContext, PluginCatalogEntry } from "./contract.js";
 
 /**
  * The session secrets plus the Paperclip key, so a refused response that echoes
@@ -36,6 +36,13 @@ export function mirrorSecrets(sessionEnv: readonly string[], apiKey: string | un
 export class PaperclipPlugin implements ForemanPlugin {
   readonly id = "paperclip";
   readonly roles = ["observer"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "Paperclip",
+    purpose: "Mirrors each issue onto a Paperclip board card and posts handoffs there for the people or agents who act next.",
+    onWhen: "`paperclip.enabled`, with `companyId` and `agentId`",
+    requires: { config: ["paperclip.enabled", "paperclip.url", "paperclip.companyId", "paperclip.agentId", "paperclip.apiKey"], env: [] },
+    whenOff: "No board: issue state lives on GitHub labels only, and every handoff is the label change itself.",
+  };
   readonly commands = {
     "paperclip:doctor": (config: AgentConfig) => runDoctor(config),
   };

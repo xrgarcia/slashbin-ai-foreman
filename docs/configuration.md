@@ -266,6 +266,12 @@ Type: string · Default: none
 
 The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about: the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
 
+### `prodGrantLabel`
+
+Type: string · Default: `"approved for prod"`
+
+The label that grants an issue a production release (a dependency batch on a `dependencyPreApproved` repo is filed carrying it). Fleet-wide.
+
 ### `techLeadPath`
 
 Type: string · Default: none · Env: `AI_AGENT_TECH_LEAD_PATH`
@@ -441,7 +447,7 @@ The metrics observer plugin (docs/metrics.md): a log of each work item's lifecyc
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
 
 - `name`: The repo's short name: in logs, state, notifications and `--repo <name>`.
-- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label and the production grant label `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for prod release` per issue). Opt-in per repo, default OFF — owner decision 2026-09-29 covers slashbin.io repos only. A repo without it files the batch unapproved, as before, and nothing builds until a human approves.
+- `dependencyPreApproved`: Owner standing authorization: file this repo's dependency batch issue already carrying the trigger label and the production grant label (`prodGrantLabel`). Opt-in per repo, default OFF. A repo without it files the batch unapproved, and nothing builds until a person approves it.
 - `skillSyncSkills`: The skills this repo's copy follows when skillSync is on, in place of skillSync.skills. [] opts the repo out of skill sync.
 - `syncOnly`: A human-lane repo (registry lane `human`): the Foreman does not implement, review, revise, release or label anything there. It only delivers the golden skills, per `approved-for-human` issue, as a `feature/<N>-<slug>` branch the person's direct-mode session resumes. Needs skillSync.
 

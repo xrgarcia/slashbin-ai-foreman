@@ -12,6 +12,7 @@ export const logs = () => {
 };
 
 export const repoConfig = (over = {}) => ({
+  prodGrantLabel: "ship to prod",
   name: "svc", githubRepo: "o/svc", repoPath: "/tmp/x", baseBranch: "develop", productionBranch: "main", featureBranch: "features",
   github: { dependencyBatchTitlePrefix: "chore(deps): validate and land ", dependencyBranchPrefixes: ["dependabot/"] },
   dependabot: { securityOnly: false }, dependencyPreApproved: true, triggerLabel: "approved", ...over,

@@ -164,7 +164,8 @@ test("the window doubles up to the cap and never past it", () => {
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
     rate(0, nowSec());
     await call();
-    await sleep(100 + 200 + 400 + 400 + 400 + 150);
+    // Wait for the probes, not a fixed budget: a slow CI runner fires late and fits fewer in.
+    for (const end = Date.now() + 4000; probes().length < 5 && Date.now() < end; ) await sleep(50);
     const p = probes();
     console.log(JSON.stringify({ gaps: p.slice(1).map((t, i) => t - p[i]) }));
   `, { baseMs: 100, capMs: 400 });

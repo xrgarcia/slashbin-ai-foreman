@@ -30,7 +30,7 @@ test("pendingVerification asks the EM for its release gate and names done; label
     { ...DEFAULT_HANDOFF_LABELS, readyForProd: "ship it" });
   assert.equal(text, [
     "**Next: Engineering Manager — action needed**",
-    "- **Do:** Run the EM release gate (`/deliver-to-prod` step 3a) for example/r#7 and, if it passes, apply `ship it` to the issue. The prod release does not start until you do.",
+    "- **Do:** Run the release gate for example/r#7 and, if it passes, apply `ship it` to the issue. The prod release does not start until you do.",
     "- **Why:** dev verification passed (`pr approved`) — PR #9 verified in dev (2026-10-15 16:27Z)",
     "- **Links:** [example/r#7](https://github.com/example/r/issues/7) · [PR #9](https://github.com/example/r/pull/9) · [evidence](https://github.com/example/r/pull/9#issuecomment-1)",
     "- **Done when:** `ship it` is on example/r#7; the Foreman then moves this card to Release authorized and opens the release PR",

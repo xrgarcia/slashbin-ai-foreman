@@ -297,7 +297,9 @@ test("a write is never retried: a timeout, a rejection or a 503 sends it once", 
 
 test("a request that never answers rejects at timeoutMs with status 0 and is retried as a GET", async () => {
   let calls = 0;
-  const hang = (_url, init) => { calls++; return new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason))); };
+  // Holds a ref'd handle until aborted, as a real socket does: on Node 22 AbortSignal.timeout's
+  // timer is unref'd, so a fake with nothing open lets the event loop drain before the abort fires.
+  const hang = (_url, init) => { calls++; const live = setInterval(() => {}, 1000); return new Promise((_res, rej) => init.signal.addEventListener("abort", () => { clearInterval(live); rej(init.signal.reason); })); };
   const c = new PaperclipClient({ url: BASE, companyId: CID, fetch: hang, timeoutMs: 15 });
   await assert.rejects(c.listAgents(), (err) => err.status === 0 && /timeout/i.test(err.body));
   assert.equal(calls, 3);
