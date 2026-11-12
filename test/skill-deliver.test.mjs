@@ -164,9 +164,9 @@ test("deliver: an existing feature/<N>-* branch (the person's, or an earlier del
 
 const noPr = async () => [];
 /** Golden moves on: the base is still stale, and the branch (delivered earlier) carries the older golden. */
-async function deliveredThenGoldenMoves() {
+async function deliveredThenGoldenMoves(over = {}) {
   const golden = makeGolden(tmp);
-  const cfg = cfgFor(golden);
+  const cfg = cfgFor(golden, over);
   const clone = makeRepo(tmp, STALE);
   const first = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger());
   assert.equal(first.status, "delivered");
@@ -269,6 +269,39 @@ test("refresh: a pre-tree delivery a person added a skill to is not overwritten"
   const tip = git(bare, "rev-parse", first.branch);
   assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
   assert.equal(git(bare, "rev-parse", first.branch), tip);
+});
+
+test("refresh: a pre-tree delivery a person added a golden skill outside the selection to is not overwritten (Tech Lead S1 on #298)", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves({ skills: ["implement-approved-issues"] });
+  const work = asLegacy(bare, first.branch, "legacy-outside-selection");
+  put(work, ".claude/skills/revise-pr-feedback/SKILL.md", "the person's copy\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--amend", "--no-edit");
+  git(work, "push", "--quiet", "--force", "origin", first.branch);
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+});
+
+test("refresh: a pristine pre-tree delivery that deleted an obsolete skill file is refreshed (Tech Lead S2 on #298)", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = asLegacy(bare, first.branch, "legacy-deletion");
+  // The delivery also removed a file the golden had dropped: rewrite it on a base that still carried that file.
+  git(work, "reset", "--quiet", "--soft", "HEAD~1");
+  git(work, "stash", "--quiet");
+  put(work, ".claude/skills/implement-approved-issues/old.md", "obsolete\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "-m", "base carried old.md");
+  git(work, "push", "--quiet", "origin", "HEAD:develop");
+  git(work, "stash", "pop", "--quiet");
+  git(work, "rm", "--quiet", ".claude/skills/implement-approved-issues/old.md");
+  const legacyMsg = git(bare, "log", "-1", "--format=%B", first.branch);
+  const author = git(bare, "log", "-1", "--format=%an <%ae>", first.branch);
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--author", author, "-m", legacyMsg);
+  git(work, "push", "--quiet", "--force", "origin", `HEAD:${first.branch}`);
+  git(clone, "fetch", "--quiet", "origin");
+  const lg = logger();
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, lg, noPr);
+  assert.equal(out.status, "refreshed", lg.lines.join("\n"));
+  assert.equal(git(bare, "show", `${out.sha}:.claude/skills/implement-approved-issues/SKILL.md`), "implement v3");
 });
 
 test("refresh: a file a person added inside a delivered skill's directory, amended in, is not overwritten", async () => {

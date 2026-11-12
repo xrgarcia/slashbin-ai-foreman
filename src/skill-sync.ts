@@ -666,7 +666,8 @@ export class SkillSync {
       const subjectRe = new RegExp(`^chore\\(skills\\): sync .+ \\(#${issue.number}\\)$`);
       // Every path a delivery may write: a file of a golden skill, under the target directory.
       const goldenPaths = new Set<string>();
-      for (const [name, files] of a.golden.skills) for (const f of files.keys()) goldenPaths.add(`${a.target}/${name}/${f}`);
+      for (const name of a.names) for (const f of a.golden.skills.get(name)?.keys() ?? []) goldenPaths.add(`${a.target}/${name}/${f}`);
+      const selectedDirs = a.names.map((n) => `${a.target}/${n}/`);
       for (const [sha, parents, author, subject, tree, body] of commits) {
         if (parents.trim().split(/\s+/).length !== 1) return null; // a merge: the person brought the base in
         if (author !== me || !subjectRe.test(subject) || !body.includes(DELIVERY_MARKER)) return null; // not the Foreman's
@@ -678,12 +679,17 @@ export class SkillSync {
           if (recorded !== `${TREE_TRAILER} ${tree}`) return null;
           continue;
         }
-        // A delivery built before the tree was recorded: untouched only if every file it changed is a golden skill
-        // file. A person's added skill, or a file added beside a delivered one, is not, and leaves the branch alone.
-        // A person's edit to a golden file's bytes is not detectable here, and those bytes are a copy by contract
-        // (the commit body says to change the golden instead).
-        const files = (await git(["diff-tree", "--no-commit-id", "--name-only", "-r", sha], cwd)).split("\n").filter(Boolean);
-        if (files.length === 0 || files.some((f) => !goldenPaths.has(f))) return null;
+        // A delivery built before the tree was recorded: untouched only if every file it ADDED or CHANGED is a golden
+        // file of a skill this repo selects, and every file it DELETED is inside a selected skill's directory (the
+        // delivery removes files the golden dropped). A person's added skill, a golden skill outside the selection,
+        // or a file added beside a delivered one fails that and leaves the branch alone. A person's edit to a golden
+        // file's bytes is not detectable here; those bytes are a copy by contract (the body says to change the golden).
+        const changes = (await git(["diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-r", sha], cwd))
+          .split("\n").filter(Boolean).map((l) => l.split("\t"));
+        if (changes.length === 0) return null;
+        for (const [status, path] of changes) {
+          if (status === "D" ? !selectedDirs.some((d) => path.startsWith(d)) : !goldenPaths.has(path)) return null;
+        }
       }
       const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
       if (carried.length === 0) return null; // the branch already carries the golden
