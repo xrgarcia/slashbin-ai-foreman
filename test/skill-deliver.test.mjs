@@ -227,6 +227,31 @@ test("refresh: a person's work amended into the delivery commit, metadata unchan
   assert.equal(git(bare, "show", `${tip}:feature.txt`), "the person's work");
 });
 
+test("refresh: a skill a person amended into the delivery commit, under the skills directory, is not overwritten (Tech Lead S1 on #296)", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = join(tmp, "skill-amender");
+  git(tmp, "clone", "--quiet", "-b", first.branch, bare, work);
+  put(work, ".claude/skills/team-helper/SKILL.md", "the team's own skill\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--amend", "--no-edit");
+  git(work, "push", "--quiet", "--force", "origin", first.branch);
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+  assert.equal(git(bare, "show", `${tip}:.claude/skills/team-helper/SKILL.md`), "the team's own skill");
+});
+
+test("refresh: a file a person added inside a delivered skill's directory, amended in, is not overwritten", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = join(tmp, "skill-editor");
+  git(tmp, "clone", "--quiet", "-b", first.branch, bare, work);
+  put(work, ".claude/skills/implement-approved-issues/notes.md", "local notes\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--amend", "--no-edit");
+  git(work, "push", "--quiet", "--force", "origin", first.branch);
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+});
+
 test("refresh: the PR lookup omits --base for null and keeps it for a named base (gh is a recorder)", async () => {
   const { allPrsForBranch } = await import(join(root, "dist", "github", "core-reads.js"));
   const bin = mkTmp("skill-deliver-gh-");
