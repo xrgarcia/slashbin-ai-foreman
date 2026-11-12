@@ -705,22 +705,22 @@ export class SkillSync {
         const changes = (await git(["diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-r", sha], cwd))
           .split("\n").filter(Boolean).map((l) => l.split("\t"));
         if (changes.length === 0) return null;
-        const touched = new Set<string>();
-        for (const [status, path] of changes) {
+        for (const [, path] of changes) {
           const dir = selectedDirs.find((d) => path.startsWith(d));
-          if (!dir) return null;
-          const name = dir.slice(a.target.length + 1, -1);
-          touched.add(name);
-          if (status === "D") continue;
-          const want = then.skills.get(name)?.get(path.slice(dir.length));
-          if (!want || !want.equals(await gitBuf(["cat-file", "blob", `${sha}:${path}`], cwd))) return null;
+          if (!dir || !then.skills.has(dir.slice(a.target.length + 1, -1))) return null; // the Foreman wrote only golden skills
         }
-        // A delivery replaces a whole skill directory, so a touched skill's tree holds only that golden's files. A file
-        // beyond them was put back by a person (a restore of a file the delivery deleted leaves no trace in the diff).
-        for (const name of touched) {
+        // A delivery leaves every selected golden skill exactly as that golden had it: a stale one is replaced whole,
+        // a current one already was. So each such skill's tree in the commit must be the golden's, file set and bytes.
+        // A file a person put back (restoring what the delivery deleted, even when that undoes the skill's whole diff),
+        // or an edited byte, breaks that and the branch is left alone.
+        for (const name of a.names) {
           const files = then.skills.get(name);
-          for (const e of await lsTree(cwd, sha, `${a.target}/${name}`)) {
-            if (!files?.has(e.path.slice(a.target.length + name.length + 2))) return null;
+          if (!files) continue; // not in the golden then: the diff check above proved the delivery left it alone
+          const entries = await lsTree(cwd, sha, `${a.target}/${name}`);
+          if (entries.length !== files.size) return null;
+          for (const e of entries) {
+            const want = files.get(e.path.slice(a.target.length + name.length + 2));
+            if (!want || !want.equals(await gitBuf(["cat-file", "blob", e.oid], cwd))) return null;
           }
         }
       }
