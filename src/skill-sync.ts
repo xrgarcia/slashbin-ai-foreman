@@ -638,7 +638,8 @@ export class SkillSync {
    * An existing `feature/<N>-*` branch the Foreman delivered and nobody touched, carrying skills that differ from the
    * golden, is rebuilt as one fresh sync commit on `origin/<base>` and force-updated. Safe because only the Foreman has
    * written it: every commit beyond the base is a Foreman delivery commit (subject, body marker, and the author the
-   * Foreman commits as), none is a merge, and no PR from it exists in any state. The push is a lease on the sha just
+   * Foreman commits as), none is a merge, and each touches only files under the skills directory (an amend that kept
+   * the metadata but added other files is a person's work), and no PR from it exists in any state. The push is a lease on the sha just
    * read, so a commit that lands in between wins and the push fails. Returns null to leave the branch alone.
    */
   private async refreshUntouched(a: {
@@ -660,6 +661,13 @@ export class SkillSync {
       for (const [, parents, author, subject, body] of commits) {
         if (parents.trim().split(/\s+/).length !== 1) return null; // a merge: the person brought the base in
         if (author !== me || !subjectRe.test(subject) || !body.includes(DELIVERY_MARKER)) return null; // not the Foreman's
+      }
+      // Metadata alone can be kept while the content is changed (a human's `commit --amend --no-edit`): each
+      // commit may touch only the skill files under the target dir, nothing else. Their bytes are the golden's
+      // by construction and are what the rebuild regenerates.
+      for (const [sha] of commits) {
+        const files = (await git(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha], cwd)).split("\n").filter(Boolean);
+        if (files.length === 0 || files.some((f) => !f.startsWith(`${a.target}/`))) return null;
       }
       const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
       if (carried.length === 0) return null; // the branch already carries the golden

@@ -83,8 +83,9 @@ sync commit on the current `origin/<base>` and force-updated (status `refreshed`
 
 - every commit beyond `origin/<base>` is a Foreman delivery commit: subject `chore(skills): sync ... (#N)`,
   the delivery marker line in the body (`DELIVERY_MARKER`), and the author the Foreman commits as
-  (`git var GIT_AUTHOR_IDENT` in its clone), and none is a merge (a merge means the person brought the base in);
-- no PR from the branch exists, open, merged or closed (`allPrsForBranch`; an unreadable list, or none supplied, means no refresh);
+  (`git var GIT_AUTHOR_IDENT` in its clone), and none is a merge (a merge means the person brought the base in), and each touches only files under the skills
+  directory (an amend that kept the metadata but added other files is a person's work);
+- no PR from the branch exists, open, merged or closed, into any base (`allPrsForBranch` with no base filter; an unreadable list, or none supplied, means no refresh);
 - the skills it carries differ from the golden.
 
 **Why the force is safe.** The only writer of such a branch is the Foreman, and the history it discards is one
