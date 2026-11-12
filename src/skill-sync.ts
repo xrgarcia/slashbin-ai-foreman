@@ -234,13 +234,17 @@ async function readGit(cfg: SkillSyncConfig, fetch: boolean): Promise<Golden> {
 }
 
 /**
- * The golden as it was at `version` (a commit of a git source), or null when that cannot be read: a builtin source,
- * or a version the golden checkout does not hold. A refresh uses it to prove an old delivery is still byte for byte
- * what the Foreman wrote.
+ * The golden as it was at `version`, or null when that cannot be read. A git source reads its checkout at that commit.
+ * A builtin source's version is the Foreman build's own commit, so it reads this package's `skills/` from the
+ * package's own git at that commit; a non-git install, a hash-fallback version or a commit the install lacks is null.
+ * A refresh uses it to prove an old delivery is still byte for byte what the Foreman wrote.
  */
-async function readGoldenAt(cfg: SkillSyncConfig, version: string): Promise<Golden | null> {
-  if (cfg.source !== "git" || !/^[0-9a-f]{7,40}$/.test(version)) return null;
-  try { return await readGit({ ...cfg, ref: version }, false); } catch { return null; }
+export async function readGoldenAt(cfg: SkillSyncConfig, version: string): Promise<Golden | null> {
+  if (!/^[0-9a-f]{7,40}$/.test(version)) return null;
+  try {
+    if (cfg.source === "git") return await readGit({ ...cfg, ref: version }, false);
+    return await readGit({ ...cfg, source: "git", repoPath: PACKAGE_ROOT, dirs: ["skills"], ref: version }, false);
+  } catch { return null; }
 }
 
 /** Read the golden now. `fetch: false` reads the ref as last fetched (the doctor's read-only mode). */
@@ -693,20 +697,31 @@ export class SkillSync {
         // directory (a delivery removes files the golden had dropped). Today's golden is not the yardstick: files it
         // has since removed or renamed were legitimately delivered then. A person's added skill, a golden skill
         // outside the selection, an added file or an edited byte fails, and the branch is left alone. An unreadable
-        // version (builtin source, a commit the golden checkout lacks) leaves it alone too.
+        // version (a commit the golden checkout lacks; for the builtin source, an install that is not a git checkout or
+        // lacks that commit) leaves it alone too.
         const version = versionRe.exec(subject)?.[1];
         const then = version ? await readGoldenAt(a.cfg, version) : null;
         if (!then) return null;
         const changes = (await git(["diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-r", sha], cwd))
           .split("\n").filter(Boolean).map((l) => l.split("\t"));
         if (changes.length === 0) return null;
-        for (const [status, path] of changes) {
+        for (const [, path] of changes) {
           const dir = selectedDirs.find((d) => path.startsWith(d));
-          if (!dir) return null;
-          if (status === "D") continue;
-          const name = dir.slice(a.target.length + 1, -1);
-          const want = then.skills.get(name)?.get(path.slice(dir.length));
-          if (!want || !want.equals(await gitBuf(["cat-file", "blob", `${sha}:${path}`], cwd))) return null;
+          if (!dir || !then.skills.has(dir.slice(a.target.length + 1, -1))) return null; // the Foreman wrote only golden skills
+        }
+        // A delivery leaves every selected golden skill exactly as that golden had it: a stale one is replaced whole,
+        // a current one already was. So each such skill's tree in the commit must be the golden's, file set and bytes.
+        // A file a person put back (restoring what the delivery deleted, even when that undoes the skill's whole diff),
+        // or an edited byte, breaks that and the branch is left alone.
+        for (const name of a.names) {
+          const files = then.skills.get(name);
+          if (!files) continue; // not in the golden then: the diff check above proved the delivery left it alone
+          const entries = await lsTree(cwd, sha, `${a.target}/${name}`);
+          if (entries.length !== files.size) return null;
+          for (const e of entries) {
+            const want = files.get(e.path.slice(a.target.length + name.length + 2));
+            if (!want || !want.equals(await gitBuf(["cat-file", "blob", e.oid], cwd))) return null;
+          }
         }
       }
       const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
