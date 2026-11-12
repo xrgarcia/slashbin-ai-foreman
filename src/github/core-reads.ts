@@ -82,15 +82,15 @@ export async function closedPrsForBranch(repo: string, head: string, base: strin
 export const ALL_PRS_LIMIT = 5000;
 
 /**
- * EVERY PR `head → base`, open, merged and closed, with no date window (gh pages through the list). Throws on a
+ * EVERY PR `head → base` (any base when `base` is null), open, merged and closed, with no date window (gh pages through the list). Throws on a
  * failed read, and when the list reaches ALL_PRS_LIMIT: a listing that may have been cut short is not a listing.
  */
-export async function allPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{ number: number; state: string }[]> {
+export async function allPrsForBranch(repo: string, head: string, base: string | null, cwd: string): Promise<{ number: number; state: string }[]> {
   const json = await ghAsync([
     "pr", "list",
     "--repo", repo,
     "--head", head,
-    "--base", base,
+    ...(base === null ? [] : ["--base", base]), // null: a PR from the head into any base
     "--state", "all",
     "--json", "number,state",
     "--limit", String(ALL_PRS_LIMIT),

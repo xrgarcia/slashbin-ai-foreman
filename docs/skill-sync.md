@@ -64,15 +64,36 @@ For each open `approved-for-human` issue (lowest number first), `SkillSync.deliv
 
 1. fetches `origin/<base>` and compares the carried skills by content. Current: nothing is done.
 2. looks for `feature/<N>-*` on origin. Present (the person started it, or an earlier delivery):
-   nothing is done. The direct-mode skill resumes that branch, and a second push would diverge it.
+   nothing is done, except in the one case below. The direct-mode skill resumes that branch, and a
+   second push would diverge it.
 3. otherwise builds one `chore(skills): sync ... (#N)` commit on `origin/<base>` and pushes it as
    `feature/<N>-<slug>` (same slug rule as the skill: lower-case, non-alphanumerics to `-`, 40
    characters). The person's session finds the branch, checks it out and merges `origin/<base>`.
 
 It uses git plumbing and a throwaway index, so the clone's working tree, index and branches are never
-touched (the clone may be someone's own) and there is no sync commit to settle afterwards. It never
-force-pushes, opens a PR, comments, labels or implements. Once the person's PR merges, the base is
-current and the repo is quiet until the golden changes.
+touched (the clone may be someone's own) and there is no sync commit to settle afterwards. It opens no
+PR, comments, labels or implements. Once the person's PR merges, the base is current and the repo is
+quiet until the golden changes.
+
+**Refreshing an untouched delivery.** An earlier delivery otherwise goes stale: the base still lacks the
+new golden, the branch exists, and step 2 would leave it on the old template for ever (jerky_com_marketing,
+2026-11-03 to 11-11: four branches missing `ship` and carrying an old `pre-pr-check`). So when exactly one
+`feature/<N>-*` exists, the base is stale, and **all** of these hold, the branch is rebuilt as one fresh
+sync commit on the current `origin/<base>` and force-updated (status `refreshed`):
+
+- every commit beyond `origin/<base>` is a Foreman delivery commit: subject `chore(skills): sync ... (#N)`,
+  the delivery marker line in the body (`DELIVERY_MARKER`), and the author the Foreman commits as
+  (`git var GIT_AUTHOR_IDENT` in its clone), and none is a merge (a merge means the person brought the base in), and each touches only files under the skills
+  directory (an amend that kept the metadata but added other files is a person's work);
+- no PR from the branch exists, open, merged or closed, into any base (`allPrsForBranch` with no base filter; an unreadable list, or none supplied, means no refresh);
+- the skills it carries differ from the golden.
+
+**Why the force is safe.** The only writer of such a branch is the Foreman, and the history it discards is one
+generated commit that the new one reproduces from the newer golden. The push is `--force-with-lease` on the
+sha just read, so a commit pushed in the meantime wins and the push fails (the branch is left as is). Any
+other commit, any merge, any PR, a second `feature/<N>-*` branch or any failed read leaves the branch alone, as before.
+The one residual risk: a person who already fetched the untouched branch locally, without committing, finds
+it rewritten; their next `git fetch` and checkout of it resolves it, and nothing of theirs was on it.
 
 ## Config
 

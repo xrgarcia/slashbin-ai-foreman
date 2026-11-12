@@ -412,8 +412,8 @@ export interface CodeHost {
   closedPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{
     number: number; url: string; mergedAt: string | null; headRefOid: string; closedAt: string | null;
   }[]>;
-  /** Every PR `head → base` in any state, no date window; throws on a failed read or a listing that may be cut short. */
-  allPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{ number: number; state: string }[]>;
+  /** Every PR `head → base` (any base when `base` is null) in any state, no date window; throws on a failed read or a listing that may be cut short. */
+  allPrsForBranch(repo: string, head: string, base: string | null, cwd: string): Promise<{ number: number; state: string }[]>;
   /** Open a PR; the host's output, which names its URL. Throws on failure. */
   createPr(config: RepoConfig, pr: { base: string; head: string; title: string; body: string }): Promise<string>;
   /** Every label name on the repo. Throws on a failed read. */
