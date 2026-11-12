@@ -705,13 +705,23 @@ export class SkillSync {
         const changes = (await git(["diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-r", sha], cwd))
           .split("\n").filter(Boolean).map((l) => l.split("\t"));
         if (changes.length === 0) return null;
+        const touched = new Set<string>();
         for (const [status, path] of changes) {
           const dir = selectedDirs.find((d) => path.startsWith(d));
           if (!dir) return null;
-          if (status === "D") continue;
           const name = dir.slice(a.target.length + 1, -1);
+          touched.add(name);
+          if (status === "D") continue;
           const want = then.skills.get(name)?.get(path.slice(dir.length));
           if (!want || !want.equals(await gitBuf(["cat-file", "blob", `${sha}:${path}`], cwd))) return null;
+        }
+        // A delivery replaces a whole skill directory, so a touched skill's tree holds only that golden's files. A file
+        // beyond them was put back by a person (a restore of a file the delivery deleted leaves no trace in the diff).
+        for (const name of touched) {
+          const files = then.skills.get(name);
+          for (const e of await lsTree(cwd, sha, `${a.target}/${name}`)) {
+            if (!files?.has(e.path.slice(a.target.length + name.length + 2))) return null;
+          }
         }
       }
       const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
