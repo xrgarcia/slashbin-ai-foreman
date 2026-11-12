@@ -234,13 +234,17 @@ async function readGit(cfg: SkillSyncConfig, fetch: boolean): Promise<Golden> {
 }
 
 /**
- * The golden as it was at `version` (a commit of a git source), or null when that cannot be read: a builtin source,
- * or a version the golden checkout does not hold. A refresh uses it to prove an old delivery is still byte for byte
- * what the Foreman wrote.
+ * The golden as it was at `version`, or null when that cannot be read. A git source reads its checkout at that commit.
+ * A builtin source's version is the Foreman build's own commit, so it reads this package's `skills/` from the
+ * package's own git at that commit; a non-git install, a hash-fallback version or a commit the install lacks is null.
+ * A refresh uses it to prove an old delivery is still byte for byte what the Foreman wrote.
  */
-async function readGoldenAt(cfg: SkillSyncConfig, version: string): Promise<Golden | null> {
-  if (cfg.source !== "git" || !/^[0-9a-f]{7,40}$/.test(version)) return null;
-  try { return await readGit({ ...cfg, ref: version }, false); } catch { return null; }
+export async function readGoldenAt(cfg: SkillSyncConfig, version: string): Promise<Golden | null> {
+  if (!/^[0-9a-f]{7,40}$/.test(version)) return null;
+  try {
+    if (cfg.source === "git") return await readGit({ ...cfg, ref: version }, false);
+    return await readGit({ ...cfg, source: "git", repoPath: PACKAGE_ROOT, dirs: ["skills"], ref: version }, false);
+  } catch { return null; }
 }
 
 /** Read the golden now. `fetch: false` reads the ref as last fetched (the doctor's read-only mode). */
@@ -693,7 +697,8 @@ export class SkillSync {
         // directory (a delivery removes files the golden had dropped). Today's golden is not the yardstick: files it
         // has since removed or renamed were legitimately delivered then. A person's added skill, a golden skill
         // outside the selection, an added file or an edited byte fails, and the branch is left alone. An unreadable
-        // version (builtin source, a commit the golden checkout lacks) leaves it alone too.
+        // version (a commit the golden checkout lacks; for the builtin source, an install that is not a git checkout or
+        // lacks that commit) leaves it alone too.
         const version = versionRe.exec(subject)?.[1];
         const then = version ? await readGoldenAt(a.cfg, version) : null;
         if (!then) return null;
