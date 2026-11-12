@@ -328,6 +328,37 @@ test("refresh: a pre-tree delivery a person restored a deleted file into is not 
   assert.equal(git(bare, "show", `${tip}:.claude/skills/implement-approved-issues/local-notes.md`), "the person's notes");
 });
 
+test("refresh: a pre-tree delivery whose restore undoes a skill's whole diff, another skill still changed, is not overwritten (Tech Lead S1 on #302)", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = asLegacy(bare, first.branch, "legacy-restore-whole");
+  git(work, "reset", "--quiet", "--soft", "HEAD~1");
+  git(work, "stash", "--quiet");
+  // The base already had the golden's implement SKILL.md, plus a notes file the golden lacks: the delivery's only
+  // change to implement is deleting the notes, and it also adds clean-code.
+  put(work, ".claude/skills/implement-approved-issues/SKILL.md", "implement v2\n");
+  put(work, ".claude/skills/implement-approved-issues/local-notes.md", "the person's notes\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "-m", "base carried implement v2 + local-notes.md");
+  git(work, "push", "--quiet", "origin", "HEAD:develop");
+  git(work, "stash", "pop", "--quiet");
+  git(work, "rm", "--quiet", ".claude/skills/implement-approved-issues/local-notes.md");
+  const legacyMsg = git(bare, "log", "-1", "--format=%B", first.branch);
+  const author = git(bare, "log", "-1", "--format=%an <%ae>", first.branch);
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--author", author, "-m", legacyMsg);
+  assert.match(git(work, "show", "--name-status", "--format=", "HEAD"), /D\t\.claude\/skills\/implement-approved-issues\/local-notes\.md/);
+  // The person restores the notes: implement drops out of the diff entirely, clean-code is still added.
+  git(work, "checkout", "--quiet", "HEAD~1", "--", ".claude/skills/implement-approved-issues/local-notes.md");
+  git(work, "commit", "--quiet", "--amend", "--no-edit");
+  const files = git(work, "show", "--name-only", "--format=", "HEAD");
+  assert.ok(!files.includes("implement-approved-issues"), files);
+  assert.ok(files.includes("clean-code"), files);
+  git(work, "push", "--quiet", "--force", "origin", `HEAD:${first.branch}`);
+  git(clone, "fetch", "--quiet", "origin");
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+  assert.equal(git(bare, "show", `${tip}:.claude/skills/implement-approved-issues/local-notes.md`), "the person's notes");
+});
+
 test("refresh: a pristine pre-tree delivery of a file the golden has since removed is refreshed, and the file goes (Tech Lead S2 on #296)", async () => {
   const golden = makeGolden(tmp);
   put(golden, ".claude/skill-templates/foreman-lane/implement-approved-issues/extra.md", "extra v1\n");
