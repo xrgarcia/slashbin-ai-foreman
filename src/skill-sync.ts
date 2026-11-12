@@ -233,6 +233,16 @@ async function readGit(cfg: SkillSyncConfig, fetch: boolean): Promise<Golden> {
   return { label: cfg.label ?? basename(cwd), version, hash: goldenHash(skills), skills, origin };
 }
 
+/**
+ * The golden as it was at `version` (a commit of a git source), or null when that cannot be read: a builtin source,
+ * or a version the golden checkout does not hold. A refresh uses it to prove an old delivery is still byte for byte
+ * what the Foreman wrote.
+ */
+async function readGoldenAt(cfg: SkillSyncConfig, version: string): Promise<Golden | null> {
+  if (cfg.source !== "git" || !/^[0-9a-f]{7,40}$/.test(version)) return null;
+  try { return await readGit({ ...cfg, ref: version }, false); } catch { return null; }
+}
+
 /** Read the golden now. `fetch: false` reads the ref as last fetched (the doctor's read-only mode). */
 export async function readGolden(cfg: SkillSyncConfig, opts: { fetch?: boolean } = {}): Promise<Golden> {
   return cfg.source === "git" ? readGit(cfg, opts.fetch ?? true) : readBuiltin(cfg);
@@ -579,7 +589,7 @@ export class SkillSync {
         const rows = existing.split("\n").map((l) => l.split("\t"));
         const branch = rows[0][1]?.replace(/^refs\/heads\//, "") ?? `feature/${issue.number}-*`;
         if (rows.length === 1 && prsForBranch) {
-          const refreshed = await this.refreshUntouched({ cwd, golden, names, target, baseSha, stale, have, issue, branch, oldSha: rows[0][0], prsForBranch, logger });
+          const refreshed = await this.refreshUntouched({ cfg, cwd, golden, names, target, baseSha, stale, have, issue, branch, oldSha: rows[0][0], prsForBranch, logger });
           if (refreshed) return refreshed;
         }
         return { status: "exists", branch };
@@ -649,7 +659,7 @@ export class SkillSync {
    * read, so a commit that lands in between wins and the push fails. Returns null to leave the branch alone.
    */
   private async refreshUntouched(a: {
-    cwd: string; golden: Golden; names: string[]; target: string; baseSha: string; stale: string[];
+    cfg: SkillSyncConfig; cwd: string; golden: Golden; names: string[]; target: string; baseSha: string; stale: string[];
     have: Map<string, Map<string, Buffer>>; issue: { number: number; title: string }; branch: string; oldSha: string;
     prsForBranch: (branch: string) => Promise<{ number: number; state: string }[]>; logger: Logger;
   }): Promise<DeliverOutcome | null> {
@@ -664,10 +674,8 @@ export class SkillSync {
       if (commits.length === 0) return null;
       const me = (await git(["var", "GIT_AUTHOR_IDENT"], cwd)).replace(/ \d+ [+-]\d{4}$/, "");
       const subjectRe = new RegExp(`^chore\\(skills\\): sync .+ \\(#${issue.number}\\)$`);
-      // Every path a delivery may write: a file of a golden skill, under the target directory.
-      const goldenPaths = new Set<string>();
-      for (const name of a.names) for (const f of a.golden.skills.get(name)?.keys() ?? []) goldenPaths.add(`${a.target}/${name}/${f}`);
       const selectedDirs = a.names.map((n) => `${a.target}/${n}/`);
+      const versionRe = new RegExp(`^chore\\(skills\\): sync .+ from .+@([0-9a-f]{7,40}) \\(#${issue.number}\\)$`);
       for (const [sha, parents, author, subject, tree, body] of commits) {
         if (parents.trim().split(/\s+/).length !== 1) return null; // a merge: the person brought the base in
         if (author !== me || !subjectRe.test(subject) || !body.includes(DELIVERY_MARKER)) return null; // not the Foreman's
@@ -679,16 +687,26 @@ export class SkillSync {
           if (recorded !== `${TREE_TRAILER} ${tree}`) return null;
           continue;
         }
-        // A delivery built before the tree was recorded: untouched only if every file it ADDED or CHANGED is a golden
-        // file of a skill this repo selects, and every file it DELETED is inside a selected skill's directory (the
-        // delivery removes files the golden dropped). A person's added skill, a golden skill outside the selection,
-        // or a file added beside a delivered one fails that and leaves the branch alone. A person's edit to a golden
-        // file's bytes is not detectable here; those bytes are a copy by contract (the body says to change the golden).
+        // A delivery built before the tree was recorded is checked against the golden it names in its subject
+        // (`from <label>@<version>`), read at that version: every file it ADDED or CHANGED must be byte for byte that
+        // golden's file of a skill this repo selects, and every file it DELETED must be inside a selected skill's
+        // directory (a delivery removes files the golden had dropped). Today's golden is not the yardstick: files it
+        // has since removed or renamed were legitimately delivered then. A person's added skill, a golden skill
+        // outside the selection, an added file or an edited byte fails, and the branch is left alone. An unreadable
+        // version (builtin source, a commit the golden checkout lacks) leaves it alone too.
+        const version = versionRe.exec(subject)?.[1];
+        const then = version ? await readGoldenAt(a.cfg, version) : null;
+        if (!then) return null;
         const changes = (await git(["diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-r", sha], cwd))
           .split("\n").filter(Boolean).map((l) => l.split("\t"));
         if (changes.length === 0) return null;
         for (const [status, path] of changes) {
-          if (status === "D" ? !selectedDirs.some((d) => path.startsWith(d)) : !goldenPaths.has(path)) return null;
+          const dir = selectedDirs.find((d) => path.startsWith(d));
+          if (!dir) return null;
+          if (status === "D") continue;
+          const name = dir.slice(a.target.length + 1, -1);
+          const want = then.skills.get(name)?.get(path.slice(dir.length));
+          if (!want || !want.equals(await gitBuf(["cat-file", "blob", `${sha}:${path}`], cwd))) return null;
         }
       }
       const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
