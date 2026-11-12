@@ -69,7 +69,8 @@ test("unreachable: every network check FAILs, config-complete still judged on it
 });
 
 test("a server that never answers fails on the timeout instead of hanging", async () => {
-  const hang = (_url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
+  // Holds a ref'd handle until aborted, as a real socket does (Node 22 unrefs AbortSignal.timeout's timer).
+  const hang = (_url, init) => { const live = setInterval(() => {}, 1000); return new Promise((_, reject) => init.signal.addEventListener("abort", () => { clearInterval(live); reject(init.signal.reason); })); };
   const r = byName(await diagnosePaperclip(cfg(), { fetch: hang, timeoutMs: 50 }));
   assert.equal(r.health.ok, false);
   assert.match(r.health.detail, /no answer within 50 ms/);

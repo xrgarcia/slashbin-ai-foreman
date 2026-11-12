@@ -26,13 +26,12 @@ import { applyProfile, profileNamed } from "./profiles/index.js";
 // different names would be one fleet speaking two protocols. `triggerLabel` stays
 // separate for the opposite reason: it selects work, and it does cascade per repo.
 /**
- * The production grant label, `deliver-to-prod`: the EM's release gate reads it on a standalone
- * issue as the owner's authorization to ship that issue to production. Deliberately NOT in
- * `lifecycleLabels` (those are stripped as an issue moves through the pipeline; a grant must stay),
- * and the Foreman never acts on it: it only files dependency batches carrying it on a
- * `dependencyPreApproved` repo (owner decision 2026-11-06).
+ * The production grant label when the config names none (`prodGrantLabel`): an issue carrying it is
+ * authorized to ship to production. Deliberately NOT in `lifecycleLabels` (those are stripped as an
+ * issue moves; a grant must stay), and the Foreman never acts on it: it only files dependency batches
+ * carrying it on a `dependencyPreApproved` repo, for whoever gates the release to read.
  */
-export const PROD_GRANT_LABEL = "deliver-to-prod";
+export const DEFAULT_PROD_GRANT_LABEL = "approved for prod";
 
 const lifecycleLabelsSchema = z.object({
   // Implement/revise opened or updated a PR; the review phase picks it up.
@@ -93,10 +92,8 @@ const repoEntrySchema = z.object({
   reviewerLogin: z.string().optional(),
   // Owner standing authorization: file this repo's dependency batch issue
   // already carrying the trigger label and the production grant label
-  // `deliver-to-prod` (owner decision 2026-11-06; the EM still signs `ready for
-  // prod release` per issue). Opt-in per repo, default OFF — owner
-  // decision 2026-09-29 covers slashbin.io repos only. A repo without it files
-  // the batch unapproved, as before, and nothing builds until a human approves.
+  // (`prodGrantLabel`). Opt-in per repo, default OFF. A repo without it files
+  // the batch unapproved, and nothing builds until a person approves it.
   dependencyPreApproved: z.boolean().optional(),
   // The skills this repo's copy follows when skillSync is on, in place of
   // skillSync.skills. [] opts the repo out of skill sync.
@@ -290,6 +287,9 @@ export const configSchema = z.object({
   // The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about:
   // the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
   epicRepo: z.string().min(1).optional(),
+  // The label that grants an issue a production release (a dependency batch on a
+  // `dependencyPreApproved` repo is filed carrying it). Fleet-wide.
+  prodGrantLabel: z.string().min(1).default(DEFAULT_PROD_GRANT_LABEL),
   // The Tech Lead (slashbin_ai_tech_lead, EM#427): when set, each
   // review runs through it — Codex judges, its code posts and merges.
   // It exits 3 when it cannot take the review and nothing was written; the PR
@@ -547,6 +547,8 @@ export interface RepoConfig {
   /** The epic label in `<label> #N` issue references — the global value; undefined = no epic parsing. */
   epicRefLabel?: string;
   epicRepo?: string;
+  /** The production grant label — the global value. */
+  prodGrantLabel: string;
 }
 
 /**
@@ -597,6 +599,8 @@ export interface AgentConfig {
   /** The epic label in `<label> #N` issue references; undefined = no epic parsing. */
   epicRefLabel?: string;
   epicRepo?: string;
+  /** The label that grants an issue a production release. */
+  prodGrantLabel: string;
   /** Absolute path to the Tech Lead checkout; undefined = Claude review only. */
   techLeadPath?: string;
   srePath?: string;
@@ -696,10 +700,10 @@ function inferGithubRepo(repoPath: string): string | undefined {
  * label. The one selection rule — onboarding, `npm run labels:install` and
  * `npm run doctor` all read it from here.
  */
-export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github"> & { dependencyPreApproved?: boolean }): string[] {
+export function requiredLabels(repo: Pick<RepoConfig, "triggerLabel" | "lifecycleLabels" | "github" | "prodGrantLabel"> & { dependencyPreApproved?: boolean }): string[] {
   // The production grant label is not a lifecycle label (lifecycle labels get stripped as an issue moves);
   // a pre-approved repo files its dependency batches carrying it, and gh refuses a label that does not exist.
-  const grant = repo.dependencyPreApproved ? [PROD_GRANT_LABEL] : [];
+  const grant = repo.dependencyPreApproved ? [repo.prodGrantLabel] : [];
   return [...new Set([repo.triggerLabel, ...Object.values(repo.lifecycleLabels), repo.github.blockedLabel, ...grant])];
 }
 
@@ -809,6 +813,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     unstickEscalationOwner: process.env.AI_AGENT_UNSTICK_ESCALATION_OWNER ?? fileConfig.unstickEscalationOwner,
     epicRefLabel: fileConfig.epicRefLabel,
     epicRepo: fileConfig.epicRepo,
+    prodGrantLabel: fileConfig.prodGrantLabel,
     techLeadPath: process.env.AI_AGENT_TECH_LEAD_PATH ?? fileConfig.techLeadPath,
     srePath: process.env.AI_AGENT_SRE_PATH ?? fileConfig.srePath,
     qaPath: process.env.AI_AGENT_QA_PATH ?? fileConfig.qaPath,
@@ -867,6 +872,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     metrics: Object.freeze({ enabled: parsed.metrics.enabled, path: parsed.metrics.path, retentionDays: parsed.metrics.retentionDays }),
     epicRefLabel: parsed.epicRefLabel,
     epicRepo: parsed.epicRepo,
+    prodGrantLabel: parsed.prodGrantLabel,
   };
 
   let repos: RepoConfig[];
@@ -1023,6 +1029,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     unstickEscalationOwner: parsed.unstickEscalationOwner,
     epicRefLabel: parsed.epicRefLabel,
     epicRepo: parsed.epicRepo,
+    prodGrantLabel: parsed.prodGrantLabel,
     techLeadPath: parsed.techLeadPath ? resolve(parsed.techLeadPath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     srePath: parsed.srePath ? resolve(parsed.srePath.replace(/^~(?=$|\/)/, homedir())) : undefined,
     qaPath: parsed.qaPath ? resolve(parsed.qaPath.replace(/^~(?=$|\/)/, homedir())) : undefined,

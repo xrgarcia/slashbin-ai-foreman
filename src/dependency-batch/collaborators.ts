@@ -2,7 +2,7 @@
 // function (phases/promote.ts) only wires them in order; each is unit-tested on
 // its own against a fake `DependencyHostPort`.
 
-import { PROD_GRANT_LABEL, type RepoConfig } from "../config.js";
+import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { DependencyChange, PrSnapshot } from "../code-host.js";
 import type { GithubConventions } from "../config-schema/github.js";
@@ -98,10 +98,10 @@ export class BatchIssueComposer {
 
 /**
  * The labels a batch issue is filed with: the trigger label AND the production grant
- * on a pre-approved repo (owner decisions 2026-09-29 and 2026-11-06), none otherwise.
+ * (`prodGrantLabel`) on a pre-approved repo, none otherwise.
  */
-export function batchIssueLabels(repoConfig: Pick<RepoConfig, "dependencyPreApproved" | "triggerLabel">): string[] {
-  return repoConfig.dependencyPreApproved ? [repoConfig.triggerLabel, PROD_GRANT_LABEL] : [];
+export function batchIssueLabels(repoConfig: Pick<RepoConfig, "dependencyPreApproved" | "triggerLabel" | "prodGrantLabel">): string[] {
+  return repoConfig.dependencyPreApproved ? [repoConfig.triggerLabel, repoConfig.prodGrantLabel] : [];
 }
 
 /**

@@ -2,7 +2,7 @@
 // Every decision lives in a collaborator; this class only sequences them and
 // keeps the ledger honest about what it filed.
 
-import { PROD_GRANT_LABEL, type RepoConfig } from "../config.js";
+import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { DependencyBatch } from "./batch.js";
 import {
@@ -73,7 +73,7 @@ export class DependencyBatchSweep {
       `Filed dependency batch issue #${number} for ${prs.length} PR(s) on ${found.bases.join("/")}` +
       (majors > 0 ? ` — ${majors} major` : "") +
       (repoConfig.dependencyPreApproved
-        ? ` — filed with "${repoConfig.triggerLabel}" and "${PROD_GRANT_LABEL}", queued to build and deliver to prod`
+        ? ` — filed with "${repoConfig.triggerLabel}" and "${repoConfig.prodGrantLabel}", queued to build and deliver to prod`
         : ` — awaiting "${repoConfig.triggerLabel}"`),
     );
     return number;
