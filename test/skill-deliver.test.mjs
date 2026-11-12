@@ -17,7 +17,7 @@ import { test, beforeEach } from "node:test";
 import { mkTmp } from "./tmp-dir.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -227,9 +227,49 @@ test("refresh: a person's work amended into the delivery commit, metadata unchan
   assert.equal(git(bare, "show", `${tip}:feature.txt`), "the person's work");
 });
 
-test("refresh: the stage looks for a PR from the branch into ANY base", async () => {
-  assert.match(readFileSync(join(root, "src", "phases", "skill-deliver.ts"), "utf8"), /allPrsForBranch\(repoConfig\.githubRepo, branch, null,/);
-  assert.match(readFileSync(join(root, "src", "github", "core-reads.ts"), "utf8"), /base === null \? \[\] : \["--base", base\]/);
+test("refresh: the PR lookup omits --base for null and keeps it for a named base (gh is a recorder)", async () => {
+  const { allPrsForBranch } = await import(join(root, "dist", "github", "core-reads.js"));
+  const bin = mkTmp("skill-deliver-gh-");
+  const log = join(bin, "args.log");
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho "$@" >> "${log}"\necho '[{"number":9,"state":"OPEN"}]'\n`);
+  chmodSync(join(bin, "gh"), 0o755);
+  const oldPath = process.env.PATH;
+  process.env.FOREMAN_GITHUB_TOKEN ??= "test-token-not-real";
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    assert.deepEqual(await allPrsForBranch("o/r", "feature/1-x", null, tmp), [{ number: 9, state: "OPEN" }]);
+    await allPrsForBranch("o/r", "feature/1-x", "develop", tmp);
+  } finally { process.env.PATH = oldPath; }
+  const [anyBase, named] = readFileSync(log, "utf8").trim().split("\n");
+  assert.doesNotMatch(anyBase, /--base/);
+  assert.match(anyBase, /--head feature\/1-x/);
+  assert.match(named, /--base develop/);
+});
+
+test("refresh: the stage asks for a PR from the branch into ANY base, and a PR it finds stops the refresh", async () => {
+  const { startGitHubWorkSource } = await import("./agent-plugins.mjs");
+  const { codeHost } = await import(join(root, "dist", "plugins", "registry.js"));
+  const { trySkillDeliver } = await import(join(root, "dist", "phases", "skill-deliver.js"));
+  process.env.FOREMAN_GITHUB_TOKEN ??= "test-token-not-real";
+  await startGitHubWorkSource();
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const host = codeHost();
+  const real = { getOpenIssues: host.getOpenIssues, hasLabel: host.hasLabel, allPrsForBranch: host.allPrsForBranch };
+  const asked = [];
+  let prs = [{ number: 7, state: "MERGED" }];
+  host.getOpenIssues = async () => [{ number: ISSUE.number, title: ISSUE.title }];
+  host.hasLabel = () => true;
+  host.allPrsForBranch = async (...args) => { asked.push(args); return prs; };
+  try {
+    const repoConfig = { ...repoOf(clone), githubRepo: "o/svc", syncOnly: true };
+    const config = { skillSync: cfg };
+    assert.equal(await trySkillDeliver({ skillSync }, repoConfig, config, logger(), []), 0);
+    assert.deepEqual(asked, [["o/svc", first.branch, null, clone]], "any base: null, never the configured base");
+    assert.equal(git(bare, "rev-parse", first.branch), first.sha, "a PR into another base still leaves the branch alone");
+    prs = [];
+    assert.equal(await trySkillDeliver({ skillSync }, repoConfig, config, logger(), []), 1);
+    assert.notEqual(git(bare, "rev-parse", first.branch), first.sha, "no PR in any base: refreshed");
+  } finally { Object.assign(host, real); }
 });
 
 test("refresh: a sync-looking commit by someone else is not the Foreman's", async () => {
