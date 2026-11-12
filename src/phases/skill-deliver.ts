@@ -36,7 +36,8 @@ export async function trySkillDeliver(
     for (const issue of issues) {
       const out = await rt.skillSync.deliverSkillsForIssue(
         config.skillSync, repoConfig, issue, logger,
-        (branch) => codeHost().allPrsForBranch(repoConfig.githubRepo, branch, repoConfig.baseBranch, repoConfig.repoPath),
+        // Any base: a PR from this branch into another branch is still somebody's work.
+        (branch) => codeHost().allPrsForBranch(repoConfig.githubRepo, branch, null, repoConfig.repoPath),
       );
       // Current is repo-wide (origin/<base> carries the skills): no issue needs anything. A skip or failure repeats on the next issue.
       if (out.status !== "delivered" && out.status !== "refreshed" && out.status !== "exists") break;

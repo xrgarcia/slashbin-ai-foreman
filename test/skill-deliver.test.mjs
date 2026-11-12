@@ -214,6 +214,24 @@ test("refresh: a human commit on the branch (or a merge of the base) means it is
   assert.equal(git(bare, "rev-parse", first.branch), tip);
 });
 
+test("refresh: a person's work amended into the delivery commit, metadata unchanged, is not overwritten", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = join(tmp, "amender");
+  git(tmp, "clone", "--quiet", "-b", first.branch, bare, work);
+  put(work, "feature.txt", "the person's work\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--amend", "--no-edit");
+  git(work, "push", "--quiet", "--force", "origin", first.branch);
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+  assert.equal(git(bare, "show", `${tip}:feature.txt`), "the person's work");
+});
+
+test("refresh: the stage looks for a PR from the branch into ANY base", async () => {
+  assert.match(readFileSync(join(root, "src", "phases", "skill-deliver.ts"), "utf8"), /allPrsForBranch\(repoConfig\.githubRepo, branch, null,/);
+  assert.match(readFileSync(join(root, "src", "github", "core-reads.ts"), "utf8"), /base === null \? \[\] : \["--base", base\]/);
+});
+
 test("refresh: a sync-looking commit by someone else is not the Foreman's", async () => {
   const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
   const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr);
