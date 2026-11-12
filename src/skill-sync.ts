@@ -644,7 +644,8 @@ export class SkillSync {
    * golden, is rebuilt as one fresh sync commit on `origin/<base>` and force-updated. Safe because only the Foreman has
    * written it: every commit beyond the base is a Foreman delivery commit (subject, body marker, and the author the
    * Foreman commits as), none is a merge, each commit's tree is still the tree the Foreman recorded in it (an amend
-   * that kept the metadata but changed any file is a person's work), and no PR from it exists in any state. The push is a lease on the sha just
+   * that kept the metadata but changed any file is a person's work; a delivery from before the tree was recorded may
+   * change only golden skill files), and no PR from it exists in any state. The push is a lease on the sha just
    * read, so a commit that lands in between wins and the push fails. Returns null to leave the branch alone.
    */
   private async refreshUntouched(a: {
@@ -663,14 +664,26 @@ export class SkillSync {
       if (commits.length === 0) return null;
       const me = (await git(["var", "GIT_AUTHOR_IDENT"], cwd)).replace(/ \d+ [+-]\d{4}$/, "");
       const subjectRe = new RegExp(`^chore\\(skills\\): sync .+ \\(#${issue.number}\\)$`);
-      for (const [, parents, author, subject, tree, body] of commits) {
+      // Every path a delivery may write: a file of a golden skill, under the target directory.
+      const goldenPaths = new Set<string>();
+      for (const [name, files] of a.golden.skills) for (const f of files.keys()) goldenPaths.add(`${a.target}/${name}/${f}`);
+      for (const [sha, parents, author, subject, tree, body] of commits) {
         if (parents.trim().split(/\s+/).length !== 1) return null; // a merge: the person brought the base in
         if (author !== me || !subjectRe.test(subject) || !body.includes(DELIVERY_MARKER)) return null; // not the Foreman's
         // Metadata alone can be kept while the content changes (a human's `commit --amend --no-edit`, adding a file
-        // anywhere, a new skill under the skills directory included). Only a commit whose tree is still the one the
-        // Foreman recorded is provably untouched; a delivery with no recorded tree (built before it was recorded) is
-        // left alone.
-        if (!body.split("\n").some((l) => l.trim() === `${TREE_TRAILER} ${tree}`)) return null;
+        // anywhere, a new skill under the skills directory included). A commit that recorded its tree is untouched
+        // only while its tree is still that one.
+        const recorded = body.split("\n").map((l) => l.trim()).find((l) => l.startsWith(`${TREE_TRAILER} `));
+        if (recorded !== undefined) {
+          if (recorded !== `${TREE_TRAILER} ${tree}`) return null;
+          continue;
+        }
+        // A delivery built before the tree was recorded: untouched only if every file it changed is a golden skill
+        // file. A person's added skill, or a file added beside a delivered one, is not, and leaves the branch alone.
+        // A person's edit to a golden file's bytes is not detectable here, and those bytes are a copy by contract
+        // (the commit body says to change the golden instead).
+        const files = (await git(["diff-tree", "--no-commit-id", "--name-only", "-r", sha], cwd)).split("\n").filter(Boolean);
+        if (files.length === 0 || files.some((f) => !goldenPaths.has(f))) return null;
       }
       const carried = compareSkills(a.golden, a.names, await repoSkillsAt(cwd, tip, a.target, a.names)).filter((d) => d.state !== "current");
       if (carried.length === 0) return null; // the branch already carries the golden

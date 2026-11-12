@@ -83,8 +83,11 @@ sync commit on the current `origin/<base>` and force-updated (status `refreshed`
 
 - every commit beyond `origin/<base>` is a Foreman delivery commit: subject `chore(skills): sync ... (#N)`,
   the delivery marker line in the body (`DELIVERY_MARKER`), and the author the Foreman commits as
-  (`git var GIT_AUTHOR_IDENT` in its clone), and none is a merge (a merge means the person brought the base in), and each touches only files under the skills
-  directory (an amend that kept the metadata but added other files is a person's work);
+  (`git var GIT_AUTHOR_IDENT` in its clone), and none is a merge (a merge means the person brought the base in), and each commit's tree is still the one the
+  Foreman recorded in its `Foreman-Tree: <oid>` body line (an amend that kept the metadata but changed any file, a
+  new skill under the skills directory included, is a person's work). A delivery from before that line was recorded
+  qualifies only if every file it changed is a file of a golden skill under the skills directory; a person's added
+  skill or added file fails that, while an edit to a golden file's bytes cannot be told apart and is a copy by contract;
 - no PR from the branch exists, open, merged or closed, into any base (`allPrsForBranch` with no base filter; an unreadable list, or none supplied, means no refresh);
 - the skills it carries differ from the golden.
 
