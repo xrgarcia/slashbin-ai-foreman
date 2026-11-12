@@ -89,10 +89,18 @@ repo's entry instead of the top level):
    a list of labels an issue must all carry).
 9. **Dependency PRs** — "Do dependency updates come from Dependabot (default) or
    Renovate?" Renovate → `github.dependencyBranchPrefixes: ["renovate/"]`.
-10. **Review** — "Should each PR be reviewed by a second agent before it merges?" Review
-    runs only through the Tech Lead: yes → ask for its checkout path (`techLeadPath`)
-    and set `reviewEnabled: true`; it needs `TECHLEAD_GITHUB_KEY`. No checkout → leave
-    review off and say PRs will wait for a human merge.
+10. **Roles** — read [`docs/capabilities.md`](../../../docs/capabilities.md), generated
+    from each plugin's own catalog: every optional role, the config and env it needs, and
+    what the Foreman does when it is off. Ask once per role, in the team's terms: a
+    **reviewer** (an agent reviews each PR before it merges), a **verifier** and
+    **deployer** (an agent checks dev and production and ships releases), **qa** (an agent
+    tests the running app before merge), **unstick** (an agent clears stuck or held work),
+    and the **observers** (a board, metrics). For each yes, ask for exactly what its
+    **Config** and **Env** lines name and write only that; a reviewer also sets
+    `reviewEnabled: true`. A role whose **On when** line says it turns another on (QA
+    turns on Unstick) cannot be taken without that one: say so before writing it. For each no, write nothing and tell the user its **When off**
+    line, so they know who does that step instead. A team with only GitHub is a valid
+    setup: the Foreman builds and revises, and a person reviews and merges.
 11. **Model and limits** — offer the defaults (`docs/configuration.md`); set only what
     the user changes.
 

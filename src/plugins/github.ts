@@ -26,7 +26,7 @@ import { ghAsync } from "../github/gh.js";
 import { probeToken } from "../github/token-probe.js";
 import { fleetState } from "../github-state.js";
 import { GitHubIssueConnector } from "../github-work-source.js";
-import type { ForemanPlugin, PluginRole } from "./contract.js";
+import type { ForemanPlugin, PluginRole, PluginCatalogEntry } from "./contract.js";
 
 /** The id that selects this plugin as work source and as code host; the default for both. */
 export const GITHUB_WORK_SOURCE = "github";
@@ -193,6 +193,13 @@ export class GitHubPlugin implements ForemanPlugin {
 
   readonly id = "github";
   readonly roles = ["workSource", "codeHost"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "GitHub",
+    purpose: "Reads the issues to build (work source) and opens, reads and merges pull requests (code host).",
+    onWhen: "`workSource` / `codeHost` is `github` (the default)",
+    requires: { config: ["workSource", "codeHost", "repos[].githubRepo"], env: ["FOREMAN_GITHUB_TOKEN"] },
+    whenOff: "Nothing runs: GitHub is the only built-in work source and code host, so there are no issues to build and nowhere to open a PR.",
+  };
   /** The Foreman login, read once, shared by both roles. */
   private readonly identity = new skipHold.ForemanIdentity();
   /** The connector the daemon uses; it holds its own announce-once and hold memory. */

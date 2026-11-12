@@ -195,6 +195,8 @@ test("onboarding: false in the file skips onboarding, missing labels or a refuse
 
 test("requiredLabels adds the production grant label only for a pre-approved repo", () => {
   const base = load().repos[0];
-  assert.ok(!requiredLabels(base).includes("deliver-to-prod"));
-  assert.ok(requiredLabels({ ...base, dependencyPreApproved: true }).includes("deliver-to-prod"));
+  assert.equal(base.prodGrantLabel, "approved for prod", "the core default names no deployment's label");
+  assert.ok(!requiredLabels(base).includes(base.prodGrantLabel));
+  assert.ok(requiredLabels({ ...base, dependencyPreApproved: true }).includes(base.prodGrantLabel));
+  assert.ok(requiredLabels({ ...base, dependencyPreApproved: true, prodGrantLabel: "ship it" }).includes("ship it"));
 });

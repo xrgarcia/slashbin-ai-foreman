@@ -74,7 +74,7 @@ that the next pass would place: fix the issue.
 
 **Human-lane repos (`syncOnly`, stage `skill-deliver`).** Not a lifecycle stage: no card, label or PR. For each open
 `approved-for-human` issue in a `syncOnly` repo the Foreman pushes the current golden skills as one commit on
-`feature/<N>-<slug>` cut from `origin/<base>` (never when the base is current or `feature/<N>-*` exists), so the
+`feature/<N>-<slug>` cut from `origin/<base>` (never when the base is current; an existing `feature/<N>-*` is left alone unless every commit on it is the Foreman's own delivery commit and no PR exists, then it is rebuilt on the current base), so the
 person's direct-mode session resumes it. EM input: none. Adding a human-lane repo to the Foreman means a `syncOnly`
 entry in `.ai-agent.json`, never an implement/review lane (`docs/skill-sync.md`).
 

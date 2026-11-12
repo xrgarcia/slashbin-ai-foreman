@@ -18,6 +18,7 @@ export interface ConfigProfile {
   readonly reviewAllowedTools?: readonly string[];
   readonly epicRefLabel?: string;
   readonly epicRepo?: string;
+  readonly prodGrantLabel?: string;
   readonly paperclip?: { readonly commentAuthorHeader?: string };
 }
 

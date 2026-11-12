@@ -6,7 +6,7 @@ import { readResultV1, waitUntilSlug, type RoleResult } from "../contract/result
 import { recordContractPath } from "../contract/usage.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { cliTail, parseReviewTrailerRecords, parseUnrelatedErrors, runAgentCli, type CliRun } from "./agent-cli.js";
-import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, UnrelatedErrors, Verifier, VerifyResult } from "./contract.js";
+import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, UnrelatedErrors, Verifier, VerifyResult, PluginCatalogEntry } from "./contract.js";
 
 /**
  * The SRE (`<srePath>/bin/sre.mjs`) as the verifier and deployer plugin
@@ -263,6 +263,13 @@ export async function verifyProdViaSre(
 export class SrePlugin implements ForemanPlugin {
   readonly id = "sre";
   readonly roles = ["verifier", "deployer"] as const;
+  readonly catalog: PluginCatalogEntry = {
+    name: "SRE",
+    purpose: "An agent verifies each merged change in dev and, after release, in production, and deploys the release PR.",
+    onWhen: "`srePath` is set",
+    requires: { config: ["srePath"], env: ["SRE_GITHUB_KEY"] },
+    whenOff: "No dev or production verification and no deploy: a merged issue goes straight on, and when no promote stage is configured either, it is commented and closed. A release PR waits for a person to merge it.",
+  };
   readonly verifier: Verifier = { verifyDev: verifyViaSre, verifyProd: verifyProdViaSre };
   readonly deployer: Deployer = { deploy: deployViaSre };
   enabled(config: AgentConfig): boolean {
