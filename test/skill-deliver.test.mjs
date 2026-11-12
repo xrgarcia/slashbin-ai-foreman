@@ -480,3 +480,20 @@ test("stage wiring: a sync-only repo runs only skill-deliver, others never run i
   assert.doesNotMatch(stage, /addLabel|createPR|commentOnIssue|advance\(|emit\(/, "the human lane gets no PR, label, comment or card move");
   assert.match(readFileSync(join(root, "src", "plugins", "paperclip.ts"), "utf8"), /filter\(\(r\) => !r\.syncOnly\)/);
 });
+
+test("readGoldenAt reads a builtin golden from the Foreman's own git at its commit", async () => {
+  const cfg = ss.resolveSkillSync({ enabled: true, source: "builtin", dirs: [], skills: [], targetDir: ".claude/skills", refreshMs: 300000 });
+  const head = git(root, "rev-parse", "--short", "HEAD");
+  const then = await ss.readGoldenAt(cfg, head);
+  assert.ok(then, "HEAD of the package root is readable");
+  const now = await ss.readGolden(cfg);
+  const dirty = new Set(git(root, "status", "--porcelain", "--", "skills").split("\n").filter(Boolean).map((l) => l.slice(3).split("/")[1]));
+  const clean = [...now.skills.keys()].filter((n) => !dirty.has(n));
+  assert.ok(clean.length > 0);
+  for (const name of clean) {
+    assert.deepEqual([...then.skills.get(name).keys()].sort(), [...now.skills.get(name).keys()].sort());
+    for (const [f, buf] of now.skills.get(name)) assert.ok(buf.equals(then.skills.get(name).get(f)), `${name}/${f}`);
+  }
+  assert.equal(await ss.readGoldenAt(cfg, "0000000"), null);
+  assert.equal(await ss.readGoldenAt(cfg, "not-hex"), null);
+});
