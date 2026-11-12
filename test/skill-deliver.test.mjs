@@ -240,6 +240,37 @@ test("refresh: a skill a person amended into the delivery commit, under the skil
   assert.equal(git(bare, "show", `${tip}:.claude/skills/team-helper/SKILL.md`), "the team's own skill");
 });
 
+/** Strips the Foreman-Tree line, keeping author, subject and marker: a delivery made before the tree was recorded. */
+function asLegacy(bare, branch, name) {
+  const work = join(tmp, name);
+  git(tmp, "clone", "--quiet", "-b", branch, bare, work);
+  const msg = git(work, "log", "-1", "--format=%B").split("\n").filter((l) => !l.startsWith("Foreman-Tree:")).join("\n");
+  git(work, "commit", "--quiet", "--amend", "-m", msg);
+  git(work, "push", "--quiet", "--force", "origin", branch);
+  return work;
+}
+
+test("refresh: a pristine delivery from before the tree was recorded is refreshed (Tech Lead S2 on #296)", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  asLegacy(bare, first.branch, "legacy-pristine");
+  const lg = logger();
+  const out = await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, lg, noPr);
+  assert.equal(out.status, "refreshed", lg.lines.join("\n"));
+  assert.equal(git(bare, "show", `${out.sha}:.claude/skills/implement-approved-issues/SKILL.md`), "implement v3");
+  assert.equal(git(bare, "show", `${out.sha}:.claude/skills/ship/SKILL.md`), "ship v1");
+});
+
+test("refresh: a pre-tree delivery a person added a skill to is not overwritten", async () => {
+  const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
+  const work = asLegacy(bare, first.branch, "legacy-amended");
+  put(work, ".claude/skills/team-helper/SKILL.md", "the team's own skill\n");
+  git(work, "add", "-A"); git(work, "commit", "--quiet", "--amend", "--no-edit");
+  git(work, "push", "--quiet", "--force", "origin", first.branch);
+  const tip = git(bare, "rev-parse", first.branch);
+  assert.deepEqual(await skillSync.deliverSkillsForIssue(cfg, repoOf(clone), ISSUE, logger(), noPr), { status: "exists", branch: first.branch });
+  assert.equal(git(bare, "rev-parse", first.branch), tip);
+});
+
 test("refresh: a file a person added inside a delivered skill's directory, amended in, is not overwritten", async () => {
   const { cfg, clone, first, bare } = await deliveredThenGoldenMoves();
   const work = join(tmp, "skill-editor");
