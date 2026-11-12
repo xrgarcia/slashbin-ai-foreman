@@ -86,8 +86,10 @@ sync commit on the current `origin/<base>` and force-updated (status `refreshed`
   (`git var GIT_AUTHOR_IDENT` in its clone), and none is a merge (a merge means the person brought the base in), and each commit's tree is still the one the
   Foreman recorded in its `Foreman-Tree: <oid>` body line (an amend that kept the metadata but changed any file, a
   new skill under the skills directory included, is a person's work). A delivery from before that line was recorded
-  qualifies only if every file it changed is a file of a golden skill under the skills directory; a person's added
-  skill or added file fails that, while an edit to a golden file's bytes cannot be told apart and is a copy by contract;
+  is checked against the golden version its subject names (`from <label>@<version>`), read at that version: every
+  file it added or changed must be byte for byte that golden's file of a selected skill, and every file it deleted
+  must be inside a selected skill's directory. A golden file removed or renamed since does not disqualify it; a
+  person's added skill, added file or edited byte does, and so does a version that cannot be read (builtin source);
 - no PR from the branch exists, open, merged or closed, into any base (`allPrsForBranch` with no base filter; an unreadable list, or none supplied, means no refresh);
 - the skills it carries differ from the golden.
 
