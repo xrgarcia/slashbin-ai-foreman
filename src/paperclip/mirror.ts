@@ -398,10 +398,11 @@ export class PaperclipMirror implements WorkObserver {
    * merge with no PR is work found already in production (→ done).
    */
   async onRelease(event: ReleaseEvent, _logger: Logger): Promise<void> {
-    const vars = { pr: event.pr === undefined ? "?" : String(event.pr), branch: event.productionBranch };
+    const vars = { pr: event.pr === undefined ? "?" : String(event.pr), branch: event.productionBranch, at: event.waitUntil ?? "", reason: event.waitReason ?? "" };
     // An owned release PR's items are `releasing` (the SRE's seat): an `open` re-announce
     // (a restart, a changed issue list) must not pull them back to `awaitingRelease`.
-    const step = event.state === "open" ? (event.owned ? PAPERCLIP_STEPS.releaseQueued : PAPERCLIP_STEPS.releaseWaiting)
+    const step = event.state === "waiting" ? PAPERCLIP_STEPS.releaseVerifyWait
+      : event.state === "open" ? (event.owned ? PAPERCLIP_STEPS.releaseQueued : PAPERCLIP_STEPS.releaseWaiting)
       : event.state === "closed" ? PAPERCLIP_STEPS.releaseClosed
       : event.pr === undefined ? PAPERCLIP_STEPS.inProduction : PAPERCLIP_STEPS.released;
     for (const item of event.issues) {
