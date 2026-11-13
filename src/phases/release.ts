@@ -885,16 +885,27 @@ const statedReason = (reason: string | undefined, hold: string): string | undefi
 };
 
 /**
- * The SRE named the time the rest of the production check becomes observable. Record the time, then say once per
- * time on each of the release's issues (comment and card note) that it is live, verified and needs nobody: without
- * it the card sits unchanged for the whole wait. Recording first means a save that fails says nothing and is tried
- * on the next pass. It never changes when or whether the release closes.
+ * The SRE named the time the rest of the production check becomes observable: record it, then announce it.
+ * It never changes when or whether the release closes.
  */
 async function settleWait(
   rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, v: Extract<Verdict, { kind: "wait" }>, logger: Logger,
 ): Promise<void> {
-  const noted = rel.waitNoted === v.retryAt;
-  if (!(await putRelease(rt, repoConfig, { ...rel, retryAt: v.retryAt, waitNoted: v.retryAt }, logger)) || noted) return;
+  const next: ProdRelease = { ...rel, retryAt: v.retryAt };
+  if (await putRelease(rt, repoConfig, next, logger)) await announceWait(rt, repoConfig, next, v, logger);
+}
+
+/**
+ * Say once per `retryAt`, on each of the release's issues (comment and card note), that it is live, verified and
+ * needs nobody: without it the card sits unchanged for the whole wait. The issues are read before the marker is
+ * saved, so a failed read says nothing and is tried again; a save that fails likewise.
+ */
+async function announceWait(
+  rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, v: Extract<Verdict, { kind: "wait" }>, logger: Logger,
+): Promise<void> {
+  if (rel.waitNoted === v.retryAt) return;
+  const issues = await writable(repoConfig, rel, logger);
+  if (!(await putRelease(rt, repoConfig, { ...rel, waitNoted: v.retryAt }, logger))) return;
   const at = utcMinute(v.retryAt);
   const stated = statedReason(v.reason, v.hold);
   const why = stated ?? `the part of the SRE's production check that cannot be observed before then${v.evidence ? ` (${v.evidence})` : ""}`;
@@ -905,7 +916,7 @@ async function settleWait(
     `The Foreman is waiting until ${at} for ${why}. Nothing is needed from anyone: it re-verifies then and closes this ` +
     `issue on a pass.${stated && v.evidence ? ` Evidence: ${v.evidence}` : ""}`,
   ].join("\n");
-  for (const n of await writable(repoConfig, rel, logger)) {
+  for (const n of issues) {
     await comment(repoConfig, n, body, logger);
     await emit(rt, {
       kind: "release",
@@ -1287,6 +1298,18 @@ export async function tryRelease(
     }
     return true;
   };
+
+  // A merged release waiting on a time the SRE named (a `merged` release has a `retryAt` only from a wait) that was
+  // saved before waits were announced: say so now, once. It is not an action: nothing is verified early and the
+  // time is unchanged.
+  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && !due(r.retryAt) && r.waitNoted !== r.retryAt)) {
+    try {
+      const evidence = await evidenceFor(repoConfig, w.pr, rlog);
+      await announceWait(rt, repoConfig, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog);
+    } catch (err) {
+      rlog.warn(`Release PR #${w.pr}: could not announce its wait: ${errText(err)}`);
+    }
+  }
 
   const merged = current.find((r) => r.phase === "merged" && ready(r) && due(r.retryAt));
   if (merged) {

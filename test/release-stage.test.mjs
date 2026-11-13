@@ -2217,3 +2217,21 @@ test("a time wait on prod verification says so once per eligible_at on each issu
     assert.equal(gh().issues[n].state, "OPEN");
   }
 });
+
+// The release already waiting when this shipped (jerky_security_testing#431: retryAt 2026-12-01, saved before waits were
+// announced) is not due for weeks, so the settle path never runs for it: it is announced on an ordinary pass instead.
+test("a stored merged release already waiting on a future time is announced once, with no verification and the time unchanged", async () => {
+  const at = new Date(Date.now() + 19 * 86_400_000).toISOString();
+  const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60)], compareFiles: 0, prodHead: MERGE });
+  await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: at });
+  await run();
+  assert.equal(waitNotes(5).length, 1, "told once");
+  assert.match(waitNotes(5)[0], /Nothing is needed from anyone/);
+  assert.equal(agentCalls().filter((c) => c[1] === "verify").length, 0, "nothing is verified early");
+  const rel = (await prodReleases())[100];
+  assert.equal(rel.retryAt, at, "the scheduled time is unchanged");
+  assert.equal(rel.waitNoted, at);
+  await run(2);
+  assert.equal(waitNotes(5).length, 1, "not told again on the next pass or after a restart");
+});
