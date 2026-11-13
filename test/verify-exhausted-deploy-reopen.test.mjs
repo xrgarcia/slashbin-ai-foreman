@@ -28,7 +28,7 @@ const evidence = (result, { at = "2026-10-20T21:28:04Z", author = SRE_LOGIN } = 
 });
 
 /** Drive one verify pass over issue 224 (PR 225) held with `reason`, exhausted. */
-async function pass({ reason = "dev-verify-failed", deployments = [], comments = [] }) {
+async function pass({ reason = "dev-verify-failed", deployments = [], comments = [], heldAt = HELD_AT }) {
   resetRegistryForTests();
   const rt = new ForemanRuntime();
   const store = new InMemoryRecordStore();
@@ -64,7 +64,7 @@ async function pass({ reason = "dev-verify-failed", deployments = [], comments =
     }[k];
     return impl ?? (async () => { throw new Error(`unexpected code host call: ${String(k)}`); });
   } }));
-  await seed(rt, REPO, 224, { verifyHeld: { heldAt: HELD_AT, prNumber: 225, reason, attempts: 3 } });
+  await seed(rt, REPO, 224, { verifyHeld: { heldAt, prNumber: 225, reason, attempts: 3 } });
   await tryVerify(rt, REPO, CONFIG, logger, 1);
   const held = (await recordOf(rt, REPO, 224)).verifyHeld;
   resetRegistryForTests();
@@ -79,7 +79,7 @@ test("an exhausted dev-verify-failed hold whose merge gains a SUCCESS dev deploy
   const r = await pass({ deployments: [dev("failure", "2026-10-20T21:00:00Z"), dev("success", "2026-10-20T21:26:02Z")] });
   assert.equal(r.runs, 1, "verify ran again");
   assert.deepEqual(r.forced, [true], "the SRE is told to re-run, not replay its cached failure");
-  assert.match(r.unblocked[0], /successful dev deployment/);
+  assert.match(r.unblocked[0], /dev deploy that succeeded or restarted/);
   assert.equal(r.held, undefined, "the hold cleared (the re-run passed)");
   assert.deepEqual(r.moves, ["verifyPassed"]);
 });
@@ -113,6 +113,34 @@ test("devDeployRepaired: newest dev deployment SUCCESS after heldAt only", () =>
   assert.equal(devDeployRepaired([], HELD_AT), false);
   assert.equal(devDeployRepaired([dev("success", "2026-10-20T21:26:00Z")], "garbage"), false);
   assert.ok(isDevEnvironment("jerky-com / development") && isDevEnvironment("dev") && !isDevEnvironment("jerky-com / production"));
+});
+
+// SLA-4625 (2026-11-12): Railway reused ONE GitHub deployment for both deploys of a SHA and wrote a stale
+// `failure` 4s after it reported the redeploy SUCCESS. The newest status said failure; the hold stayed 6h.
+const SLA_HELD_AT = "2026-11-12T18:24:47Z";
+const SLA_STATUSES = [
+  { state: "failure", at: "2026-11-12T18:29:02Z" }, { state: "failure", at: "2026-11-12T18:29:02Z" },
+  { state: "in_progress", at: "2026-11-12T18:28:09Z" }, { state: "failure", at: "2026-11-12T17:49:35Z" },
+  { state: "in_progress", at: "2026-11-12T17:48:09Z" },
+];
+const reused = (statuses) => ({ environment: "cmneb / development", state: statuses[0].state, at: statuses[0].at, statuses });
+
+test("devDeployRepaired: a redeploy that began after the hold releases even when the newest status is a stale failure (SLA-4625)", () => {
+  assert.equal(devDeployRepaired([reused(SLA_STATUSES)], SLA_HELD_AT), true);
+});
+
+test("devDeployRepaired: failures after the hold with no new attempt, or attempts only before it, never release", () => {
+  assert.equal(devDeployRepaired([reused(SLA_STATUSES.slice(3))], SLA_HELD_AT), false, "history ends before the hold");
+  assert.equal(devDeployRepaired([reused([{ state: "failure", at: "2026-11-12T18:30:00Z" }, ...SLA_STATUSES.slice(3)])], SLA_HELD_AT), false, "a lone later failure is no new attempt");
+  assert.equal(devDeployRepaired([{ environment: "cmneb / development", state: "failure", at: "2026-11-12T18:29:02Z" }], SLA_HELD_AT), false, "no history: unknown");
+  assert.equal(devDeployRepaired([{ ...reused(SLA_STATUSES), environment: "cmneb / production" }], SLA_HELD_AT), false, "production is not dev");
+  assert.equal(devDeployRepaired([{ ...reused(SLA_STATUSES), at: "" }], SLA_HELD_AT), false, "unreadable time");
+});
+
+test("the SLA-4625 sequence releases the exhausted hold and forces the SRE to re-run, which owns the verdict", async () => {
+  const r = await pass({ deployments: [reused(SLA_STATUSES)], heldAt: SLA_HELD_AT });
+  assert.equal(r.runs, 1);
+  assert.deepEqual(r.forced, [true]);
 });
 
 test("srePassedSince: the SRE's newest evidence for this merge, after the hold, PASS", () => {
