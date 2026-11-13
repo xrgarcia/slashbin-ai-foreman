@@ -35,9 +35,11 @@ export async function deploymentsForSha(repoConfig: RepoConfig, sha: string): Pr
     ".[] | {id, environment} | @json"], repoConfig.repoPath)) as Array<{ id: number; environment: string }>;
   const out: DeploymentView[] = [];
   for (const d of rows) {
-    const status = jsonLines(await ghAsync(["api", `repos/${repoConfig.githubRepo}/deployments/${d.id}/statuses?per_page=1`, "--jq",
-      ".[0] // empty | {state, at: .created_at} | @json"], repoConfig.repoPath))[0] as { state: string; at: string } | undefined;
-    out.push({ environment: d.environment ?? "", state: (status?.state ?? "pending").toLowerCase(), at: status?.at ?? "" });
+    const statuses = (jsonLines(await ghAsync(["api", `repos/${repoConfig.githubRepo}/deployments/${d.id}/statuses?per_page=100`, "--jq",
+      ".[] | {state, at: .created_at} | @json"], repoConfig.repoPath)) as Array<{ state: string; at: string }>)
+      .map((x) => ({ state: x.state.toLowerCase(), at: x.at }));
+    const newest = statuses[0];
+    out.push({ environment: d.environment ?? "", state: newest?.state ?? "pending", at: newest?.at ?? "", statuses });
   }
   return out;
 }
