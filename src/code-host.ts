@@ -208,6 +208,12 @@ export interface DeploymentView {
   state: string;
   /** ISO time that newest status was created. */
   at: string;
+  /**
+   * Every status of the deployment, newest first. GitHub keeps ONE deployment per commit+environment and Railway
+   * reuses it for every redeploy of the same SHA, so the history, not the newest status, tells whether a deploy
+   * was attempted after a hold. Absent on a host that reports only the newest.
+   */
+  statuses?: { state: string; at: string }[];
 }
 
 /** A release PR read live. */
