@@ -39,9 +39,19 @@ export const SRE_LOGIN = "slashbin-sre";
 /** A deployment environment that is dev: Railway posts `<project> / development` (or `dev`). */
 export const isDevEnvironment = (environment: string): boolean => /(^|\/\s*)(dev|development)\s*$/i.test(environment);
 
+/** A deployment status that says a deploy ran (or is running) rather than one that ended badly: it counts as an attempt. */
+const ATTEMPT_STATES = new Set(["success", "in_progress", "queued", "pending"]);
+
 /**
- * The merge's newest dev deployment is SUCCESS and reached it after the hold: the environment was repaired
- * (a redeploy, a rebuilt commit) with no change to the spec or the base branch. Pure.
+ * The merge's dev environment was given a new chance after the hold, with no change to the spec or the base branch.
+ * Pure. Two shapes count:
+ *  - the newest dev deployment is SUCCESS and reached it after the hold (a redeploy, a rebuilt commit);
+ *  - a dev deployment's status history holds a `success`, `in_progress`, `queued` or `pending` entry created after the
+ *    hold: a redeploy of the same SHA began. Railway reuses the one GitHub deployment for every deploy of a SHA and
+ *    can write a stale `failure` after the redeploy it reports SUCCESS (SLA-4625, 2026-11-12: a `failure` 4s after
+ *    Railway's SUCCESS), so the newest status cannot say how the redeploy ended. The Foreman reads no Railway; this
+ *    releases the hold to a forced SRE re-verify, which does, and a genuinely failed redeploy fails there and re-holds.
+ * A failure alone after the hold, no deployments, and an unreadable `heldAt` never release (unknown never releases).
  */
 export function devDeployRepaired(deployments: readonly DeploymentView[], heldAtIso: string): boolean {
   const heldAt = Date.parse(heldAtIso);
@@ -49,7 +59,8 @@ export function devDeployRepaired(deployments: readonly DeploymentView[], heldAt
   const dev = deployments.filter((d) => isDevEnvironment(d.environment) && !Number.isNaN(Date.parse(d.at)));
   if (dev.length === 0) return false;
   const newest = dev.reduce((a, b) => (Date.parse(b.at) > Date.parse(a.at) ? b : a));
-  return newest.state === "success" && Date.parse(newest.at) > heldAt;
+  if (newest.state === "success" && Date.parse(newest.at) > heldAt) return true;
+  return dev.some((d) => (d.statuses ?? []).some((s) => ATTEMPT_STATES.has(s.state) && Date.parse(s.at) > heldAt));
 }
 
 const EVIDENCE_HEADING = /^\s*## Dev Verification Evidence\b/;
