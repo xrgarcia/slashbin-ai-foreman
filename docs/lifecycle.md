@@ -173,6 +173,11 @@ lifecycle label; the one label a person writes is the EM's `ready for prod relea
    labels and closes it. A hold or fail labels it `prod verification held`, reopens it if GitHub's
    keywords closed it, comments the reason, and re-verifies (`sre.mjs verify --mode prod`) on
    `backoff.prodVerifyRetry`. No issue is ever left closed-but-unverified or open-but-unlabelled.
+   **A time wait is announced once.** A verification that returns `wait-until-…` (the rest of the check cannot
+   be observed before `eligible_at`) is not a hold: nothing is labelled or retried early. The Foreman comments
+   once per release PR and `eligible_at` on each issue, and mirrors it to the card: live in production, deploy
+   verified, waiting until that time for the SRE's reason, nothing needed from anyone. A changed `eligible_at`
+   says it again. It does not change when or whether the release closes.
    **Each issue is graded on its own row (foreman#117).** The SRE's v1 line (verifier, and deployer when its
    prod verify did not pass) carries `issue_acceptance: [{issue, state}]`, `state` PASS, FAIL or NOT-VERIFIED.
    When the hold is an acceptance hold and every issue of the release has a row, at least one FAIL and at

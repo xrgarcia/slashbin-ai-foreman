@@ -98,6 +98,7 @@ const WHEN = {
   released: "That release pull request merges to the production branch.",
   inProduction: "Promotion finds the issue's work already on the production branch, with no release pull request left to merge.",
   releaseQueued: "With the release stage on: promote lists the issue in the release pull request it owns (`ready for prod release` → `release pending`). The Tech Lead approves it, the SRE deploys it, and the SRE verifies production next.",
+  releaseVerifyWait: "The release merged and its deploy verified, but the SRE's production check names a later time it can finish (`wait-until`): said once per time, with the reason; the card stays where it is and nothing is needed from anyone.",
   prodHeld: "The release merged to the production branch but its prod verification (or its 30-minute soak) held or failed: the issue is reopened if it was closed and re-verified on a back-off.",
   prodVerified: "The SRE verified the release in production: the Foreman tags the merge commit and closes the issue with one comment.",
   releaseClosed: "That release pull request is closed without merging; the task stays in review until the next one.",
