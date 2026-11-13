@@ -327,7 +327,7 @@ export interface WorkObserver {
  */
 export interface ReleaseEvent {
   readonly repo: string;
-  readonly state: "open" | "merged" | "closed";
+  readonly state: "open" | "merged" | "closed" | "waiting";
   readonly pr?: number;
   readonly url?: string;
   readonly issues: ReadonlyArray<WorkItem>;
@@ -336,6 +336,9 @@ export interface ReleaseEvent {
    *  `awaitingRelease`, so an `open` must not move them back off the SRE (jerky_service
    *  PR #146, 2026-10-14). */
   readonly owned?: boolean;
+  /** `waiting`: merged and deploy-verified, the rest of the prod check waits for this time (`waitUntil`, UTC text) for `waitReason`. */
+  readonly waitUntil?: string;
+  readonly waitReason?: string;
 }
 
 /** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */

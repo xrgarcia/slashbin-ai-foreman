@@ -2175,3 +2175,63 @@ test("#117: a net-zero issue closed with a no-op note keeps a terminal record; a
   assert.equal((await recordOf(rt, repo, 9)).prodVerified, undefined, "never recorded verified");
   assert.ok(!Object.values(await prodReleases()).some((r) => r.issues.includes(9)), "no release carries it");
 });
+
+// SLA-4600 / jerky_security_testing#429: the deploy's prod verify returned a time hold (a monthly cron on the 1st)
+// while the issue's own row PASSed, and the card sat unchanged for 19 days. The issues now hear it once per time.
+const TIME_WAIT = (eligible) => ({
+  exit: 0, merge: MERGE,
+  out: `FOREMAN_RESULT_V1 ${JSON.stringify({ schema: 1, role: "deployer", outcome: "merged", pr: 100, merged: true, merge_sha: MERGE, verify: "hold", hold: "wait-until", eligible_at: eligible, hold_class: "time", evidence: ["https://example.test/pv"], issue_acceptance: ROWS([5, "PASS"], [6, "PASS"]) })}`,
+});
+const waitNotes = (n) => commentsOn(n).filter((b) => b.startsWith("**Live in production; waiting until"));
+
+test("a time wait on prod verification says so once per eligible_at on each issue, and closes nothing", async () => {
+  world(pending(), { approve: { exit: 0 }, deploy: TIME_WAIT("2026-12-01T06:00:00.000Z"), prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: "2026-12-01T06:00:00.000Z" }) });
+  assert.equal(await run(), true);
+  for (const n of [5, 6]) {
+    const notes = waitNotes(n);
+    assert.equal(notes.length, 1, `#${n} hears it once`);
+    assert.match(notes[0], /waiting until 2026-12-01 06:00 UTC/);
+    assert.match(notes[0], /verified the deploy/);
+    assert.match(notes[0], /Nothing is needed from anyone/);
+    assert.match(notes[0], /https:\/\/example\.test\/pv/, "the SRE's evidence is linked");
+    assert.equal(gh().issues[n].state, "OPEN", `#${n} stays open`);
+    assert.ok(!gh().issues[n].labels.includes("prod verification held"), `#${n} is not labelled held`);
+  }
+  const rel = (await prodReleases())[100];
+  assert.equal(rel.retryAt, "2026-12-01T06:00:00.000Z");
+  assert.equal(rel.waitNoted, "2026-12-01T06:00:00.000Z");
+
+  // The same time again (a later pass, a restart): nothing more is said.
+  await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
+  setCtl({ prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: "2026-12-01T06:00:00.000Z" }) });
+  await run(2);
+  for (const n of [5, 6]) assert.equal(waitNotes(n).length, 1, `#${n} is not told again`);
+
+  // A new time says it again.
+  await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
+  setCtl({ prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: "2026-12-08T06:00:00.000Z" }) });
+  await run(3);
+  for (const n of [5, 6]) {
+    assert.equal(waitNotes(n).length, 2, `#${n} hears the changed time`);
+    assert.match(waitNotes(n)[1], /waiting until 2026-12-08 06:00 UTC/);
+    assert.equal(gh().issues[n].state, "OPEN");
+  }
+});
+
+// The release already waiting when this shipped (jerky_security_testing#431: retryAt 2026-12-01, saved before waits were
+// announced) is not due for weeks, so the settle path never runs for it: it is announced on an ordinary pass instead.
+test("a stored merged release already waiting on a future time is announced once, with no verification and the time unchanged", async () => {
+  const at = new Date(Date.now() + 19 * 86_400_000).toISOString();
+  const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60)], compareFiles: 0, prodHead: MERGE });
+  await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: at });
+  await run();
+  assert.equal(waitNotes(5).length, 1, "told once");
+  assert.match(waitNotes(5)[0], /Nothing is needed from anyone/);
+  assert.equal(agentCalls().filter((c) => c[1] === "verify").length, 0, "nothing is verified early");
+  const rel = (await prodReleases())[100];
+  assert.equal(rel.retryAt, at, "the scheduled time is unchanged");
+  assert.equal(rel.waitNoted, at);
+  await run(2);
+  assert.equal(waitNotes(5).length, 1, "not told again on the next pass or after a restart");
+});

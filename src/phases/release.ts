@@ -77,15 +77,15 @@ type Verdict =
   | { kind: "pass"; evidence?: string; /** What the verifier could not check, passed anyway: named in the close comment. */ note?: string }
   | { kind: "hold"; hold: string; evidence?: string; /** The verifier's grade of each issue on its own rows (foreman#117). */ rows?: IssueAcceptance[] }
   /** Not a failure: the SRE named the time the rest becomes observable. */
-  | { kind: "wait"; retryAt: string; hold: string }
+  | { kind: "wait"; retryAt: string; hold: string; evidence?: string; /** The SRE's stated reason, when it gave one. */ reason?: string }
   /** Nothing was verified (the SRE could not run): back off, write nothing. */
   | { kind: "defer"; reason: string };
 
 /** A hold slug's verdict: `defer` and `wait` are not failures (verifyHoldPlan). */
-function holdVerdict(hold: string, evidence?: string, rows?: IssueAcceptance[]): Verdict {
+function holdVerdict(hold: string, evidence?: string, rows?: IssueAcceptance[], reason?: string): Verdict {
   const plan = verifyHoldPlan(hold);
   if (plan.kind === "defer") return { kind: "defer", reason: hold };
-  if (plan.kind === "wait") return { kind: "wait", retryAt: plan.retryAt, hold };
+  if (plan.kind === "wait") return { kind: "wait", retryAt: plan.retryAt, hold, ...(evidence ? { evidence } : {}), ...(reason ? { reason } : {}) };
   return { kind: "hold", hold, ...(evidence ? { evidence } : {}), ...(rows?.length ? { rows } : {}) };
 }
 
@@ -874,6 +874,57 @@ async function mergedVerdict(rt: ForemanRuntime, repoConfig: RepoConfig, config:
   return await fromVerifyResult(rt, r, repoConfig, rel.pr, logger);
 }
 
+/** `2026-12-01T06:00:00.000Z` as `2026-12-01 06:00 UTC`. */
+const utcMinute = (isoTime: string): string => `${isoTime.slice(0, 10)} ${isoTime.slice(11, 16)} UTC`;
+
+/** A hold slug or the class word is not a reason: only prose the SRE wrote is. */
+const SLUG_PREFIX = /^wait-until(-\d{8}T\d{4}Z)?(: |$)/;
+const statedReason = (reason: string | undefined, hold: string): string | undefined => {
+  const r = reason?.trim().replace(/\.+$/, "").replace(SLUG_PREFIX, "").trim();
+  return r && r !== hold ? r : undefined;
+};
+
+/**
+ * The SRE named the time the rest of the production check becomes observable: record it, then announce it.
+ * It never changes when or whether the release closes.
+ */
+async function settleWait(
+  rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, v: Extract<Verdict, { kind: "wait" }>, logger: Logger,
+): Promise<void> {
+  const next: ProdRelease = { ...rel, retryAt: v.retryAt };
+  if (await putRelease(rt, repoConfig, next, logger)) await announceWait(rt, repoConfig, next, v, logger);
+}
+
+/**
+ * Say once per `retryAt`, on each of the release's issues (comment and card note), that it is live, verified and
+ * needs nobody: without it the card sits unchanged for the whole wait. The issues are read before the marker is
+ * saved, so a failed read says nothing and is tried again; a save that fails likewise.
+ */
+async function announceWait(
+  rt: ForemanRuntime, repoConfig: RepoConfig, rel: ProdRelease, v: Extract<Verdict, { kind: "wait" }>, logger: Logger,
+): Promise<void> {
+  if (rel.waitNoted === v.retryAt) return;
+  const issues = await writable(repoConfig, rel, logger);
+  if (!(await putRelease(rt, repoConfig, { ...rel, waitNoted: v.retryAt }, logger))) return;
+  const at = utcMinute(v.retryAt);
+  const stated = statedReason(v.reason, v.hold);
+  const why = stated ?? `the part of the SRE's production check that cannot be observed before then${v.evidence ? ` (${v.evidence})` : ""}`;
+  const body = [
+    `**Live in production; waiting until ${at}.** Release PR #${rel.pr} merged to \`${repoConfig.productionBranch}\` as ` +
+    `\`${short(rel.mergeSha)}\`${rel.tag ? ` (tag \`${rel.tag}\`)` : ""} and the SRE verified the deploy.`,
+    "",
+    `The Foreman is waiting until ${at} for ${why}. Nothing is needed from anyone: it re-verifies then and closes this ` +
+    `issue on a pass.${stated && v.evidence ? ` Evidence: ${v.evidence}` : ""}`,
+  ].join("\n");
+  for (const n of issues) {
+    await comment(repoConfig, n, body, logger);
+    await emit(rt, {
+      kind: "release",
+      release: { repo: repoConfig.githubRepo, state: "waiting", pr: rel.pr, ...(rel.url ? { url: rel.url } : {}), issues: [itemOf(repoConfig, n)], productionBranch: repoConfig.productionBranch, owned: true, waitUntil: at, waitReason: why },
+    }, repoConfig, logger);
+  }
+}
+
 /** Act on a verdict for a release that has merged (first verification, or a held re-verify). */
 async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, v: Verdict, logger: Logger): Promise<void> {
   const key = `${repoConfig.githubRepo}#${rel.pr}`;
@@ -890,7 +941,7 @@ async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
       return;
     case "wait":
       logger.info(`Release PR #${rel.pr}: the SRE can verify the rest after ${v.retryAt} (${v.hold})`);
-      await putRelease(rt, repoConfig, { ...rel, retryAt: v.retryAt }, logger);
+      await settleWait(rt, repoConfig, rel, v, logger);
       return;
     case "defer": {
       const ms = rt.memory.releaseBackoff.start(key, config.backoff.releaseRetry);
@@ -1120,7 +1171,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   if (tr.verify === "pass") {
     await settle(rt, repoConfig, config, merged, { kind: "pass", ...(tr.evidence ? { evidence: tr.evidence } : {}) }, logger);
   } else if (tr.verify === "hold" || tr.verify === "fail") {
-    const v = holdVerdict(tr.hold ?? (tr.verify === "fail" ? "prod-verify-failed" : "prod-verify-held"), tr.evidence, tr.issues);
+    const v = holdVerdict(tr.hold ?? (tr.verify === "fail" ? "prod-verify-failed" : "prod-verify-held"), tr.evidence, tr.issues, tr.holdReason);
     // A deferred verdict leaves it `merged`: the next pass verifies it.
     if (v.kind !== "defer") await settle(rt, repoConfig, config, merged, v, logger);
   }
@@ -1247,6 +1298,18 @@ export async function tryRelease(
     }
     return true;
   };
+
+  // A merged release waiting on a time the SRE named (a `merged` release has a `retryAt` only from a wait) that was
+  // saved before waits were announced: say so now, once. It is not an action: nothing is verified early and the
+  // time is unchanged.
+  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && !due(r.retryAt) && r.waitNoted !== r.retryAt)) {
+    try {
+      const evidence = await evidenceFor(repoConfig, w.pr, rlog);
+      await announceWait(rt, repoConfig, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog);
+    } catch (err) {
+      rlog.warn(`Release PR #${w.pr}: could not announce its wait: ${errText(err)}`);
+    }
+  }
 
   const merged = current.find((r) => r.phase === "merged" && ready(r) && due(r.retryAt));
   if (merged) {
