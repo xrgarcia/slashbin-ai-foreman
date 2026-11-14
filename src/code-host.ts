@@ -366,6 +366,8 @@ export interface CodeHostStateOptions {
   now?: () => number;
   /** Narrows a time-driven refresh to the repos that need it (a change signal); see GitHubStateOptions. */
   refreshGate?: (repos: string[]) => Promise<string[]>;
+  /** Whether a repo changed since release carry last listed its merges (a change signal); omitted, every call reads. */
+  carryGate?: (repo: string) => Promise<boolean>;
 }
 
 /** What the host said about one token: accepted, rejected (401), or unknown (no answer: network, 5xx, back-off). */

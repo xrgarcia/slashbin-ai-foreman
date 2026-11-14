@@ -310,6 +310,14 @@ export function pickVerifyTarget(
 }
 
 /**
+ * How often each repo's merged PRs are read for an EM QA re-run request. 2026-11-14: reading them
+ * every 60 s pass was 245 of ~2,560 gh calls/hr; a re-run request waits at most this long.
+ */
+export const QA_RERUN_POLL_MS = 5 * 60_000;
+/** repo → when its next QA re-run read is due. */
+const qaRerunDueAt = new Map<string, number>();
+
+/**
  * The EM's QA re-run (slashbin-ai-foreman#158): an issue at `pr approved`, not yet authorized for production,
  * whose merged PR carries a comment opening `**EM QA re-run` newer than every QA Report, goes back to
  * `pr merged`, so this stage verifies it again and runs the QA gate on dev. Best effort: a failed read moves nothing.
@@ -361,7 +369,10 @@ export async function tryVerify(
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
-  if ((await qaApplies(repoConfig, config)) === true) await takeQaRerunRequests(rt, repoConfig, config, vlog);
+  if (Date.now() >= (qaRerunDueAt.get(repoConfig.name) ?? 0) && (await qaApplies(repoConfig, config)) === true) {
+    qaRerunDueAt.set(repoConfig.name, Date.now() + QA_RERUN_POLL_MS);
+    await takeQaRerunRequests(rt, repoConfig, config, vlog);
+  }
   const awaiting = await codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
   // The holds of the issues this pass looks at: the ones awaiting verification, and the repo's other open
   // issues, whose holds are stale. An issue whose record cannot be read is left alone, not read as unheld.

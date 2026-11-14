@@ -57,6 +57,21 @@ export function mergedPrNumber(headline: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * Whether `repo` changed since release carry last listed it; null (the default, and every test) = always.
+ * 2026-11-14: listing every carried merge each 60 s pass was ~360 of ~2,560 gh calls/hr (one compare and a
+ * `pr view` per merge). A PR edit, merge or push is a webhook, so a corrected PR body still wakes the gate
+ * and is re-read on the next pass (#90); a quiet repo reuses its last complete listing until the forced check.
+ */
+let carryGate: ((repo: string) => Promise<boolean>) | null = null;
+/** repo → its last complete listing (every merge read), reused while the gate says nothing changed. */
+const lastListing = new Map<string, CarriedMerge[]>();
+
+export function configureCarryGate(due: ((repo: string) => Promise<boolean>) | null): void {
+  carryGate = due;
+  lastListing.clear();
+}
+
 async function readPr(prViews: PrViews, repo: string, pr: number, cwd: string): Promise<PrView> {
   const key = `${repo}#${pr}`;
   const known = prViews.get(key);
@@ -82,6 +97,11 @@ async function readPr(prViews: PrViews, repo: string, pr: number, cwd: string): 
 export async function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, unresolved?: number[]): Promise<CarriedMerge[] | null> {
   const { githubRepo: repo, productionBranch, baseBranch, repoPath: cwd } = repoConfig;
   const prViews: PrViews = new Map();
+  // Only the plain listing is reused: a caller collecting `unresolved` must see every read fail or succeed now.
+  const reusable = carryGate !== null && unresolved === undefined;
+  const last = lastListing.get(repo);
+  if (reusable && last && !(await carryGate!(repo).catch(() => true))) return last;
+  let complete = true;
   try {
     const out = await ghAsync([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}?per_page=100`, "--paginate",
@@ -105,7 +125,10 @@ export async function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, 
         // unread, so the caller that must be sure of the inventory is told which one.
         const f = formatGhError(err);
         // Judge by gh's stderr alone: the error message embeds the command, so a PR numbered 404 would match.
-        if (unresolved && !/could not resolve to a pull ?request/i.test(f.stderr ?? "")) unresolved.push(pr);
+        if (!/could not resolve to a pull ?request/i.test(f.stderr ?? "")) {
+          complete = false;
+          unresolved?.push(pr);
+        }
         continue;
       }
       if (view.state !== "MERGED") continue;
@@ -114,6 +137,10 @@ export async function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, 
       const exempt = issues.length === 0 &&
         (view.headRefName === productionBranch || prefixes.some((p) => view.headRefName.startsWith(p)));
       merges.push({ pr, sha: c.sha, title: view.title || c.headline, issues, exempt });
+    }
+    if (reusable) {
+      if (complete) lastListing.set(repo, merges);
+      else lastListing.delete(repo);
     }
     return merges;
   } catch (err) {
