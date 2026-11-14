@@ -61,8 +61,8 @@ export const SOAK_DELAY_MS = 30 * 60_000;
 export const REARM_SETTLE_MS = 10 * 60_000;
 /** How far back the release stage adopts merged releases it did not deploy. */
 export const ADOPT_WINDOW_MS = 48 * 3_600_000;
-/** How often a repo is scanned for releases to adopt: one `gh pr list` each time. */
-export const ADOPT_SCAN_MS = 10 * 60_000;
+/** How often a repo is scanned for releases to adopt: one `gh pr list` each time. 30 min (was 10, 2026-11-14: 162 gh calls/hr); a release merged outside the Foreman is already live, so adopting it later costs only bookkeeping latency. */
+export const ADOPT_SCAN_MS = 30 * 60_000;
 
 /** How many unlabeled open issues one scan looks at for the stranded sweep (their records are read, one call each). */
 export const STRANDED_SCAN_CAP = 25;

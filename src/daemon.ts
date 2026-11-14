@@ -77,6 +77,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
     persistPath: join(stateDir(), ".github-state.json"),
     logger,
     refreshGate: (repos) => gate.dueRepos("state", repos),
+    carryGate: (repo) => gate.due("carry", repo),
   });
 
   // The Foreman's own in-flight work, beside the GitHub view: every step the work
