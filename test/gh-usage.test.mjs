@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ghResource, recordGhCall, configureGhUsage, restEndpointKey } from "../dist/gh-usage.js";
+import { ghResource, recordGhCall, configureGhUsage, restEndpointKey, callerKey } from "../dist/gh-usage.js";
 
 test("ghResource: api is core unless graphql; every other subcommand is graphql", () => {
   assert.equal(ghResource(["issue", "list"]), "graphql");
@@ -36,4 +36,31 @@ test("restEndpointKey: ids, repos, refs and ranges are stripped; method and flag
   assert.equal(restEndpointKey(["api", "--jq", ".[0]", "repos/a/b/deployments?sha=abc"]), "GET repos/:repo/deployments");
   assert.equal(restEndpointKey(["api", "repos/a/b/branches/feature/x/protection"]), "GET repos/:repo/branches/:ref");
   assert.equal(restEndpointKey(["api", "repos/a/b/commits/" + "a".repeat(40) + "/status"]), "GET repos/:repo/commits/:sha/status");
+});
+
+test("callerKey: names the first two frames outside the gh relay", () => {
+  const stack = [
+    "Error",
+    "    at recordGhCall (file:///x/dist/gh-usage.js:60:5)",
+    "    at runGhAsync (file:///x/dist/github/gh.js:96:7)",
+    "    at ghAsync (file:///x/dist/github/gh.js:120:10)",
+    "    at commentBodies (file:///x/dist/github/pr-comments.js:8:21)",
+    "    at Object.commentBodies (file:///x/dist/plugins/github.js:90:3)",
+    "    at async failCount (file:///x/dist/qa-report.js:503:20)",
+    "    at async tick (file:///x/dist/daemon.js:10:1)",
+  ].join("\n");
+  assert.equal(callerKey(stack), "github/pr-comments:commentBodies < dist/qa-report:failCount");
+  assert.equal(callerKey(undefined), "?");
+});
+
+test("configureGhUsage: REST calls are attributed to the code that made them", async () => {
+  const lines = [];
+  const logger = { debug() {}, warn() {}, error() {}, info: (msg, data) => lines.push(data), child() { return this; } };
+  configureGhUsage({ intervalMs: 100, logger });
+  (function hotReader() { recordGhCall(["api", "repos/a/b/issues/9/comments"]); })();
+  await new Promise((r) => setTimeout(r, 150));
+  const byCaller = JSON.parse(lines[0].restByCaller);
+  const key = Object.keys(byCaller)[0];
+  assert.ok(key.startsWith("GET repos/:repo/issues/:n/comments <- ") && key.includes(":hotReader"), key);
+  configureGhUsage({ intervalMs: 3_600_000, logger: { info() {} } });
 });
