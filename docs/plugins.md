@@ -32,9 +32,14 @@ A plugin that fills the `changeSignal` role implements:
 
 ```ts
 changeSignal: {
-  changedSince(cursor: string | null, repos: readonly string[]): Promise<{ changed: readonly string[] | "all"; cursor: string }>;
+  changedSince(cursor: string | null, repos: readonly string[]): Promise<{ changed: readonly string[] | "all"; cursor: string; moved?: { repo: string; branch: string }[] }>;
 }
 ```
+
+`moved` is optional: the branches that received a push since the cursor, per repo (bare names such as
+`main`). The branch-drift compare re-reads only when the production or base branch moved, not on every
+event in the repo. Without `moved`, every repo in `changed` counts as every branch moved. Branch `*` means
+every branch of that repo moved: a plugin that cannot see a repo's pushes reports it that way.
 
 `cursor` is `null` on the first call and otherwise the cursor the last report returned. `changed`
 names the repos (`owner/name`) with news since the cursor, or `"all"` when the plugin cannot say
