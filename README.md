@@ -157,7 +157,7 @@ Set `FOREMAN_GITHUB_TOKEN` in the daemon's environment: a dedicated GitHub accou
 write access. The daemon needs it and refuses GitHub calls without it. Keep tokens out of the config file.
 
 ```bash
-git clone https://github.com/slashbin-io/slashbin-ai-foreman.git
+git clone <this repository's clone URL> slashbin-ai-foreman
 cd slashbin-ai-foreman
 ```
 
