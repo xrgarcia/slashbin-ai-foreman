@@ -42,6 +42,8 @@ repos, a sign-off commit status on release PRs, and new back-off groups.
    | `epicRefLabel` | issue bodies are not read for an epic |
    | `paperclip.commentAuthorHeader` | no credit header is sent |
    | `reviewAllowedTools` | base tools plus `WebFetch` |
+   | `epicRepo` | none: a closed epic is not filtered out of the epic-close ask |
+   | `prodGrantLabel` | `approved for prod` |
    | `qaRepos`, `qaSecretsRunner`, `qaBearerKey` | `[]`, unset, `EM_SLASHBIN_MCP_ROUTER_BEARER` |
 3. **Check the tokens.** `FOREMAN_GITHUB_TOKEN` is required: **new in this release:** with
    it unset, or rejected by GitHub (401), the daemon refuses to start (exit 78,
