@@ -38,7 +38,8 @@ export interface ChangeReport {
    * (`main`, not `refs/heads/main`). A consumer that depends only on branch heads (the branch-drift
    * compare) skips a repo whose other traffic (comments, checks, labels) changed nothing it reads.
    * Omitted: every repo in `changed` counts as every branch moved, exactly as before. A signal that sets
-   * it must list every push it saw; a repo it reports as always changed (no events) is treated the same.
+   * it must list every push it saw, and branch `*` for a repo whose pushes it cannot see (one it always
+   * reports as changed): every branch of that repo moved.
    */
   readonly moved?: ReadonlyArray<{ readonly repo: string; readonly branch: string }>;
 }

@@ -85,7 +85,7 @@ export class ChangeGate {
     const key = `${consumer}\u0000${repo}\u0000${[...branches].sort().join(",")}`;
     const t = this.now();
     let moves = this.repoMoves.get(repo) ?? 0;
-    for (const b of branches) moves += this.branchSeq.get(`${repo}\u0000${b}`) ?? 0;
+    for (const b of [...branches, "*"]) moves += this.branchSeq.get(`${repo}\u0000${b}`) ?? 0;
     const prior = this.branchSeen.get(key);
     const changed = !prior || prior.moves < moves || prior.all < this.allSeq;
     const forced = prior !== undefined && t - prior.at >= this.o.forceMs();

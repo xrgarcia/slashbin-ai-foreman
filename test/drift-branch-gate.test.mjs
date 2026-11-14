@@ -96,6 +96,16 @@ test("branchesDue: a signal without `moved` counts every change as a move; the f
   assert.equal(await g.branchesDue("drift", "o/r", B), true);   // forced
 });
 
+test("branchesDue: branch `*` (a repo the signal cannot see) moves every branch", async () => {
+  const { g } = gate([
+    { changed: "all", cursor: "1" },
+    { changed: ["o/r"], cursor: "2", moved: [{ repo: "o/r", branch: "*" }] },
+  ]);
+  assert.equal(await g.branchesDue("drift", "o/r", B), true);
+  assert.equal(await g.branchesDue("drift", "o/r", B), true);
+  assert.equal(await g.branchesDue("drift", "o/r", B), false);
+});
+
 test("branchesDue: a failing signal makes it due", async () => {
   let n = 0;
   const signal = { changedSince: async () => { if (n++ > 0) throw new Error("down"); return { changed: "all", cursor: "1" }; } };
