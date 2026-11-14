@@ -209,6 +209,14 @@ export interface SnapshotCard {
   readonly signoff?: SignoffHold;
 }
 
+/**
+ * Why a card waits at `pendingVerification` or `awaitingSignoff` (the EM seat's release gate), as the Foreman can
+ * tell from its own state (`gateWaitReason`, src/unstick.ts): the production grant is missing, the gate ran and did
+ * not sign, the EM run failed, the EM took it and nothing moved, or none of those is known. Recorded by the metrics plugin.
+ */
+export const WAIT_REASONS = ["grant", "gate-failed", "seat-failed", "seat-silent", "other"] as const;
+export type WaitReason = (typeof WAIT_REASONS)[number];
+
 /** One lifecycle item as the work source shows it at the end of a cycle. */
 export interface SnapshotItem {
   readonly item: WorkItem;
@@ -224,6 +232,8 @@ export interface SnapshotItem {
    * behind it is stale. Absent: not read; nothing is inferred.
    */
   readonly foremanHeld?: boolean;
+  /** Set on an item at `pendingVerification` or `awaitingSignoff`: why it waits on the EM seat. Absent elsewhere. */
+  readonly waitReason?: WaitReason;
   /** Set on an item at `awaitingSignoff`: the release PR and the unsigned issues that hold it. */
   readonly signoff?: SignoffHold;
 }

@@ -22,6 +22,11 @@ export interface StageSpan {
   readonly hours: number | null;
 }
 
+/** The stages whose wait is split by reason (the `hold` events the recorder writes there). */
+export const HOLD_STAGES: readonly string[] = ["pendingVerification", "awaitingSignoff"];
+/** Hours at a hold stage with no `hold` row (history from before reasons were recorded). */
+export const UNRECORDED = "unrecorded";
+
 export interface ItemTimeline {
   readonly repo: string;
   readonly issue: number;
@@ -32,12 +37,19 @@ export interface ItemTimeline {
   readonly doneAt: string | null;
   readonly totalHours: number | null;
   readonly approvedToDoneHours: number | null;
+  /** Hours at each hold stage, split by the recorded reason: stage -> reason -> hours. Only closed spans. */
+  readonly holdHours: Readonly<Record<string, Readonly<Record<string, number>>>>;
 }
 
 export interface Stats { readonly count: number; readonly median: number; readonly p75: number; readonly p90: number }
 
+/** One reason's share of a hold stage over the items in the aggregate: how many items, total hours, and median per item. */
+export interface HoldStats { readonly items: number; readonly hours: number; readonly median: number }
+
 export interface Aggregate {
   readonly stages: Readonly<Record<string, Stats>>;
+  /** stage -> reason -> share of the hours spent at that stage (`pendingVerification` split by why it waited). */
+  readonly holds: Readonly<Record<string, Readonly<Record<string, HoldStats>>>>;
   readonly total: Stats | null;
   readonly items: number;
 }
@@ -93,6 +105,33 @@ export function buildTimeline(repo: string, issue: number, rows: readonly Metric
     hours: i + 1 < points.length ? hoursBetween(p.at, points[i + 1]!.at) : null,
   }));
 
+  // Each closed span at a hold stage is split at the `hold` rows written inside it; the time before the first
+  // one (or with none) is `unrecorded`.
+  const holdRows = byTime
+    .filter((r) => r.kind === "hold" && typeof r.detail?.reason === "string")
+    .map((r) => ({ t: Date.parse(r.at), stage: r.detail!.stage, reason: String(r.detail!.reason) }));
+  const holdHours: Record<string, Record<string, number>> = {};
+  // Spans are in time order and so are the hold rows: one pointer walks the rows once, so the work is linear
+  // in spans plus hold events, not spans times hold events.
+  let hi = 0;
+  for (const sp of stages) {
+    if (sp.hours === null || !HOLD_STAGES.includes(sp.stage)) continue;
+    const start = Date.parse(sp.at);
+    const end = start + sp.hours * HOUR;
+    while (hi < holdRows.length && holdRows[hi]!.t < start) hi++;
+    const acc = (holdHours[sp.stage] ??= {});
+    let from = start;
+    let reason = UNRECORDED;
+    for (; hi < holdRows.length && holdRows[hi]!.t < end; hi++) {
+      const r = holdRows[hi]!;
+      if (r.stage !== undefined && r.stage !== sp.stage) continue;
+      if (r.t > from) acc[reason] = (acc[reason] ?? 0) + (r.t - from) / HOUR;
+      from = Math.max(from, r.t);
+      reason = r.reason;
+    }
+    acc[reason] = (acc[reason] ?? 0) + (end - from) / HOUR;
+  }
+
   const done = distinct.find((r) => r.stage === "done");
   const approved = distinct.find((r) => r.stage === "approved");
   return {
@@ -103,6 +142,7 @@ export function buildTimeline(repo: string, issue: number, rows: readonly Metric
     doneAt: done?.at ?? null,
     totalHours: pickup && done ? hoursBetween(pickup, done.at) : null,
     approvedToDoneHours: approved && done ? hoursBetween(approved.at, done.at) : null,
+    holdHours,
   };
 }
 
@@ -135,9 +175,19 @@ export function aggregate(timelines: readonly ItemTimeline[], sinceMs = 0): Aggr
       if (list) list.push(h); else perStage.set(stage, [h]);
     }
   }
+  const perHold = new Map<string, Map<string, number[]>>();
+  for (const t of done) {
+    for (const [stage, byReason] of Object.entries(t.holdHours)) {
+      const m = perHold.get(stage) ?? perHold.set(stage, new Map()).get(stage)!;
+      for (const [reason, h] of Object.entries(byReason)) (m.get(reason) ?? m.set(reason, []).get(reason)!).push(h);
+    }
+  }
+  const holds = Object.fromEntries([...perHold].map(([stage, m]) => [stage, Object.fromEntries([...m].map(([reason, v]) =>
+    [reason, { items: v.length, hours: v.reduce((a, b) => a + b, 0), median: percentile(v, 0.5) }]))]));
   const totals = done.map((t) => t.totalHours).filter((h): h is number => h !== null);
   return {
     stages: Object.fromEntries([...perStage].map(([k, v]) => [k, stats(v)])),
+    holds,
     total: totals.length ? stats(totals) : null,
     items: done.length,
   };
@@ -163,5 +213,12 @@ export function formatReport(timelines: readonly ItemTimeline[], agg: Aggregate)
     out.push(`  ${name.padEnd(22)} ${String(s.count).padStart(5)} ${s.median.toFixed(1).padStart(7)} ${s.p75.toFixed(1).padStart(6)} ${s.p90.toFixed(1).padStart(6)}`);
   for (const [stage, s] of Object.entries(agg.stages)) row(stage, s);
   if (agg.total) row("TOTAL pickup->done", agg.total);
+  for (const [stage, byReason] of Object.entries(agg.holds)) {
+    const all = Object.values(byReason).reduce((a, h) => a + h.hours, 0);
+    out.push("", `${stage} by reason (hours)`, `  ${"reason".padEnd(22)} items   total  share  median`);
+    for (const [reason, h] of Object.entries(byReason).sort((a, b) => b[1].hours - a[1].hours)) {
+      out.push(`  ${reason.padEnd(22)} ${String(h.items).padStart(5)} ${h.hours.toFixed(1).padStart(7)} ${(all ? `${((h.hours / all) * 100).toFixed(0)}%` : "-").padStart(6)} ${h.median.toFixed(1).padStart(7)}`);
+    }
+  }
   return out.join("\n");
 }
