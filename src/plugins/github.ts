@@ -84,6 +84,7 @@ export function githubCodeHost(
     hasLabel: cache.hasLabel,
     isPrOpen: cache.isPrOpen,
     knownOpenPr: cache.knownOpenPr,
+    knownNoOpenPr: cache.knownNoOpenPr,
     openIssueLabels: cache.openIssueLabels,
     bounceForRedCI: ciGate.bounceForRedCI,
     commentOnIssue: ciGate.commentOnIssue,

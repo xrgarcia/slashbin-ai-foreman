@@ -61,6 +61,7 @@ async function pass({ reason = "dev-verify-failed", deployments = [], comments =
       viewReleasePr: async () => ({ number: 225, mergeSha: SHA }),
       issueCommentRows: async () => comments,
       deploymentsForSha: async () => deployments,
+      forgetOpenPrs: () => {},
     }[k];
     return impl ?? (async () => { throw new Error(`unexpected code host call: ${String(k)}`); });
   } }));

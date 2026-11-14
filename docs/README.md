@@ -40,6 +40,7 @@ its own section contents and links back here.
 | [Running the daemon](running.md) | How do I start, stop, inspect, and restart it? How do retries and GitHub API use work? |
 | [Repos and labels](config-guide.md) | How do single-repo and multi-repo configs work? How do I use my own labels and branches, or a config profile? |
 | [Configuration reference](configuration.md) *(generated)* | What does each setting mean, what is its default, and which environment variable overrides it? |
+| [External plugins and the change signal](plugins.md) | How do I load a plugin from outside this repo, cut idle polling with a change signal, or slow one lane down? |
 | [Pipeline](pipeline.md) | Which stages run, what do they require, and how do lanes and custom gates work? |
 | [Review](review.md) | How does the Tech Lead review and merge? How are missing outcome labels and deliberate holds handled? |
 | [Lifecycle reference](lifecycle.md) *(generated)* | What state is an issue in, what moves it, how is a Blocked card released, and what constitutes a verified release? |

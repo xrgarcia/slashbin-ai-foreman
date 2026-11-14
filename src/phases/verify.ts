@@ -456,6 +456,8 @@ export async function tryVerify(
     const forceKey = `${repoName}#${target.prNumber}`;
     const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath, rt.memory.verifyForce.has(forceKey))
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
+    // The SRE is a foreign process that writes labels and comments: its run must invalidate what the next scan reads.
+    codeHost().forgetOpenPrs(repoConfig.githubRepo);
     if (sre.kind === "verdict") rt.memory.verifyForce.delete(forceKey);
     // Errors the SRE excluded as not this release's go to the EM to route (unrelated-error); they never hold it.
     // Held in memory until the record has them; the gate runs on EVERY result, so a clean re-verification cannot advance past an unsaved report.

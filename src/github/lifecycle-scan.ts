@@ -391,7 +391,9 @@ export async function readReviewOutcomes(
 export async function findIssuesAwaitingVerify(config: RepoConfig, logger: Logger): Promise<number[]> {
   try {
     const { prMerged, prApproved, readyForProd } = config.lifecycleLabels;
-    dropIssueSnapshot(config.githubRepo);
+    // No drop here: this runs every verify pass, and dropping forced a full refresh each time (the idle API spend).
+    // The foreign writers it guarded against invalidate when they finish (verify.ts after verifyDev; review.ts and
+    // the implement workflow via forgetOpenPrs), and the Foreman's own writes invalidate through the ghAsync hook.
     return (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) => hasLabel(i, prMerged) && !hasLabel(i, prApproved) && !hasLabel(i, readyForProd))
       .map((i) => i.number)

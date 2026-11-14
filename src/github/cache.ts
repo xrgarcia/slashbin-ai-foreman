@@ -215,6 +215,7 @@ export function hasLabel(issue: IssueSnapshot, name: string): boolean {
  */
 export function forgetOpenPrs(repo: string): void {
   reads.prs.delete(repo);
+  reads.issues.delete(repo);
   fleetState.markRepoDirty(repo);
 }
 
@@ -317,6 +318,23 @@ export async function knownOpenPr(
   const pr = (await fleetState.openPrs(repo)).find((p) => p.headRefName === head && p.baseRefName === base);
   return pr ? { number: pr.number, url: pr.url, headRefOid: pr.headRefOid } : undefined;
 }
+
+/**
+ * True when the fleet state AUTHORITATIVELY says no PR is open `head → base`: it is on for the repo,
+ * was brought up to date for this read (a repo this process wrote to is re-read first), and holds fewer
+ * PRs than one page, so the list cannot have been cut short. False is "ask GitHub", as in `knownOpenPr`.
+ * Only for a caller whose wrong "none" costs nothing it cannot afford (branch deletion, which also
+ * needs the head to equal a merged PR's); never for one that would open a PR on it.
+ */
+export async function knownNoOpenPr(repo: string, head: string, base: string): Promise<boolean> {
+  if (reads.ttlMs <= 0 || !fleetState.isEnabled(repo)) return false;
+  const prs = await fleetState.openPrs(repo);
+  if (prs.length >= STATE_PR_PAGE) return false;
+  return !prs.some((p) => p.headRefName === head && p.baseRefName === base);
+}
+
+/** The fleet state reads this many open PRs per repo; a view that full may be missing some. */
+const STATE_PR_PAGE = 100;
 
 /**
  * Deep reads keyed on what the fleet state says about the repo, so they repeat
