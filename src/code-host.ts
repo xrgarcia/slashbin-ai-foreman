@@ -557,6 +557,11 @@ export interface CodeHost {
    * `mentions`. Throws when a link cannot be read: a guess is not a fact, so the caller treats it as nothing found.
    */
   relationsOf(config: RepoConfig, issues: readonly number[], logger: Logger): Promise<Map<number, Relation>>;
+  /**
+   * The issues that correct `holder`, read from its side (blocked-by, sub-issues, the legacy title), closed ones
+   * included. Throws when a link cannot be read: the caller treats that as unknown, never as "none".
+   */
+  correctorsOf(config: RepoConfig, holder: number, logger: Logger): Promise<number[]>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;

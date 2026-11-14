@@ -262,3 +262,102 @@ test("a follow-up corrective releases the hold: it builds, its merge advances ba
   const rel = corrects([[1543, [1538]]]);
   assert.deepEqual(correctionsToBuild(1538, [...[1539], ...[1539, 1543]], rel), [1543]);
 });
+
+// A linked corrective that merges after the hold releases a charged verify hold (security_tests#407:
+// #436, a sub-issue of #407, merged and the acceptance-not-verified hold never released).
+import { registerPlugin, startPlugins, setCodeHost, resetRegistryForTests } from "../dist/plugins/registry.js";
+import { registerWorkSource } from "../dist/work-source.js";
+import { InMemoryRecordStore } from "../dist/record-store.js";
+import { ForemanRuntime } from "../dist/runtime.js";
+import { tryVerify } from "../dist/phases/verify.js";
+import { UNBLOCK_CHECKS as CHECKS, CHECK_WORDS, passingCheck } from "../dist/unblock.js";
+import { seed, recordOf } from "./issue-records.mjs";
+
+const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
+const CM_HELD_AT = "2026-11-14T00:00:00Z";
+const CM_REPO = {
+  name: "r", githubRepo: "o/r", repoPath: "/nonexistent", baseBranch: "develop", productionBranch: "main", featureBranch: "develop",
+  lifecycleLabels: { ...L, releasePending: "release pending", prodVerifyHeld: "prod verification held" }, github: { blockedLabel: "blocked" },
+};
+const CM_CONFIG = { qaRepos: [], stages: [], paperclip: { enabled: false }, backoff: DEFAULT_BACKOFF, qaGate: false };
+
+/** One verify pass over issue 407 (PR 408), held with `reason`; `correctors` are the issues the code host says correct it, `merged` the merged PRs by issue. */
+async function correctionPass({ reason = "acceptance-not-verified", attempts = VERIFY_MAX_ATTEMPTS, correctors = [436], merged = {}, correctorsThrow = false }) {
+  resetRegistryForTests();
+  const rt = new ForemanRuntime();
+  const store = new InMemoryRecordStore();
+  const unblocked = [];
+  registerWorkSource({
+    record: async (e) => { if (e.kind === "unblocked") unblocked.push(e.reason); return true; },
+    loadRecord: (k, rc) => store.loadRecord(k, rc),
+    saveRecord: (k, r, rc) => store.saveRecord(k, r, rc),
+  });
+  const forced = [];
+  registerPlugin({
+    id: "fake-sre", roles: ["verifier"], enabled: () => true, fills: (role) => role === "verifier",
+    verifier: { verifyDev: async (_r, _c, _pr, _l, _s, _t, force) => { forced.push(force); return { kind: "verdict", pass: true, trailer: { deploy: "SUCCESS" }, summary: "" }; } },
+  });
+  await startPlugins(CM_CONFIG, { logger: quiet, configText: () => null });
+  const mergedRefs = { 407: { issueNumber: 407, prNumber: 408, prUrl: "", mergedAt: "2026-11-13T20:00:00Z" }, ...merged };
+  setCodeHost(new Proxy({}, { get: (_, k) => {
+    if (k === "then" || typeof k === "symbol") return undefined;
+    const impl = {
+      findIssuesAwaitingVerify: async () => [407],
+      getOpenIssues: async () => [{ number: 407 }],
+      findIssuesMergedToBase: async (_c, cands) => cands.filter((n) => mergedRefs[n]).map((n) => mergedRefs[n]),
+      forgetOpenPrs: () => {},
+      correctorsOf: async () => { if (correctorsThrow) throw new Error("422"); return correctors; },
+      issueLastEditedAt: async () => null,
+    }[k];
+    return impl ?? (async () => { throw new Error(`unexpected code host call: ${String(k)}`); });
+  } }));
+  await seed(rt, CM_REPO, 407, { verifyHeld: { heldAt: CM_HELD_AT, prNumber: 408, reason, attempts } });
+  await tryVerify(rt, CM_REPO, CM_CONFIG, quiet, 1);
+  const held = (await recordOf(rt, CM_REPO, 407)).verifyHeld;
+  resetRegistryForTests();
+  registerWorkSource(null);
+  setCodeHost(null);
+  return { unblocked, forced, held };
+}
+const fix = (at) => ({ 436: { issueNumber: 436, prNumber: 437, prUrl: "", mergedAt: at } });
+
+test("a corrective merged after heldAt releases an exhausted acceptance-not-verified hold and re-verifies, forced", async () => {
+  const r = await correctionPass({ merged: fix("2026-11-14T04:31:00Z") });
+  assert.match(r.unblocked[0] ?? "", /corrects this one merged/);
+  assert.deepEqual(r.forced, [true], "the SRE must run again, not replay its cached verdict for the same merge and spec");
+});
+
+test("a closed title-only corrective merged after heldAt releases the exhausted hold: attempts reset, SRE forced (security_tests#407/#436)", async () => {
+  // the code host reports #436 (closed, linked only by 'follow-up to #407') as a corrector; the hold is gone, so the next attempt count starts fresh
+  const r = await correctionPass({ correctors: [436], merged: fix("2026-11-14T04:31:00Z") });
+  assert.equal(r.held, undefined, "the hold record, attempts included, is cleared");
+  assert.deepEqual(r.forced, [true]);
+});
+
+test("a corrective merged after heldAt also releases a still-charged (not yet exhausted) hold", async () => {
+  const r = await correctionPass({ reason: "healthcheck-red", attempts: 1, merged: fix("2026-11-14T04:31:00Z") });
+  assert.match(r.unblocked[0] ?? "", /corrects this one merged/);
+});
+
+test("a corrective merged before heldAt, an unmerged one, or an unrelated base advance does not release", async () => {
+  for (const [what, opts] of [
+    ["merged before the hold", { merged: fix("2026-11-13T23:00:00Z") }],
+    ["not merged", { merged: {} }],
+    ["no corrective at all, another issue merged after the hold", { correctors: [], merged: { 500: { issueNumber: 500, prNumber: 501, prUrl: "", mergedAt: "2026-11-14T04:31:00Z" } } }],
+    ["relation unreadable", { correctorsThrow: true, merged: fix("2026-11-14T04:31:00Z") }],
+  ]) {
+    const r = await correctionPass(opts);
+    assert.deepEqual(r.unblocked, [], what);
+    assert.deepEqual(r.forced, [], `${what}: no SRE run`);
+    assert.equal(r.held.reason, "acceptance-not-verified", `${what}: still held`);
+  }
+});
+
+test("correctionMerged releases verify-held and verify-exhausted only, and has a card note", () => {
+  assert.ok(CHECKS["verify-held"].includes("correctionMerged") && CHECKS["verify-exhausted"].includes("correctionMerged"));
+  assert.ok(CHECK_WORDS.correctionMerged);
+  assert.equal(passingCheck("verify-exhausted", { correctionMerged: true, baseAdvanced: false }), "correctionMerged");
+  assert.equal(passingCheck("verify-held", { correctionMerged: true }), "correctionMerged");
+  assert.equal(passingCheck("verify-held", { correctionMerged: undefined }), null);
+  assert.equal(passingCheck("verify-no-pr", { correctionMerged: true }), null);
+});
