@@ -22,6 +22,7 @@
 import { createHash } from "node:crypto";
 import { escapeRegex } from "./regex.js";
 import type { RepoConfig } from "./config.js";
+import type { WaitReason } from "./adapters.js";
 import type { IssueRecordStore, SkippedIssue, VerifyHold } from "./issue-records.js";
 import { codeHost } from "./plugins/registry.js";
 import { backoffDelay, type BackoffWindow } from "./backoff.js";
@@ -148,6 +149,49 @@ export function releaseGateReason(labels: readonly string[], grantState?: string
 export function releaseGateCandidateReason(labels: readonly string[], grantState: string | null, priorReason?: string): string {
   if (grantState === null && priorReason !== undefined) return priorReason;
   return releaseGateReason(labels, grantState);
+}
+
+/**
+ * Why a card waits on the EM seat's release gate, from what the Foreman already holds: the issue's `release-gate`
+ * unstick entry (its reason carries the EM's own `grant-state` answer, `{"granted": bool, ...}`, and its status says how
+ * the last EM call ended). Pure; recorded by the metrics plugin as the `hold` event's `reason`.
+ *
+ *  - `grant`: the EM reported no production grant. A missing grant wins over everything: the gate cannot pass.
+ *  - `seat-failed`: the EM call failed or was refused (a limit): the gate never ran.
+ *  - `seat-silent`: the EM took it (exit 0) and, after the Foreman asked again, the issue never moved: the seat that
+ *    took it may have stopped. Also an entry still `pending`, once it has stood past `silentAfterMs`.
+ *  - `gate-failed`: the EM ran the gate and did not sign: it escalated (exit 2), declined (exit 3), or took it once and
+ *    has not yet been re-asked (the hold comment is the usual outcome of a gate that fails).
+ *  - `other`: no entry, or a state none of those names.
+ *
+ * `awaitingSignoff` has no release-gate entry (the issue left `pr approved`): it is `gate-failed` when the issue is
+ * among the release PR's unsigned issues (`unsigned`, a set built once per release PR), else `other`.
+ */
+export function gateWaitReason(
+  stage: "pendingVerification" | "awaitingSignoff",
+  issue: number,
+  entry: Pick<UnstickEntry, "reason" | "status" | "recalls" | "gaveUpAt" | "since"> | undefined,
+  unsigned: ReadonlySet<number> | undefined,
+  nowMs: number,
+  silentAfterMs = 60 * 60_000,
+): WaitReason {
+  if (stage === "awaitingSignoff") return unsigned?.has(issue) ? "gate-failed" : "other";
+  if (!entry) return "other";
+  const grant = /\[grant: (\{.*\})\]/.exec(entry.reason)?.[1];
+  if (grant) {
+    try {
+      if ((JSON.parse(grant) as { granted?: unknown }).granted === false) return "grant";
+    } catch { /* an answer that is not JSON says nothing about the grant */ }
+  }
+  switch (entry.status) {
+    case "failed":
+    case "refused": return "seat-failed";
+    case "escalated":
+    case "declined": return "gate-failed";
+    case "invoked": return (entry.recalls ?? 0) > 0 || entry.gaveUpAt ? "seat-silent" : "gate-failed";
+    case "pending": return nowMs - Date.parse(entry.since) >= silentAfterMs ? "seat-silent" : "other";
+    default: return "other";
+  }
 }
 
 /**
