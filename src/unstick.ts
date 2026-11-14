@@ -165,17 +165,17 @@ export function releaseGateCandidateReason(labels: readonly string[], grantState
  *  - `other`: no entry, or a state none of those names.
  *
  * `awaitingSignoff` has no release-gate entry (the issue left `pr approved`): it is `gate-failed` when the issue is
- * among the release PR's unsigned issues, else `other`.
+ * among the release PR's unsigned issues (`unsigned`, a set built once per release PR), else `other`.
  */
 export function gateWaitReason(
   stage: "pendingVerification" | "awaitingSignoff",
   issue: number,
   entry: Pick<UnstickEntry, "reason" | "status" | "recalls" | "gaveUpAt" | "since"> | undefined,
-  signoff: { readonly unsigned: readonly number[] } | undefined,
+  unsigned: ReadonlySet<number> | undefined,
   nowMs: number,
   silentAfterMs = 60 * 60_000,
 ): WaitReason {
-  if (stage === "awaitingSignoff") return signoff?.unsigned.includes(issue) ? "gate-failed" : "other";
+  if (stage === "awaitingSignoff") return unsigned?.has(issue) ? "gate-failed" : "other";
   if (!entry) return "other";
   const grant = /\[grant: (\{.*\})\]/.exec(entry.reason)?.[1];
   if (grant) {

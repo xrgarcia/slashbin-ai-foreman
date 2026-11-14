@@ -107,21 +107,27 @@ export function buildTimeline(repo: string, issue: number, rows: readonly Metric
 
   // Each closed span at a hold stage is split at the `hold` rows written inside it; the time before the first
   // one (or with none) is `unrecorded`.
-  const holdRows = byTime.filter((r) => r.kind === "hold" && typeof r.detail?.reason === "string");
+  const holdRows = byTime
+    .filter((r) => r.kind === "hold" && typeof r.detail?.reason === "string")
+    .map((r) => ({ t: Date.parse(r.at), stage: r.detail!.stage, reason: String(r.detail!.reason) }));
   const holdHours: Record<string, Record<string, number>> = {};
+  // Spans are in time order and so are the hold rows: one pointer walks the rows once, so the work is linear
+  // in spans plus hold events, not spans times hold events.
+  let hi = 0;
   for (const sp of stages) {
     if (sp.hours === null || !HOLD_STAGES.includes(sp.stage)) continue;
     const start = Date.parse(sp.at);
     const end = start + sp.hours * HOUR;
-    const inside = holdRows.filter((r) => (r.detail!.stage === undefined || r.detail!.stage === sp.stage) && Date.parse(r.at) >= start && Date.parse(r.at) < end);
+    while (hi < holdRows.length && holdRows[hi]!.t < start) hi++;
     const acc = (holdHours[sp.stage] ??= {});
     let from = start;
     let reason = UNRECORDED;
-    for (const r of inside) {
-      const t = Date.parse(r.at);
-      if (t > from) acc[reason] = (acc[reason] ?? 0) + (t - from) / HOUR;
-      from = Math.max(from, t);
-      reason = String(r.detail!.reason);
+    for (; hi < holdRows.length && holdRows[hi]!.t < end; hi++) {
+      const r = holdRows[hi]!;
+      if (r.stage !== undefined && r.stage !== sp.stage) continue;
+      if (r.t > from) acc[reason] = (acc[reason] ?? 0) + (r.t - from) / HOUR;
+      from = Math.max(from, r.t);
+      reason = r.reason;
     }
     acc[reason] = (acc[reason] ?? 0) + (end - from) / HOUR;
   }

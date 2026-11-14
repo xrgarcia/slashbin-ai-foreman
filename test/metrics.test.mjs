@@ -251,8 +251,8 @@ test("gateWaitReason: grant, failed run, silent seat, failed gate, unknown", () 
   assert.equal(w(entry({ status: "declined" })), "gate-failed");
   assert.equal(w(entry({ reason: "x [grant: not json]" })), "other");
   assert.equal(w(undefined), "other");
-  assert.equal(gateWaitReason("awaitingSignoff", 5, undefined, { unsigned: [5] }, now), "gate-failed");
-  assert.equal(gateWaitReason("awaitingSignoff", 5, undefined, { unsigned: [6] }, now), "other");
+  assert.equal(gateWaitReason("awaitingSignoff", 5, undefined, new Set([5]), now), "gate-failed");
+  assert.equal(gateWaitReason("awaitingSignoff", 5, undefined, new Set([6]), now), "other");
 });
 
 test("report: pendingVerification hours split by reason, history before reasons is unrecorded", () => {
@@ -277,4 +277,22 @@ test("report: pendingVerification hours split by reason, history before reasons 
   assert.equal(agg.holds.pendingVerification["seat-silent"].hours, 4);
   assert.equal(agg.holds.pendingVerification.unrecorded.items, 1);
   assert.match(formatReport([one, two], agg), /pendingVerification by reason[\s\S]*grant\s+2\s+10\.0\s+56%/);
+});
+
+test("report: hold attribution is linear and still right on a long history with re-entries", () => {
+  const t = (m) => new Date(Date.parse("2026-11-01T00:00:00Z") + m * 60_000).toISOString();
+  const all = [];
+  let m = 0;
+  for (let i = 0; i < 1000; i++) {
+    all.push({ at: t(m), repo: R, issue: 1, kind: "stage", stage: i % 2 ? "awaitingRelease" : "pendingVerification", detail: null });
+    if (i % 2 === 0) all.push({ at: t(m + 1), repo: R, issue: 1, kind: "hold", stage: null, detail: { stage: "pendingVerification", reason: "grant" } });
+    m += 2;
+  }
+  all.push({ at: t(m), repo: R, issue: 1, kind: "closed", stage: "done", detail: null });
+  const start = performance.now();
+  const [tl] = buildTimelines(all);
+  assert.ok(performance.now() - start < 1000);
+  // 500 visits of 2 minutes: 1 minute unrecorded, then 1 minute grant.
+  assert.equal(Math.round(tl.holdHours.pendingVerification.grant * 60), 500);
+  assert.equal(Math.round(tl.holdHours.pendingVerification.unrecorded * 60), 500);
 });
