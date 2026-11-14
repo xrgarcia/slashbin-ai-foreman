@@ -183,6 +183,8 @@ own `.ai-agent.json`, which git ignores, and never in this repo: the code is pub
 | `qaSecretsRunner` | none: a dev QA run reports errored |
 | `qaBearerKey` | `EM_SLASHBIN_MCP_ROUTER_BEARER`, unpinned to a Doppler project |
 | `reviewAllowedTools` | `Read, Write, Edit, Bash, Glob, Grep, WebFetch` |
+| `epicRepo` | none: a closed epic is not filtered out of the epic-close ask |
+| `prodGrantLabel` | `approved for prod` |
 
 The `profile` key that once bundled these in `src/profiles/` is gone; a config that still
 sets it stops startup with a message naming the keys to set instead.
