@@ -138,6 +138,8 @@ async function hasOpenPR(
   featureBranch: string,
   baseBranch: string,
   cwd: string,
+  /** The caller only DELETES on "none" (never opens a PR), so the fleet state's word that none is open is enough. */
+  trustStateAbsence = false,
 ): Promise<{ number: number; url: string } | null | "unknown"> {
   try {
     // Every cycle, for every branch with commits waiting on review, this asks
@@ -145,6 +147,8 @@ async function hasOpenPR(
     // answers that without a request; only "not known open" goes to GitHub.
     const known = await codeHost().knownOpenPr(githubRepo, featureBranch, baseBranch);
     if (known) return { number: known.number, url: known.url };
+    // Live only where the state cannot answer: it is off, it may be cut short, or the caller may open a PR on "none".
+    if (trustStateAbsence && await codeHost().knownNoOpenPr(githubRepo, featureBranch, baseBranch)) return null;
     const prs = await codeHost().openPrsForBranch(githubRepo, featureBranch, baseBranch, cwd);
     return prs.length > 0 ? prs[0] : null;
   } catch {
@@ -203,7 +207,7 @@ export async function pruneMergedBranches(config: RepoConfig, logger: Logger, br
   for (const branch of branches) {
     if (!branch.startsWith(branchPrefixOf(config))) continue;
     try {
-      const open = await hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath);
+      const open = await hasOpenPR(config.githubRepo, branch, config.baseBranch, config.repoPath, true);
       if (open !== null) continue; // open, or unknown: delete nothing
       const closed = await readClosedPrs(config.githubRepo, branch, config.baseBranch, config.repoPath);
       if (closed === "unknown") continue;

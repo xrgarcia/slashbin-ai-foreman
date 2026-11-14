@@ -10,7 +10,7 @@ import { runCycle } from "./orchestrator.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
 import { checkCredentials } from "./credentials.js";
-import { registerBuiltinPlugins } from "./plugins/index.js";
+import { registerBuiltinPlugins, registerExternalPlugins } from "./plugins/index.js";
 import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
 import type { PluginContext } from "./plugins/contract.js";
 import { workSourceRefusal } from "./work-source.js";
@@ -163,6 +163,7 @@ async function main(rt: ForemanRuntime): Promise<void> {
       return p ? readFileSync(p, "utf-8") : null;
     },
   };
+  await registerExternalPlugins(config, logger, dirname(findConfigFile(configPath) ?? resolve(".")));
   await startPlugins(config, pluginCtx);
   // Every stage selects and records through the work source, and opens, reads and
   // merges through the code host; without either, refuse here rather than throw

@@ -128,6 +128,24 @@ Type: integer · Default: `300000` (5 min) · Env: `AI_AGENT_POLL_INTERVAL_MS`
 
 How often a poll cycle starts.
 
+### `laneIntervalsMs`
+
+Type: object · Default: `{}`
+
+A poll interval of its own for named lanes, in milliseconds, keyed by lane name (`reconcile`, `review`, `verify`, `release`, `build`, `branch-sync`, `dependabot`, `unstick`, `skill-deliver`, or a custom stage's id). A lane not listed polls on `pollIntervalMs`, so an existing config changes nothing. Slow a lane whose work changes rarely (branch sync, dependabot) to spend fewer GitHub calls while idle; the lanes that start sessions keep the short interval. Additive + OSS-safe.
+
+### `plugins`
+
+Type: string[] · Default: `[]`
+
+Modules that register Foreman plugins at startup (docs/plugins.md): each entry is a path (absolute, `~/`, or relative to the config file) or a package name, dynamically imported once at startup; its default export is a plugin, a list of them, or a function returning either. A module that fails to load is logged and skipped, so the Foreman runs without it. Changing the list takes a restart. Additive + OSS-safe: empty by default.
+
+### `changeSignal`
+
+Type: object · Default: `{"forceCheckMs":300000,"lanes":["branch-sync","dependabot"]}`
+
+How a plugin's change signal (a plugin filling the `changeSignal` role, docs/plugins.md) is used. With no such plugin none of this does anything and the Foreman polls as it always did. Additive + OSS-safe.
+
 ### `maxConcurrentRepos`
 
 Type: integer · Default: none · Env: `AI_AGENT_MAX_CONCURRENT_REPOS`

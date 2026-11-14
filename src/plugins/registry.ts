@@ -1,6 +1,6 @@
 import type { WorkObserver, WorkSourceAdapter } from "../adapters.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
-import type { AgentRole, CodeHost, ForemanPlugin, PluginCommand, PluginContext, PluginRole, QaRunner } from "./contract.js";
+import type { AgentRole, ChangeSignal, CodeHost, ForemanPlugin, PluginCommand, PluginContext, PluginRole, QaRunner } from "./contract.js";
 
 /**
  * The plugin registry (EM#1150): the core's only way to reach a plugin.
@@ -154,6 +154,11 @@ export function roleFor<R extends AgentRole>(role: R, config: AgentConfig): NonN
     if (impl && p.enabled(config)) return impl as NonNullable<ForemanPlugin[R]>;
   }
   return undefined;
+}
+
+/** The change signal of the first started plugin that fills the role, or undefined: then every repo is polled as always. */
+export function changeSignal(): ChangeSignal | undefined {
+  return pluginsFor("changeSignal").find((p) => p.changeSignal)?.changeSignal;
 }
 
 /**

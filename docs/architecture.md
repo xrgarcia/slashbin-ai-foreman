@@ -76,6 +76,7 @@ plugin. Each plugin, its roles and the key that turns it on: [README](../README.
 | `deployer` | Merges and deploys a release PR | `roleFor("deployer", config)` | Optional |
 | `qa` | Checks a change before or after merge, for the repos it covers | `qaFor(repo, config)` | Optional |
 | `unstick` | Takes stuck work to someone who can move it | `roleFor("unstick", config)` | Optional |
+| `changeSignal` | Says which repos changed since a cursor, so quiet ones skip polling ([plugins](plugins.md)) | `changeSignal()` | Optional |
 
 With no work source or no code host, startup refuses (exit 78) and `npm run doctor`
 fails. A stage whose agent role has no plugin does not run, and startup warnings read

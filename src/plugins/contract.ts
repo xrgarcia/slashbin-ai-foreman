@@ -24,7 +24,28 @@ export type PluginRole =
   | "verifier" // verifies a merge on dev, and production
   | "deployer" // ships a release
   | "qa" // checks a change before or after merge
-  | "unstick"; // takes stuck work to someone who can move it
+  | "unstick" // takes stuck work to someone who can move it
+  | "changeSignal"; // says which repos changed, so quiet ones are polled less (ChangeSignal)
+
+/** What a change signal answers: the repos that changed since the cursor it was given, and the cursor to ask with next. */
+export interface ChangeReport {
+  /** `owner/name` of each repo that changed since the cursor, or `"all"` when it cannot tell (the first call, a gap). A repo it has no events for must be reported on every call, so it is polled in full. */
+  readonly changed: readonly string[] | "all";
+  /** Opaque; handed back unchanged on the next call. */
+  readonly cursor: string;
+}
+
+/**
+ * An optional source of "which repos changed" (a webhook feed, an event table), so the core can poll a
+ * quiet repo less. The core only ever uses it to SKIP work: with none installed, or when it throws, every
+ * repo is polled as it always was, and a quiet repo is still checked in full at least every
+ * `changeSignal.forceCheckMs`, so a missed event delays work by at most that. It must be cheap, and must
+ * not call GitHub.
+ */
+export interface ChangeSignal {
+  /** The repos among `repos` that changed since `cursor` (null on the first call). Rejects when it cannot answer: the core then polls everything. */
+  changedSince(cursor: string | null, repos: readonly string[]): Promise<ChangeReport>;
+}
 
 /** What a plugin is handed when it starts or reloads. */
 export interface PluginContext {
@@ -248,4 +269,5 @@ export interface ForemanPlugin {
   readonly deployer?: Deployer;
   readonly qa?: QaRunner;
   readonly unstick?: Unsticker;
+  readonly changeSignal?: ChangeSignal;
 }
