@@ -25,14 +25,46 @@ export function ghResource(args: string[]): GhResource {
 let counts = { graphql: 0, core: 0 };
 /** Process-wide: per-subcommand gh counts for the same process-wide budget. */
 let bySubcommand: Record<string, number> = {};
+/** Process-wide: REST calls by normalised endpoint, so an hour's core spend can be attributed. */
+let byEndpoint: Record<string, number> = {};
 /** Process-wide: the one usage-report timer. */
 let timer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * The endpoint of a REST `gh api` call with every id stripped, e.g.
+ * `GET repos/:repo/issues/:n/comments`. 2026-11-14: the change-signal deploy cut
+ * GraphQL state points 75% but left ~3,900 REST calls/hr that the hourly line
+ * could only call "api rest"; attribution had to be modelled from code.
+ */
+export function restEndpointKey(args: string[]): string {
+  let method = "GET";
+  let path = "";
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-X" || a === "--method") { method = (args[++i] ?? "GET").toUpperCase(); continue; }
+    if (a.startsWith("-")) { if (!a.includes("=") && i + 1 < args.length && /^-(f|F|H|q|t|-field|-raw-field|-header|-jq|-template|-input|-cache)$/.test(a)) i++; continue; }
+    if (!path) path = a;
+  }
+  const norm = path.replace(/^\//, "").split("?")[0]
+    .replace(/^repos\/[^/]+\/[^/]+/, "repos/:repo")
+    .replace(/\/compare\/.+$/, "/compare/:range")
+    .replace(/\/(git\/(?:refs|ref)\/heads|branches)\/.+$/, "/$1/:ref")
+    .split("/").map((seg) => (/^\d+$/.test(seg) ? ":n" : /^[0-9a-f]{40}$/.test(seg) ? ":sha" : seg)).join("/");
+  return `${method} ${norm || "?"}`;
+}
 
 /** Count one spawned `gh` process. */
 export function recordGhCall(args: string[]): void {
   counts[ghResource(args)]++;
-  const key = args[0] === "api" && args[1] !== "graphql" ? "api rest" : `${args[0] ?? ""} ${args[1] ?? ""}`.trim();
+  const rest = args[0] === "api" && args[1] !== "graphql";
+  const key = rest ? "api rest" : `${args[0] ?? ""} ${args[1] ?? ""}`.trim();
   bySubcommand[key] = (bySubcommand[key] ?? 0) + 1;
+  if (rest) { const e = restEndpointKey(args); byEndpoint[e] = (byEndpoint[e] ?? 0) + 1; }
+}
+
+/** The busiest REST endpoints, highest first, capped so the hourly line stays one readable line. */
+function topEndpoints(limit = 15): Record<string, number> {
+  return Object.fromEntries(Object.entries(byEndpoint).sort((a, b) => b[1] - a[1]).slice(0, limit));
 }
 
 /** Current counters without resetting them. */
@@ -53,10 +85,12 @@ export function configureGhUsage(opts: { intervalMs: number; logger: Logger; ext
     // Stringified: the text log format prints a nested object as [object Object],
     // which is how the first hourly line (2026-10-02 13:24) lost its breakdown.
     opts.logger.info("gh-usage: gh calls in the last interval", {
-      intervalMs, ...snap, bySubcommand: JSON.stringify(snap.bySubcommand), ...(opts.extra?.() ?? {}),
+      intervalMs, ...snap, bySubcommand: JSON.stringify(snap.bySubcommand),
+      restByEndpoint: JSON.stringify(topEndpoints()), ...(opts.extra?.() ?? {}),
     });
     counts = { graphql: 0, core: 0 };
     bySubcommand = {};
+    byEndpoint = {};
   }, intervalMs);
   timer.unref?.();
 }
