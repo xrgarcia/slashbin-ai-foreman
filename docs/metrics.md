@@ -30,6 +30,7 @@ Raw events only; durations are computed when read. Table `events(id, at, repo, i
 | `transition` | the stage entered | the Foreman moved the item (`detail`: move, from, to, observed) |
 | `stage` | the stage entered | a snapshot shows a stage different from the last one seen, e.g. a move the EM made |
 | `closed` | `done` or `notPlanned` | the item closed (once) |
+| `hold` | none | why an item waits at `pendingVerification` or `awaitingSignoff` (the EM seat's release gate): `detail` is `{stage, reason}`, one row each time the reason changes, again on re-entry |
 | `claim`, `blocked`, `unblocked`, `escalated`, `merged`, `promoted`, `verifyWaiting` | none | context rows |
 | `session` | none | one row per item a session lists (`detail`: phase, status, pr, reviewer, detail) |
 | `release` | none | one row per issue in a release PR (`detail`: state, pr) |
@@ -38,6 +39,22 @@ An implement session lists a whole batch of candidates but builds one, so pickup
 report, not stored. The table `item_stage(repo, issue, stage, at)` holds the last stage seen, to avoid
 duplicate rows. The first snapshot after enabling records each open item at its current stage with that
 moment as the time, so its earlier history is not known.
+
+**Hold reasons.** `detail.reason` is one of `grant` (the EM reported no production grant), `gate-failed` (the EM ran the
+gate and did not sign: it escalated or declined, or took it once and has not been re-asked), `seat-failed` (the EM call
+failed or was refused, so the gate never ran), `seat-silent` (the EM took it, was asked again, and the issue never
+moved; or a call still pending after an hour), `other` (no release-gate entry yet, or none of those). The Foreman derives
+it each pass from the issue's `release-gate` unstick entry (its `[grant: {...}]` answer from `em.mjs grant-state`, and
+how the last EM call ended; `gateWaitReason`, `src/unstick.ts`) and carries it on the snapshot item. It does not read the
+EM seat's Paperclip card: the unstick entry is the Foreman's own record of the seat run. At `awaitingSignoff` it is
+`gate-failed` when the issue is among the release PR's unsigned issues, else `other`. A grant missing wins over the
+call's status. The table `item_hold(repo, issue, stage, reason)` holds the last reason, to avoid duplicate rows.
+
+**One stage per pass.** A snapshot carries the item view and the card view of the same pass; the card's stage wins (it
+knows the open release PRs). Separately, a snapshot-seen A -> B -> A within 10 minutes of B is not recorded (the log
+keeps B): a safety net, not a substitute for the two views agreeing. The Foreman's own moves are never suppressed.
+(jerky_shipping#856 alternated `pendingVerification` and `awaitingRelease` every pass, ~2000 rows, 2026-11-10, because
+only the card view read the open release PR; both views now share that read.)
 
 Retention: rows older than `retentionDays` are deleted at start and at most hourly after.
 
@@ -53,6 +70,10 @@ Then, over items that reached `done` in the window (default 30 days): count, med
 per stage and for the total. `--repo` takes the name or `owner/name`. The command runs whether or not
 the plugin is enabled, but it exits with `No metrics database at <path>` until a daemon
 with `metrics.enabled` has created the file.
+
+Then, for `pendingVerification` and `awaitingSignoff`, a table of the hours split by reason (items, total hours,
+share, median per item), summed over the same done items. Time at the stage before the first `hold` row, or in history
+recorded before reasons existed, is `unrecorded`.
 
 Direct SQL, e.g. the stage log of one item:
 

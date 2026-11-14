@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { WorkEvent, WorkItem } from "../adapters.js";
+import { WAIT_REASONS, type WaitReason, type WorkEvent, type WorkItem } from "../adapters.js";
 import type { Logger } from "../logger.js";
 import type { MetricsRow } from "./report.js";
 
@@ -24,11 +24,21 @@ CREATE TABLE IF NOT EXISTS item_stage (
   stage TEXT NOT NULL,
   at TEXT NOT NULL,
   PRIMARY KEY (repo, issue)
+);
+CREATE TABLE IF NOT EXISTS item_hold (
+  repo TEXT NOT NULL,
+  issue INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  PRIMARY KEY (repo, issue)
 );`;
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
+/** A snapshot-seen move straight back to the stage before the last one, within this long of it, is a flap, not a move. */
+const FLAP_WINDOW = 10 * 60_000;
 const CLOSED_STAGES = new Set(["done", "notPlanned"]);
+const HOLD_STAGES = new Set(["pendingVerification", "awaitingSignoff"]);
 
 /**
  * `node:sqlite` loaded on first use, not at import: Node 22.12 (the declared minimum) has it only behind
@@ -102,13 +112,41 @@ export class MetricsRecorder {
     this.db.prepare(
       "INSERT INTO item_stage (repo, issue, stage, at) VALUES (?, ?, ?, ?) ON CONFLICT (repo, issue) DO UPDATE SET stage = excluded.stage, at = excluded.at",
     ).run(item.repo, item.issueNumber, stage, new Date(this.now()).toISOString());
+    // A new stage ends the wait that was recorded for the last one.
+    this.db.prepare("DELETE FROM item_hold WHERE repo = ? AND issue = ?").run(item.repo, item.issueNumber);
   }
 
-  /** A stage row, unless the item is already there. */
+  /**
+   * True when a snapshot would put the item back to stage A right after A -> B, B being a snapshot row under
+   * `FLAP_WINDOW` old: a pure A -> B -> A oscillation (two sources disagreeing, jerky_shipping#856), not a move.
+   * Skipped, so the log keeps B until the item has stood there past the window. Moves the Foreman makes
+   * (`transition`) are never suppressed.
+   */
+  private isFlap(item: WorkItem, stage: string): boolean {
+    const last = this.db.prepare(
+      "SELECT kind, stage, at FROM events WHERE repo = ? AND issue = ? AND stage IS NOT NULL AND kind IN ('transition', 'stage', 'closed') ORDER BY id DESC LIMIT 2",
+    ).all(item.repo, item.issueNumber) as Array<{ kind: string; stage: string; at: string }>;
+    const [b, a] = last;
+    return !!b && !!a && b.kind === "stage" && a.stage === stage && this.now() - Date.parse(b.at) < FLAP_WINDOW;
+  }
+
+  /** A stage row, unless the item is already there (or a snapshot only flaps it back). */
   private advance(item: WorkItem, stage: string, kind: string, detail: Record<string, unknown> | null): void {
     if (this.lastStage(item) === stage) return;
+    if (kind === "stage" && this.isFlap(item, stage)) return;
     this.insert(item.repo, item.issueNumber, kind, stage, detail);
     this.setStage(item, stage);
+  }
+
+  /** A `hold` row (detail: stage, reason) when why an item waits at `stage` changed; one row per change, not per pass. */
+  private noteHold(item: WorkItem, stage: string, reason: WaitReason): void {
+    if (!HOLD_STAGES.has(stage) || !WAIT_REASONS.includes(reason) || this.lastStage(item) !== stage) return;
+    const cur = this.db.prepare("SELECT stage, reason FROM item_hold WHERE repo = ? AND issue = ?").get(item.repo, item.issueNumber) as { stage?: string; reason?: string } | undefined;
+    if (cur?.stage === stage && cur.reason === reason) return;
+    this.insert(item.repo, item.issueNumber, "hold", null, { stage, reason });
+    this.db.prepare(
+      "INSERT INTO item_hold (repo, issue, stage, reason) VALUES (?, ?, ?, ?) ON CONFLICT (repo, issue) DO UPDATE SET stage = excluded.stage, reason = excluded.reason",
+    ).run(item.repo, item.issueNumber, stage, reason);
   }
 
   private closeItem(item: WorkItem, state: string): void {
@@ -142,9 +180,17 @@ export class MetricsRecorder {
         this.setStage(event.item, event.stage);
         return;
       case "snapshot": {
-        for (const s of event.items ?? []) this.advance(s.item, s.stage, "stage", { detail: s.detail });
+        // One stage per item per snapshot. A card's stage is the fuller read (it knows the open release PRs), so it
+        // wins over the item's: applying both in turn flipped an item between the two every pass.
+        const cardStage = new Map((event.cards ?? []).filter((c) => c.stage).map((c) => [`${c.item.repo}#${c.item.issueNumber}`, c.stage as string]));
+        for (const s of event.items ?? []) {
+          const stage = cardStage.get(`${s.item.repo}#${s.item.issueNumber}`) ?? s.stage;
+          this.advance(s.item, stage, "stage", { detail: s.detail });
+          if (s.waitReason && stage === s.stage) this.noteHold(s.item, stage, s.waitReason);
+        }
+        const seen = new Set((event.items ?? []).map((s) => `${s.item.repo}#${s.item.issueNumber}`));
         for (const c of event.cards ?? []) {
-          if (c.stage) this.advance(c.item, c.stage, "stage", null);
+          if (c.stage && !seen.has(`${c.item.repo}#${c.item.issueNumber}`)) this.advance(c.item, c.stage, "stage", null);
         }
         for (const c of event.closed ?? []) this.closeItem(c.item, c.state);
         for (const c of event.cards ?? []) {
@@ -196,6 +242,7 @@ export class MetricsRecorder {
     const cutoff = new Date(t - this.retentionDays * DAY).toISOString();
     this.db.prepare("DELETE FROM events WHERE at < ?").run(cutoff);
     this.db.exec("DELETE FROM item_stage WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.repo = item_stage.repo AND e.issue = item_stage.issue)");
+    this.db.exec("DELETE FROM item_hold WHERE NOT EXISTS (SELECT 1 FROM item_stage s WHERE s.repo = item_hold.repo AND s.issue = item_hold.issue)");
   }
 }
 

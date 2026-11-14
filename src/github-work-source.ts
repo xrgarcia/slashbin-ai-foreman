@@ -187,6 +187,23 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   }
 
   /**
+   * The issues an open release PR (into the production branch) names (#N in the body, the rule the receiver's sync
+   * used). The one read behind `inRelease`, shared by `cards` and `snapshot`: before, only `cards` read it, so the same
+   * pass placed an issue named by a release PR at `awaitingRelease` (cards) and `pendingVerification` (snapshot), and a
+   * recorder fed both flipped it every pass (jerky_shipping#856, ~2000 rows). A failed read names none.
+   */
+  private async releaseIssues(repoConfig: RepoConfig, logger: Logger): Promise<Set<number>> {
+    try {
+      return new Set((await getOpenPrs(repoConfig.githubRepo, repoConfig.repoPath))
+        .filter((p) => p.baseRefName === repoConfig.productionBranch)
+        .flatMap((p) => [...String(p.body ?? "").matchAll(/#(\d+)\b/g)].map((m) => Number(m[1]))));
+    } catch (err) {
+      logger.debug(`cards: ${repoConfig.githubRepo} release PRs not read: ${err instanceof Error ? err.message : String(err)}`);
+      return new Set();
+    }
+  }
+
+  /**
    * Every card the repo has, for an observer that owns them all: each open
    * issue with its stage (null: not approved) and title, `inRelease` read from
    * the open PRs into the production branch that name it (#N in the body, the
@@ -197,14 +214,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     const repo = repoConfig.githubRepo;
     const url = (n: number) => `https://github.com/${repo}/issues/${n}`;
     const blockedLabel = repoConfig.github.blockedLabel;
-    let release = new Set<number>();
-    try {
-      release = new Set((await getOpenPrs(repo, repoConfig.repoPath))
-        .filter((p) => p.baseRefName === repoConfig.productionBranch)
-        .flatMap((p) => [...String(p.body ?? "").matchAll(/#(\d+)\b/g)].map((m) => Number(m[1]))));
-    } catch (err) {
-      logger.debug(`cards: ${repo} release PRs not read: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    const release = await this.releaseIssues(repoConfig, logger);
     const open = await getOpenIssues(repo, repoConfig.repoPath, logger);
     const labelsOf = (i: { labels: { name: string }[] }) => i.labels.map((l) => l.name);
     const signoff = await this.signoffHeld(repoConfig, open.some((i) => labelsOf(i).includes(repoConfig.lifecycleLabels.releasePending)), logger);
@@ -264,9 +274,10 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   async snapshot(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotItem[]> {
     const out: SnapshotItem[] = [];
     const issues = await openIssueLabels(repoConfig, logger);
+    const release = await this.releaseIssues(repoConfig, logger);
     const signoff = await this.signoffHeld(repoConfig, issues.some((i) => i.labels.includes(repoConfig.lifecycleLabels.releasePending)), logger);
     for (const { number, labels } of issues) {
-      const stage = issueStage(labels, false, repoConfig.lifecycleLabels, repoConfig.triggerLabel, repoConfig.github.blockedLabel, signoff !== null);
+      const stage = issueStage(labels, release.has(number), repoConfig.lifecycleLabels, repoConfig.triggerLabel, repoConfig.github.blockedLabel, signoff !== null);
       if (stage === null) continue;
       out.push({ item: { issueNumber: number, repo: repoConfig.githubRepo }, stage, detail: labels.join(", ") || "none", ...(stage === "awaitingSignoff" && signoff ? { signoff } : {}) });
     }
