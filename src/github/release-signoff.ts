@@ -52,6 +52,9 @@ export async function unsignedIssues(
   return out.sort((a, b) => a - b);
 }
 
+/** How long a "never adopted" answer is trusted before the comments are read again. */
+export const NOT_ADOPTED_TTL_MS = 30 * 60_000;
+
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
 
@@ -63,6 +66,14 @@ const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
 export class ReleaseSignoff {
   /** `repo#N` whose sign-off a human applied; never re-read. */
   private readonly humanSigned = new Set<string>();
+  /**
+   * `repo#N` → when a "no carried comment" answer expires. 2026-11-14 this read ran
+   * for every signed issue in every open release, every 60 s pass: 2,536 of the
+   * Foreman's 3,103 REST calls in an hour. The carried comment is only written
+   * when an issue is adopted, before it is signed, so an answer of "never adopted"
+   * on a signed issue holds; the expiry bounds it anyway.
+   */
+  private readonly notAdopted = new Map<string, number>();
   /** `repo#PR` → the head and sets last posted. */
   private readonly posted = new Map<string, string>();
 
@@ -78,12 +89,16 @@ export class ReleaseSignoff {
   async foremanApplied(config: RepoConfig, n: number): Promise<boolean> {
     const key = `${config.githubRepo}#${n}`;
     if (this.humanSigned.has(key)) return false;
+    if ((this.notAdopted.get(key) ?? 0) > Date.now()) return false;
     const rows = (await ghAsync([
       "api", `repos/${config.githubRepo}/issues/${n}/comments?per_page=100`, "--paginate",
       "--jq", ".[] | {body: .body, by: .user.login} | @json",
     ], config.repoPath)).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { body?: string; by?: string });
     const adopted = rows.find((r) => (r.body ?? "").includes(CARRIED_MARK));
-    if (!adopted?.by) return false;
+    if (!adopted?.by) {
+      this.notAdopted.set(key, Date.now() + NOT_ADOPTED_TTL_MS);
+      return false;
+    }
     const events = (await ghAsync([
       "api", `repos/${config.githubRepo}/issues/${n}/events?per_page=100`, "--paginate",
       "--jq", '.[] | select(.event=="labeled") | {label: .label.name, by: .actor.login} | @json',
