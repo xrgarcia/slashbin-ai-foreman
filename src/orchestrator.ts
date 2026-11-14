@@ -211,7 +211,7 @@ export async function runRepoPass(
 // Observers mirror GitHub's labels as they stand after a pass. Events move a
 // card only when the Foreman acts on that issue, so a card it never acts on
 // again (blocked by an old skip, then advanced by a label heal) stayed wrong
-// for good: jerky_service #73 sat in Blocked at `pr merged` (2026-10-05).
+// for good: orders_service #73 sat in Blocked at `pr merged` (2026-10-05).
 async function publishBoard(rt: ForemanRuntime, repoConfig: RepoConfig, log: Logger): Promise<void> {
   if (!wantsSnapshot()) return;
   try {

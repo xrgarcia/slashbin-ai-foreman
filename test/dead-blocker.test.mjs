@@ -1,8 +1,8 @@
 // A build that ends with no PR must not leave its dependents waiting silently.
 //
-// 2026-10-26: Slashbin-Ingest-Gateway#222 (all 11 PRs fail npm ci) and
-// jerky_skuvault_service#478 (all 16 already on features) ended "No PR produced"
-// and stayed open and approved, so gateway#227 (S1) and skuvault#489, both
+// 2026-10-26: ingest-gateway#222 (all 11 PRs fail npm ci) and
+// inventory_service#478 (all 16 already on features) ended "No PR produced"
+// and stayed open and approved, so gateway#227 (S1) and inventory#489, both
 // GitHub-blocked-by them, never ran: ~13h of stall.
 //
 // Drives the BUILT modules; `gh` is a fake on PATH that records every call and
@@ -186,7 +186,7 @@ test("pending EM handoffs are delivered before the eligibility gate; a daemon re
   assert.match(daemon, /repos: \[match\], allRepos: fresh\.repos/);
 });
 
-test("a skip with no dependents still labels the stopped issue blocked (jerky_data_receiver#553)", () => {
+test("a skip with no dependents still labels the stopped issue blocked (events_receiver#553)", () => {
   const impl = readFileSync(join(root, "src/phases/implement.ts"), "utf-8");
   const body = impl.slice(impl.indexOf("async function tellDependents"), impl.indexOf("export async function deliverPendingHandoffs"));
   const hold = body.indexOf("holdBlocker(repoConfig, n)");

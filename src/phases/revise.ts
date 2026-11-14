@@ -38,7 +38,7 @@ export async function tryRevision(
   //
   // This runs BEFORE the exhausted-retries skip, on purpose. The reset below is
   // the only way an exhausted counter clears short of a daemon restart, and it
-  // used to sit after the skip — unreachable once the cap was hit. Slashbin-io-docs
+  // used to sit after the skip — unreachable once the cap was hit. docs-site
   // PR #411 (2026-10-01) failed revision twice on the account's session limit,
   // exhausted, and then deadlocked the whole repo: revision skipped forever, and
   // implement is gated on "no pending revision", so #412 could not build either.
@@ -67,7 +67,7 @@ export async function tryRevision(
   const head = pending.pr.headRefOid ?? await codeHost().readPrHeadSha(repoConfig, prNumber, revLogger);
 
   // The EM's `**EM QA re-run` on an open PR (docs/em-coordination.md): a QA FAIL that was QA's own defect moved the
-  // card here, and nothing below would ever send it back to QA (slashbin-io-docs#645). Before every gate and any paid
+  // card here, and nothing below would ever send it back to QA (docs-site#645). Before every gate and any paid
   // session: back to review, where the next QA pass voids the reused verdict. One-shot: QA's fresh report spends it.
   if ((await qaBeforeMergeApplies(repoConfig, config)) === true) {
     let rerun = false;
@@ -125,7 +125,7 @@ export async function tryRevision(
 
   // A no-commit stalemate already escalated: the card is Blocked and the EM must
   // rule. Re-running the reviser only re-answers the same review — it launched a
-  // paid session on 17 straight cycles for slashbin-io-worker PR #694
+  // paid session on 17 straight cycles for worker PR #694
   // (2026-10-03). Clears when the head moves, the PR closes (foreman#167), or an EM
   // scope ruling is posted after the last no-commit round (released above).
   if (noCommitCount(streak, head) > MAX_CONSECUTIVE_NO_COMMIT) {
@@ -137,7 +137,7 @@ export async function tryRevision(
   // being revised again. Rounds count from the last ruling posted on the PR
   // (a comment opening "**EM scope ruling"), so posting one resumes revision
   // on the next cycle. The Tech Lead can ask for a ruling sooner by marking
-  // its review (TECH_LEAD_ESCALATE_MARKER). jerky_service PR #125 went 13
+  // its review (TECH_LEAD_ESCALATE_MARKER). orders_service PR #125 went 13
   // rounds (2026-10-13) because each fix answered the last finding and the
   // spec question underneath reached no one who owned the spec.
   const ruling = await codeHost().readRulingState(repoConfig.githubRepo, pending.pr.number, repoConfig.repoPath, revLogger);

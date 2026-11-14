@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Acceptance for the Foreman daemon-wide upstream back-off (GitHub rate limit,
- * Claude session limit) — xrgarcia/slashbin-ai-foreman, filed 2026-10-01.
+ * Claude session limit) — slashbin-io/slashbin-ai-foreman, filed 2026-10-01.
  *
  * Front door: the BUILT Foreman's own entry points — `gh()` from dist/github.js
  * (the function every phase calls), `detectUpstreamLimit` from dist/refusal.js, and

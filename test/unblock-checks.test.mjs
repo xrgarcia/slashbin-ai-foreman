@@ -1,4 +1,4 @@
-// The blocked queue's way out (Ray, 2026-10-05): every kind of block has a
+// The blocked queue's way out (owner, 2026-10-05): every kind of block has a
 // fixed list of checks, any passing check resolves it, unknown never does,
 // and a resolution moves the card out of Blocked.
 import { test } from "node:test";
@@ -61,7 +61,7 @@ test("the mirror moves only a Foreman-blocked card on unblock", () => {
 
 test("an exhausted hold dev could not observe is not reopened by new commits on base", async () => {
   const { reopensOnBaseAdvance } = await import("../dist/phases/verify.js");
-  // jerky_service #110: dev has no classifier key and drafting off, so every reopen re-ran the same hold.
+  // orders_service #110: dev has no classifier key and drafting off, so every reopen re-ran the same hold.
   assert.equal(reopensOnBaseAdvance("acceptance-not-verified"), false);
   assert.equal(reopensOnBaseAdvance("acceptance-failed"), true);
 });

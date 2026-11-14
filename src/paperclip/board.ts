@@ -40,7 +40,7 @@ export const FOREMAN_BLOCKED_PREFIX = "blocked: ";
  * The unblock-descriptor action of a card held because its issue carries the
  * work source's blocked label, when the source read why (`SnapshotHold`): it
  * starts with FOREMAN_BLOCKED_PREFIX, so no reader takes it for a waiting hold,
- * and it ends when the label goes. The text slashbin_data_receiver#43 wrote, so
+ * and it ends when the label goes. The text data_receiver#43 wrote, so
  * a card it held reads the same.
  */
 export const HOLD_PREFIX = `${FOREMAN_BLOCKED_PREFIX}on GitHub — `;

@@ -1,6 +1,6 @@
 // An approved issue waits for the prerequisites its own Pre-Flight declares.
 //
-// Origin: jerky_service#185 (2026-10-16). Approved with its real prerequisite —
+// Origin: orders_service#185 (2026-10-16). Approved with its real prerequisite —
 // a playbook file on another repo's `main`, a 404 that day — written only as
 // prose. The Foreman built it, the session found the file missing and
 // skip-held, and a person had to touch the issue. A prerequisite is now a

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Acceptance for "retry lives only in the plugin; a failed read fails the pass closed" —
- * xrgarcia/slashbin-ai-foreman#196 (EM#1244 feature 5).
+ * slashbin-io/slashbin-ai-foreman#196 (EM#1244 feature 5).
  *
  * Front door: the BUILT Foreman. A fake `gh` first on PATH holds fixture issues (their lifecycle labels) and
  * a switch that makes every read, or every write, fail the way a network error or a 5xx does for longer than
@@ -219,7 +219,7 @@ console.log(JSON.stringify(out));
       rows.length === 20 && wrongStage === 0 && wrongAgent === 0 && lost === 0 && recovered === rows.length);
   }
 
-  // R — round 2 of the review (xrgarcia/slashbin-ai-foreman#197): five cases, each a row. Same front door: the built
+  // R — round 2 of the review (slashbin-io/slashbin-ai-foreman#197): five cases, each a row. Same front door: the built
   // Foreman, a fake `gh` and `claude` first on PATH, the repo record held in memory (so a record failure is injected).
   //   R1 a failed branch-sha read fails the revise pass: no session, no no-commit round used, the unchanged head
   //      stays eligible after recovery and after a restart (3 rows)

@@ -15,7 +15,7 @@ edit or a lifted `blocked` label · a new corrective issue. Everything else the 
 action you are about to take is not one of these seven, you are doing someone else's stage.
 
 Dependency-batch issues (Dependabot version and security updates) on a `dependencyPreApproved` repo are **filed by the Foreman
-with both `approved` and `deliver-to-prod`** (Ray, 2026-11-06: standing production grant for dependency upgrades and security
+with both `approved` and `deliver-to-prod`** (owner, 2026-11-06: standing production grant for dependency upgrades and security
 patches). The release gate therefore finds the grant on the issue itself (check 0 passes); you still run checks 1-6 and sign
 `ready for prod release` per issue, and the SRE verifies dev and prod. A batch on a repo that is not pre-approved is filed bare.
 The Foreman only files with the label; it never decides a release.
@@ -89,7 +89,7 @@ come at 10 minutes, then 20, then the issue goes `blocked` (verify-exhausted).
 | `codex-unavailable`, `em-mirror-unavailable`, `registry-unavailable`, `tooling-unavailable`, `evidence-check-failed`, `no-evidence-comment`, `qa-errored`, `qa-coverage-unknown`, `qa-held-qa-local-boot-failed`, `qa-held-qa-local-seed-missing`, `qa-held-worker-data-unavailable`, `qa-held-attribution-unavailable`, `qa-held-dev-unreachable`, `qa-held-sign-in-failed`, `qa-held-review-unavailable`, `qa-held-pr-unreadable`, `qa-held-baseline-unreadable`, `qa-held-registry-unavailable` | defer (tooling) | retries on `backoff.agentUnavailable` (2 → 30 min), no attempt charged, silent | none — wait. Persisting for hours is a tooling defect: file it on the SRE or Foreman |
 | `github-unavailable` (Tech Lead exit 3), or a Tech Lead exit 1 whose stderr is a transient GitHub transport error (TLS handshake timeout, ECONNRESET, ENOTFOUND, `dial tcp`, 502/503/504) | defer (tooling) | the review is retried on `backoff.agentUnavailable`, no failure charged, the card is **not** moved to Blocked, silent (foreman#180). Auth, 404, 422 and rate-limit errors are never treated this way | none — wait. Persisting for hours is a tooling defect: file it on the Foreman |
 | `wait-until-YYYYMMDDTHHMMZ` | wait | retries at that time, no charge. A **release's** prod verification that returns it (the SRE's check needs a later time, e.g. a monthly cron) is announced once per release PR and `eligible_at`: a comment on each issue and a card note saying live in production, deploy verified, waiting until that time for the SRE's reason, nothing needed. A changed `eligible_at` says it again; the release still closes only on a pass | none — wait. A card that looks stalled with this note is not stalled |
-| `visual-qa-failed` | decide | **files nothing and builds nothing.** Holds at its cap at once (retrying unchanged code cannot pass) and raises the unstick kind `rework-decision` in the same cycle, with the PR, the files it touched, the verdict and the evidence links (Ray, 2026-10-31; Slashbin-console#1538: an automatic rework changed `JourneyBar.tsx` while the cause was in `DashboardLayout.tsx`, and the release queue was held ~24h) | **yours — decide the fix, on the first FAIL.** Read the evidence, find the component that owns the defect (it may lie outside the PR's files), and file the corrective **linked to #N** (below) or edit the spec. The linked follow-up merging into base (`correctionMerged`; any other base commit is `baseAdvanced`) or a spec edit (`specEdited`) releases the hold and re-verifies |
+| `visual-qa-failed` | decide | **files nothing and builds nothing.** Holds at its cap at once (retrying unchanged code cannot pass) and raises the unstick kind `rework-decision` in the same cycle, with the PR, the files it touched, the verdict and the evidence links (owner, 2026-10-31; console#1538: an automatic rework changed `JourneyBar.tsx` while the cause was in `DashboardLayout.tsx`, and the release queue was held ~24h) | **yours — decide the fix, on the first FAIL.** Read the evidence, find the component that owns the defect (it may lie outside the PR's files), and file the corrective **linked to #N** (below) or edit the spec. The linked follow-up merging into base (`correctionMerged`; any other base commit is `baseAdvanced`) or a spec edit (`specEdited`) releases the hold and re-verifies |
 | every other `qa-held-*` (`unsafe-host`, `browser-crashed`, `nothing-captured`, `page-unplaced`), `qa-inconsistent` | charged | 10 min, 20 min, then `blocked` | after exhaustion: read the QA report, fix the spec or file the defect |
 | `dev-verify-failed`, `deploy=…` | charged | blocked with owner SRE (`deployFailed`) | route to the SRE |
 | `acceptance-not-verified` and every other code | charged | 10 min, 20 min, then `blocked`; the retries keep running, but the first failure also raises `rework-decision` (§3) | **yours — decide the fix, on the first failure; do not wait out the attempts.** Read the evidence and the touched files: edit the spec (`specEdited` releases it at once) or file the fix linked to the held issue (below). The linked fix merging into base after the hold releases it and re-verifies with a fresh attempt count (`correctionMerged`); an unrelated base commit (`baseAdvanced`) does **not** release this one. Deploy failures (`dev-verify-failed`, `deploy=…`) and runs that returned no verdict raise nothing early; they stay with the SRE and `verify-exhausted` |
@@ -159,7 +159,7 @@ the repo and PR it was first seen on, and the SRE's evidence links. It is repo-l
 The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
 fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
 `epic-ready-to-close` fires when the release stage closes an issue after its production verification and that issue
-names an epic (`<epicRefLabel> #N` in its body, `engineering-manager #N` in the `slashbin` profile; unset, this kind never fires; or in the body of the issue the issue it corrects names).
+names an epic (`<epicRefLabel> #N` in its body; unset, this kind never fires; or in the body of the issue the issue it corrects names).
 It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
@@ -170,7 +170,7 @@ is not and writes nothing.
 `dependency-batch-loop` fires when the dependency sweep has filed the same batch (the same Dependabot PRs at the same head
 commits) 3 times in 24 hours. The sweep then **holds that batch**: it files nothing more for those PRs and raises this kind once,
 repo-level (issue 0). Each of those issues ended with no PR of its own (`landed`), so a Dependabot PR is almost certainly open
-after its version reached the base branch and the Foreman's close of it failed (foreman#230: jerky-mcp-services #627, 397
+after its version reached the base branch and the Foreman's close of it failed (foreman#230: mcp-services #627, 397
 sessions). The EM finds out why, closes or fixes the PR(s); a new Dependabot push is a new batch and is filed once. Never
 file the batch by hand. A `landed` batch issue closes its Dependabot PRs itself (a comment naming why) and records the batch
 as `landed`, after which the sweep never files that batch again.
@@ -190,8 +190,8 @@ every kind in `nextStep`: a `failed` entry whose 3 attempts are spent is called 
 so it is retried once the EM is fixed. Any other exit 3 stays `declined`.
 
 After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up comment
-@-mentioning `unstickEscalationOwner` (Ray, in the `slashbin` profile; unset, the give-up is only
-logged). **That comment means the EM failed its stage** — a give-up is never the first Ray hears
+@-mentioning `unstickEscalationOwner` (unset, the give-up is only
+logged). **That comment means the EM failed its stage** — a give-up is never the first the owner hears
 of a stuck card.
 
 **An `invoked` answer on an issue is a handoff, not a resolution** (a repo-level alert, issue 0, has no issue to watch: once the EM took it, it is delivered and never recalled). If the question still stands, the Foreman
@@ -235,6 +235,6 @@ reset (or the upstream back-off window) has passed.
 | skip hold | 3 attempts → `blocked` |
 | tooling defer / prod-verify / release retries | uncapped back-offs |
 | QA run | 90 minutes, then `qa-errored` (free retry) |
-| unstick calls | 3, then the give-up comment to Ray |
+| unstick calls | 3, then the give-up comment to the owner |
 
 A card past its limit is the EM's. A card inside its limit is not: wait for the loop.

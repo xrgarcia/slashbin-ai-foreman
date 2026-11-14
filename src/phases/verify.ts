@@ -27,7 +27,7 @@ import type { ForemanRuntime } from "../runtime.js";
 /**
  * True when a verify hold's reason says the deploy itself failed (`dev-verify-failed`:
  * trailer deploy=FAILURE; `deploy=<state>`: any other deploy state). Infrastructure,
- * so the SRE owns the hold, not the EM (jerky_ops#97, 2026-10-21: Railway paused deploys).
+ * so the SRE owns the hold, not the EM (ops_portal#97, 2026-10-21: Railway paused deploys).
  */
 export function isDeployFailureHold(reason: string): boolean {
   return reason === "dev-verify-failed" || reason.startsWith("deploy=");
@@ -137,15 +137,15 @@ export function reopensOnBaseAdvance(reason: string): boolean {
 
 /**
  * SRE holds that mean "the verifier or its tooling could not run" — no verdict on
- * the change, so no attempt is charged (Slashbin-console#1445 spent 3 attempts on
- * visual-qa-review-unavailable; jerky_data_receiver#543 on registry-unavailable).
+ * the change, so no attempt is charged (console#1445 spent 3 attempts on
+ * visual-qa-review-unavailable; events_receiver#543 on registry-unavailable).
  * Mirrors the SRE's own re-run list, `slashbin_ai_sre/lib/reuse.mjs` RERUN_HOLDS,
  * minus `wait-until-*` (a named wait, handled separately). Verdicts (`visual-qa-failed`,
  * `acceptance-failed`, `dev-verify-failed`, ...) and `visual-qa-unsafe-host` (a
  * deterministic config refusal a retry cannot clear) are NOT here: they charge or rework.
  * `qa-errored` is the Foreman's own QA gate failing to produce a verdict (timeout, crash,
  * no manifest) after an SRE pass: the checker could not run, so it charges nothing either
- * (slashbin-ai-foreman#137; Slashbin-console#1492 spent 3 attempts on QA timeouts).
+ * (slashbin-ai-foreman#137; console#1492 spent 3 attempts on QA timeouts).
  */
 export const SRE_TOOLING_HOLDS: readonly string[] = [
   "codex-unavailable",
@@ -190,7 +190,7 @@ export const isToolingHold = (reason: string): boolean => TOOLING_HOLDS.includes
  *   observable (`wait-until-YYYYMMDDTHHMMZ`) — not a failure, so no attempt is
  *   charged; the PR is not picked again before that time.
  * - `decide`: a visual QA FAIL (`hold=visual-qa-failed`). The fix is a technical
- *   decision, so it is the EM's (Ray, 2026-10-31; Slashbin-console#1538, where an
+ *   decision, so it is the EM's (owner, 2026-10-31; console#1538, where an
  *   automatic rework touched files that were not the cause and held the release
  *   queue ~24h): the Foreman files nothing. The hold is placed at its cap at once
  *   (nothing retries unchanged code), the EM is called on this first FAIL
@@ -212,7 +212,7 @@ export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wai
  * The merged issue whose dev verification holds the repo's next build, or
  * null. Pure, exported for tests.
  *
- * Ray, 2026-10-14: one issue in flight per repo, from build until it is
+ * The owner, 2026-10-14: one issue in flight per repo, from build until it is
  * verified on dev — a fix the verification asks for lands before the next issue
  * is built on top. A merge holds while the SRE has it: not yet verified, or
  * held and still retrying. It frees the repo once its attempts are spent (it
@@ -250,7 +250,7 @@ export function visualDecisionHolder(merged: readonly number[], held: Readonly<R
  * `holder` (`Relation.corrects`, src/adapters.ts; slashbin-ai-foreman#267). The
  * caller passes everything buildable, not just the trimmed batch: a fix filed
  * after the queue's older work sat outside it, and the verification waited on
- * a fix the build never saw (Slashbin-console #1440 behind #1431, 2026-10-27).
+ * a fix the build never saw (console #1440 behind #1431, 2026-10-27).
  * Pure, exported for tests.
  */
 export function correctionsToBuild(holder: number, candidates: readonly number[], relations: ReadonlyMap<number, Relation>): number[] {
@@ -260,7 +260,7 @@ export function correctionsToBuild(holder: number, candidates: readonly number[]
 /**
  * The `candidates` that look like the fix for `holder` but carry no relation to
  * it: they mention it without correcting it, so they queue behind the very
- * verification they may be meant to clear (Slashbin-console#1476 behind #1438,
+ * verification they may be meant to clear (console#1476 behind #1438,
  * foreman#131). Never built on that guess; the caller says so. Pure, exported for tests.
  */
 export function unlinkedFixes(holder: number, candidates: readonly number[], relations: ReadonlyMap<number, Relation>): number[] {
@@ -342,7 +342,7 @@ async function takeQaRerunRequests(rt: ForemanRuntime, repoConfig: RepoConfig, c
  * maxAttempts, after which it waits for a person. Nothing here writes `pr pending actions` — a merged PR
  * has no feature PR left to revise.
  *
- * The SRE runs on Codex only (Ray, 2026-10-10). A run that could not happen, or
+ * The SRE runs on Codex only (owner, 2026-10-10). A run that could not happen, or
  * one waiting on a named time, costs no attempt — see verifyHoldPlan.
  */
 export async function tryVerify(
@@ -558,7 +558,7 @@ export async function tryVerify(
       for (const n of target.issueNumbers) await emit(rt, { kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       return false;
     }
-    // The EM decides every post-merge fix (Ray, 2026-10-31): the Foreman files nothing. A visual QA FAIL is held at
+    // The EM decides every post-merge fix (owner, 2026-10-31): the Foreman files nothing. A visual QA FAIL is held at
     // its cap at once (retrying unchanged code cannot pass), and the unstick stage calls the EM on this first FAIL
     // (`rework-decision`) with the PR, the files it touched, the verdict and the evidence links. A charged hold
     // keeps its retries and is also shown to the EM on its first failure.

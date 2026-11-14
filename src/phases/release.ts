@@ -173,7 +173,7 @@ async function dropRelease(rt: ForemanRuntime, repoConfig: RepoConfig, pr: numbe
  * A release ended healthy (its soak passed, or there was none left to run): the corrective change is live and proven.
  * Every held release that carries an issue this one corrects is due `REARM_SETTLE_MS` from now with its attempts
  * cleared, so a failed re-verify retries in minutes instead of on the back-off it had grown to (foreman#186,
- * slashbin_data_receiver#189 held 6 h past the fix of #192). Never called at a production-verification pass.
+ * data_receiver#189 held 6 h past the fix of #192). Never called at a production-verification pass.
  */
 async function rearmHeld(rt: ForemanRuntime, repoConfig: RepoConfig, from: ProdRelease, followUpOf: readonly number[] | undefined, logger: Logger): Promise<void> {
   if (!followUpOf?.length) return;
@@ -441,7 +441,7 @@ async function holdRelease(
 /**
  * SRE deploy holds that only a person or a new commit clears. Every other unmerged hold retries
  * on the back-off; these did too, and each retry bought a Tech Lead approval and an SRE run
- * (slashbin-cli#161: 46 refused merges at one sha; slashbin-io-worker#724: 13 approvals behind
+ * (slashbin-cli#161: 46 refused merges at one sha; worker#724: 13 approvals behind
  * a red required check).
  */
 export const DEPLOY_STOPS: Readonly<Record<string, string>> = {
@@ -705,7 +705,7 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, releases
  * Open issues the lifecycle lost, found from GitHub every scan and not from the labels (#220).
  *
  * `passRelease` used to strip an issue's lifecycle labels before closing it; a close that failed left it open,
- * unlabelled and carried by nothing (jerky_shipping #618 and #620, 2026-10-10), and no later pass looked at an
+ * unlabelled and carried by nothing (shipping_app #618 and #620, 2026-10-10), and no later pass looked at an
  * issue with no label. Closing first (`closeReleased`) stops new ones; this recovers the ones already there, and
  * any that never carried a label (#396, #680). An open issue with no lifecycle or blocked label that no release
  * carries (it may still carry the trigger label: closing strips only lifecycle labels) is one of two things:
@@ -785,12 +785,12 @@ async function sweepStranded(rt: ForemanRuntime, repoConfig: RepoConfig, release
  * An orphan's work is on production with nothing left on base, so the release
  * whose merge IS production's head shipped it. That happens when an issue
  * reaches `ready for prod release` after promote read the list for the open
- * release PR (jerky_skuvault_service #417 and #419, 2026-10-11: labelled 1-4 s
+ * release PR (inventory_service #417 and #419, 2026-10-11: labelled 1-4 s
  * after PR #426 was opened naming only #397, then blocked here as carried by
  * nothing). Join it to that release: its PR body names it, so the SRE's next
  * prod verification grades its acceptance, and the release closes it on a pass.
  * A `soaking` release already passed without it, so it goes back to `merged` to
- * be verified again (jerky_skuvault_service #433, 2026-10-12: labelled 2 s
+ * be verified again (inventory_service #433, 2026-10-12: labelled 2 s
  * before PR #439 was cut, orphaned only after #439 passed). True when joined.
  */
 async function joinCarryingRelease(rt: ForemanRuntime, repoConfig: RepoConfig, releases: readonly ProdRelease[], orphans: number[], logger: Logger): Promise<boolean | "unreadable"> {
@@ -803,7 +803,7 @@ async function joinCarryingRelease(rt: ForemanRuntime, repoConfig: RepoConfig, r
   }
   let rel: ProdRelease | undefined = releases.find((r) => r.mergeSha === head && r.phase !== "deploying");
   // The head release already settled and left the state, and the orphan shipped
-  // unlisted inside an earlier one (Slashbin-console #1297, 2026-10-16: on `main`
+  // unlisted inside an earlier one (console #1297, 2026-10-16: on `main`
   // via #1302, which named only #1285, and #1312 settled at the head before it
   // was ready). Production's head carries everything on it, so track the head
   // release again for these issues alone; its issues already closed stay closed.

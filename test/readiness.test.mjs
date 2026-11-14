@@ -1,5 +1,5 @@
 // An approved issue waits for the prerequisites its own Pre-Flight declares
-// (slashbin-ai-foreman#91; origin jerky_service#185, 2026-10-16): a structured
+// (slashbin-ai-foreman#91; origin orders_service#185, 2026-10-16): a structured
 // `readiness` block, read before a session is spent. Parser and evaluator are
 // pure and take a stubbed gh; the eligibility and comment tests drive the built
 // connector with a fake `gh` on PATH. Nothing reaches GitHub.
@@ -199,7 +199,7 @@ function reset(labels = ["approved"], body = HELD_BODY) {
   setState({
     board: [{ number: 7, title: "seven", labels: labels.map((name) => ({ name })) }],
     body, comments: [], fileOnMain: false,
-    labeled: [{ label: { name: "approved" }, actor: { login: "ray" } }],
+    labeled: [{ label: { name: "approved" }, actor: { login: "alice" } }],
   });
 }
 
@@ -253,7 +253,7 @@ test("one hold comment for a reason: none on the second cycle, none after a rest
   const body = posted()[0].body;
   assert.match(body, /<!-- foreman:readiness-hold \S+ -->/, "hidden marker");
   assert.match(body, /file_at_ref: o\/m rick-bot\/voicemail\.md main/, "names the unmet predicate");
-  assert.match(body, /@ray/, "names the approver from the labeled event");
+  assert.match(body, /@alice/, "names the approver from the labeled event");
   assert.match(body, /starts automatically/);
   await eligible(c);
   assert.equal(posted().length, 1, "second cycle");
@@ -279,7 +279,7 @@ test("R1: 30+ human comments after the hold marker, then a restart: no repeat", 
   reset();
   await eligible(await connector("k"));
   assert.equal(posted().length, 1);
-  const humans = Array.from({ length: 130 }, (_, i) => ({ body: `chat ${i}`, author: { login: "ray" } }));
+  const humans = Array.from({ length: 130 }, (_, i) => ({ body: `chat ${i}`, author: { login: "alice" } }));
   setState({ comments: [...fileState().comments, ...humans] });
   await eligible(await connector("k-restarted"));
   assert.equal(posted().length, 1, "marker found across pages");
@@ -288,16 +288,16 @@ test("R1: 30+ human comments after the hold marker, then a restart: no repeat", 
 test("R2/R4: 50+ label events after the approval: the announcement names the approver", async () => {
   reset();
   const noise = Array.from({ length: 230 }, (_, i) => ({ label: { name: `l${i}` }, actor: { login: "someone" } }));
-  setState({ labeled: [{ label: { name: "approved" }, actor: { login: "ray" } }, ...noise] });
+  setState({ labeled: [{ label: { name: "approved" }, actor: { login: "alice" } }, ...noise] });
   await eligible(await connector("l"));
   assert.equal(posted().length, 1);
-  assert.match(posted()[0].body, /@ray/);
+  assert.match(posted()[0].body, /@alice/);
   assert.doesNotMatch(posted()[0].body, /@unknown/);
 });
 
 test("a failed history read posts nothing", async () => {
   reset();
-  setState({ comments: [{ body: "x", author: { login: "ray" } }], labeled: null });
+  setState({ comments: [{ body: "x", author: { login: "alice" } }], labeled: null });
   await eligible(await connector("m"));
   assert.equal(posted().length, 0);
 });

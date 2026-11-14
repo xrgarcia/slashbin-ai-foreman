@@ -58,7 +58,7 @@ export const githubConventionsSchema = z.object({
   // merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date,
   // {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must
   // appear so two releases never share a name. A plain annotated tag only,
-  // never a GitHub Release: jerky_shipping's desktop pipeline
+  // never a GitHub Release: shipping_app's desktop pipeline
   // (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases
   // and tags at HEAD to decide whether a commit is already released, so a
   // Release on main's merge commit would suppress its desktop build. Never

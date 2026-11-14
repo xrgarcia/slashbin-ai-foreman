@@ -48,7 +48,7 @@ test("unmetReadiness reads through an async reader without blocking the event lo
 
 test("featurePrUrlFallback is async: a slow gh does not freeze the loop, and the Foreman's PR is found", async () => {
   const bin = mkdtempSync(join(tmpdir(), "foreman-fakegh-"));
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\nsleep 0.3\necho '[{"url":"https://x/pull/4","headRefName":"foreman/4-thing"},{"url":"https://x/pull/5","headRefName":"ray/fix"}]'\n`);
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\nsleep 0.3\necho '[{"url":"https://x/pull/4","headRefName":"foreman/4-thing"},{"url":"https://x/pull/5","headRefName":"alice/fix"}]'\n`);
   chmodSync(join(bin, "gh"), 0o755);
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;

@@ -11,10 +11,9 @@ import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
 import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { PaperclipClient, PaperclipClientError, createPaperclipClient } from "../dist/paperclip/client.js";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
-/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
-const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
+/** A credit header a Paperclip fork reads (`paperclip.commentAuthorHeader`, set in the deployment config). */
+const HEADER = "x-comment-author";
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-paperclip-test-"));
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -321,9 +320,9 @@ test("listIssues sends the status filter and q, and counts GETs and rows read", 
   const fn = async (url) => { urls.push(String(url)); return new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }); };
   const c = make(fn);
   const got = [];
-  for await (const r of c.listIssues({ q: "jerky ops", statuses: ["todo", "in_review"] })) got.push(r.id);
+  for await (const r of c.listIssues({ q: "shop ops", statuses: ["todo", "in_review"] })) got.push(r.id);
   assert.deepEqual(got, ["a", "b"]);
-  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&status=todo,in_review&q=jerky%20ops&sortField=id&sortDir=asc"));
+  assert.ok(urls[0].endsWith("/issues?limit=1000&offset=0&status=todo,in_review&q=shop%20ops&sortField=id&sortDir=asc"));
   assert.deepEqual({ ...c.reads }, { calls: 1, rows: 2 });
 });
 

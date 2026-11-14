@@ -5,7 +5,7 @@
     {
       "id": "A1-named-script",
       "ok": true,
-      "body": "## Problem\nx\n\n## Acceptance\n- **Script:** `scripts/jerky-com/jerky_service-200-acceptance.mjs`\n- **Invocation:** POST /x\n\n## Notes\ny"
+      "body": "## Problem\nx\n\n## Acceptance\n- **Script:** `scripts/acceptance/orders_service-200.mjs`\n- **Invocation:** POST /x\n\n## Notes\ny"
     },
     {
       "id": "A2-no-script-with-reason",
@@ -23,7 +23,7 @@
       "body": "## Problem\nx\n\n## Requirements\ny\n"
     },
     {
-      "id": "H2-jerky_service-200-checkbox-list-heading-with-suffix",
+      "id": "H2-orders_service-200-checkbox-list-heading-with-suffix",
       "ok": false,
       "body": "## Problem\nx\n\n## Acceptance (dev; incident pings are internal-only)\n\n- [ ] **#10555 replay:** classified not_a_ticket 0.95 -> no ping.\n- [ ] A test fails if any path can drop a keyword hit.\n"
     },

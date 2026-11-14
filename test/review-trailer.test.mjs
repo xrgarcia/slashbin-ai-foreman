@@ -132,7 +132,7 @@ test("label mapping never yields the production authorization", () => {
 // extractStreamResult used to return text.slice(0, 2000), and the trailer is
 // required to be the LAST thing the agent emits. Any review with a summary over
 // 2000 chars had its outcome silently cut off, and the caller reported a
-// complete review as having declared nothing. Real case: slashbin-io-worker
+// complete review as having declared nothing. Real case: worker
 // PR #589 — 3,672-char result, trailer at index 3,571.
 import { extractStreamResult, SUMMARY_DISPLAY_LIMIT } from "../dist/session/protocol.js";
 

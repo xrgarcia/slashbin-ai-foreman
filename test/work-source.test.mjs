@@ -3,7 +3,7 @@
 // of them (default 1). The session is handed exactly that batch and only it is
 // claimed; the rest stay queued (todo), never claimed, never Blocked. An open
 // feature PR holds the branch: the pick waits as queued and is built the pass
-// after the PR leaves (jerky_service #131-#133, 2026-10-14).
+// after the PR leaves (orders_service #131-#133, 2026-10-14).
 //
 // Drives the BUILT runRepoPass with a fake `gh` and a fake `claude` first on
 // PATH. Nothing reaches GitHub or Anthropic, and no token is real.
@@ -117,7 +117,7 @@ test("the GitHub connector offers every eligible issue, uncapped, in gh order", 
     "unranked, the batch is oldest first, capped at the size asked for");
 });
 
-test("an issue whose GitHub blocker has not merged is not offered (jerky_service #108 → #109)", async () => {
+test("an issue whose GitHub blocker has not merged is not offered (orders_service #108 → #109)", async () => {
   const config = load({ githubRepo: "example/ordered" });
   const items = await new GitHubIssueConnector().selectWork(config.repos[0], config, logger);
   assert.deepEqual(items.map((w) => w.issueNumber), [5, 4, 2, 1], "#3 is blocked by #2, still only approved");

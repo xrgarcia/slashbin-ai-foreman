@@ -9,7 +9,7 @@ import { verifyHoldPlan } from "../dist/phases/verify.js";
 import { configSchema } from "../dist/config.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
-const REPO = "xrgarcia/Slashbin-console";
+const REPO = "acme/console";
 const sre = { kind: "verdict", pass: true, trailer: { deploy: "SUCCESS" }, summary: "sre ok" };
 const find = (route, vp, criterion, reason) => ({ route, viewport: vp, items: [{ criterion, reason }] });
 const manifests = {

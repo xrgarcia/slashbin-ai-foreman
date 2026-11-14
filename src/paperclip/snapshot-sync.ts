@@ -20,7 +20,7 @@ import {
   RECEIVER_HOLD_ENTRY, type Holds, type SnapshotReads,
 } from "./steps.js";
 
-/** How long the board's GitHub logins are trusted before a re-read. Each agent's `metadata.githubLogin` is the golden source for who it is on GitHub (Ray, 2026-10-16), so a hold comment is credited to the agent whose words it is. */
+/** How long the board's GitHub logins are trusted before a re-read. Each agent's `metadata.githubLogin` is the golden source for who it is on GitHub (owner, 2026-10-16), so a hold comment is credited to the agent whose words it is. */
 const GITHUB_LOGINS_TTL_MS = 10 * 60_000;
 
 /** Cards with no open issue behind them that are read live per cycle, and how long a card waits between reads. */
@@ -53,7 +53,7 @@ export class SnapshotSync {
    * from before this process started stands while the issue is still at the
    * trigger label, since nothing on GitHub has moved past it — or while a
    * persisted verify hold still names it: that block sits at `pr merged`, and
-   * a restart released cmneb_data_publisher#199 to the SRE's To-do after the
+   * a restart released partner_publisher#199 to the SRE's To-do after the
    * SRE had given up on it (2026-10-05).
    */
   async onSnapshot(_repo: string, items: ReadonlyArray<SnapshotItem>, logger: Logger, read: SnapshotReads = {}): Promise<void> {
@@ -125,7 +125,7 @@ export class SnapshotSync {
       // the stage owner's own wake checks the card out to in_progress, and
       // matching that to GitHub took SLA-1335 out of the EM's hands (2026-10-14).
       // A block GitHub's label made ends when the label goes, at any stage:
-      // read as a Foreman block from before a restart, jerky_service #132/#133
+      // read as a Foreman block from before a restart, orders_service #132/#133
       // sat Blocked for hours after the EM lifted the label (2026-10-14).
       // A seat's escalation hop, or a person's hold, keeps the card until it is
       // resolved, or until GitHub moves the issue to another stage (Foreman #98):
@@ -136,7 +136,7 @@ export class SnapshotSync {
       this.placement.escalatedAt.delete(id);
       if ((state === blocked || this.placement.blockedAt.has(id)) && stage !== "blocked" && !(await this.blockedByLabel(id))) {
         // A block from before this process started stands only while the Foreman's state still holds the issue:
-        // jerky_security_testing#398 sat Blocked at `release pending` after every hold was gone (2026-10-26).
+        // security_tests#398 sat Blocked at `release pending` after every hold was gone (2026-10-26).
         // A block read back from the store is that kind of block too.
         const anchored = this.placement.blockedAt.has(id) && !(this.placement.restoredBlocks.has(id) && foremanHeld === false);
         if (anchored ? this.placement.blockedAt.get(id) === stage || this.placement.blockedAt.get(id) === undefined : foremanHeld !== false && (stage === "approved" || (stage === "merged" && verifyHeld === true))) {
@@ -153,7 +153,7 @@ export class SnapshotSync {
     // Every column a label would change is confirmed against GitHub's live
     // state first, in one read: a closed issue's card goes to done, or
     // cancelled when not planned, whatever labels it still shows; one whose
-    // state cannot be read is left where it is (cmneb_data_receiver#218 went
+    // state cannot be read is left where it is (partner_receiver#218 went
     // done → in_review on a stale open view, 2026-10-15).
     // A card closed for an issue the cards now show open is asked about too: only a live read reopens it.
     const reopened = ids.filter(([c, id]) => c.state === "open" && this.index.closedCards.has(id) && !closed.has(c.item.issueNumber));
@@ -311,7 +311,7 @@ export class SnapshotSync {
    * A card whose issue is closed: done, or cancelled when not planned, with no
    * stage label. A card a session holds and one already there are left alone;
    * a hold of the Foreman's (waiting, or Blocked) never keeps a closed issue's
-   * card open (jerky_ops#138 and nine more, 2026-10-26). With `ownsCards` the
+   * card open (ops_portal#138 and nine more, 2026-10-26). With `ownsCards` the
    * card sync does this instead.
    */
   private async closeCard(id: string, how: "completed" | "not_planned", item: WorkItem, logger: Logger): Promise<boolean> {
@@ -474,8 +474,8 @@ export class SnapshotSync {
    * moved it there, or (after a restart) it carries the action only that move
    * writes, or its latest note is the one that move posts. A Foreman block
    * names its reason and ends on its own note, so it never reads so. The note
-   * alone is not enough: a later run note buried it on jerky_service #132/#133,
-   * which sat Blocked behind a lifted label until Ray asked (2026-10-14).
+   * alone is not enough: a later run note buried it on orders_service #132/#133,
+   * which sat Blocked behind a lifted label until the owner asked (2026-10-14).
    */
   private async blockedByLabel(id: string): Promise<boolean> {
     if (this.placement.blockedAt.has(id)) return false;

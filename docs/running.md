@@ -82,7 +82,7 @@ The daemon exits 78 (`EX_CONFIG`: a restart cannot fix it, and the example unit'
   work-source and code-host check and before the PID file is claimed, in `--once` too. When GitHub cannot be
   reached to check a token, it logs a warning and starts anyway.
 
-It exits 1 when the PID file names a live process, and an unknown `profile` stops startup.
+It exits 1 when the PID file names a live process, and a leftover `profile` key stops startup.
 
 ## Back-offs
 

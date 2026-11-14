@@ -133,7 +133,7 @@ export async function ghAsync(args: string[], cwd: string): Promise<string> {
  * Foreman cannot approve its own PR), and the merge, which must come from an
  * account Railway links to a workspace member or the dev deploy waits for a
  * manual approval. Every approval is the Tech Lead's; the EM coordinates
- * and does not review (Ray, 2026-10-10). A sync PR's head is `main`, so the
+ * and does not review (owner, 2026-10-10). A sync PR's head is `main`, so the
  * approval vouches for no new code.
  */
 export async function ghAsTechLeadAsync(args: string[], cwd: string): Promise<string> {

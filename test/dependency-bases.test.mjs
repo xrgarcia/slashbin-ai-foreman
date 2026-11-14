@@ -6,7 +6,7 @@
 // (`develop`) from its own branch, so the only acceptable base is `baseBranch`.
 //
 // The risk this file bounds is unchanged: the one outcome the dependency phase must never produce
-// is a merge to the production branch, which is the defect `jerky_shipping#237` closed on the
+// is a merge to the production branch, which is the defect `shipping_app#237` closed on the
 // producing side.
 //
 // Run with `npm test` (node:test, no dependencies) after `npm run build`.

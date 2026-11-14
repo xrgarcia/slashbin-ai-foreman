@@ -35,7 +35,7 @@
 // Release: once an item's work is in a release PR (base → production) the row
 // goes to in_review, "waiting on release PR #N", and to done when that PR
 // merges. Promotion used to be a note, so an item waiting only on the release
-// merge read as "in progress" (Slashbin-console#1185 behind PR #1206).
+// merge read as "in progress" (console#1185 behind PR #1206).
 //
 // An issue the Foreman gives up on (an agent declined it, revision retries
 // ran out) goes to the `blocked` stage: held by its configured owner, its
@@ -333,7 +333,7 @@ export class PaperclipMirror implements WorkObserver {
     // the review that tipped the count moves the labels to `pr pending actions`
     // seconds before the escalation, and anchoring on the stale `pr under review`
     // let the next snapshot read it as "moved on" and release the hold
-    // (slashbin_data_receiver#41, 2026-10-14: the card sat In Review on the
+    // (data_receiver#41, 2026-10-14: the card sat In Review on the
     // Foreman for ten hours with nobody told).
     // A block that names its stage (a review failure: `inReview`) is anchored there, not on the last
     // snapshot: the review can outlive its stage, and a block anchored on the stage GitHub already
@@ -348,7 +348,7 @@ export class PaperclipMirror implements WorkObserver {
 
   /**
    * Dev verification waits on something that clears by itself: the card stays in
-   * review with the reason, never Blocked, which is a person's queue (jerky_ops#18,
+   * review with the reason, never Blocked, which is a person's queue (ops_portal#18,
    * 2026-10-15, sat in Blocked through a ten-minute deploy). The same reason twice
    * writes nothing.
    */

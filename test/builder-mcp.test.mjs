@@ -14,8 +14,8 @@ const dir = mkTmp("builder-mcp-");
 
 test("server names are read from mcpServers", () => {
   const p = join(dir, "ok.json");
-  writeFileSync(p, JSON.stringify({ mcpServers: { "pg-dev-console": { headers: { Authorization: "Bearer x" } }, "redis-dev-worker": {} } }));
-  assert.deepEqual(mcpServerNames(p, quiet), ["pg-dev-console", "redis-dev-worker"]);
+  writeFileSync(p, JSON.stringify({ mcpServers: { "db-dev-app": { headers: { Authorization: "Bearer x" } }, "cache-dev-app": {} } }));
+  assert.deepEqual(mcpServerNames(p, quiet), ["db-dev-app", "cache-dev-app"]);
 });
 
 test("a missing file means no MCP servers — the builder runs as before", () => {

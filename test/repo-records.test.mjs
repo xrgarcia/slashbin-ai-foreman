@@ -228,7 +228,7 @@ function legacy() {
       },
       b: { implemented: [1], repoUnstick: {} },
       ws: { implemented: [1], repoUnstick: { "0:x": question("x", "orphan") } },
-      jerky_live: { implemented: [] },
+      live_app: { implemented: [] },
     },
     cardBlocks: { c1: block("blocked: x") },
   });

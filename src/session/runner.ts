@@ -30,11 +30,11 @@ let secretGateLogged = false;
  * for an unrelated reason, that noise became the entire reported error and the
  * real cause was never recorded anywhere.
  *
- * Observed 2026-08-04 on slashbin-io-worker cycle 1519: the run died 12.5
+ * Observed 2026-08-04 on worker cycle 1519: the run died 12.5
  * minutes in and was reported as
  * `Implementation failed: Ignoring 5 permissions.allow entries ...`.
  * The identical warning appears on cycle 1520, which SUCCEEDED — so it could
- * not have been the cause, and the actual reason is unrecoverable. Ray brought
+ * not have been the cause, and the actual reason is unrecoverable. The owner brought
  * that message in as the failure; it was never even a symptom.
  *
  * The fix is precedence and labelling, not suppression: lead with the one
@@ -344,7 +344,7 @@ export function spawnClaude(
  * long it has, and the instant it dies.
  *
  * Exists as its own function because the ceiling was enforced and never
- * disclosed. On 2026-09-22 a review of `jerky_skuvault_service#362` finished its
+ * disclosed. On 2026-09-22 a review of `inventory_service#362` finished its
  * work at 22:11, then polled a backfill that needed ~75 minutes to converge
  * until the 60-minute kill; a completed review and merge was recorded as
  * `Review failed: timed out`. Nothing in its prompt named a number, so it had no

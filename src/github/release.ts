@@ -2,7 +2,7 @@
 // live state, a release PR's live head, the latest merged release PR, and the
 // annotated tag on a release's merge commit.
 //
-// A plain annotated tag ONLY, never a GitHub Release object: jerky_shipping's
+// A plain annotated tag ONLY, never a GitHub Release object: shipping_app's
 // desktop pipeline reads published Releases to decide whether a commit is
 // already released, so a Release on main's merge commit would suppress its
 // desktop build. See `github.releaseTagFormat`.
@@ -194,7 +194,7 @@ export async function productionHead(config: RepoConfig): Promise<string> {
 
 /**
  * Of `issues`, those whose own merged PR changed nothing (an empty net diff) and whose merge commit is not on the
- * production branch (foreman#117: Slashbin-io-docs#547, a net-zero PR on `develop` that no release carries). Nothing
+ * production branch (foreman#117: docs-site#547, a net-zero PR on `develop` that no release carries). Nothing
  * shipped for them, so a release at production's head does not carry them and has no verdict that is theirs. An
  * issue with no merged PR found, a PR with a diff, or a merge already on production is not in the map. Throws on a
  * failed read: the caller leaves the issues alone rather than guess.

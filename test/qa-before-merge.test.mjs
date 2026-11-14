@@ -20,7 +20,7 @@ let rt = new ForemanRuntime();
 await startAgentPlugins();
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
-const REPO = "xrgarcia/Slashbin-console";
+const REPO = "acme/console";
 const SHA = "a".repeat(40);
 const src = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf-8");
 process.env.TECHLEAD_GITHUB_KEY ||= "test-token-not-real";
@@ -278,7 +278,7 @@ test("F3: runQaReport, applyQaGate and runQaBeforeMerge share one run helper; a 
   assert.equal(code.split("await deps.run(").length - 1, 1, "deps.run is called once (the helper)");
 });
 
-// The EM's `**EM QA re-run` on an open PR voids a reused verdict for that head (QA's own defect; Slashbin-io-docs#645).
+// The EM's `**EM QA re-run` on an open PR voids a reused verdict for that head (QA's own defect; docs-site#645).
 const failReport = (at) => ({ at, body: `## QA Report\n${qaVerdictMarker(SHA, "FAIL")}\n**Verdict: FAIL**` });
 const rerun = (at, body = "**EM QA re-run: slashbin_ai_qa#36 fixed the CDN abort") => ({ at, body });
 const withComments = (comments, outcome = ran("PASS", 0)) => {

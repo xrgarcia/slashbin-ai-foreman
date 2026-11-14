@@ -1,7 +1,7 @@
 // Every point where the Foreman stops and waits for a person must put the card
 // in the board's Blocked column.
 //
-// 2026-10-03, slashbin-io-worker#693: the PR stalled and the Paperclip card sat
+// 2026-10-03, worker#693: the PR stalled and the Paperclip card sat
 // in "in review" — the owner could not see that anything needed him. Each stall
 // below already logged an error and a Discord event; none told the work source.
 // The blocked report is `emit(rt, { kind: "blocked", ... })` (work-source.ts).

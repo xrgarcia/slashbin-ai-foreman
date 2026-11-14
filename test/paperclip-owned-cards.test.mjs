@@ -1,4 +1,4 @@
-// One writer per card (jerky_ops#11, 2026-10-15: two cards for one issue, one
+// One writer per card (ops_portal#11, 2026-10-15: two cards for one issue, one
 // from the receiver's sync and one from the Foreman). The pieces outside the
 // mirror: the rule every writer evaluates, which of two rows is the card, the
 // hold reason read from GitHub, and the snapshot carrying every card only when
@@ -21,23 +21,23 @@ let rt = new ForemanRuntime();
 const logger = createLogger({ format: "text", level: "error" });
 
 test("foremanOwnsCard: a served, mirrored repo's card with ownsCards on; everything else is another writer's", () => {
-  const served = ["xrgarcia/jerky_ops", "xrgarcia/jerky_service"];
-  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "xrgarcia/jerky_ops"), true);
-  assert.equal(foremanOwnsCard({ ownsCards: false }, served, "xrgarcia/jerky_ops"), false, "off: the Foreman owns nothing");
-  assert.equal(foremanOwnsCard({}, served, "xrgarcia/jerky_ops"), false);
-  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "xrgarcia/slashbin-engineering-manager"), false, "the EM repo is not served");
-  assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["xrgarcia/jerky_service"] }, served, "xrgarcia/jerky_ops"), false, "served but not mirrored");
-  assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["xrgarcia/jerky_service"] }, served, "xrgarcia/jerky_service"), true);
+  const served = ["acme/ops_portal", "acme/orders_service"];
+  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "acme/ops_portal"), true);
+  assert.equal(foremanOwnsCard({ ownsCards: false }, served, "acme/ops_portal"), false, "off: the Foreman owns nothing");
+  assert.equal(foremanOwnsCard({}, served, "acme/ops_portal"), false);
+  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "acme/slashbin-engineering-manager"), false, "the EM repo is not served");
+  assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["acme/orders_service"] }, served, "acme/ops_portal"), false, "served but not mirrored");
+  assert.equal(foremanOwnsCard({ ownsCards: true, repos: ["acme/orders_service"] }, served, "acme/orders_service"), true);
 });
 
 test("foremanOwnsCard: with a registry a moved repo matches under either owner; without one it stays exact (#177)", () => {
-  const served = ["xrgarcia/slashbin_data_receiver"];
+  const served = ["acme/data_receiver"];
   const reg = { ownsCards: true, registryUrl: "https://registry.example/registry/mcp" };
-  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/slashbin_data_receiver"), true, "moved owner, registry set");
-  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/Slashbin_Data_Receiver"), true, "case does not matter");
-  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "slashbin-io/slashbin_data_receiver"), false, "no registry: exact");
-  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/slashbin_mcp_services"), false, "a different name is not owned");
-  assert.equal(foremanOwnsCard({ ...reg, repos: ["slashbin-io/slashbin_data_receiver"] }, served, "xrgarcia/slashbin_data_receiver"), true, "paperclip.repos under the other owner");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/data_receiver"), true, "moved owner, registry set");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/data_receiver"), true, "case does not matter");
+  assert.equal(foremanOwnsCard({ ownsCards: true }, served, "slashbin-io/data_receiver"), false, "no registry: exact");
+  assert.equal(foremanOwnsCard(reg, served, "slashbin-io/mcp_services"), false, "a different name is not owned");
+  assert.equal(foremanOwnsCard({ ...reg, repos: ["slashbin-io/data_receiver"] }, served, "acme/data_receiver"), true, "paperclip.repos under the other owner");
 });
 
 test("pickCard: the oldest row that is not cancelled, else the oldest; undated rows by list order, after dated ones", () => {
@@ -61,23 +61,23 @@ test("the core's hold prefix is the plugin's, and both read as a Foreman block",
 test("holdReason: the labeller's newest comment from 15 minutes before the label on; none says so", () => {
   const events = [
     { createdAt: "2026-10-10T10:00:00Z", actor: { login: "old" }, label: { name: "blocked" } },
-    { createdAt: "2026-10-14T12:00:00Z", actor: { login: "ray" }, label: { name: "blocked" } },
-    { createdAt: "2026-10-14T13:00:00Z", actor: { login: "ray" }, label: { name: "bug" } },
+    { createdAt: "2026-10-14T12:00:00Z", actor: { login: "alice" }, label: { name: "blocked" } },
+    { createdAt: "2026-10-14T13:00:00Z", actor: { login: "alice" }, label: { name: "bug" } },
   ];
   const comments = [
-    { url: "https://github.com/o/r/issues/1#c1", createdAt: "2026-10-14T11:00:00Z", author: { login: "ray" }, body: "too early" },
-    { url: "https://github.com/o/r/issues/1#c2", createdAt: "2026-10-14T11:50:00Z", author: { login: "ray" }, body: "**Hold**: waiting on `legal`\nmore" },
+    { url: "https://github.com/o/r/issues/1#c1", createdAt: "2026-10-14T11:00:00Z", author: { login: "alice" }, body: "too early" },
+    { url: "https://github.com/o/r/issues/1#c2", createdAt: "2026-10-14T11:50:00Z", author: { login: "alice" }, body: "**Hold**: waiting on `legal`\nmore" },
     { url: "https://github.com/o/r/issues/1#c3", createdAt: "2026-10-14T12:05:00Z", author: { login: "someone" }, body: "not the holder" },
   ];
   const h = holdReason("blocked", events, comments);
-  assert.equal(h.action, `${HOLD_PREFIX}Hold: waiting on legal (ray, 2026-10-14) https://github.com/o/r/issues/1#c2`);
+  assert.equal(h.action, `${HOLD_PREFIX}Hold: waiting on legal (alice, 2026-10-14) https://github.com/o/r/issues/1#c2`);
   assert.equal(h.commentUrl, "https://github.com/o/r/issues/1#c2");
-  assert.ok(h.comment.startsWith("Held on GitHub by ray, 2026-10-14:\n\n**Hold**"));
+  assert.ok(h.comment.startsWith("Held on GitHub by alice, 2026-10-14:\n\n**Hold**"));
   assert.ok(isHoldComment(h.comment, { comment: h.comment, url: h.commentUrl }));
   assert.ok(!isHoldComment(`see ${h.commentUrl}`, { comment: h.comment, url: h.commentUrl }), "a mere link is not the copy");
 
   const none = holdReason("blocked", events, []);
-  assert.equal(none.action, `${HOLD_PREFIX}labelled blocked by ray on 2026-10-14; no reason posted on the issue`);
+  assert.equal(none.action, `${HOLD_PREFIX}labelled blocked by alice on 2026-10-14; no reason posted on the issue`);
   assert.equal(none.comment, null);
   assert.equal(holdReason("blocked", [], []).action, `${HOLD_PREFIX}labelled blocked by unknown on unknown date; no reason posted on the issue`);
 });

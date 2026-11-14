@@ -1,7 +1,7 @@
 // An approved issue waits for every issue GitHub records as blocking it, until
 // that blocker has merged to the base branch.
 //
-// Origin: jerky_service #108 → #109 (2026-10-12). The order was agreed with the
+// Origin: orders_service #108 → #109 (2026-10-12). The order was agreed with the
 // customer and written into both issue bodies as prose, and the EM told him the
 // builder "handles the dependency automatically". Nothing did: the build ran in
 // order only because the lower number happened to be the prerequisite and a

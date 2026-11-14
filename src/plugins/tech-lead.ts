@@ -66,7 +66,7 @@ const REVIEW_NOOP_SENTINEL = /FOREMAN_REVIEW\s+none\b/i;
  * Exit 3 is its "I could not take this, and I wrote NOTHING" signal (Codex signed
  * out, out of allowance, timed out, or a path it does not cover). That returns
  * `{ fallback: true }` and the caller waits and offers the PR again — never to
- * Claude (Ray, 2026-10-10). Any other non-zero exit is an ordinary failure: it
+ * Claude (owner, 2026-10-10). Any other non-zero exit is an ordinary failure: it
  * may have written.
  *
  * While it runs, each `TECH_LEAD_PROGRESS` line on its stderr (reading, depth

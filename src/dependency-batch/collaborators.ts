@@ -45,7 +45,7 @@ export class DependencyDiscovery {
 }
 
 /**
- * Step 2: security-only selection (`dependabot.securityOnly`, default on; Ray, 2026-10-26).
+ * Step 2: security-only selection (`dependabot.securityOnly`, default on; the owner, 2026-10-26).
  * A version-update PR is left alone: not batched, merged or closed. If the alert
  * list cannot be read the sweep batches NOTHING, never everything.
  */

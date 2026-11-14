@@ -2,7 +2,7 @@
 // work will be accepted: a committed script under `scripts/`, or a deliberate
 // `**No-Script:** <category> — <reason>` (categories below).
 //
-// Origin: EM#99 / jerky_service#200. The EM's `approved_gate_hook.py` refuses to
+// Origin: EM#99 / orders_service#200. The EM's `approved_gate_hook.py` refuses to
 // apply `approved` to an issue without one, but a customer applying the label
 // themselves bypasses that hook. The Foreman enforces the same structural rule at
 // pickup. This mirrors `section_body`, `acceptance_script_paths`, the No-Script

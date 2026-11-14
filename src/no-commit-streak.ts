@@ -10,7 +10,7 @@
 // revise pass nor a restart resets it. It used to be a per-repo counter cleared
 // on any pass with no pending revision; with qaBeforeMerge every round has such
 // a pass (the card sits in review while QA runs), so it never reached two and
-// Slashbin-console PR #1597 looped QA FAIL → no-commit 15+ times on one SHA
+// console PR #1597 looped QA FAIL → no-commit 15+ times on one SHA
 // (foreman#167, 2026-11-01). It ends only when the head moves (a push), or the
 // PR closes or merges.
 

@@ -291,7 +291,7 @@ ever written at creation, and never used to find a task, so changing the format 
 
 When two tasks carry the same identity line, the card is the oldest one that is not cancelled
 (else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
-another writer the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+another writer the last, so a pair for one issue never settled (ops_portal#11, 2026-10-15).
 
 ### What the plugin reads
 
@@ -343,7 +343,7 @@ moves it by its own steps and the snapshot, and leaves a card's content to whoev
 
 Labels never move a closed issue's card. Each cycle the Foreman moves a card to the column its
 issue's labels call for, but the open-issue view those labels come from can still carry an
-issue GitHub has closed, with its old labels: cmneb_data_receiver#218 went done → in_review
+issue GitHub has closed, with its old labels: partner_receiver#218 went done → in_review
 13 minutes after its release closed it (2026-10-15). So every card a label would move is first
 checked against GitHub's live state, in one batched read per snapshot:
 

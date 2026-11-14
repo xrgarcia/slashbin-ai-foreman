@@ -205,8 +205,8 @@ const writeCfg = (name, extra) => {
   writeFileSync(p, JSON.stringify({ emRepoPath: tmp, repos: [{ name: "rel", repoPath: tmp, githubRepo: REPO }], ...extra }));
   return p;
 };
-// Slashbin's profile: its epic label (`engineering-manager #N`) is what the epic tests read.
-const config = loadConfig(writeCfg("cfg.json", { profile: "slashbin", techLeadPath: techLeadDir, srePath: sreDir }));
+// The deployment's epic label (`engineering-manager #N`) is what the epic tests read.
+const config = loadConfig(writeCfg("cfg.json", { epicRefLabel: "engineering-manager", epicRepo: "acme/slashbin-engineering-manager", prodGrantLabel: "deliver-to-prod", techLeadPath: techLeadDir, srePath: sreDir }));
 const repo = config.repos[0];
 
 const HEAD = "a".repeat(40);
@@ -552,7 +552,7 @@ test("merged R1: A unsaved, then the re-verification reports B while the drain s
   assert.ok(await bothRecorded(), "A and B, once each");
 });
 
-test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
+test("no epicRefLabel: a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
   const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
   assert.equal(neutral.repos[0].epicRefLabel, undefined);
   world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
@@ -954,7 +954,7 @@ test("an adopted release whose Production Verification failed is held, not close
 });
 
 test("adoption never takes back a delivered issue: closed and verified on an older release (foreman#86)", async () => {
-  // jerky_ops#11 shipped on release 16; release 20 shipped #18 and its verification failed. Before the fix the hold
+  // ops_portal#11 shipped on release 16; release 20 shipped #18 and its verification failed. Before the fix the hold
   // reopened #11 too: its title mention (and any explicit line) made it a candidate, and 16 < 20 let it through.
   const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance** | FAIL | 500s |";
   world({
@@ -1052,7 +1052,7 @@ test("an issue orphaned after its release passed rejoins it, and the release is 
 });
 
 test("an issue that shipped unlisted joins the release at production's head after that release settled", async () => {
-  // Slashbin-console #1297: on `main` via a release naming only another issue; the head release had already settled.
+  // console #1297: on `main` via a release naming only another issue; the head release had already settled.
   world({
     issues: [{ number: 5, title: "Issue 5", state: "CLOSED", labels: ["approved"] }, issue(9, "release pending")],
     prs: [mergedPr(90, "### Issues included\n- #4: Issue 4", OLD, 300), mergedPr(100, "### Issues included\n- #5: Issue 5\n\n---\nsigned", MERGE, 120)],
@@ -1456,7 +1456,7 @@ test("carry: a corrected PR body is re-read on the next pass", async () => {
 const statuses = () => gh().statuses ?? [];
 const heldComments = (pr) => commentsOn(pr).filter((b) => b.startsWith("<!-- foreman:release-unsigned"));
 const unsignedWorld = () => ({
-  // Slashbin-console#1455: #5 and #6 signed and moved on; #1434-like #7 listed with no sign-off.
+  // console#1455: #5 and #6 signed and moved on; #1434-like #7 listed with no sign-off.
   issues: [issue(5, "release pending"), issue(6, "release pending"), issue(7, "pr approved")],
   prs: [releasePr(100, "## Production Promotion\n\n### Issues included\n- #5: Issue 5\n- #6: Issue 6\n- #7: Issue 7")],
   compareFiles: 3,
@@ -1560,7 +1560,7 @@ test("signoff: an issue the Foreman itself labelled before this fix is unsigned 
 
   // The EM applies `ready for prod release` himself: a label event by someone else.
   g = gh();
-  g.events = { 6: [{ label: "ready for prod release", by: "foreman-bot" }, { label: "ready for prod release", by: "ray" }] };
+  g.events = { 6: [{ label: "ready for prod release", by: "foreman-bot" }, { label: "ready for prod release", by: "alice" }] };
   writeFileSync(GH_STATE, JSON.stringify(g));
   assert.equal(await run(2), true);
   assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);
@@ -1771,7 +1771,7 @@ test("a restart after the deploy whose 'merged' record could not be saved verifi
   assertClosedVerified(5);
 });
 
-// --- Review follow-up (xrgarcia/slashbin-ai-foreman#192) ----------------------------------------------
+// --- Review follow-up (slashbin-io/slashbin-ai-foreman#192) ----------------------------------------------
 
 test("orphan scan: while a release PR's record is unreadable, ownership is unknown: no issue is joined or blocked, and none needs unblocking after", async () => {
   const old = new Date(Date.now() - 72 * 3_600_000).toISOString();
@@ -1805,7 +1805,7 @@ test("release view: updating R releases is O(R), not O(R^2): the view is a map, 
   assert.doesNotMatch(follow, /\.filter\(|\.sort\(/, "no per-update scan or sort");
 });
 
-// #220: issues the lifecycle lost. A close that failed after the labels were stripped (jerky_shipping #618/#620)
+// #220: issues the lifecycle lost. A close that failed after the labels were stripped (shipping_app #618/#620)
 // left an open issue with no label that nothing looked at; the sweep finds it from GitHub, not from labels.
 const bare = (number) => ({ number, title: `Issue ${number}`, state: "OPEN", labels: [] });
 const verifiedAt = () => ({ pr: 90, mergeSha: MERGE, at: "2026-10-10T21:41:00.000Z", tag: "release-20261010-2141-pr90", evidence: "healthcheck green, /orders 200" });
@@ -2176,7 +2176,7 @@ test("#117: a net-zero issue closed with a no-op note keeps a terminal record; a
   assert.ok(!Object.values(await prodReleases()).some((r) => r.issues.includes(9)), "no release carries it");
 });
 
-// SLA-4600 / jerky_security_testing#429: the deploy's prod verify returned a time hold (a monthly cron on the 1st)
+// SLA-4600 / security_tests#429: the deploy's prod verify returned a time hold (a monthly cron on the 1st)
 // while the issue's own row PASSed, and the card sat unchanged for 19 days. The issues now hear it once per time.
 const TIME_WAIT = (eligible) => ({
   exit: 0, merge: MERGE,
@@ -2218,7 +2218,7 @@ test("a time wait on prod verification says so once per eligible_at on each issu
   }
 });
 
-// The release already waiting when this shipped (jerky_security_testing#431: retryAt 2026-12-01, saved before waits were
+// The release already waiting when this shipped (security_tests#431: retryAt 2026-12-01, saved before waits were
 // announced) is not due for weeks, so the settle path never runs for it: it is announced on an ordinary pass instead.
 test("a stored merged release already waiting on a future time is announced once, with no verification and the time unchanged", async () => {
   const at = new Date(Date.now() + 19 * 86_400_000).toISOString();

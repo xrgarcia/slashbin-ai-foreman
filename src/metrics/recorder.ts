@@ -118,7 +118,7 @@ export class MetricsRecorder {
 
   /**
    * True when a snapshot would put the item back to stage A right after A -> B, B being a snapshot row under
-   * `FLAP_WINDOW` old: a pure A -> B -> A oscillation (two sources disagreeing, jerky_shipping#856), not a move.
+   * `FLAP_WINDOW` old: a pure A -> B -> A oscillation (two sources disagreeing, shipping_app#856), not a move.
    * Skipped, so the log keeps B until the item has stood there past the window. Moves the Foreman makes
    * (`transition`) are never suppressed.
    */

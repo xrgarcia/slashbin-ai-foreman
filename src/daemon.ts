@@ -128,8 +128,6 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   // The EM publishes the alert kinds it accepts; a kind the Foreman sends that it lacks is an alert nobody receives.
   void checkKindContract(config, logger);
 
-  logger.info(config.profile ? `Config profile: ${config.profile}` : "Config profile: none (neutral defaults)");
-
   const repoNames = config.repos.map((r) => r.name).join(", ");
   const startLanes = lanesFor(config.stages);
   logger.info("Daemon starting", {
@@ -214,8 +212,8 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   //
   // Each lane of each repo polls, works and sleeps on its OWN schedule (see
   // src/lanes.ts). There is no barrier between repos — 2026-07-29 the fleet went
-  // quiet for 24 minutes behind one slashbin-io-worker review — and now none
-  // between the stages of one repo either: on 2026-10-14 jerky_service's
+  // quiet for 24 minutes behind one worker review — and now none
+  // between the stages of one repo either: on 2026-10-14 orders_service's
   // release PR #146 waited behind a 30-minute revision on the same repo.
   //
   // What bounds the work is the lane itself: one item per repo per lane. Stages

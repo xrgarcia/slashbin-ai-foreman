@@ -25,7 +25,7 @@ export function buildEmEnv(agentConfig: AgentConfig): Record<string, string> {
 export const EM_UNSTICK_MAX_DURATION_MS = 20 * 60_000;
 /**
  * A rework decision files and approves a corrective, so the EM gives it a 38-minute session
- * (`sessionBudget`, bin/em.mjs). 20 minutes killed Slashbin-console#1552's on 2026-10-31.
+ * (`sessionBudget`, bin/em.mjs). 20 minutes killed console#1552's on 2026-10-31.
  */
 export const EM_UNSTICK_REWORK_MAX_DURATION_MS = 40 * 60_000;
 export function emUnstickMaxDurationMs(kind: string): number {

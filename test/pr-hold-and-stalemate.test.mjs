@@ -1,4 +1,4 @@
-// foreman#167. Slashbin-console PR #1597 (2026-11-01) looped QA FAIL → no-commit revise on one head 15+
+// foreman#167. console PR #1597 (2026-11-01) looped QA FAIL → no-commit revise on one head 15+
 // times: the no-commit streak was reset by every pass with no pending revision, and a reused QA FAIL left
 // no comment, so neither the stalemate nor the review-rounds alert fired. Then the EM's `blocked` label on
 // its issue paused nothing. These drive the real phases against a fake `gh` and `claude` on PATH.

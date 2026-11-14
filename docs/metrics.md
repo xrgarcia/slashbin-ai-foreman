@@ -53,7 +53,7 @@ call's status. The table `item_hold(repo, issue, stage, reason)` holds the last 
 **One stage per pass.** A snapshot carries the item view and the card view of the same pass; the card's stage wins (it
 knows the open release PRs). Separately, a snapshot-seen A -> B -> A within 10 minutes of B is not recorded (the log
 keeps B): a safety net, not a substitute for the two views agreeing. The Foreman's own moves are never suppressed.
-(jerky_shipping#856 alternated `pendingVerification` and `awaitingRelease` every pass, ~2000 rows, 2026-11-10, because
+(shipping_app#856 alternated `pendingVerification` and `awaitingRelease` every pass, ~2000 rows, 2026-11-10, because
 only the card view read the open release PR; both views now share that read.)
 
 Retention: rows older than `retentionDays` are deleted at start and at most hourly after.
@@ -79,6 +79,6 @@ Direct SQL, e.g. the stage log of one item:
 
 ```sql
 SELECT at, kind, stage FROM events
-WHERE repo = 'xrgarcia/example' AND issue = 42 AND stage IS NOT NULL
+WHERE repo = 'acme/example' AND issue = 42 AND stage IS NOT NULL
 ORDER BY at;
 ```

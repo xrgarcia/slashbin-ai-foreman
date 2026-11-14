@@ -135,7 +135,7 @@ const LABEL_WRITE: Readonly<Record<Move, LabelWrite>> = Object.freeze({
 /**
  * The open cards and the closed ones as one list. An issue in both is closed:
  * the closed read is live, while the open list is a view that has carried a
- * closed issue with its old labels (cmneb_data_receiver#218, 2026-10-15). An
+ * closed issue with its old labels (partner_receiver#218, 2026-10-15). An
  * issue reopened since is placed again once a live read finds it open.
  */
 export function closedWins(open: readonly SnapshotCard[], closed: readonly SnapshotCard[]): SnapshotCard[] {
@@ -190,7 +190,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * The issues an open release PR (into the production branch) names (#N in the body, the rule the receiver's sync
    * used). The one read behind `inRelease`, shared by `cards` and `snapshot`: before, only `cards` read it, so the same
    * pass placed an issue named by a release PR at `awaitingRelease` (cards) and `pendingVerification` (snapshot), and a
-   * recorder fed both flipped it every pass (jerky_shipping#856, ~2000 rows). A failed read names none.
+   * recorder fed both flipped it every pass (shipping_app#856, ~2000 rows). A failed read names none.
    */
   private async releaseIssues(repoConfig: RepoConfig, logger: Logger): Promise<Set<number>> {
     try {
@@ -347,7 +347,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
    * Why the post-review write exists at all: the merge is performed by code, but
    * the record of what the merge MEANT was left to the review agent to remember to
    * write. Measured over 7 days (2026-07-29 → 08-04): 53 merges, 12 issues left
-   * mislabeled — ~23%. In the worked example (slashbin-io-worker#575) the agent
+   * mislabeled — ~23%. In the worked example (worker#575) the agent
    * merged, verified, reported `verdict=APPROVE merged=yes deploy=SUCCESS`, named
    * the target label 24 times in its own output, and never executed the write.
    *
@@ -607,7 +607,7 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
       const strip = Object.values(config.lifecycleLabels).filter((l) => issue.labels.includes(l));
       // Close FIRST, strip after: a close that fails leaves the lifecycle labels on, so the issue is still
       // the release's and the next pass retries it. Stripped first, a failed close left an open issue
-      // nobody owned (jerky_shipping #618/#620, 2026-10-10).
+      // nobody owned (shipping_app #618/#620, 2026-10-10).
       if (issue.state === "OPEN") {
         await ghAsync(["issue", "close", String(num), "--repo", config.githubRepo, "--reason", "completed"], config.repoPath);
       }

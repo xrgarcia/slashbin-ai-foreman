@@ -100,9 +100,9 @@ export const INDEX_TTL_MS = 10 * 60_000;
 export const LABEL_BLOCK_ACTION = `${FOREMAN_BLOCKED_PREFIX}needs attention`;
 
 /**
- * The unblock action the shared escalation (`process.escalate`, slashbin_mcp_services
+ * The unblock action the shared escalation (`process.escalate`, mcp_services
  * #308) writes when a seat hands a card up, back or down the chain. That block is
- * a hop between seats, not the Foreman's and not GitHub's: SLA-1873 (jerky_ops#45)
+ * a hop between seats, not the Foreman's and not GitHub's: SLA-1873 (ops_portal#45)
  * was put back with the EM two minutes after the hop gave it to the PO, before
  * the PO's run started (Foreman #98, 2026-10-18).
  */

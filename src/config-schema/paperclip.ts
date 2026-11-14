@@ -137,7 +137,7 @@ export const paperclipConfigSchema = z.object({
   // instance that requires sign-in. Unset sends no authorization header. Set it
   // from the environment; it is a secret and is redacted from the mirror's logs.
   apiKey: z.string().min(1).optional(),
-  // The registry's MCP endpoint (slashbin_mcp_services, `repo_identity`). The mirror compares
+  // The registry's MCP endpoint (mcp_services, `repo_identity`). The mirror compares
   // cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an
   // item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own
   // key (exact string comparison), and no registry call is made. Set, each open card also

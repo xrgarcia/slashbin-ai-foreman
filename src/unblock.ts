@@ -1,12 +1,12 @@
 /**
- * The blocked queue's way out (Ray, 2026-10-05).
+ * The blocked queue's way out (owner, 2026-10-05).
  *
  * The state machine blocks work for a reason, and that stays as it is. What it
  * lacked was the other half: once a card is Blocked, nothing asked whether the
  * reason still held. Work done out of band — a person reconciles a branch,
  * pushes a fix to a PR, merges the missing PR, lands a fix on the base branch —
  * cleared the cause but not the block, so the card sat in Blocked until someone
- * noticed and cleared it by hand (jerky_service #76/#79, 2026-10-05).
+ * noticed and cleared it by hand (orders_service #76/#79, 2026-10-05).
  *
  * Each kind of block has a fixed list of checks. They run every pass against
  * facts the orchestrator gathers read-only, and the first that passes resolves

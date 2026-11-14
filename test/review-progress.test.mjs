@@ -1,4 +1,4 @@
-// A running Tech Lead review's milestones reach the PR's cards (Ray,
+// A running Tech Lead review's milestones reach the PR's cards (owner,
 // 2026-10-15): read off the Tech Lead's stderr, relayed at most once per stage
 // (Paperclip cannot edit a comment), gated by the comment toggles, and never
 // able to fail a review. Fake Tech Lead, fake Paperclip — no network.

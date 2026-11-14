@@ -1,5 +1,5 @@
 // The mirror's only registry client: the owner-free identity of a GitHub repo, from the
-// registry's `repo_identity` MCP tool (slashbin_mcp_services). After a repo moves from
+// registry's `repo_identity` MCP tool (mcp_services). After a repo moves from
 // one GitHub owner to another, `<old-owner>/<name>` and `<new-owner>/<name>` answer the same
 // `key`, so a card written under one spelling is found by an item carrying the other.
 //
@@ -8,7 +8,7 @@
 // retried in place with `backoff.registry`; the mirror's scan tolerates what still fails (it uses
 // the repo's last known key). A successful answer is kept REPO_KEY_TTL_MS; a failure never is. A repo the registry does not know
 // (kind "unknown") or knows only exactly (kind "other") keeps its input as its key, so
-// `jerky_*`, `cmneb_*` and `slashbin-io/jerky_rank` merge with nothing.
+// `orders_*`, `partner_*` and `slashbin-io/rank_service` merge with nothing.
 //
 // Transport: MCP streamable HTTP (JSON-RPC over POST, bearer auth), the same route the EM's
 // `registry_client.py` takes to the router. Uses the global fetch; no dependency.

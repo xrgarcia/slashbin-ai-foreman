@@ -175,7 +175,7 @@ export async function findStuckMergedIssues(
     // belongs to the verify stage, which owns its retries, and the rest are
     // later still. Listing only three of them let a released issue that still
     // carried a stale `pr pending actions` be "recovered" back to `pr merged`
-    // (jerky_ops#15, 2026-10-15, 28s after it reached `release pending`).
+    // (ops_portal#15, 2026-10-15, 28s after it reached `release pending`).
     const candidates = issues.filter((i) => !isPastReview(config, i));
     if (candidates.length === 0) return [];
 
@@ -443,7 +443,7 @@ export function wasGateRevokedSince(
  * guard got it wrong: it captured which issues held the gate BEFORE the review
  * started, then restored those. That handles a gate signed before the run and
  * completely misses a gate signed DURING it — which is the actual reported
- * scenario, and the one that recurred on Slashbin-io-docs#269 (review triggered
+ * scenario, and the one that recurred on docs-site#269 (review triggered
  * 13:52:25Z, gate signed 13:57:41Z, agent removed it 13:58:20Z, guard restored
  * nothing because its snapshot predated the signature).
  *
@@ -541,7 +541,7 @@ export function planEmGateRestore(
  * `findReadyForProdIssues`, which filters on exactly this label, and returns
  * early on an empty set. A revoked gate produces no PR, no error and no log line
  * — indistinguishable from having nothing to promote. Observed on
- * Slashbin-io-docs, 2026-08-04: the gate was signed at 20:20:15Z, overwritten
+ * docs-site, 2026-08-04: the gate was signed at 20:20:15Z, overwritten
  * with `pr approved` at 20:22:12Z by a review run that started at 20:11:59Z, and
  * the promotion sat stalled for an hour until a human noticed the absence.
  *

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Acceptance for the Foreman work-source record store — xrgarcia/slashbin-ai-foreman#187
+ * Acceptance for the Foreman work-source record store — slashbin-io/slashbin-ai-foreman#187
  * (EM#1244 feature 1).
  *
  * Front door: the BUILT Foreman's registered work source — builtin plugins

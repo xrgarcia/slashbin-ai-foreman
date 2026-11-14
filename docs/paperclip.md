@@ -53,7 +53,7 @@ that one field. A reload applies the block: enabling it starts the mirror, disab
 | `agentName` | string | `AI_AGENT_PAPERCLIP_AGENT_NAME` | `"Foreman"` | The name the Foreman registers under, and finds itself by, in Paperclip. |
 | `agentId` | string | `AI_AGENT_PAPERCLIP_AGENT_ID` | — | The Foreman's Paperclip agent id, once registered. |
 | `apiKey` | string | `AI_AGENT_PAPERCLIP_API_KEY` | — | The bearer credential sent as `authorization: Bearer` on every request, for an instance that requires sign-in. Unset sends no authorization header. Set it from the environment; it is a secret and is redacted from the mirror's logs. |
-| `registryUrl` | string | `AI_AGENT_PAPERCLIP_REGISTRY_URL` | — | The registry's MCP endpoint (slashbin_mcp_services, `repo_identity`). The mirror compares cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own key (exact string comparison), and no registry call is made. Set, each open card also carries its GitHub issue's customer labels: every issue label whose name matches a registry customer's `github_label` (list_customers), in name order, or `no customer label` alone when none does. Unset: no customer label is written, and the mirror works the same otherwise. |
+| `registryUrl` | string | `AI_AGENT_PAPERCLIP_REGISTRY_URL` | — | The registry's MCP endpoint (mcp_services, `repo_identity`). The mirror compares cards on the repo's owner-free identity key, so a card written `<old-owner>/<name>#N` and an item for `<new-owner>/<name>` are one card after a repo moves. Unset: a repo is its own key (exact string comparison), and no registry call is made. Set, each open card also carries its GitHub issue's customer labels: every issue label whose name matches a registry customer's `github_label` (list_customers), in name order, or `no customer label` alone when none does. Unset: no customer label is written, and the mirror works the same otherwise. |
 | `registryApiKey` | string | `AI_AGENT_PAPERCLIP_REGISTRY_API_KEY` | — | The bearer credential the registry's router requires. Set it from the environment; it is a secret and is redacted from the mirror's logs. Unset sends no authorization header. |
 | `commentAuthorHeader` | string | `AI_AGENT_PAPERCLIP_COMMENT_AUTHOR_HEADER` | — | The request header that credits a write to the Foreman's agent (or another author) instead of the key's user, for an instance that supports one. Unset = no credit header is sent: every write reads as the key's user. |
 | `identityKeyFormat` | string | `AI_AGENT_PAPERCLIP_IDENTITY_KEY_FORMAT` | `"source: {repo}#{N}"` | How a Paperclip task names the GitHub issue it mirrors. {repo} is the full owner/name, {N} the issue number. Must match whatever else writes those tasks, or the Foreman creates a second row for an issue that already has one. |
@@ -109,7 +109,7 @@ ever written at creation, and never used to find a task, so changing the format 
 
 When two tasks carry the same identity line, the card is the oldest one that is not cancelled
 (else the oldest), and every writer adopts that one: the Foreman once kept the first listed and
-another writer the last, so a pair for one issue never settled (jerky_ops#11, 2026-10-15).
+another writer the last, so a pair for one issue never settled (ops_portal#11, 2026-10-15).
 
 ### What the plugin reads
 
@@ -161,7 +161,7 @@ moves it by its own steps and the snapshot, and leaves a card's content to whoev
 
 Labels never move a closed issue's card. Each cycle the Foreman moves a card to the column its
 issue's labels call for, but the open-issue view those labels come from can still carry an
-issue GitHub has closed, with its old labels: cmneb_data_receiver#218 went done → in_review
+issue GitHub has closed, with its old labels: partner_receiver#218 went done → in_review
 13 minutes after its release closed it (2026-10-15). So every card a label would move is first
 checked against GitHub's live state, in one batched read per snapshot:
 

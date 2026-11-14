@@ -123,7 +123,7 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged
 });
 
 test("correctionsToBuild: the fix a held verification asks for builds instead of queueing behind it", () => {
-  // Slashbin-console#1340 waited 32 min behind #1338's verification, which needed it.
+  // console#1340 waited 32 min behind #1338's verification, which needed it.
   const rel = corrects([[1340, [1338]], [1342, [13380]]]);
   assert.deepEqual(correctionsToBuild(1338, [1340, 1341, 1342], rel), [1340]);
   assert.deepEqual(correctionsToBuild(1338, [1341], rel), [], "no follow-up, the hold stands");
@@ -131,7 +131,7 @@ test("correctionsToBuild: the fix a held verification asks for builds instead of
 });
 
 test("correctionsToBuild: a fix outside the trimmed batch still builds", () => {
-  // Slashbin-console #1440 behind #1431, 2026-10-27: the batch (size 1) was #1432,
+  // console #1440 behind #1431, 2026-10-27: the batch (size 1) was #1432,
   // so the rework issue #1440 stayed queued and #1431 could never pass.
   const rel = corrects([[1440, [1431]]]);
   assert.deepEqual(correctionsToBuild(1431, [...[1432], ...[1432, 1433, 1440]], rel), [1440]);
@@ -145,7 +145,7 @@ test("a failed dev deploy is the SRE's hold: dev-verify-failed and deploy=<state
   assert.equal(isDeployFailureHold("deploy=CRASHED"), true);
   assert.equal(isDeployFailureHold("no-merged-pr"), false);
   assert.equal(isDeployFailureHold("unexpected trailer verdict=REJECT merged=false"), false);
-  // The charged-hold emit carries the owner (jerky_ops#97, 2026-10-21).
+  // The charged-hold emit carries the owner (ops_portal#97, 2026-10-21).
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf8");
   assert.match(src.slice(src.indexOf("let attempts = 0;")), /isDeployFailureHold\(reason\) \? \{ owner: "sre" as const \}/);
@@ -202,7 +202,7 @@ test("SRE_TOOLING_HOLDS matches the SRE RERUN_HOLDS (skipped when the SRE checko
   for (const r of ["qa-held-unsafe-host", "qa-held-browser-crashed", "qa-held-nothing-captured"]) assert.ok(!TOOLING_HOLDS.includes(r), r);
 });
 
-// Ray, 2026-10-31 (Slashbin-console#1538): every post-merge fix is the EM's decision; the Foreman files nothing.
+// The owner, 2026-10-31 (console#1538): every post-merge fix is the EM's decision; the Foreman files nothing.
 import { evidenceLinks } from "../dist/phases/verify.js";
 import { derivedCandidates, needsCall, openEntry, unstickKey, reworkDecisionReason } from "../dist/unstick.js";
 
@@ -263,7 +263,7 @@ test("a follow-up corrective releases the hold: it builds, its merge advances ba
   assert.deepEqual(correctionsToBuild(1538, [...[1539], ...[1539, 1543]], rel), [1543]);
 });
 
-// A linked corrective that merges after the hold releases a charged verify hold (jerky_security_testing#407:
+// A linked corrective that merges after the hold releases a charged verify hold (security_tests#407:
 // #436, a sub-issue of #407, merged and the acceptance-not-verified hold never released).
 import { registerPlugin, startPlugins, setCodeHost, resetRegistryForTests } from "../dist/plugins/registry.js";
 import { registerWorkSource } from "../dist/work-source.js";
@@ -327,7 +327,7 @@ test("a corrective merged after heldAt releases an exhausted acceptance-not-veri
   assert.deepEqual(r.forced, [true], "the SRE must run again, not replay its cached verdict for the same merge and spec");
 });
 
-test("a closed title-only corrective merged after heldAt releases the exhausted hold: attempts reset, SRE forced (jerky_security_testing#407/#436)", async () => {
+test("a closed title-only corrective merged after heldAt releases the exhausted hold: attempts reset, SRE forced (security_tests#407/#436)", async () => {
   // the code host reports #436 (closed, linked only by 'follow-up to #407') as a corrector; the hold is gone, so the next attempt count starts fresh
   const r = await correctionPass({ correctors: [436], merged: fix("2026-11-14T04:31:00Z") });
   assert.equal(r.held, undefined, "the hold record, attempts included, is cleared");

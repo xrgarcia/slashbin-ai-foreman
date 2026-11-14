@@ -6,7 +6,7 @@
  * detector only looked at `pr under review` / `pr pending actions`, so nothing
  * ever advanced it.
  *
- * Observed live 2026-10-02: Slashbin-Ingest-Gateway#155 — label `approved` only,
+ * Observed live 2026-10-02: ingest-gateway#155 — label `approved` only,
  * PR #156 merged to develop 2026-10-01T14:01:29Z, and the journal repeating
  * "Skipped …: 1 approved issue(s), all have linked PRs (open or merged)".
  *

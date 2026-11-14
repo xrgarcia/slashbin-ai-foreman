@@ -25,7 +25,7 @@ export class SessionLease {
   private publishedSha: string | null = null;
   /**
    * Lease recovery, until it settles. A session event waits on it: recovery
-   * read jerky_service#87 as in progress (its implement session had died with
+   * read orders_service#87 as in progress (its implement session had died with
    * the old process), the new process's review session moved the card to the
    * Tech Lead meanwhile, and recovery's write then landed last — the card sat
    * in To-do while the Tech Lead reviewed PR #90 (2026-10-05).

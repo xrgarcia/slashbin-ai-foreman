@@ -2,7 +2,7 @@
 /**
  * Acceptance for the Foreman GitHub rate-limit follow-up to slashbin-ai-foreman#52
  * (back-off refusals logged at ERROR, probe clearing on the wrong bucket, no
- * per-hour call accounting) — xrgarcia/slashbin-ai-foreman, filed 2026-10-02.
+ * per-hour call accounting) — slashbin-io/slashbin-ai-foreman, filed 2026-10-02.
  *
  * Front door: the BUILT Foreman's own entry points — `gh()` and the six discovery
  * functions from dist/github.js, the dist/upstream-backoff.js state API, and the

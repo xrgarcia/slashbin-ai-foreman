@@ -2,9 +2,9 @@
 //
 // 2026-10-10, 18:57-19:00Z: the Tech Lead posted APPROVE on five PRs, then
 // GitHub refused each merge while required checks ran (HTTP 405). A current
-// APPROVE is never reviewed again, so nothing offered them: Slashbin-console
-// #1271, jerky_event_processor #110, Slashbin-io-docs #436, jerky_data_receiver
-// #484 and slashbin-io-worker #704 sat approved and unmerged for five hours,
+// APPROVE is never reviewed again, so nothing offered them: console
+// #1271, event_processor #110, docs-site #436, events_receiver
+// #484 and worker #704 sat approved and unmerged for five hours,
 // each holding its repo's implement queue.
 //
 // Drives the BUILT module; `gh` is a fake on PATH serving one PR and its reviews.

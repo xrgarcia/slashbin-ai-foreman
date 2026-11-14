@@ -30,7 +30,7 @@ test("configureGhUsage: one summary per interval, counters reset on each emit", 
 });
 
 test("restEndpointKey: ids, repos, refs and ranges are stripped; method and flags handled", () => {
-  assert.equal(restEndpointKey(["api", "repos/xrgarcia/foo/issues/123/comments", "--paginate"]), "GET repos/:repo/issues/:n/comments");
+  assert.equal(restEndpointKey(["api", "repos/acme/foo/issues/123/comments", "--paginate"]), "GET repos/:repo/issues/:n/comments");
   assert.equal(restEndpointKey(["api", "/repos/a/b/compare/main...develop"]), "GET repos/:repo/compare/:range");
   assert.equal(restEndpointKey(["api", "-X", "POST", "repos/a/b/issues/7/labels", "-f", "labels[]=x"]), "POST repos/:repo/issues/:n/labels");
   assert.equal(restEndpointKey(["api", "--jq", ".[0]", "repos/a/b/deployments?sha=abc"]), "GET repos/:repo/deployments");

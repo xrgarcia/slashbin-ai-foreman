@@ -1,10 +1,10 @@
 // What a release PR carries (slashbin-ai-foreman#90). A release PR (base →
 // production) promotes ALL of the base branch, but used to list only the
 // `ready for prod release` issues, so the rest of `develop` shipped unlisted
-// and unverified (Slashbin-console#1297 inside release PR #1302, jerky_shipping
-// #647/#649 inside #655, jerky_public_api #163 inside #170).
+// and unverified (console#1297 inside release PR #1302, shipping_app
+// #647/#649 inside #655, public_api #163 inside #170).
 //
-// Owner decision (Ray, 2026-10-27): features accumulating on `develop` go out
+// Owner decision (owner, 2026-10-27): features accumulating on `develop` go out
 // together. So the release is never refused; instead every issue whose merge
 // it carries is ADOPTED into it: labelled like an authorized issue, listed in
 // the PR body, and verified in production and closed the same way. Merges with
@@ -158,7 +158,7 @@ export function planCarry(
  * every issue the release lists or will list. An adopted issue is LISTED in the
  * release (so the SRE verifies it) but is NOT signed off: `ready for prod
  * release` is the EM's production sign-off and the Foreman never applies it
- * (slashbin-ai-foreman#128: Slashbin-console#1455 shipped #1434 and #1453 with
+ * (slashbin-ai-foreman#128: console#1455 shipped #1434 and #1453 with
  * labels the Foreman had written). The release holds, failing its sign-off
  * status, until the EM signs each one; then the ordinary promote path moves it
  * to `release pending`.

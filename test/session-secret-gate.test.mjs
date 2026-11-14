@@ -122,7 +122,7 @@ test("the hook ships in the package", () => {
 });
 
 test("the hook names no operator", () => {
-  assert.ok(!/slashbin|jerky/i.test(readFileSync(HOOK, "utf8")));
+  assert.ok(!/slashbin|shop/i.test(readFileSync(HOOK, "utf8")));
 });
 
 // --- every spawn path carries the gate --------------------------------------

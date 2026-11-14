@@ -99,7 +99,7 @@ export async function hasPendingRevisions(
  * An APPROVED feature PR that is still open: the merge after the approval never
  * happened, and a current APPROVE is never reviewed again, so nothing would
  * offer it. On 2026-10-10 GitHub refused five merges while required checks ran
- * (HTTP 405) — Slashbin-console #1271 among them — and each PR sat approved and
+ * (HTTP 405) — console #1271 among them — and each PR sat approved and
  * unmerged for five hours, holding its repo's implement queue. It is offered
  * again once the approval is one `backoff.approvedUnmerged` window old, then
  * after each longer window while it stays open (an author hold keeps it open on
@@ -277,7 +277,7 @@ export async function findQaPendingPr(
  *
  * A PR with no issue to adopt is still reviewed, with no issues: the implement
  * stage queues every approved issue behind any open feature PR, so one the
- * review stage ignores holds the repo forever. jerky_service #99 (a person's
+ * review stage ignores holds the repo forever. orders_service #99 (a person's
  * PR on `features`, linked to nothing) held #102 for days, logged once a
  * minute as "queued" (2026-10-10). The Tech Lead merges it or asks for changes;
  * the freshness guard keeps either verdict from being reviewed again.

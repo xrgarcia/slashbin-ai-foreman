@@ -1,7 +1,7 @@
 // A skipped issue is held, not retried on a timer: the reads that decide when
 // it may run again. Each one is a cheap gh call, never an agent session.
 //
-// Origin: jerky_service#127 (2026-10-14). The session skipped it about ten times
+// Origin: orders_service#127 (2026-10-14). The session skipped it about ten times
 // in a day for the same unmet precondition — a file on another repo's unmerged
 // PR — because the skip back-off only hid it for a window (5 min rising to 4 h)
 // and every expiry bought a full session to rediscover the same answer. A held
@@ -20,7 +20,7 @@ export function parseWaitingOn(raw: string | undefined, repo: string): WaitingOn
   return m ? { repo: m[1] ?? repo, number: Number(m[2]) } : undefined;
 }
 
-/** `#166`, `jerky_com_marketing#166` for a sibling repo, `owner/repo#166` elsewhere. */
+/** `#166`, `marketing_site#166` for a sibling repo, `owner/repo#166` elsewhere. */
 export function waitingOnLabel(ref: WaitingOn, repo: string): string {
   if (ref.repo === repo) return `#${ref.number}`;
   const [owner, name] = ref.repo.split("/");

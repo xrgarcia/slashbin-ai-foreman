@@ -1,6 +1,6 @@
 // A declared no-commit revision must actually be re-reviewed.
 //
-// slashbin-io-worker#694, 2026-10-03. The reviewer requested changes at 18:29:56Z;
+// worker#694, 2026-10-03. The reviewer requested changes at 18:29:56Z;
 // the reviser answered "branch already correct" and the orchestrator relabelled
 // #693 `pr under review` at 18:31:13Z — as revision-no-commit.test.mjs requires.
 // But hasFreshReview measures a verdict against the last COMMIT, and a no-commit

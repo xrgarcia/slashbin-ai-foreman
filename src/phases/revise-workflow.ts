@@ -54,7 +54,7 @@ export async function revisePRFeedback(
   // on an issue body rather than the branch. Before this trailer existed, that
   // outcome was indistinguishable from a silent no-op and was marked failed, so
   // the labels never returned to `pr under review` and the PR could never be
-  // re-reviewed — Slashbin-console#843 sat in exactly that deadlock.
+  // re-reviewed — console#843 sat in exactly that deadlock.
   const noCommitNote = `\n\nIF NO CODE CHANGE IS NEEDED: do not invent one. Say so on its own line, as the LAST line of your output:\n\n  FOREMAN_REVISION no-commit reason=<one line: why the branch is already correct>\n\nWithout that trailer, a run that pushes nothing is treated as a failed revision — which is the correct default, because a silent no-op and a deliberate one look identical from outside.`;
 
   // In every prompt, not only the bundled skill's: a repo-local skill (revisionSkillPath) never carries it (foreman#116).

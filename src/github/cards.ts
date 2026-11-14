@@ -6,12 +6,12 @@
 //     follows its issue to done or cancelled. One GraphQL read per repo every
 //     CLOSED_READ_MS; the first looks back CLOSED_FIRST_LOOKBACK_MS, each later
 //     one from the start of the last good read (less an overlap).
-//   - why a held issue is held (slashbin_data_receiver#43, ported): the newest
+//   - why a held issue is held (data_receiver#43, ported): the newest
 //     labelling with the blocked label, and the newest comment its author posted
 //     from 15 minutes before it on. Read only for issues carrying the label, once
 //     per HOLD_TTL_MS each.
 //
-// Ported from slashbin_data_receiver server/paperclip-sync (issue-rules.mjs
+// Ported from data_receiver server/paperclip-sync (issue-rules.mjs
 // holdReason, paperclip-sync.mjs readClosedSince / readHoldReasons), which wrote
 // these cards before the Foreman owned them.
 
@@ -194,7 +194,7 @@ export class CardReads {
 /**
  * Whether each of `numbers` is open or how it closed, read live from GitHub,
  * 25 to a request. Not the open-issue view: a full read of it carried
- * cmneb_data_receiver#218, closed minutes before, with its old labels, and
+ * partner_receiver#218, closed minutes before, with its old labels, and
  * the card went done → in_review (2026-10-15). A number that cannot be read
  * (a missing issue, a number that is not a positive integer) is left out, so
  * nothing is guessed. One unresolvable number makes `gh` fail its whole

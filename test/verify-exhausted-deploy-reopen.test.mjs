@@ -113,7 +113,7 @@ test("devDeployRepaired: newest dev deployment SUCCESS after heldAt only", () =>
   assert.equal(devDeployRepaired([{ environment: "o / production", state: "success", at: "2026-10-20T21:26:00Z" }], HELD_AT), false, "production is not dev");
   assert.equal(devDeployRepaired([], HELD_AT), false);
   assert.equal(devDeployRepaired([dev("success", "2026-10-20T21:26:00Z")], "garbage"), false);
-  assert.ok(isDevEnvironment("jerky-com / development") && isDevEnvironment("dev") && !isDevEnvironment("jerky-com / production"));
+  assert.ok(isDevEnvironment("shop / development") && isDevEnvironment("dev") && !isDevEnvironment("shop / production"));
 });
 
 // SLA-4625 (2026-11-12): Railway reused ONE GitHub deployment for both deploys of a SHA and wrote a stale
@@ -124,7 +124,7 @@ const SLA_STATUSES = [
   { state: "in_progress", at: "2026-11-12T18:28:09Z" }, { state: "failure", at: "2026-11-12T17:49:35Z" },
   { state: "in_progress", at: "2026-11-12T17:48:09Z" },
 ];
-const reused = (statuses) => ({ environment: "cmneb / development", state: statuses[0].state, at: statuses[0].at, statuses });
+const reused = (statuses) => ({ environment: "a second customer / development", state: statuses[0].state, at: statuses[0].at, statuses });
 
 test("devDeployRepaired: a redeploy that began after the hold releases even when the newest status is a stale failure (SLA-4625)", () => {
   assert.equal(devDeployRepaired([reused(SLA_STATUSES)], SLA_HELD_AT), true);
@@ -133,8 +133,8 @@ test("devDeployRepaired: a redeploy that began after the hold releases even when
 test("devDeployRepaired: failures after the hold with no new attempt, or attempts only before it, never release", () => {
   assert.equal(devDeployRepaired([reused(SLA_STATUSES.slice(3))], SLA_HELD_AT), false, "history ends before the hold");
   assert.equal(devDeployRepaired([reused([{ state: "failure", at: "2026-11-12T18:30:00Z" }, ...SLA_STATUSES.slice(3)])], SLA_HELD_AT), false, "a lone later failure is no new attempt");
-  assert.equal(devDeployRepaired([{ environment: "cmneb / development", state: "failure", at: "2026-11-12T18:29:02Z" }], SLA_HELD_AT), false, "no history: unknown");
-  assert.equal(devDeployRepaired([{ ...reused(SLA_STATUSES), environment: "cmneb / production" }], SLA_HELD_AT), false, "production is not dev");
+  assert.equal(devDeployRepaired([{ environment: "a second customer / development", state: "failure", at: "2026-11-12T18:29:02Z" }], SLA_HELD_AT), false, "no history: unknown");
+  assert.equal(devDeployRepaired([{ ...reused(SLA_STATUSES), environment: "a second customer / production" }], SLA_HELD_AT), false, "production is not dev");
   assert.equal(devDeployRepaired([{ ...reused(SLA_STATUSES), at: "" }], SLA_HELD_AT), false, "unreadable time");
 });
 
@@ -148,7 +148,7 @@ test("srePassedSince: the SRE's newest evidence for this merge, after the hold, 
   assert.equal(srePassedSince([evidence("PASS")], HELD_AT), true);
   assert.equal(srePassedSince([evidence("**PASS**")], HELD_AT), true);
   assert.equal(srePassedSince([evidence("PASS", { at: "2026-10-20T21:00:00Z" })], HELD_AT), false, "older than the hold");
-  assert.equal(srePassedSince([evidence("PASS", { author: "xrgarcia" })], HELD_AT), false, "not the SRE");
+  assert.equal(srePassedSince([evidence("PASS", { author: "owner-login" })], HELD_AT), false, "not the SRE");
   assert.equal(srePassedSince([evidence("PASS"), evidence("FAIL", { at: "2026-10-20T22:00:00Z" })], HELD_AT), false, "a later FAIL supersedes");
   assert.equal(srePassedSince([evidence("NOT YET ELIGIBLE (2026-10-20T22:00Z)")], HELD_AT), false);
 });

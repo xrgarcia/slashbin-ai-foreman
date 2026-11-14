@@ -211,7 +211,7 @@ export function hasLabel(issue: IssueSnapshot, name: string): boolean {
  * mutation hook in `ghAsync()` never sees: without this, the check that the
  * session's PR exists read the list cached before it, found nothing, and
  * booked a built PR as "PR creation could not be verified"
- * (slashbin_mcp_services PR #240, 2026-10-09).
+ * (mcp_services PR #240, 2026-10-09).
  */
 export function forgetOpenPrs(repo: string): void {
   reads.prs.delete(repo);

@@ -37,15 +37,15 @@ test("stageTarget: defaults hand every card to the Foreman; a role takes its sta
 });
 
 test("stageTarget: no lifecycle stage is held by a user, so no result carries a userId key", () => {
-  const cfg = { agentId: "fm", humanUserId: "ray", roles: { em: { name: "EM", id: "em-1" } } };
+  const cfg = { agentId: "fm", humanUserId: "alice", roles: { em: { name: "EM", id: "em-1" } } };
   for (const st of PAPERCLIP_STAGES) assert.equal("userId" in stageTarget(cfg, st), false, st);
 });
 
 test("assigneeFor: approved-for-human goes to the user; nothing else is assigned, an EM-repo item included", () => {
-  const EM = "xrgarcia/slashbin-engineering-manager";
-  const cfg = { agentId: "fm", humanUserId: "ray-user", roles: { em: { name: "Engineering Manager", id: "em-agent" } } };
-  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
-  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: EM }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
+  const EM = "acme/slashbin-engineering-manager";
+  const cfg = { agentId: "fm", humanUserId: "alice-user", roles: { em: { name: "Engineering Manager", id: "em-agent" } } };
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: "alice-user" });
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: EM }), { assigneeAgentId: null, assigneeUserId: "alice-user" });
   // An agent is never assigned: the EM agent is bridged and would wake on every row.
   assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: EM }), undefined);
   assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: "acme/svc" }), undefined);
@@ -57,8 +57,8 @@ test("assigneeFor: an unset humanUserId leaves both null, never the Foreman's ag
 });
 
 test("assigneeFor: two identical calls return equal results", () => {
-  const cfg = { agentId: "fm", humanUserId: "ray-user" };
-  for (const item of [{ labels: ["approved-for-human"], repo: "a/b" }, { labels: [], repo: "xrgarcia/slashbin-engineering-manager" }, { labels: [], repo: "a/b" }]) {
+  const cfg = { agentId: "fm", humanUserId: "alice-user" };
+  for (const item of [{ labels: ["approved-for-human"], repo: "a/b" }, { labels: [], repo: "acme/slashbin-engineering-manager" }, { labels: [], repo: "a/b" }]) {
     assert.deepEqual(assigneeFor(cfg, item), assigneeFor(cfg, item));
   }
 });
@@ -98,13 +98,13 @@ test("ensureStageLabels: creates only the missing labels; a lost race (409) re-l
   assert.equal(m.size, 12);
 });
 
-const REG = ["cmneb", "jerky-com", "slashbin-ai", "slashbin-io"];
+const REG = ["a second customer", "shop", "slashbin-ai", "slashbin-io"];
 
 test("customerLabelsOf: exact registry names only, every match once, ascending; none is empty", () => {
-  assert.deepEqual(customerLabelsOf(["bug", "jerky-com"], REG), ["jerky-com"]);
+  assert.deepEqual(customerLabelsOf(["bug", "shop"], REG), ["shop"]);
   assert.deepEqual(customerLabelsOf(["bug", "S3", "approved"], REG), []);
-  assert.deepEqual(customerLabelsOf(["Jerky-Com", "jerky-com-x"], REG), []);
-  assert.deepEqual(customerLabelsOf(["slashbin-io", "cmneb", "slashbin-io"], REG), ["cmneb", "slashbin-io"]);
+  assert.deepEqual(customerLabelsOf(["Shop", "shop-x"], REG), []);
+  assert.deepEqual(customerLabelsOf(["slashbin-io", "a second customer", "slashbin-io"], REG), ["a second customer", "slashbin-io"]);
   assert.deepEqual(customerLabelsOf([], REG), []);
 });
 
@@ -114,20 +114,20 @@ test("withCustomerLabels: strips every customer and marker id, keeps the rest in
 });
 
 test("ensureCustomerLabels: reuses by name, creates the rest and the marker, a lost race (409) re-lists", async () => {
-  const labels = [{ id: "e1", name: "jerky-com" }];
+  const labels = [{ id: "e1", name: "shop" }];
   const created = [];
   const client = {
     listLabels: async () => labels,
     createLabel: async (l) => {
-      if (l.name === "cmneb") { labels.push({ id: "race", name: l.name }); throw Object.assign(new Error("409"), { status: 409 }); }
+      if (l.name === "a second customer") { labels.push({ id: "race", name: l.name }); throw Object.assign(new Error("409"), { status: 409 }); }
       const made = { id: `n${created.length}`, ...l };
       created.push(made.name); labels.push(made);
       return made;
     },
   };
   const m = await ensureCustomerLabels(client, REG);
-  assert.equal(m.get("jerky-com"), "e1");
-  assert.equal(m.get("cmneb"), "race");
+  assert.equal(m.get("shop"), "e1");
+  assert.equal(m.get("a second customer"), "race");
   assert.deepEqual(created, ["slashbin-ai", "slashbin-io", NO_CUSTOMER_LABEL.name]);
   assert.equal(m.size, 5);
 });

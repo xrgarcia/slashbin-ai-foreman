@@ -89,7 +89,7 @@ ${issueList}${unlinkedSection(unlinked)}`, conventions);
   //   GraphQL: Projects (classic) is being deprecated in favor of the new
   //   Projects experience (repository.pullRequest.projectCards)
   //
-  // Reproduced twice against jerky_data_receiver#241 — exit 1, title unchanged.
+  // Reproduced twice against events_receiver#241 — exit 1, title unchanged.
   // This silently blocked EVERY repo that already had an open promotion PR,
   // from ~04:11Z until it was found at ~21:10Z: the promote phase kept logging
   // "Found N issue(s) ready for prod release" and then failing to act. Creating

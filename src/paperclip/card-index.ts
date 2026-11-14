@@ -4,7 +4,7 @@
 // keeps what each card shows (status, holder, content, repo, issue number). It
 // owns that state; every other collaborator reads it through the mirror's wiring.
 //
-// RULES (Ray, 2026-11-05):
+// RULES (owner, 2026-11-05):
 // - Paperclip is the record. A repo's cards come from one read of that repo
 //   (`q` = its name, the in-play statuses only); what it returned is kept until
 //   the next read of that repo replaces it in full. No company-wide read, no
@@ -38,7 +38,7 @@ const DUPLICATE_NOTE = "retired: a second card for {key}; {winner} is the card f
  * Which of the rows carrying one identity key is the card: the oldest that is
  * not cancelled, else the oldest. A row with no creation time sorts by the
  * order it was listed in, after every dated one. Both writers' rows for
- * jerky_ops#11 stood open side by side because each kept a different one of the
+ * ops_portal#11 stood open side by side because each kept a different one of the
  * pair: the Foreman the first listed, the receiver the last (2026-10-15).
  */
 export function pickCard<T extends { status: string; createdAt?: string }>(rows: readonly T[], cancelled: string): T | undefined {
