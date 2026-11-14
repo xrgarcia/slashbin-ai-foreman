@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
-import { relationsOf, bodyMentions, titleCorrects } from "../dist/github/corrections.js";
+import { relationsOf, correctorsOf, bodyMentions, titleCorrects } from "../dist/github/corrections.js";
 import { dropIssueSnapshot } from "../dist/github/cache.js";
 import { githubCodeHost } from "../dist/plugins/github.js";
 import { setCodeHost } from "../dist/plugins/registry.js";
@@ -38,6 +38,8 @@ case "$args" in
 esac
 ${fail ? 'echo "HTTP 422: Validation Failed" >&2; exit 1' : ""}
 case "$args" in
+  *"/dependencies/blocked_by"*) cat "$d/blockedby_$n.json" 2>/dev/null || echo '[]' ;;
+  *"/sub_issues"*) cat "$d/subs_$n.json" 2>/dev/null || echo '[]' ;;
   *"/dependencies/blocking"*) cat "$d/blocking_$n.json" 2>/dev/null || echo '[]' ;;
   *"/parent"*) if [ -f "$d/parent_$n.json" ]; then cat "$d/parent_$n.json"; else echo "gh: No parent issue found (HTTP 404)" >&2; exit 1; fi ;;
   *"--jq"*) cat "$d/body_$n.txt" 2>/dev/null || true ;;
@@ -83,6 +85,20 @@ test("relationsOf: blocks (this repo only), parent, title, strongest first; a mi
     assert.deepEqual(r.get(13).corrects, [10]);
     assert.deepEqual(r.get(14), { corrects: [], mentions: [] });
     assert.deepEqual(r.get(16), { corrects: [], mentions: [10, 3, 4, 1000] });
+  });
+});
+
+test("correctorsOf: from the holder's side, blocked-by (this repo only), sub-issues and the legacy title; an unreadable link throws", async () => {
+  const dir = fakeGh(ISSUES, {
+    "blockedby_10.json": JSON.stringify([{ number: 11, state: "closed", labels: [] }, { number: 99, state: "open", labels: [], repository_url: "https://api.github.com/repos/x/other" }]),
+    "subs_10.json": JSON.stringify([{ number: 12 }]),
+  });
+  await withGh(dir, async (cfg) => {
+    assert.deepEqual(await correctorsOf(cfg, 10, quiet), [11, 12, 13], "closed blocker kept, other repo's dropped, #13 by its title");
+    assert.deepEqual(await correctorsOf(cfg, 14, quiet), []);
+  });
+  await withGh(fakeGh(ISSUES, {}, { fail: true }), async (cfg) => {
+    await assert.rejects(() => correctorsOf(cfg, 10, quiet), /422/);
   });
 });
 
