@@ -314,8 +314,6 @@ export function pickVerifyTarget(
  * every 60 s pass was 245 of ~2,560 gh calls/hr; a re-run request waits at most this long.
  */
 export const QA_RERUN_POLL_MS = 5 * 60_000;
-/** repo → when its next QA re-run read is due. */
-const qaRerunDueAt = new Map<string, number>();
 
 /**
  * The EM's QA re-run (slashbin-ai-foreman#158): an issue at `pr approved`, not yet authorized for production,
@@ -369,8 +367,8 @@ export async function tryVerify(
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
 
-  if (Date.now() >= (qaRerunDueAt.get(repoConfig.name) ?? 0) && (await qaApplies(repoConfig, config)) === true) {
-    qaRerunDueAt.set(repoConfig.name, Date.now() + QA_RERUN_POLL_MS);
+  if (Date.now() >= (rt.memory.qaRerunDueAt.get(repoConfig.name) ?? 0) && (await qaApplies(repoConfig, config)) === true) {
+    rt.memory.qaRerunDueAt.set(repoConfig.name, Date.now() + QA_RERUN_POLL_MS);
     await takeQaRerunRequests(rt, repoConfig, config, vlog);
   }
   const awaiting = await codeHost().findIssuesAwaitingVerify(repoConfig, vlog);
