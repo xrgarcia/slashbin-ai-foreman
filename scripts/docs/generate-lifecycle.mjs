@@ -96,6 +96,7 @@ const CHECK_ACTS = {
   mergedPrFound: "Merge a PR into the base branch that closes the issue.",
   baseAdvanced: "Land a fix on the base branch.",
   specEdited: "Edit the issue's body (the spec the SRE verifies against).",
+  correctionMerged: "File the fix linked to the held issue (blocked-by or sub-issue) and let it merge into the base branch: its merge, after the hold, re-verifies.",
   holdNoLongerCharged: "Nothing: a hold whose reason no longer spends an attempt (a checker that could not run) reopens on its own.",
   deployRepaired: "Repair the dev environment: a SUCCESS dev deployment of the merge, newer than the hold, reopens a deploy failure.",
   srePassedSince: "Nothing: an SRE `## Dev Verification Evidence` PASS for the merge, newer than the hold, advances a deploy failure.",

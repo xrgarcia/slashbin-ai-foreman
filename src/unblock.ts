@@ -38,6 +38,8 @@ export interface BlockFacts {
   baseAdvanced?: boolean;
   /** The issue's body, which is the spec the SRE verifies against, was edited after the hold. */
   specEdited?: boolean;
+  /** An issue that corrects the held one (blocked-by, sub-issue) had its PR merged into the base branch after the hold. */
+  correctionMerged?: boolean;
   /** Someone pushed to the PR after the Foreman stopped on it. */
   prHeadMoved?: boolean;
   /** The EM posted a scope ruling on the PR after the stalemate's last no-commit round. */
@@ -56,8 +58,8 @@ export type UnblockCheck = keyof BlockFacts;
 export const UNBLOCK_CHECKS: Readonly<Record<BlockKind, readonly UnblockCheck[]>> = {
   "skip": ["transientCauseGone", "waitedOnDone", "issueChanged"],
   "verify-no-pr": ["mergedPrFound"],
-  "verify-held": ["specEdited"],
-  "verify-exhausted": ["specEdited", "baseAdvanced", "holdNoLongerCharged", "srePassedSince", "deployRepaired"],
+  "verify-held": ["specEdited", "correctionMerged"],
+  "verify-exhausted": ["specEdited", "correctionMerged", "baseAdvanced", "holdNoLongerCharged", "srePassedSince", "deployRepaired"],
   "revision-exhausted": ["prHeadMoved"],
   "revision-stalemate": ["prHeadMoved", "rulingPosted"],
 };
@@ -70,6 +72,7 @@ export const CHECK_WORDS: Readonly<Record<UnblockCheck, string>> = {
   mergedPrFound: "a merged PR now closes the issue",
   baseAdvanced: "new commits landed on the base branch since the hold — verifying again",
   specEdited: "the issue's spec was edited since the hold — verifying again against it, with a fresh attempt count",
+  correctionMerged: "an issue that corrects this one merged to the base branch since the hold — verifying again with a fresh attempt count",
   prHeadMoved: "the PR received new commits since the Foreman stopped — resuming",
   rulingPosted: "the EM posted a scope ruling since the stalemate — revising once more against it",
   deployRepaired: "the merge has a dev deploy that succeeded or restarted after the hold — the SRE verifies again with a fresh attempt count",
