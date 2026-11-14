@@ -96,6 +96,8 @@ test("correctorsOf: from the holder's side, blocked-by (this repo only), sub-iss
   await withGh(dir, async (cfg) => {
     assert.deepEqual(await correctorsOf(cfg, 10, quiet), [11, 12, 13], "closed blocker kept, other repo's dropped, #13 by its title");
     assert.deepEqual(await correctorsOf(cfg, 14, quiet), []);
+    const calls = readFileSync(join(dir, "calls"), "utf8");
+    assert.match(calls, /issue list .*--state all/, "a closed corrective linked only by its title is found (#436 ends 'follow-up to #407')");
   });
   await withGh(fakeGh(ISSUES, {}, { fail: true }), async (cfg) => {
     await assert.rejects(() => correctorsOf(cfg, 10, quiet), /422/);

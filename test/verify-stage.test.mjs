@@ -326,6 +326,13 @@ test("a corrective merged after heldAt releases an exhausted acceptance-not-veri
   assert.deepEqual(r.forced, [true], "the SRE must run again, not replay its cached verdict for the same merge and spec");
 });
 
+test("a closed title-only corrective merged after heldAt releases the exhausted hold: attempts reset, SRE forced (security_tests#407/#436)", async () => {
+  // the code host reports #436 (closed, linked only by 'follow-up to #407') as a corrector; the hold is gone, so the next attempt count starts fresh
+  const r = await correctionPass({ correctors: [436], merged: fix("2026-11-14T04:31:00Z") });
+  assert.equal(r.held, undefined, "the hold record, attempts included, is cleared");
+  assert.deepEqual(r.forced, [true]);
+});
+
 test("a corrective merged after heldAt also releases a still-charged (not yet exhausted) hold", async () => {
   const r = await correctionPass({ reason: "healthcheck-red", attempts: 1, merged: fix("2026-11-14T04:31:00Z") });
   assert.match(r.unblocked[0] ?? "", /corrects this one merged/);
