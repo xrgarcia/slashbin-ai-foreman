@@ -44,7 +44,7 @@ every watched repo at once and at most every 5 seconds.
 With a signal installed, a repo that has not changed skips its fleet-state refresh and the lane
 passes listed in `changeSignal.lanes` (default `branch-sync`, `dependabot`). Every repo is still
 checked in full at least every `changeSignal.forceCheckMs` (default 300000, 5 minutes), so a missed
-event costs minutes, never correctness. A signal that throws makes every repo due until it answers
+event costs minutes, never correctness. A signal that throws, rejects, or does not answer within 10 seconds makes every repo due until it answers
 again. Foreman's own writes still invalidate the fleet state immediately. With no signal installed
 the behaviour is identical to before.
 

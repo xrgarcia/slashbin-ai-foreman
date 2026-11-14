@@ -22,7 +22,8 @@ after(() => rmSync(tmp, { recursive: true, force: true }));
 function gate(report, extra = {}) {
   let clock = T0;
   const asked = [];
-  const signal = report === null ? undefined : { async changedSince(cursor, repos) { asked.push({ cursor, repos: [...repos] }); return report(cursor); } };
+  const signal = report === null ? undefined : { changedSince(cursor, repos) { asked.push({ cursor, repos: [...repos] }); return extra.rawSync ? report(cursor) : Promise.resolve().then(() => report(cursor)); } };
+  delete extra.rawSync;
   const g = new ChangeGate({ signal: () => signal, repos: () => REPOS, forceMs: () => 300_000, logger, now: () => clock, pollTtlMs: 0, ...extra });
   return { g, asked, tick: (ms) => { clock += ms; } };
 }
@@ -75,6 +76,51 @@ test("a failing signal fails open: everything is due", async () => {
   await g.due("state", "a/x");
   tick(1000);
   assert.equal(await g.due("state", "a/x"), true);
+});
+
+test("sync throw: the signal is retried after the TTL, everything is due meanwhile, and recovery is honoured", async () => {
+  let n = 0;
+  const { g, asked, tick } = gate(() => {
+    n++;
+    if (n <= 2) throw new Error("sync boom");
+    return { changed: n === 3 ? "all" : [], cursor: `c${n}` };
+  }, { pollTtlMs: 5_000, rawSync: true });
+  assert.equal(await g.due("state", "a/x"), true);
+  tick(6_000);
+  assert.equal(await g.due("state", "a/x"), true, "second call retried and failed again: still open");
+  assert.equal(n, 2);
+  tick(6_000);
+  assert.equal(await g.due("state", "a/x"), true); // recovery: first answer is "all"
+  assert.equal(n, 3);
+  tick(6_000);
+  assert.equal(await g.due("state", "a/x"), false); // recovered and quiet
+  assert.equal(n, 4);
+});
+
+test("rejection: retried after the TTL and recovery is honoured", async () => {
+  let n = 0;
+  const { g, tick } = gate(async () => {
+    n++;
+    if (n === 1) throw new Error("reject");
+    return { changed: n === 2 ? "all" : [], cursor: `c${n}` };
+  }, { pollTtlMs: 5_000 });
+  assert.equal(await g.due("state", "a/x"), true);
+  tick(6_000);
+  assert.equal(await g.due("state", "a/x"), true);
+  tick(6_000);
+  assert.equal(await g.due("state", "a/x"), false);
+  assert.equal(n, 3);
+});
+
+test("a signal that hangs fails open at the timeout and is retried later", async () => {
+  let n = 0;
+  const { g, tick } = gate(() => (++n === 1 ? new Promise(() => {}) : { changed: [], cursor: "c" }), { pollTtlMs: 0, signalTimeoutMs: 20 });
+  const t0 = Date.now();
+  assert.equal(await g.due("state", "a/x"), true);
+  assert.ok(Date.now() - t0 < 1000, "did not wait on the hung plugin");
+  tick(1_000);
+  assert.equal(await g.due("state", "a/x"), false, "retried after the timeout, answered quiet");
+  assert.equal(n, 2);
 });
 
 function stateHarness(gateFn) {
