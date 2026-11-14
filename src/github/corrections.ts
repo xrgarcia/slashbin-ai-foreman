@@ -14,6 +14,7 @@ import type { Logger } from "../logger.js";
 import { getOpenIssues } from "./cache.js";
 import { dependentRepo, dependentsOf } from "./dead-blocker.js";
 import { ghAsync } from "./gh.js";
+import { blockersOf } from "./blockers.js";
 import { readIssueBody } from "./readiness.js";
 
 /** Every issue a title says it follows up ("— follow-up to #N"), in order. The one parser for that phrase. */
@@ -71,4 +72,19 @@ export async function relationsOf(config: RepoConfig, issues: readonly number[],
     out.set(n, { corrects, mentions });
   }
   return out;
+}
+
+/**
+ * The issues of this repo that correct `holder`, read from its side: the issues it is blocked by, its sub-issues,
+ * and the open issues whose title says `follow-up to #holder`. Closed ones count: a corrective that merged and
+ * closed is the very one the caller looks for. Throws when a link cannot be read: a missing link read as
+ * "no corrective" would be a guess.
+ */
+export async function correctorsOf(config: RepoConfig, holder: number, logger: Logger): Promise<number[]> {
+  const own = (repoUrl: string | undefined): boolean => (repoUrl?.match(/repos\/([^/]+\/[^/]+)$/)?.[1] ?? config.githubRepo) === config.githubRepo;
+  const blockers = (await blockersOf(config.githubRepo, holder, config.repoPath)).filter((b) => own(b.repository_url)).map((b) => b.number);
+  const subs = (JSON.parse(await ghAsync(["api", `repos/${config.githubRepo}/issues/${holder}/sub_issues`], config.repoPath) || "[]") as { number: number; repository_url?: string }[])
+    .filter((i) => own(i.repository_url)).map((i) => i.number);
+  const titled = (await getOpenIssues(config.githubRepo, config.repoPath, logger)).filter((i) => titleCorrects(i.title).includes(holder)).map((i) => i.number);
+  return [...new Set([...blockers, ...subs, ...titled])].filter((m) => m !== holder);
 }

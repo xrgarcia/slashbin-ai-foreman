@@ -133,6 +133,7 @@ export function githubCodeHost(
     readIssueBody: readiness.readIssueBody,
     readIssueState: readiness.readIssueState,
     relationsOf: corrections.relationsOf,
+    correctorsOf: corrections.correctorsOf,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),

@@ -109,6 +109,28 @@ async function prFilesTouched(repoConfig: RepoConfig, pr: number, vlog: Logger):
   return (await codeHost().prChangedFiles(repoConfig.githubRepo, pr, repoConfig.repoPath, vlog)).slice(0, 40);
 }
 
+/**
+ * Whether an issue that corrects `holder` (`CodeHost.correctorsOf`: blocked-by, sub-issue, legacy title) had its PR
+ * merged into the base branch after `heldAt`. A corrective merged before the hold changed nothing the verdict saw, an
+ * unmerged one has not landed, and an unrelated base commit is `baseAdvanced`'s. Undefined when the relation cannot be
+ * read: unknown never unblocks. The merge scan sees the newest merged PRs only, so a corrective older than that window
+ * is never found (it would long predate any hold still waiting).
+ */
+export async function correctionMergedSince(repoConfig: RepoConfig, holder: number, heldAt: string, logger: Logger): Promise<boolean | undefined> {
+  const since = Date.parse(heldAt);
+  if (Number.isNaN(since)) return undefined;
+  let fixes: number[];
+  try {
+    fixes = await codeHost().correctorsOf(repoConfig, holder, logger);
+  } catch (err) {
+    logger.warn(`#${holder}: its corrections could not be read (${(err instanceof Error ? err.message : String(err)).split("\n")[0]}) — a merged fix is not known`);
+    return undefined;
+  }
+  if (fixes.length === 0) return false;
+  const merged = await codeHost().findIssuesMergedToBase(repoConfig, fixes, logger);
+  return merged.some((m) => Date.parse(m.mergedAt) > since);
+}
+
 export function reopensOnBaseAdvance(reason: string): boolean {
   return reason !== "acceptance-not-verified";
 }
@@ -374,8 +396,9 @@ export async function tryVerify(
   const refs = await codeHost().findIssuesMergedToBase(repoConfig, waiting, vlog);
   // The blocked verify holds, re-checked: a merged PR now closes a
   // "no merged PR" hold; an edited spec reopens any failed one at once, with a
-  // fresh attempt count, because retrying an unchanged spec cannot pass; new
-  // commits on base reopen an exhausted one, unless dev could not observe it.
+  // fresh attempt count, because retrying an unchanged spec cannot pass; a merged
+  // corrective (an issue that corrects it) reopens any charged one; new commits on base reopen an exhausted
+  // one, unless dev could not observe it (`acceptance-not-verified`).
   let released = false;
   // Issues the SRE's earlier PASS advanced this pass: their label moves on the next read, so they are not verified again now.
   const passedBySre = new Set<number>();
@@ -408,10 +431,15 @@ export async function tryVerify(
       released = true;
       continue;
     }
+    // A charged hold waits on the fix the EM filed: its merge releases it, whatever the reason. A tooling hold or a
+    // named wait charges nothing and retries on its own, so it reads nothing.
+    const charged = !noPr && ["charge", "decide"].includes(verifyHoldPlan(h.reason).kind);
+    const correctionMerged = charged ? await correctionMergedSince(repoConfig, n, h.heldAt, vlog) : undefined;
     const ok = noPr
       ? await releaseIfResolved(rt, "verify-no-pr", { mergedPrFound: refs.some((r) => r.issueNumber === n) }, [n], repoConfig, vlog)
       : await releaseIfResolved(rt, kind, {
         specEdited: await issueEditedSince(repoConfig, n, h.heldAt),
+        ...(correctionMerged !== undefined ? { correctionMerged } : {}),
         ...(exhausted && reopensOnBaseAdvance(h.reason) ? { baseAdvanced: await baseAdvancedSince(repoConfig, h.heldAt) } : {}),
         // Exhausted on a reason that no longer charges (it joined TOOLING_HOLDS after the
         // attempts were spent): those attempts were never verdicts, so it reopens.
@@ -422,7 +450,8 @@ export async function tryVerify(
       delete held[n];
       released = true;
       // The SRE would replay its cached failure for the same merge and spec; this re-verify must run again.
-      if (deployFacts.deployRepaired === true || deployFacts.srePassedSince === true) rt.memory.verifyForce.add(`${repoName}#${h.prNumber}`);
+      // So does a merged corrective: the merge and spec are unchanged, so the cached verdict would be the old failure.
+      if (deployFacts.deployRepaired === true || deployFacts.srePassedSince === true || correctionMerged === true) rt.memory.verifyForce.add(`${repoName}#${h.prNumber}`);
     }
   }
   if (released) await persist();
