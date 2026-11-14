@@ -2,7 +2,7 @@
 //
 // WHY. A Tech Lead review runs for tens of minutes, and until 2026-10-15 the
 // card said "Tech Lead reviewing PR #N" and nothing more until the verdict.
-// Ray (2026-10-15): "Reading began, reading complete, the depth check began,
+// The owner (2026-10-15): "Reading began, reading complete, the depth check began,
 // depth check complete, final check ran, final check complete ... just
 // something so I can see that there's progress."
 //

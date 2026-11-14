@@ -1,6 +1,6 @@
 // A revision round that correctly changes nothing must be able to say so.
 //
-// Slashbin-console#843, 2026-09-02. The reviewer requested changes; the reviser
+// console#843, 2026-09-02. The reviewer requested changes; the reviser
 // determined the branch was already correct and pushed nothing; the SHA guard
 // marked the run failed; the orchestrator therefore never transitioned
 // "pr pending actions" -> "pr under review"; and the review phase only picks up

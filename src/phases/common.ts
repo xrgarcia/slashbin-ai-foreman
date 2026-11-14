@@ -175,10 +175,10 @@ export const activeRuns = new Map<AbortController, string>();
 // A PR sent back this many times is probably not converging: each round answers
 // the last finding and the reviewer finds a new one in the answer. The retry cap
 // above counts only FAILED revisions, so a spiral of successful ones was silent —
-// slashbin_mcp_services PR 245 (2026-10-09) went six rounds, 3,286 lines, nobody
+// mcp_services PR 245 (2026-10-09) went six rounds, 3,286 lines, nobody
 // told. At this count since the last EM scope ruling, revision stops and the card
 // goes to the EM (src/phases/revise.ts); escalated once per PR per newest review.
-// 3, not 4 (2026-10-14): jerky_service PR 148 took ~35 min a round and four
+// 3, not 4 (2026-10-14): orders_service PR 148 took ~35 min a round and four
 // rounds before a ruling — a fourth round is two hours spent before anyone rules.
 export const REVIEW_ROUNDS_ALERT = 3;
 
@@ -217,7 +217,7 @@ export function workStateOf(outcome: ReviewOutcome): "approved" | "merged" | "ch
 
 /**
  * Whether the EM holds PR `pr`: one of its issues carries `github.blockedLabel`, so `phase` (review, QA
- * before the merge, revise) does not act on it until the label is lifted. Slashbin-console PR #1597 ran
+ * before the merge, revise) does not act on it until the label is lifted. console PR #1597 ran
  * three more QA FAILs and revises after its issue was labelled (foreman#167). Issues that cannot be read
  * pause it for this pass: an unknown hold is not a lifted one.
  */

@@ -32,7 +32,7 @@ With no reviewer a person merges, and Reconcile closes the issue if nothing rele
 A dev visual QA FAIL (`hold=visual-qa-failed`) is the EM's decision: the Foreman files nothing, holds the
 issue at its cap and raises unstick kind `rework-decision` that cycle (PR, touched files, verdict, evidence).
 A charged failure with a verdict calls the EM the same way on its first failure, retries still running. The
-EM's fix linked to #N (#N blocked by it, or a sub-issue of #N; `docs/em-coordination.md` §2) or a spec edit releases the hold. (Ray, 2026-10-31; replaces EM#485.)
+EM's fix linked to #N (#N blocked by it, or a sub-issue of #N; `docs/em-coordination.md` §2) or a spec edit releases the hold. (owner, 2026-10-31; replaces EM#485.)
 
 A config may drop or reorder built-ins and add custom `{ id, skillPath }` stages —
 one Claude session on that skill against the open Foreman PR. A custom stage that
@@ -65,7 +65,7 @@ reports `blocked` or no verdict stops the later stages for that repo's pass.
 8. **Branch Sync** — merge `main → develop` to clear post-promotion drift.
 9. **Dependabot** — file one issue for the open Dependabot PRs (pre-approved per repo
    with `dependencyPreApproved`: filed with `approved` and `deliver-to-prod`; owner authorization covers every Foreman-managed repo for
-   slashbin.io, jerky.com and cmneb as of 2026-10-24; opt-in per repo, default off).
+   slashbin.io, a customer and a second customer as of 2026-10-24; opt-in per repo, default off).
 10. **Unstick** (`src/phases/unstick.ts`, `src/unstick.ts`, no Claude session; runs only with
     `emRepoPath`) — the EM plugin's `bin/em.mjs unstick` takes each stuck issue; the outcome is
     the `unstick` record. See docs/pipeline.md.
@@ -167,7 +167,7 @@ Layout, plugin model and boundary: `docs/architecture.md`. The modules a change 
 
 - `plugins/` — `contract.ts` (roles), `registry.ts` (the core's only way in), `index.ts` (composition root), one file per plugin.
 - `lifecycle.ts` (the state machine; generates `docs/lifecycle.md`), `work-source.ts` (`emit()`/`advance()`), `adapters.ts` (the data contract), `code-host.ts` (typed, no raw `gh`).
-- `runtime.ts` + `phase-memory.ts`, `issue-records.ts` + `record-store.ts`, `profiles/`, `foreman-branch.ts`.
+- `runtime.ts` + `phase-memory.ts`, `issue-records.ts` + `record-store.ts`, `foreman-branch.ts`.
 - `stages.ts`, `lanes.ts`, `orchestrator.ts`, `daemon.ts`, `phases/` (`*-workflow.ts` run the Claude session), `dependency-batch/`, `session/` (runner, env, secret-gate, protocol).
 - Plugin code, off-limits to the core: `github.ts`, `github/`, `github-work-source.ts`, `github-state.ts`, `paperclip/`, `metrics/`.
 
@@ -210,6 +210,13 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
   `.ai-agent.json` files keep working unchanged. Every key is commented where it is
   declared; `docs/configuration.md` is generated from those comments and the generator
   fails on an uncommented key. `docs/README.md` is the docs index.
-- **Profiles** — operator-specific values (logins, repo names, header names) live in `src/profiles/`, nowhere else in `src/`.
+- **Public repo: no private names** — this code is published. No customer name, no
+  customer's or Slashbin's private repo or service name, no operator login or personal
+  name, no internal MCP server, Doppler project or Railway name may appear in any tracked
+  file: code, comments, tests, fixtures, docs, skills. Cite an incident by what happened
+  and the Foreman's own issue number, naming any other repo generically ("a customer's
+  orders service"). A deployment's own values go in its git-ignored `.ai-agent.json`.
+  `test/no-private-names.test.mjs` fails the build on a banned name (stored hashed, so the
+  guard does not publish them); ban a new one by adding its hash there.
 - **Metrics** — the opt-in `metrics` observer logs stage advances to SQLite; `npm run metrics:report` reads it (`docs/metrics.md`).
 - **Persistence** — work-source records survive restarts; the daemon resumes where it left off.

@@ -1,6 +1,6 @@
 // A closed issue's card is done, or cancelled when not planned, whatever
 // lifecycle labels it still carries, and the mirror never moves it out again.
-// cmneb_data_receiver#218 went done → in_review at 14:52 on 2026-10-15: GitHub
+// partner_receiver#218 went done → in_review at 14:52 on 2026-10-15: GitHub
 // had closed it at ~14:39 (its promotion PR merged), but a full read of the
 // open-issue view carried it again with its old `ready for prod release`
 // label, and the snapshot placed the card from those labels.
@@ -125,7 +125,7 @@ const CARDS = ["done", "in_review", "cancelled"];
  */
 function expected(owns, gh, label, card) {
   const { bucket } = LABELS[label];
-  // Terminal cards are never read (Ray, 2026-11-05): a card already done or cancelled is not found,
+  // Terminal cards are never read (owner, 2026-11-05): a card already done or cancelled is not found,
   // so nothing touches it, whatever GitHub says; an open issue gets a fresh card beside it instead.
   if (card === "done" || card === "cancelled") return card;
   if (gh === "completed+read") return "done";
@@ -180,7 +180,7 @@ for (const owns of [false, true]) {
 
 // --- The incident, and the paths around the table ---
 
-test("cmneb_data_receiver#218: a done card stays done when the open view carries the closed issue at ready for prod release", async () => {
+test("partner_receiver#218: a done card stays done when the open view carries the closed issue at ready for prod release", async () => {
   for (const live of [new Map([[7, "completed"]]), new Map()]) {
     const fake = fakePaperclip([{ id: "r7", title: "t", status: "done", assigneeAgentId: AGENT, description: `source: ${REPO}#7` }]);
     const mirror = mirrorOn(fake);

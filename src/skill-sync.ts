@@ -13,7 +13,7 @@
 // 2026-10-15 it put 26 cards in the board's Review column at once. Now the
 // Foreman notices a stale copy and brings it current in the commit before the
 // next approved issue's session, so the sync rides that issue's own PR and a
-// rollout spreads at the pace work does (Ray, 2026-10-15).
+// rollout spreads at the pace work does (owner, 2026-10-15).
 //
 // WHY THE CODE COPIES AND NO SESSION DOES. The builder must not rewrite the
 // rules it is judged against. A byte-for-byte copy from a committed golden is
@@ -507,7 +507,7 @@ export class SkillSync {
           writeFileSync(dest, bytes);
         }
         // Forced: these are the sync's own files, and a repo that ignores `.claude/`
-        // (jerky_labor_forecaster) otherwise refuses them and the sync fails open,
+        // (labor_forecaster) otherwise refuses them and the sync fails open,
         // leaving the session on a stale or missing skill (EM, 2026-11-04).
         await git(["add", "--force", "--", ...[...want.keys()].map((p) => `${base}/${p}`)], cwd);
       }
@@ -537,7 +537,7 @@ export class SkillSync {
       // Leave the index as it was found, so the session does not inherit a half-staged sync.
       try { await git(["reset", "--quiet"], cwd); } catch { /* the session's Phase 0 reports a broken checkout */ }
       // And the working tree: un-staging alone left the written copies as uncommitted changes,
-      // so every later sync skipped on "the checkout has uncommitted changes" (jerky_labor_forecaster,
+      // so every later sync skipped on "the checkout has uncommitted changes" (labor_forecaster,
       // 2026-11-04 → 11-05: the ship skill never arrived).
       for (const [rel, bytes] of original) {
         try {

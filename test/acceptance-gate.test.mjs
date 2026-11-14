@@ -1,5 +1,5 @@
 // An approved issue with no committed acceptance script (or a real No-Script reason) is held, not built.
-// EM#99 / jerky_service#200. Verdicts are checked against the shared corpus, vendored from the EM repo.
+// EM#99 / orders_service#200. Verdicts are checked against the shared corpus, vendored from the EM repo.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -113,7 +113,7 @@ function reset(body, labels = ["approved"]) {
   setState({
     board: [{ number: 7, title: "seven", labels: labels.map((name) => ({ name })) }],
     body, comments: [], fileOnMain: false,
-    labeled: [{ label: { name: "approved" }, actor: { login: "ray" } }],
+    labeled: [{ label: { name: "approved" }, actor: { login: "alice" } }],
   });
 }
 
@@ -135,7 +135,7 @@ test("an issue with no acceptance is held with one comment; fixing the body make
   assert.equal(posted().length, 1, "one comment across cycles");
   assert.match(posted()[0].body, /<!-- foreman:readiness-hold acceptance:\S+ -->/);
   assert.match(posted()[0].body, /## Acceptance/);
-  assert.match(posted()[0].body, /@ray/);
+  assert.match(posted()[0].body, /@alice/);
   await eligible(await connector("a-restarted"));
   assert.equal(posted().length, 1, "none after a restart");
   setState({ body: GOOD });
@@ -198,7 +198,7 @@ async function cycleWaiting(restart) {
 }
 
 test("R1: a checkbox-only approved issue, nothing else buildable, is emitted as waiting with its acceptance reason", async () => {
-  reset(caseBody("H2-jerky_service-200-checkbox-list-heading-with-suffix"));
+  reset(caseBody("H2-orders_service-200-checkbox-list-heading-with-suffix"));
   const seen = await cycleWaiting("w1");
   const items = seen.at(-1).items;
   assert.equal(items.length, 1);
@@ -209,7 +209,7 @@ test("R1: a checkbox-only approved issue, nothing else buildable, is emitted as 
 });
 
 test("R2: every held cycle and a restart emit it, one comment throughout; fixing the body clears it", async () => {
-  reset(caseBody("H2-jerky_service-200-checkbox-list-heading-with-suffix"));
+  reset(caseBody("H2-orders_service-200-checkbox-list-heading-with-suffix"));
   for (const r of ["w2a", "w2b", "w2c-restarted"]) {
     const seen = await cycleWaiting(r);
     assert.deepEqual(seen.at(-1).items.map((i) => i.item.issueNumber), [7], r);

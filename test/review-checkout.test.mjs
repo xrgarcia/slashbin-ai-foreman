@@ -26,7 +26,7 @@ const quietLogger = { info() {}, warn() {}, debug() {}, error() {} };
 function fixture() {
   const root = mkTmp("foreman-checkout-test-");
   const config = { reviewCheckoutRoot: root };
-  const repoConfig = { name: "jerky_shipping", githubRepo: "xrgarcia/jerky_shipping" };
+  const repoConfig = { name: "shipping_app", githubRepo: "acme/shipping_app" };
   const path = checkoutPathFor(config, repoConfig);
   mkdirSync(join(path, "node_modules"), { recursive: true });
   writeFileSync(join(path, "README.md"), "checkout\n");
@@ -36,9 +36,9 @@ function fixture() {
 test("the checkout path is per repo, under the configured root", () => {
   const path = checkoutPathFor(
     { reviewCheckoutRoot: "/srv/checkouts" },
-    { name: "jerky_shipping", githubRepo: "xrgarcia/jerky_shipping" },
+    { name: "shipping_app", githubRepo: "acme/shipping_app" },
   );
-  assert.equal(path, "/srv/checkouts/jerky_shipping");
+  assert.equal(path, "/srv/checkouts/shipping_app");
 });
 
 test("queue empty — this was the last one, so the checkout is released", () => {

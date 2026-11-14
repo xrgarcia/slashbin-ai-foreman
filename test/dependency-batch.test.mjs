@@ -246,11 +246,11 @@ test("the landing branch name is taken from the caller, never hardcoded", () => 
 //
 // The authorization is SCOPED: slashbin.io repos only, opt-in per repo. The same
 // afternoon it shipped fleet-wide by mistake and began building customer
-// (jerky.com) dependency batches the owner had not authorized. Both directions
+// (a customer) dependency batches the owner had not authorized. Both directions
 // of the label are pinned here.
 
 test("a pre-approved repo files its batch carrying the trigger label", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", ["approved", "deliver-to-prod"]);
+  const args = dependencyBatchIssueCreateArgs("acme/repo", "t", "b", ["approved", "deliver-to-prod"]);
   const i = args.indexOf("--label");
   assert.ok(i >= 0, "no --label on the create call — the batch would stall unapproved");
   assert.equal(args[i + 1], "approved");
@@ -258,13 +258,13 @@ test("a pre-approved repo files its batch carrying the trigger label", () => {
 });
 
 test("a repo that is NOT pre-approved files its batch with no label at all", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", []);
+  const args = dependencyBatchIssueCreateArgs("acme/repo", "t", "b", []);
   assert.ok(!args.includes("--label"), "a label here flies work the owner never authorized");
   assert.ok(!args.includes("approved"));
 });
 
 test("the label comes from config, never hardcoded", () => {
-  const args = dependencyBatchIssueCreateArgs("xrgarcia/repo", "t", "b", ["go"]);
+  const args = dependencyBatchIssueCreateArgs("acme/repo", "t", "b", ["go"]);
   assert.equal(args[args.indexOf("--label") + 1], "go");
   assert.ok(!args.includes("approved"));
 });

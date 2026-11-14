@@ -1,6 +1,6 @@
 // An open feature PR that names no approved issue is reviewed, not skipped.
 //
-// jerky_service #99, 2026-10-10: a person's PR on the Foreman branch, linked to nothing
+// orders_service #99, 2026-10-10: a person's PR on the Foreman branch, linked to nothing
 // ("Follow-up to #98", a merged PR). The review stage only took PRs with an
 // issue in review or one it could adopt, so it never touched #99; the implement
 // stage queues every approved issue behind any open feature PR, so #102 sat

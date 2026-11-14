@@ -174,8 +174,8 @@ test("a refusal spends no attempt and waits for the stated reset, else the upstr
 });
 
 test("the handoff give-up comment names the owner, the kind and the last answer", () => {
-  const c = handoffGiveUpComment("ray", { kind: "release-gate", reason: "r", attempts: 3, since: "s", lastCallAt: "l", detail: "d" });
-  assert.match(c, /@ray/);
+  const c = handoffGiveUpComment("alice", { kind: "release-gate", reason: "r", attempts: 3, since: "s", lastCallAt: "l", detail: "d" });
+  assert.match(c, /@alice/);
   assert.match(c, /`release-gate`/);
   assert.match(c, /acted 3 times/);
 });
@@ -222,7 +222,7 @@ test("an invoked entry recorded before recalls existed is a standing handoff: a 
   assert.equal(e.recalls, 1, "a second handoff on a legacy entry is its first recall");
 });
 
-// A grant landing at the gate re-calls the EM (jerky_ops#201, 2026-11-05): the reason
+// A grant landing at the gate re-calls the EM (ops_portal#201, 2026-11-05): the reason
 // carries the labels, so an answered gate with a new label is a new question.
 test("releaseGateReason: a new label changes the reason, so an answered release gate is called again", () => {
   const before = releaseGateReason(["pr approved", "approved"]);

@@ -83,7 +83,7 @@ export const COMPARE_FILE_CAP = 300;
 /**
  * A path whose change has no production effect: agent tooling under `.claude/`
  * (the skill syncs, chore commits). It rides the next real release and never
- * makes `develop` worth promoting on its own (jerky_shipping, 2026-10-15:
+ * makes `develop` worth promoting on its own (shipping_app, 2026-10-15:
  * develop ahead by two SKILL.md files, WARNed as a stalled promotion hourly).
  */
 export function isNonProductionPath(path: string): boolean {
@@ -199,8 +199,8 @@ export async function createSyncPR(
     // Immediately approve + merge, both as the Tech Lead. The merge is what
     // triggers the dev deploy, and Railway holds any deploy merged by a GitHub
     // account with no linked workspace member for manual approval. The Foreman
-    // coordinates and has no Railway account (Ray, 2026-10-10); merging as the
-    // Foreman stalled every post-promotion dev deploy (jerky_skuvault_service#410).
+    // coordinates and has no Railway account (owner, 2026-10-10); merging as the
+    // Foreman stalled every post-promotion dev deploy (inventory_service#410).
     try {
       await ghAsTechLeadAsync([
         "pr", "review", prNumber,
@@ -246,7 +246,7 @@ export async function createSyncPR(
  *
  * That is not cosmetic. `develop` stays behind `main`, which makes the next
  * promotion PR `BEHIND`, which branch protection refuses to merge. Observed on
- * `Slashbin-console#779`: open 2h48m across ~140 no-op cycles, blocking the
+ * `console#779`: open 2h48m across ~140 no-op cycles, blocking the
  * promotion of #782 until it was merged by hand. The same "created and
  * auto-merged" line had already been logged for #438, #559 and #783.
  *

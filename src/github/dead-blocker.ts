@@ -1,10 +1,10 @@
 // A build that ends with no PR must say so to whoever waits on it.
 //
 // Origin: 2026-10-26. Two `approved` dependency-landing chores ended with "No PR
-// produced" / "No code change to land" — Slashbin-Ingest-Gateway#222 (all 11
-// PRs fail npm ci) and jerky_skuvault_service#478 (all 16 already on features).
+// produced" / "No code change to land" — ingest-gateway#222 (all 11
+// PRs fail npm ci) and inventory_service#478 (all 16 already on features).
 // Each stayed open and `approved`, so every issue GitHub records as blocked by
-// it (gateway#227, an S1 security fix; skuvault#489) was never picked up, and
+// it (gateway#227, an S1 security fix; inventory#489) was never picked up, and
 // nothing re-evaluated them: ~13h of S1 stall.
 //
 // Two outcomes, two exits:

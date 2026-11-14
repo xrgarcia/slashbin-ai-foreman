@@ -1,6 +1,6 @@
 // A declared skip must survive an unrelated open PR on the feature branch.
 //
-// Slashbin-console#841, 2026-09-02. The implement agent refused to commit a
+// console#841, 2026-09-02. The implement agent refused to commit a
 // chore onto `features` because an unrelated billing PR (#843) was already open
 // there and its skill forbids bundling the two. It emitted
 // `FOREMAN_RESULT: skipped reason="..."` exactly as instructed. But
@@ -67,7 +67,7 @@ test("the fuzzy heuristic still exists, downstream", () => {
 
 // --- A skip on one issue must not take the batch with it -------------------
 //
-// Found by second-pass.mjs on Slashbin-Ingest-Gateway#138, 2026-09-28, while
+// Found by second-pass.mjs on ingest-gateway#138, 2026-09-28, while
 // reviewing a skills:publish commit. The trailer had no issue scope, so
 // `skippedIssues: issueNumbers ?? []` marked every issue in the batch skipped
 // whenever the agent declared one. orchestrator.ts then writes a skip record per
@@ -117,7 +117,7 @@ test("the agent is told to include the issue scope", () => {
 
 // --- The trailer's fields must parse in either order -----------------------
 //
-// second-pass.mjs on Slashbin-Ingest-Gateway#138, 2026-09-28. The parse was
+// second-pass.mjs on ingest-gateway#138, 2026-09-28. The parse was
 // `skipped(?:\s+reason="([^"]*)")?`, which binds `reason` ONLY when it directly
 // follows `skipped`. Documenting the scoped form as
 // `skipped issue=123 reason="..."` therefore dropped every reason to the literal
@@ -172,7 +172,7 @@ test("no trailer at all is not a skip", async () => {
 // slashbin-ai-foreman#49: an agent that NAMED the trailer in prose, while
 // deliberately not emitting it, was booked as a batch-wide skip — twice — and
 // three approved issues backed off for 1h, then 2h. The text is from the
-// 2026-10-01T19:34:55Z Slashbin-console implement log.
+// 2026-10-01T19:34:55Z console implement log.
 test("prose that names the trailer is not a declaration", async () => {
   const { detectDeclaredSkip } = await import("../dist/session/protocol.js");
   const prose =

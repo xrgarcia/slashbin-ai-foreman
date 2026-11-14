@@ -115,7 +115,7 @@ export interface WorkSourceAdapter {
   /**
    * Whether each of `issueNumbers` is open or how it closed, read live, not
    * from the open-issue view a snapshot is built from: that view can carry a
-   * closed issue with its old labels (cmneb_data_receiver#218, 2026-10-15).
+   * closed issue with its old labels (partner_receiver#218, 2026-10-15).
    * A number that cannot be read is left out. Optional. Never throws.
    */
   states?(repoConfig: RepoConfig, issueNumbers: readonly number[], logger: Logger): Promise<Map<number, ItemState>>;
@@ -343,7 +343,7 @@ export interface ReleaseEvent {
   readonly issues: ReadonlyArray<WorkItem>;
   readonly productionBranch: string;
   /** The release stage owns this PR (`release pending`): its items are `releasing`, never
-   *  `awaitingRelease`, so an `open` must not move them back off the SRE (jerky_service
+   *  `awaitingRelease`, so an `open` must not move them back off the SRE (orders_service
    *  PR #146, 2026-10-14). */
   readonly owned?: boolean;
   /** `waiting`: merged and deploy-verified, the rest of the prod check waits for this time (`waitUntil`, UTC text) for `waitReason`. */

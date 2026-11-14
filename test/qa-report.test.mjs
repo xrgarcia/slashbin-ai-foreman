@@ -13,7 +13,7 @@ await startAgentPlugins();
 
 const logs = [];
 const logger = { info: (m) => logs.push(m), warn: (m) => logs.push(m), error() {}, debug() {}, child() { return this; } };
-const CONSOLE = "xrgarcia/Slashbin-console";
+const CONSOLE = "acme/console";
 const manifest = {
   verdict: "PASS", reason: "8 shots across 2 page(s) pass review",
   pages: [{ route: "/orders", why: "renders orders-table.tsx, edited here" }, { route: "/", why: "shared layout" }],
@@ -34,7 +34,7 @@ function deps(over = {}) {
 test("QA applies only to a configured repo on an install with a QA checkout", async () => {
   const agent = { qaPath: "/qa", qaRepos: [CONSOLE] };
   assert.equal(await qaApplies({ githubRepo: CONSOLE }, agent), true);
-  assert.equal(await qaApplies({ githubRepo: "xrgarcia/jerky_ops" }, agent), false, "a non-Console repo does not trigger it");
+  assert.equal(await qaApplies({ githubRepo: "acme/ops_portal" }, agent), false, "a non-Console repo does not trigger it");
   assert.equal(await qaApplies({ githubRepo: CONSOLE }, { qaRepos: [CONSOLE] }), false, "no qaPath: no QA");
 });
 

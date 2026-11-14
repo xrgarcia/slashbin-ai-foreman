@@ -1,5 +1,5 @@
 // An approved issue waits for its GitHub "blocked by" issues to merge
-// (jerky_service #108 → #109, 2026-10-12): order is a structured link, never prose.
+// (orders_service #108 → #109, 2026-10-12): order is a structured link, never prose.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { blockerRef, unmetBlockers } from "../dist/github/blockers.js";

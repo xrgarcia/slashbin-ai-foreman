@@ -1,6 +1,6 @@
 // Every stop moves the card to Blocked with a reason the board can show:
 // the first failure, a Claude usage limit, a GitHub rate limit. (2026-10-05:
-// Ray — "when the Foreman is up and it runs into an error, or Claude
+// The owner — "when the Foreman is up and it runs into an error, or Claude
 // subscription maxes out … it should move it to blocked.")
 import { test } from "node:test";
 import assert from "node:assert/strict";

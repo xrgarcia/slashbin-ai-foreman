@@ -24,7 +24,7 @@ export function titleCorrects(title: string): number[] {
 
 /**
  * The issues of `githubRepo` (`owner/name`) that `body` names, in order, once each: `#N`, `name#N` and
- * `owner/name#N` (Slashbin-console#1476 named its parent as `Slashbin-console#1438 (parent: …)`, foreman#131).
+ * `owner/name#N` (console#1476 named its parent as `console#1438 (parent: …)`, foreman#131).
  * Another repo's reference is not a mention of this one's issue. Pure.
  */
 export function bodyMentions(body: string, githubRepo: string): number[] {
@@ -85,7 +85,7 @@ export async function correctorsOf(config: RepoConfig, holder: number, logger: L
   const blockers = (await blockersOf(config.githubRepo, holder, config.repoPath)).filter((b) => own(b.repository_url)).map((b) => b.number);
   const subs = (JSON.parse(await ghAsync(["api", `repos/${config.githubRepo}/issues/${holder}/sub_issues`], config.repoPath) || "[]") as { number: number; repository_url?: string }[])
     .filter((i) => own(i.repository_url)).map((i) => i.number);
-  // Every state: the corrective that merged is usually closed by now (jerky_security_testing#436 ends "follow-up to #407").
+  // Every state: the corrective that merged is usually closed by now (security_tests#436 ends "follow-up to #407").
   const found = JSON.parse(await ghAsync(["issue", "list", "--repo", config.githubRepo, "--state", "all", "--search", `"follow-up to #${holder}" in:title`, "--json", "number,title", "--limit", "100"], config.repoPath) || "[]") as { number: number; title: string }[];
   const titled = found.filter((i) => titleCorrects(i.title).includes(holder)).map((i) => i.number);
   return [...new Set([...blockers, ...subs, ...titled])].filter((m) => m !== holder);

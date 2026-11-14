@@ -1,6 +1,6 @@
 // A PR that is not converging under review goes to the EM for a scope ruling
-// instead of being revised again. slashbin_mcp_services PR 245 (2026-10-09)
-// spiralled silently; jerky_service PR #125 (2026-10-13) went 13 rounds with an
+// instead of being revised again. mcp_services PR 245 (2026-10-09)
+// spiralled silently; orders_service PR #125 (2026-10-13) went 13 rounds with an
 // alert that only logged, because the spec question under it reached no one who
 // owned the spec.
 

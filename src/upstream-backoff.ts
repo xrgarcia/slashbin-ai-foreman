@@ -16,7 +16,7 @@ import { backoffDelay, backoffSettings } from "./backoff.js";
  *
  * 2026-10-01: 4,526 `RATE LIMIT EXHAUSTED` lines and 393 Claude session-limit
  * refusals in under four hours, every refusal charged to a per-repo retry
- * counter. Slashbin-io-docs PR #411 exhausted its revision retries on refusals
+ * counter. docs-site PR #411 exhausted its revision retries on refusals
  * alone and deadlocked that repo until a manual restart.
  *
  * This module is the ONLY owner of that state — one entry per upstream, shared

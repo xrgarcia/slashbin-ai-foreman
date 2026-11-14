@@ -61,7 +61,7 @@ const { trust } = new ForemanRuntime();
 const logger = createLogger({ format: "text", level: "error" });
 
 const SLASHBIN_LABELS = ["approved", "pr under review", "pr pending actions", "pr approved", "ready for prod release", "ready to close"];
-const SLASHBIN_ID = /slashbin-engineering-manager|xrgarcia\//;
+const SLASHBIN_ID = /slashbin-engineering-manager|owner-login\//;
 const literalLabel = new RegExp(`"(${SLASHBIN_LABELS.join("|")})"|--label (${SLASHBIN_LABELS.map((l) => (l.includes(" ") ? `"${l}"` : l)).join("|")})\\b`);
 
 let failed = 0;
@@ -148,7 +148,7 @@ try {
 
   const e = await run("implement", { skillPath: "builtin:" });
   // Strip absolute filesystem paths first: argv carries the install path of the
-  // Foreman's own overrides file, and `/home/xrgarcia/…` matched `xrgarcia/`
+  // Foreman's own overrides file, and `/home/user/…` matched `acme/`
   // while naming no repo (caught on the first green build of #56).
   // Also strip paths that follow a quote or backslash-escaped quote (the settings JSON now quotes the hook path).
   const promptText = e.prompt.replace(/(^|[\s"'`=\\])\/[^\s"'`\\]+/g, "$1");

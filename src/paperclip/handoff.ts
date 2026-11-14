@@ -3,7 +3,7 @@
 // links, and what "done" looks like, so the holder knows when it can stop.
 //
 // Paperclip wakes the agent a card is assigned to, and before this the card
-// told it only the stage. SLA-1550 (Slashbin-console#1283, PR #1291) reached
+// told it only the stage. SLA-1550 (console#1283, PR #1291) reached
 // the EM at `pendingVerification` with "Dev verification passed" and a bare
 // "approved"; the EM read it as a status ping, answered "nothing needed until
 // the next prod release", and the card sat while the release waited on the EM's

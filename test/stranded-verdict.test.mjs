@@ -1,6 +1,6 @@
 // A review that posts CHANGES_REQUESTED and then dies must still reach revise.
 //
-// slashbin_mcp_services#240, 2026-10-09. The Tech Lead submitted CHANGES_REQUESTED
+// mcp_services#240, 2026-10-09. The Tech Lead submitted CHANGES_REQUESTED
 // at 05:43:45Z, then its next `gh api` call hit a TLS handshake timeout and the
 // run failed before moving #235 to `pr pending actions`. The verdict was current,
 // so findPRsNeedingReview skipped the PR; the label was never applied, so the

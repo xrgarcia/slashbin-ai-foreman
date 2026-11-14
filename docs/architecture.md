@@ -10,7 +10,6 @@
 - [Where state lives](#where-state-lives)
 - [The runtime](#the-runtime)
 - [Branches](#branches)
-- [Config profiles](#config-profiles)
 - [Source layout](#source-layout)
 - [Programmatic usage](#programmatic-usage)
 
@@ -206,20 +205,12 @@ shared `featureBranch`, kept only so PRs open at the cutover drain). Revise, rec
 and branch deletion all go through it, so a head with a human's name is never pushed to,
 revised or deleted. There is no shared build branch.
 
-## Config profiles
-
-A profile (`src/profiles/`) is a named set of config defaults, selected with
-`"profile": "<name>"`. Each key resolves as the schema's neutral default, then the
-profile, then `.ai-agent.json`, then the environment. An operator's own values (logins,
-repo names, MCP tool lists, header names) live in a profile and nowhere else in `src/`.
-The only shipped profile is `slashbin`. See [config-guide.md](config-guide.md#profiles).
-
 ## Source layout
 
 ```
 src/
 ├── cli.ts             # CLI entry point; builds the ForemanRuntime, starts plugins
-├── config.ts          # Configuration loading + Zod validation (profile, file, env)
+├── config.ts          # Configuration loading + Zod validation (file, env)
 ├── logger.ts          # Structured logging (JSON/text)
 ├── runtime.ts         # ForemanRuntime: the stores and PhaseMemory, one per daemon
 ├── phase-memory.ts    # What the phases remember between passes (in memory only)
@@ -229,7 +220,6 @@ src/
 ├── plugins/           # contract.ts, registry.ts, index.ts (composition root), one file per plugin,
 │                      #   agent-cli.ts (the runner the agent plugins share)
 ├── code-host.ts       # The CodeHost interface and the PR, issue and branch types it speaks in
-├── profiles/          # Named config defaults (`"profile"`); Slashbin's values live only here
 ├── config-schema/     # The github and paperclip config blocks (core: config.ts reads them)
 ├── record-store.ts    # Source-neutral record helpers and the in-memory store
 ├── issue-records.ts   # Issue, PR and repo records, read and written through the work source

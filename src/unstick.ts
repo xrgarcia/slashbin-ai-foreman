@@ -12,7 +12,7 @@
 // `unrelated-error`, `epic-ready-to-close`) live in the repo's own record (`RepoRecord.unstick`):
 //  - DERIVED kinds are read off persisted state every pass (`derivedCandidates`):
 //    nothing relies on an event having fired, so a hold whose event came and
-//    went before a restart (cmneb_hr#38, 2026-10-20) is still found. Their
+//    went before a restart (hr_app#38, 2026-10-20) is still found. Their
 //    entries live while the condition does.
 //  - EVENT kinds have no persisted condition to read (revision and ruling
 //    stops are in memory), so the `blocked` / `escalated` event carries a

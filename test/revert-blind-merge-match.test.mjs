@@ -1,6 +1,6 @@
 // A commit a PR reverted delivers nothing, and neither does the revert.
 //
-// Slashbin-console PR #1232, 2026-10-03: #1164's commit landed on `features` by
+// console PR #1232, 2026-10-03: #1164's commit landed on `features` by
 // accident and was reverted by hand (`revert: drop #1164 change … (#1164)`, no
 // "This reverts commit" line). Net zero for #1164 — but the revert's own
 // headline named it, so review labelled #1164 `pr approved` and, on 2026-10-09,
@@ -19,14 +19,14 @@ import { loadConfig } from "../dist/config.js";
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return logger; } };
 const c = (oid, messageHeadline, messageBody = "") => ({ oid, messageHeadline, messageBody });
 
-// The three commits of Slashbin-console PR #1232, as gh returned them.
+// The three commits of console PR #1232, as gh returned them.
 const pr1232 = [
   c("2fbc678517aa", "fix: scope template-inheritance handlers to the caller's org (#1163)"),
   c("02d715b090aa", "fix: drop undeclared tool calls in chat() and name them in the reply …", "…(#1164)"),
   c("7a5a40ed6daa", "revert: drop #1164 change pushed onto #1163's open pr (#1164)", "Reverted so #1232 carries #1163 only."),
 ];
 
-test("Slashbin-console #1232: the hand-reverted #1164 is not delivered; #1163 is", () => {
+test("console #1232: the hand-reverted #1164 is not delivered; #1163 is", () => {
   assert.deepEqual(extractImplementedIssues({ title: "fix: scope … (#1163)", body: "Related to #1163", commits: pr1232 }), [1163]);
   assert.deepEqual(extractImplementedIssues({ title: "fix: scope … (#1163)", body: "Related to #1163", commits: pr1232, strict: true }), [1163]);
 });
@@ -90,7 +90,7 @@ test("findIssuesMergedToBase does not read the reverted #1164 as merged", async 
   assert.deepEqual((await findIssuesMergedToBase(cfg, [1163, 1164], logger)).map((m) => m.issueNumber), [1163]);
 });
 
-test("jerky_service PR #112: a prose mention of the next issue is not a reference", () => {
+test("orders_service PR #112: a prose mention of the next issue is not a reference", () => {
   const body = "Related to #108\n\n## Notes\n- Boot: this check runs before #108's code.\n- #109 depends on this and is next.";
   assert.deepEqual(extractImplementedIssues({ title: "feat: escalation rules + CS Manager confirm/reject (#108)", body }), [108]);
 });

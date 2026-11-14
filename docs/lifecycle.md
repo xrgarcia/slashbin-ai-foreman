@@ -220,7 +220,7 @@ column its GitHub labels call for, and notes which check released it.
 closed goes to done (completed) or cancelled (not planned), and each pass the Foreman drops its own
 skip, hold, failure and unstick entries for closed issues (`src/closed-holds.ts`). The mirror also reads
 the issue behind every card that is not closed and has no open issue, so a close missed while Paperclip
-was down is reconciled on the next snapshot (jerky_ops#138, 2026-10-26). A Blocked card whose hold the
+was down is reconciled on the next snapshot (ops_portal#138, 2026-10-26). A Blocked card whose hold the
 Foreman's state no longer records is released to the column its labels call for.
 
 **Which block is it?** The card's unblock note and the Foreman's last comment on the issue or PR
@@ -245,7 +245,7 @@ wait on an open PR) and GitHub records open issues as blocked by the skipped iss
 once (`deadBlockerTold` in the skip's state). Remove the `blocked` label on a dependent to release it.
 The opposite outcome, the work **already on the base branch**, ends `FOREMAN_RESULT: landed issue=N`:
 the Foreman closes the issue as completed with the evidence, which releases its dependents
-(`src/github/dead-blocker.ts`; gateway#222 / skuvault#478, 2026-10-26).
+(`src/github/dead-blocker.ts`; gateway#222 / inventory#478, 2026-10-26).
 
 **An escalated skip** stops reading the condition and the waited-on reference: only a change to the
 issue counts, and who made it matters. A person's edit, comment or label releases it and resets the

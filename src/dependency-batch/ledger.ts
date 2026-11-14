@@ -3,7 +3,7 @@
 // The sweep used to decide what to file from the open-issue list alone, so a
 // batch that finished with "nothing to land" was invisible the moment its issue
 // closed, and the Dependabot PR that caused it was filed again every poll
-// (jerky-mcp-services #690-#1081, 397 sessions, 2026-11-05). The ledger is the
+// (mcp-services #690-#1081, 397 sessions, 2026-11-05). The ledger is the
 // object that owns a batch's outcome.
 //
 // Durable on purpose: no in-memory state. A restart must not reopen the loop

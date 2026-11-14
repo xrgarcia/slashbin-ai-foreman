@@ -28,7 +28,7 @@ export async function verifyPRExists(
  * "Closes #N", "Fixes #N", "Resolves #N", "Refs #N", "See #N"). Used by the
  * orchestrator to know which subset of `actionableIssues` the implementation
  * skill actually addressed — under the canonical one-issue-per-invocation
- * skill (jerky_data_receiver#43 and friends), the skill picks one issue from a
+ * skill (events_receiver#43 and friends), the skill picks one issue from a
  * batch but the orchestrator must NOT label the unpicked issues as
  * `pr under review`, or they get stuck waiting forever for revision activity.
  *

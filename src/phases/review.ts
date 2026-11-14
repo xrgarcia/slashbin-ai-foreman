@@ -64,7 +64,7 @@ async function reviewPass(
   const repoName = repoConfig.name;
   const reviewLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "review" });
 
-  // The reviewer is a plugin (EM#1150): the Tech Lead, on Codex (Ray, 2026-10-10).
+  // The reviewer is a plugin (EM#1150): the Tech Lead, on Codex (owner, 2026-10-10).
   // With none enabled the PR is left for a person to review and merge; once it
   // merges, reconcile advances its issue (settleHumanMerge). When the reviewer
   // could not take a PR the repo waits (backoff.agentUnavailable).

@@ -2,7 +2,7 @@
 // observer can show a promoted item as waiting on its release and then as in
 // production. Promotion used to be a note only: nothing ever said when the
 // release PR merged, so a finished item read as "in progress" until someone
-// closed the issue (2026-10-02, Slashbin-console#1185 behind release PR #1206).
+// closed the issue (2026-10-02, console#1185 behind release PR #1206).
 //
 // The open PR comes from the fleet state, so a cycle with nothing changed costs
 // no GitHub call. The one live read is the PR's final state, taken once, when

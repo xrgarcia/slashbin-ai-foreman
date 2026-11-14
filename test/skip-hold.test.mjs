@@ -1,6 +1,6 @@
 // A skipped issue is held in Blocked, not retried on a timer.
 //
-// jerky_service#127, 2026-10-14. The session skipped it about ten times in one
+// orders_service#127, 2026-10-14. The session skipped it about ten times in one
 // day for the same reason — refund_policy.md sat on another repo's unmerged PR —
 // because the skip back-off only hid it for a window and every expiry bought a
 // full session to rediscover the same answer. A held issue runs again only when
@@ -19,7 +19,7 @@ import { UNBLOCK_CHECKS, passingCheck } from "../dist/unblock.js";
 import { changedSince, escalatedReason, heldReason, holdStatus, isEmUnstickComment, parseWaitingOn, skipGate } from "../dist/github/skip-hold.js";
 import { orchestratorSource } from "./source-text.mjs";
 
-const REPO = "xrgarcia/jerky_service";
+const REPO = "acme/orders_service";
 const SKIPPED = "2026-10-14T13:12:40Z";
 const entry = (waitingOn) => ({ lastSkippedAt: SKIPPED, reason: "refund_policy.md not on main", skipCount: 9, ...(waitingOn ? { waitingOn } : {}) });
 
@@ -35,8 +35,8 @@ function reads({ ref = { open: true, isPr: true, merged: false }, activity = [],
 }
 
 test("trailer: waiting_on is read as a structured field, in any order, quoted or bare", () => {
-  const a = detectDeclaredSkip('FOREMAN_RESULT: skipped issue=127 waiting_on="xrgarcia/jerky_com_marketing#166" reason="file not merged"');
-  assert.deepEqual([a.issue, a.waitingOn, a.reason], [127, "xrgarcia/jerky_com_marketing#166", "file not merged"]);
+  const a = detectDeclaredSkip('FOREMAN_RESULT: skipped issue=127 waiting_on="acme/marketing_site#166" reason="file not merged"');
+  assert.deepEqual([a.issue, a.waitingOn, a.reason], [127, "acme/marketing_site#166", "file not merged"]);
   const b = detectDeclaredSkip('FOREMAN_RESULT: skipped reason="x" issue=5 waiting_on=#4');
   assert.equal(b.waitingOn, "#4");
 });
@@ -51,7 +51,7 @@ test("trailer: never parsed out of the prose reason", () => {
 });
 
 test("parseWaitingOn: owner/repo#N, or #N in this repo", () => {
-  assert.deepEqual(parseWaitingOn("xrgarcia/jerky_com_marketing#166", REPO), { repo: "xrgarcia/jerky_com_marketing", number: 166 });
+  assert.deepEqual(parseWaitingOn("acme/marketing_site#166", REPO), { repo: "acme/marketing_site", number: 166 });
   assert.deepEqual(parseWaitingOn("#12", REPO), { repo: REPO, number: 12 });
   assert.equal(parseWaitingOn("166", REPO), undefined);
   assert.equal(parseWaitingOn(undefined, REPO), undefined);
@@ -59,7 +59,7 @@ test("parseWaitingOn: owner/repo#N, or #N in this repo", () => {
 
 test("held: nothing moved keeps the hold, with no session", async () => {
   const r = reads();
-  const s = await holdStatus(entry("xrgarcia/jerky_com_marketing#166"), REPO, r);
+  const s = await holdStatus(entry("acme/marketing_site#166"), REPO, r);
   assert.equal(s.held, true);
   assert.equal(s.refIsPr, true);
   assert.deepEqual(r.calls, { ref: 1, activity: 1 }, "two cheap reads, nothing else");
@@ -67,7 +67,7 @@ test("held: nothing moved keeps the hold, with no session", async () => {
 
 test("release: the waited-on PR merged or closed", async () => {
   for (const ref of [{ open: false, isPr: true, merged: true }, { open: false, isPr: true, merged: false }]) {
-    const s = await holdStatus(entry("xrgarcia/jerky_com_marketing#166"), REPO, reads({ ref }));
+    const s = await holdStatus(entry("acme/marketing_site#166"), REPO, reads({ ref }));
     assert.deepEqual([s.held, s.releasedBy], [false, "waitedOnDone"]);
   }
 });
@@ -78,14 +78,14 @@ test("release: the waited-on issue closed", async () => {
 });
 
 test("release: someone other than the Foreman changed the issue after the skip", async () => {
-  const s = await holdStatus(entry(), REPO, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "xrgarcia" }] }));
+  const s = await holdStatus(entry(), REPO, reads({ activity: [{ at: "2026-10-14T15:00:00Z", login: "owner-login" }] }));
   assert.deepEqual([s.held, s.releasedBy], [false, "issueChanged"]);
 });
 
 test("held: the Foreman's own writes, and anything before the skip, never release it", async () => {
   const activity = [
     { at: "2026-10-14T15:00:00Z", login: "slashbin-foreman" },
-    { at: "2026-10-14T13:12:35Z", login: "xrgarcia" },
+    { at: "2026-10-14T13:12:35Z", login: "owner-login" },
   ];
   assert.equal((await holdStatus(entry(), REPO, reads({ activity }))).held, true);
   assert.equal(changedSince(activity, SKIPPED, "Slashbin-Foreman"), false, "the login match ignores case");
@@ -99,9 +99,9 @@ test("held: a read that fails keeps the hold — unknown never releases", async 
 });
 
 test("the blocked reason says what releases it", () => {
-  const ref = parseWaitingOn("xrgarcia/jerky_com_marketing#166", REPO);
+  const ref = parseWaitingOn("acme/marketing_site#166", REPO);
   assert.equal(heldReason("refund_policy.md not on main\nmore", REPO, ref, true),
-    "refund_policy.md not on main — held until jerky_com_marketing#166 merges or this issue changes");
+    "refund_policy.md not on main — held until marketing_site#166 merges or this issue changes");
   assert.equal(heldReason("spec unclear", REPO), "spec unclear — held until this issue changes");
   assert.match(heldReason("x", REPO, parseWaitingOn("#3", REPO), false), /held until #3 closes or this issue changes$/);
 });
@@ -145,10 +145,10 @@ test("no session while held: a held issue leaves the hand-off before any session
   assert.ok(src.indexOf("const age = now", filterAt) > filterAt);
 });
 
-// Ray, 2026-10-14: "put it in blocked and leave it there. Needs to escalate and
+// The owner, 2026-10-14: "put it in blocked and leave it there. Needs to escalate and
 // assign it to the EM after it exhausts its attempts, but leave it in blocked."
 const gate = (e, r, transient = false) => skipGate(e, REPO, 3, r, () => transient);
-const changed = { activity: [{ at: "2026-10-14T15:00:00Z", login: "xrgarcia" }] };
+const changed = { activity: [{ at: "2026-10-14T15:00:00Z", login: "owner-login" }] };
 
 test("cap: under it, a cheap release buys one session and keeps the count", async () => {
   for (const [r, transient, by] of [[reads(changed), false, "issueChanged"], [reads({ ref: { open: false, isPr: true, merged: true } }), false, "waitedOnDone"], [reads(), true, "transientCauseGone"]]) {
@@ -182,7 +182,7 @@ test("cap: an escalated issue is released only by a person changing it, and the 
   assert.equal((await gate(e, reads({ activity: new Error("timeout") }))).run, false, "unknown never releases");
 });
 
-test("migration: an entry already past the cap (jerky_service#127, skipped 8 times) is escalated", async () => {
+test("migration: an entry already past the cap (orders_service#127, skipped 8 times) is escalated", async () => {
   const g = await gate({ lastSkippedAt: SKIPPED, reason: "x", skipCount: 8 }, reads());
   assert.deepEqual([g.run, g.escalate], [false, true]);
 });
@@ -226,7 +226,7 @@ test("cap: another agent's label or edit buys one session and keeps the count", 
 });
 
 test("cap: a person's comment still releases it and resets the count, agents' comments around it or not", async () => {
-  const g = await gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }, { at, login: "xrgarcia", kind: "comment" }]));
+  const g = await gate(escalated, agentReads([{ at, login: "agent-manager", kind: "comment" }, { at, login: "owner-login", kind: "comment" }]));
   assert.deepEqual(g, { run: true, by: "issueChanged", reset: true });
 });
 
@@ -246,8 +246,8 @@ test("config: agentLogins defaults to none, from the file as a list or the env c
 });
 
 test("release: the EM's own `**EM unstick` comment never counts as the issue changing (foreman#103)", () => {
-  const em = { at: "2026-10-14T15:00:00Z", login: "xrgarcia", kind: "comment", emUnstick: true };
-  const person = { at: "2026-10-14T15:05:00Z", login: "xrgarcia", kind: "comment" };
+  const em = { at: "2026-10-14T15:00:00Z", login: "owner-login", kind: "comment", emUnstick: true };
+  const person = { at: "2026-10-14T15:05:00Z", login: "owner-login", kind: "comment" };
   assert.equal(changedSince([em], SKIPPED, "slashbin-foreman"), false);
   assert.equal(changedSince([em, person], SKIPPED, "slashbin-foreman"), true, "a person's comment still releases");
   assert.equal(isEmUnstickComment("  **EM unstick** — ruled"), true);

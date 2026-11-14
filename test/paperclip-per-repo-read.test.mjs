@@ -1,4 +1,4 @@
-// Foreman #100 (SLA-3778, xrgarcia/jerky_skuvault_service#599, 2026-11-05): after a daemon
+// Foreman #100 (SLA-3778, acme/inventory_service#599, 2026-11-05): after a daemon
 // restart the card was never placed again. The first company-wide scan read ~3,450 rows (four
 // pages); Paperclip timed out on a page, the scan threw its pages away and restarted at row 0,
 // and one failed company read stopped every repo. The plugin now reads one repo's in-play cards
@@ -17,8 +17,8 @@ const CID = "company-1";
 const FOREMAN = "agent-foreman";
 const EM = "agent-em";
 const SRE = "agent-sre";
-const REPO = "xrgarcia/jerky_skuvault_service";
-const SLOW = "xrgarcia/jerky_labor_forecaster";
+const REPO = "acme/inventory_service";
+const SLOW = "acme/labor_forecaster";
 const item = { issueNumber: 599, repo: REPO };
 
 const IN_PLAY = new Set(["backlog", "todo", "in_progress", "in_review", "blocked"]);
@@ -45,7 +45,7 @@ function board() {
       const q = u.searchParams.get("q");
       lists.push({ status, q });
       const wanted = status ? status.split(",") : null;
-      if (!wanted || wanted.some((s) => !IN_PLAY.has(s)) || q === "jerky_labor_forecaster") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      if (!wanted || wanted.some((s) => !IN_PLAY.has(s)) || q === "labor_forecaster") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
       const off = Number(u.searchParams.get("offset")), lim = Number(u.searchParams.get("limit"));
       const hit = rows.filter((r) => wanted.includes(r.status) && (!q || r.description.includes(q)));
       return ok(hit.slice(off, off + lim));
@@ -162,7 +162,7 @@ test("a reopened issue gets a fresh card; the finished one is left alone", async
   assert.equal(b.card().status, "done", "the old card stays done");
 });
 
-// Ray, 2026-11-05: the Foreman is a product; with Paperclip on, the plugin alone closes, reopens and
+// The owner, 2026-11-05: the Foreman is a product; with Paperclip on, the plugin alone closes, reopens and
 // places its cards. Nothing here plays another writer: the fake board changes only by the plugin's own writes.
 test("no other writer: a GitHub close reaches done or cancelled, and a reopen gets a new card", async () => {
   for (const [how, want] of [["completed", "done"], ["not_planned", "cancelled"]]) {

@@ -31,8 +31,8 @@ import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
  *
  * Known transient patterns:
  * - "an open PR #N" blocks the build (foreman#50) — a skip recorded against an open
- *   Foreman PR. Cleared once #N is no longer open. The most common skip in the state file: Slashbin-console #1205
- *   sat out its window 16+ minutes after #1204 merged, Slashbin-io-docs #412 33.
+ *   Foreman PR. Cleared once #N is no longer open. The most common skip in the state file: console #1205
+ *   sat out its window 16+ minutes after #1204 merged, docs-site #412 33.
  *
  * Add new transient patterns here as they are identified. Durable reasons
  * (issue-body says "investigation only", "no immediate code change") MUST
@@ -160,7 +160,7 @@ export function orphanPrBlockReason(pr: number, author: string, head: string): s
 /**
  * An open feature PR that names no issue holds the queue and no stage moves it. Under review the Tech Lead decides it,
  * so the Foreman says once that it waits. After the Tech Lead requested changes nothing will (the revise stage is
- * issue-driven; foreman#135, jerky_labor_forecaster#19 held #23 and #24 for 15 days): each queued issue is held Blocked
+ * issue-driven; foreman#135, labor_forecaster#19 held #23 and #24 for 15 days): each queued issue is held Blocked
  * with the PR, its author and the verdict, and the `needs-ruling` stuck kind hands it to the EM. Once per head and issue.
  */
 export async function surfaceOrphanPr(
@@ -256,7 +256,7 @@ async function tellDependents(rt: ForemanRuntime, issues: number[], reason: stri
       const { told, failed, open } = await codeHost().announceDeadBlocker(repoConfig, n, reason, entry?.deadBlockerTold ?? []);
       // The stopped issue is held visibly whether or not anything waits on it: with no
       // dependents it was held only by the Foreman's state, `approved` and unlabelled, and
-      // showed Blocked on the board alone (jerky_data_receiver#553, 2026-10-26).
+      // showed Blocked on the board alone (events_receiver#553, 2026-10-26).
       await codeHost().holdBlocker(repoConfig, n);
       if (open.length === 0) continue;
       for (const f of failed) repoLogger.warn(`Could not tell dependent ${f.ref} that #${n} is dead: ${f.error}`);
@@ -364,7 +364,7 @@ export async function tryBatchImplementation(
   //     AFTER the filters, so a backed-off or already-implemented issue never
   //     holds a batch slot. Cutting first and filtering after starved the
   //     queue: three backed-off issues filled the cap every cycle and the rest
-  //     of the offer was never reached (Slashbin-console#1154, 2026-10-01).
+  //     of the offer was never reached (console#1154, 2026-10-01).
   //     The session is handed exactly this batch and only it is claimed; the
   //     rest of `handOff` stays queued, untouched, for a later build.
   const offered = (await selectWork(repoConfig, config, repoLogger)).map((w) => w.issueNumber);
@@ -404,7 +404,7 @@ export async function tryBatchImplementation(
   // something moved — the issue changed after the skip, or the issue or PR its
   // trailer named in `waiting_on` closed or merged. Without it, the older timed
   // back-off: hidden for backoffDelay(skipCount, backoff.skip), then retried.
-  // jerky_service#127, 2026-10-14: ten full sessions in a day under the timed
+  // orders_service#127, 2026-10-14: ten full sessions in a day under the timed
   // back-off, each rediscovering the same unmerged PR on another repo.
   // Skipped entries are cleared when the issue is re-implemented (success path)
   // or released here.
@@ -533,17 +533,17 @@ export async function tryBatchImplementation(
     return null;
   }
 
-  // Gate 1 — an open Foreman PR: ONE issue in flight per repo is policy (Ray, 2026-10-14),
+  // Gate 1 — an open Foreman PR: ONE issue in flight per repo is policy (owner, 2026-10-14),
   // not a branch artifact: every issue builds on its own branch now, so nothing here is
   // "held" by a shared branch. Launching anyway would run a second issue beside the first
   // one's review, and spent a session per cycle to learn it, posted "picked up" then
-  // "skipped" to Discord and bounced the Paperclip card implementing → blocked (jerky_service
+  // "skipped" to Discord and bounced the Paperclip card implementing → blocked (orders_service
   // #66/#70, 2026-10-05). Hold here: the issues show as queued, say nothing to Discord, and
   // build once the PR merges or closes.
   //
   // Gate 2 — the last merge has not passed dev verification. Merging frees the repo, but the
   // issue is not done until it is verified on dev, and what the verification finds may change
-  // the next one (Ray, 2026-10-14). Independent of gate 1: it holds when no PR is open. Queued
+  // the next one (owner, 2026-10-14). Independent of gate 1: it holds when no PR is open. Queued
   // the same way; see devVerifyHolding for what frees it.
   const repoQueue = rt.memory.queuedBehind.get(repoName) ?? new Map<number, string>();
   rt.memory.queuedBehind.set(repoName, repoQueue);
@@ -561,10 +561,10 @@ export async function tryBatchImplementation(
   const verifying = devVerifyHolding(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
-  // fail without it (Slashbin-console#1340 behind #1338, 32 min, 2026-10-20).
+  // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).
   // It builds now, alone. Looked for in all of `handOff`, not the trimmed batch:
   // a rework issue outside the batch starved while the verification waited on
-  // it (Slashbin-console #1440 behind #1431, 2026-10-27).
+  // it (console #1440 behind #1431, 2026-10-27).
   // A visual QA FAIL is capped at once (the EM decides), so it no longer holds the repo; its follow-up still goes first.
   const followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   // The fix is the issue that CORRECTS the held one, by the code host's relation (blocked-by, sub-issue or the legacy
@@ -589,7 +589,7 @@ export async function tryBatchImplementation(
     }
     repoLogger.info(`Queued ${queued.map((n) => `#${n}`).join(", ")} behind ${holder} — ${featurePr ? "builds once it merges or closes" : "builds once it passes, or waits on a person"}`);
     // A PR that names no issue is outside the lifecycle: nothing here moves it,
-    // so say once that it holds the queue (jerky_service #99 held #102 for days).
+    // so say once that it holds the queue (orders_service #99 held #102 for days).
     // The review stage hands it to the Tech Lead (adoptOrphanedReviewCandidate).
     if (featurePr && featurePr.issueNumbers.length === 0) {
       // Every issue waiting behind it, not only the capped build batch (buildBatchSize): each one is stuck.

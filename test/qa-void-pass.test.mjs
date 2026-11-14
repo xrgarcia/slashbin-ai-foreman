@@ -6,7 +6,7 @@ import { applyQaGate, decideQaBeforeMerge, isVoidQaPass, reportAlreadyPosted, po
 import { MOVES } from "../dist/lifecycle.js";
 
 const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } };
-const REPO = "xrgarcia/Slashbin-console";
+const REPO = "acme/console";
 const SHA = "d".repeat(40);
 const CLIENT = ["client/src/App.tsx", "client/src/main.tsx"];
 const src = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf-8");
@@ -22,7 +22,7 @@ test("a PASS with no shot is void only when the PR changed client code", () => {
   assert.equal(isVoidQaPass(12, CLIENT), false);
 });
 
-// slashbin-ai-foreman#181: a whole-app build input renders on every page (Slashbin-console PR #1607).
+// slashbin-ai-foreman#181: a whole-app build input renders on every page (console PR #1607).
 test("a PASS with no shot is void when the PR changed a whole-app build input", () => {
   assert.equal(isVoidQaPass(0, ["vite.config.ts", "package.json"]), true);
   assert.equal(isVoidQaPass(0, ["package.json"]), true);

@@ -111,8 +111,8 @@ test("relationsOf: an unreadable link throws, never reads as 'no link'", async (
 });
 
 test("bodyMentions: #N, repo#N and owner/repo#N of this repo; another repo's reference is not a mention (foreman#131)", () => {
-  assert.deepEqual(bodyMentions("## References\n- engineering-manager #879; Slashbin-console#1438 (parent: the acceptance script), #1473", "xrgarcia/Slashbin-console"), [879, 1438, 1473]);
-  assert.deepEqual(bodyMentions("jerky_service#108 and xrgarcia/other#2 and a#b#3", "xrgarcia/Slashbin-console"), []);
+  assert.deepEqual(bodyMentions("## References\n- engineering-manager #879; console#1438 (parent: the acceptance script), #1473", "acme/console"), [879, 1438, 1473]);
+  assert.deepEqual(bodyMentions("orders_service#108 and acme/other#2 and a#b#3", "acme/console"), []);
   assert.deepEqual(bodyMentions("#12 then #12 and #120", "o/r"), [12, 120]);
 });
 

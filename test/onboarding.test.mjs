@@ -1,6 +1,6 @@
 // Repo onboarding: before a repo's first lane pass the Foreman creates the
 // labels it runs on that the repo is missing, and no lane runs on the repo
-// until that has succeeded (xrgarcia/slashbin-ai-foreman#93).
+// until that has succeeded (slashbin-io/slashbin-ai-foreman#93).
 //
 // Drives the BUILT onboardRepo and runLanePass with a fake `gh` first on PATH:
 // it serves a label list per repo, records every call, and appends POSTed

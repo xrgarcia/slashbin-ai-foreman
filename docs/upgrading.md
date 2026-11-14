@@ -22,7 +22,7 @@ the first pass over each repo imports the old file once. Every issue is now buil
 own branch (`foreman/<issue>-<slug>`, cut from the base branch) instead of a shared
 `features` branch. Deployment-specific defaults (who an unstick give-up mentions, the QA
 repo, the review MCP tools, the Paperclip credit header) are no longer built in: they
-come from a named `profile`. New in this release: the plugin architecture (`workSource`,
+go in `.ai-agent.json`. New in this release: the plugin architecture (`workSource`,
 `codeHost`), the metrics log, the QA stage, the `skill-deliver` stage for sync-only
 repos, a sign-off commit status on release PRs, and new back-off groups.
 
@@ -32,19 +32,17 @@ repos, a sign-off commit status on release PRs, and new back-off groups.
    directory (or `FOREMAN_STATE_DIR`). The first start moves its contents into GitHub and
    deletes it, and the previous release cannot read them there
    ([How to roll back](#how-to-roll-back)).
-2. **Add `"profile": "slashbin"` to `.ai-agent.json` if this is Slashbin's fleet.** Without
-   it these now resolve to their neutral values (`src/profiles/slashbin.ts`):
+2. **Set your deployment's own values in `.ai-agent.json`, and remove any `profile` key.**
+   Built-in profiles are gone (the code is public, so it carries no deployment's names); a
+   config that still sets `profile` stops startup. Unset, these resolve to neutral values:
 
-   | Key | Previous release | Without the profile |
-   |---|---|---|
-   | `unstickEscalationOwner` | always `xrgarcia` | unset: a give-up is logged, nobody is mentioned |
-   | `epicRefLabel` | always `engineering-manager` | unset: issue bodies are not read for an epic |
-   | `paperclip.commentAuthorHeader` | `x-slashbin-comment-author` | unset: no credit header is sent |
-   | `reviewAllowedTools` | base tools plus the MCP servers | base tools plus `WebFetch` |
-   | `qaRepos`, `qaSecretsRunner`, `qaBearerKey` | n/a (QA is new) | `[]`, unset, `EM_SLASHBIN_MCP_ROUTER_BEARER` |
-
-   An unknown profile name stops startup and lists the valid ones. An explicit key in
-   `.ai-agent.json` still beats the profile.
+   | Key | Unset |
+   |---|---|
+   | `unstickEscalationOwner` | a give-up is logged, nobody is mentioned |
+   | `epicRefLabel` | issue bodies are not read for an epic |
+   | `paperclip.commentAuthorHeader` | no credit header is sent |
+   | `reviewAllowedTools` | base tools plus `WebFetch` |
+   | `qaRepos`, `qaSecretsRunner`, `qaBearerKey` | `[]`, unset, `EM_SLASHBIN_MCP_ROUTER_BEARER` |
 3. **Check the tokens.** `FOREMAN_GITHUB_TOKEN` is required: **new in this release:** with
    it unset, or rejected by GitHub (401), the daemon refuses to start (exit 78,
    `src/credentials.ts`). The previous release started anyway and failed every GitHub call;
@@ -111,7 +109,6 @@ records (bookkeeping, do not close or edit)", created on first save. Leave both 
 
 | Feature | Key (env) | Default |
 |---|---|---|
-| Profile | `profile` | unset (neutral) |
 | Metrics log | `metrics.enabled`, `metrics.path`, `metrics.retentionDays` | `false`, `foreman-metrics.db` in the state dir, `90` |
 | Metrics report | `npm run metrics:report` | works with the plugin off once the file exists |
 | Work source / code host | `workSource`, `codeHost` | `github`; any other value stops the daemon (exit 78) |

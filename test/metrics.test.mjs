@@ -147,7 +147,7 @@ test("node:sqlite is never imported at load (Node 22.12 has it only behind a fla
   }
 });
 
-// ---- the flap (jerky_shipping#856) and the wait reason ----
+// ---- the flap (shipping_app#856) and the wait reason ----
 
 test("root cause: snapshot and cards place an issue a release PR names at the same stage", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "metrics-flap-"));

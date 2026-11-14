@@ -21,8 +21,8 @@ Every setting the Foreman reads, with its default, its environment override and 
 
 - **Where it lives.** `.ai-agent.json` (or `ai-agent.config.json`) in the daemon's working directory,
   or the file named by `--config <path>`. Start from `.ai-agent.example.json`.
-- **Precedence.** An environment variable beats the file; the file beats the selected `profile`; the profile
-  beats the neutral default ([profiles](config-guide.md#profiles)). Every key is optional except
+- **Precedence.** An environment variable beats the file; the file beats the neutral default.
+  Every key is optional except
   `repos[].name` and `repos[].repoPath`.
 - **Validation.** The whole file is checked when it loads. A wrong type or out-of-range value stops
   the daemon at start with the key named, never mid-run.
@@ -118,9 +118,9 @@ One entry per repo: `{ name, repoPath, ... }` plus any key marked per repo. When
 
 ### `profile`
 
-Type: string · Default: none
+Type: object · Default: none
 
-A named set of defaults for one operator's fleet (src/profiles/): each key it sets replaces the neutral default below, and a key this file sets still wins. `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name stops startup, naming the valid ones.
+Removed: a deployment's own values (logins, repo names, MCP tool lists) go in this file, which stays out of git. Set, it stops startup (see loadConfig).
 
 ### `pollIntervalMs`
 
@@ -362,7 +362,7 @@ Type: string · Default: `"~/.foreman/review-checkouts"` · Env: `AI_AGENT_REVIE
 
 Where the review session finds the service repo's code.
 
-The session's cwd is the EM repo, so it does NOT have the code it is reviewing, and nothing ever told it where to get it. Left to improvise, every run `git clone`d into /tmp under a name it invented (sbc1006, js520, jerky_shipping_rev, cli-review-2 …) and never removed it. /tmp here is a tmpfs with a HARD CAP of 1,048,576 inodes; a review clone plus its node_modules is 40k-95k of them, and 140 such clones exhausted the cap on 2026-09-12 — at 84% of BYTES, so every `df -h` looked healthy. Once inodes are gone no agent can run at all, because Claude Code creates an output file before each command; two Foreman runs failed that morning purely because their sessions could not write.
+The session's cwd is the EM repo, so it does NOT have the code it is reviewing, and nothing ever told it where to get it. Left to improvise, every run `git clone`d into /tmp under a name it invented (sbc1006, js520, shipping_rev, cli-review-2 …) and never removed it. /tmp here is a tmpfs with a HARD CAP of 1,048,576 inodes; a review clone plus its node_modules is 40k-95k of them, and 140 such clones exhausted the cap on 2026-09-12 — at 84% of BYTES, so every `df -h` looked healthy. Once inodes are gone no agent can run at all, because Claude Code creates an output file before each command; two Foreman runs failed that morning purely because their sessions could not write.
 
 So: one managed checkout per repo, on the root filesystem (66M inodes) rather than the tmpfs, at a path the Foreman owns and can therefore also delete. Reused across cycles — the expensive part is node_modules, not the clone — and removed when the repo's queue empties (see releaseReviewCheckout).
 
@@ -725,7 +725,7 @@ markers the Foreman and its skills talk through (`FOREMAN_RESULT`, `FOREMAN_REVI
 | `syncTitle` | `"chore: sync {base} with {production} (merge commits backfill)"` | Title of the PR that merges production back into base after a promotion. {base} and {production} are the two branch names. |
 | `reconcileTitle` | `"feat: implement (#{N})"` | Title of a PR the reconcile stage opens for orphaned commits naming one issue. {N} is its number, and it must appear as `(#{N})`: the strict matcher that decides a merged PR delivered its issue reads only a closing keyword or a `(#N)` title suffix, and the reconciler's body says only "Related to #N" (#239: every reconciled PR dead-ended at verify-no-pr). |
 | `reconcileBatchTitle` | `"feat: implement {n} change(s) from {branch}"` | The same, for commits naming no issue or several. {n} is the commit count, {branch} the feature branch. |
-| `releaseTagFormat` | `"release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"` | Name of the annotated git tag the release stage puts on a release PR's merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date, {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must appear so two releases never share a name. A plain annotated tag only, never a GitHub Release: jerky_shipping's desktop pipeline (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases and tags at HEAD to decide whether a commit is already released, so a Release on main's merge commit would suppress its desktop build. Never starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a `release-` name stays out of its version history. |
+| `releaseTagFormat` | `"release-{yyyy}{mm}{dd}-{HHMM}-pr{N}"` | Name of the annotated git tag the release stage puts on a release PR's merge commit once the SRE has merged it, in UTC: {yyyy} {mm} {dd} the date, {HH} {MM} (or {HHMM}) the time, {N} the release PR's number, which must appear so two releases never share a name. A plain annotated tag only, never a GitHub Release: shipping_app's desktop pipeline (scripts/lib/desktop-release-version.mjs) reads published GitHub Releases and tags at HEAD to decide whether a commit is already released, so a Release on main's merge commit would suppress its desktop build. Never starts with "v": slashbin-cli's semantic-release reads only `v*` tags, so a `release-` name stays out of its version history. |
 | `signoffStatusContext` | `"foreman/em-sign-off"` | The commit status the Foreman puts on a release PR's head while it lists an open issue the EM has not signed off (no `ready for prod release` or later release-stage label). Failing while any is unsigned, passing once none is: add it to the production branch's required checks to hold a human merge too. |
 | `signature` | `"Automated by slashbin-ai-agent"` | The last line of every PR body the Foreman writes. Empty writes none. No "#<number>": every #N in a promotion PR's body is read as an issue it carries. |
 

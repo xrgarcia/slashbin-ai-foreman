@@ -163,7 +163,7 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
   // wording. A dropped reason turns a self-clearing skip into a 24h back-off.
   //
   // The trailer must START a line. Unanchored, prose that merely names it is a
-  // declaration: Slashbin-console 2026-10-01 18:27Z and 19:35Z, an agent wrote
+  // declaration: console 2026-10-01 18:27Z and 19:35Z, an agent wrote
   // "I left off the `FOREMAN_RESULT: skipped` line on purpose" and was booked as
   // a batch-wide skip — #1107/#1111/#1115 backed off for 1h, then 2h, for a skip
   // nobody declared (slashbin-ai-foreman#49). The last trailer line wins.
@@ -194,8 +194,8 @@ export function detectDeclaredSkip(stdout: string): { skipped: boolean; reason?:
 
 /**
  * `FOREMAN_RESULT: landed issue=<N> reason="<evidence>"` — the work is already
- * on the feature branch, so there is nothing to build (Slashbin-Ingest-Gateway#222
- * and jerky_skuvault_service#478, 2026-10-26). Anchored to a line start like the
+ * on the feature branch, so there is nothing to build (ingest-gateway#222
+ * and inventory_service#478, 2026-10-26). Anchored to a line start like the
  * skip trailer, and `issue=` is REQUIRED: this closes an issue, so it never
  * applies to a batch. The last trailer line wins. Exported for tests.
  */
@@ -253,7 +253,7 @@ export const SUMMARY_DISPLAY_LIMIT = 2000;
  * `?? result.stdout` fallback never fired — recorded a complete, correct review as
  * "ended without declaring an outcome".
  *
- * Worked example, slashbin-io-worker PR #589 (2026-08-05): full result text 3,672
+ * Worked example, worker PR #589 (2026-08-05): full result text 3,672
  * chars, trailer at index 3,571, present in the full text and absent from the
  * truncated one. The agent had complied exactly; the harness threw the answer away
  * and the run was booked as FAILED.

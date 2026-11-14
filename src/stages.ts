@@ -16,7 +16,7 @@ import { z } from "zod";
  * verify just set, and release right after promote so it acts on the release
  * PR promote just opened or updated (EM#578). Shipping goes before building:
  * revise and implement each run a session of up to 60 min, and a release
- * queued behind them waited a whole build for no reason (jerky_service
+ * queued behind them waited a whole build for no reason (orders_service
  * 2026-10-14: #130 and #141 sat in release PR #146 behind a revision and the
  * next build). Nothing revise or implement does feeds promote: neither sets
  * `ready for prod release`. A config that reorders them accepts the

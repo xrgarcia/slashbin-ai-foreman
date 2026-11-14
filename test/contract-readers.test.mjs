@@ -65,7 +65,7 @@ test("deploy v1: a time hold is read into the existing wait-until slug, and the 
 });
 
 test("deploy hold plan: person stops, a far time is capped at a day, transient backs off, legacy keeps DEPLOY_STOPS", () => {
-  assert.equal(deployHoldPlan({ hold: "needs-signoff", holdClass: "person", holdReason: "Ray signs off" }, NOW).kind, "stop");
+  assert.equal(deployHoldPlan({ hold: "needs-signoff", holdClass: "person", holdReason: "the owner signs off" }, NOW).kind, "stop");
   assert.deepEqual(deployHoldPlan({ hold: "wait-until-20261201T0000Z", holdClass: "time" }, NOW), { kind: "wait", untilMs: NOW + 86_400_000 });
   assert.equal(deployHoldPlan({ hold: "registry-timeout", holdClass: "transient" }, NOW).kind, "backoff");
   assert.equal(deployHoldPlan({ hold: "predeploy-stop" }, NOW).kind, "stop");

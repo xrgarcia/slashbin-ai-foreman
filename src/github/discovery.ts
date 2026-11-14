@@ -19,7 +19,7 @@ export const MAX_BATCH_SIZE = 3;
  * A bare `#N`, or a `(#N)` mention in the free-text BODY (e.g.
  * "tracked separately in #3", "the forthcoming handler (#2)"), does NOT
  * count — those are forward references to sibling issues, not implementations.
- * Counting them orphaned cmneb_public_api #2/#3 (slashbin-ai-foreman#28):
+ * Counting them orphaned partner_api #2/#3 (slashbin-ai-foreman#28):
  * a schema PR's body mentioning the not-yet-built endpoint issue marked that
  * issue "implemented"/"covered", so it was never picked up.
  *
@@ -94,7 +94,7 @@ function isRevert(c: PrCommit): boolean {
  *    hand-written form, with no sha) cancels that issue: it counts only while
  *    the latest commit naming it is not a revert.
  *
- * Origin: Slashbin-console PR #1232 carried #1164's commit and its hand-written
+ * Origin: console PR #1232 carried #1164's commit and its hand-written
  * revert, net zero for #1164. The revert's own headline ended `(#1164)`, so
  * every reader took the PR as delivering #1164: review labelled it `pr under
  * review` then `pr approved` (2026-10-03), the dead-zone resolver labelled it
@@ -128,7 +128,7 @@ export function issuesImplementedByCommits(commits: PrCommit[], strict = false):
  * default 1), 1 on a greenfield repo. The session is handed exactly this and
  * the Foreman claims exactly this; everything else stays queued. Handing the
  * session every offered item and claiming three left the two it did not build
- * claimed, then Blocked, on the board (jerky_service #131-#133, 2026-10-14).
+ * claimed, then Blocked, on the board (orders_service #131-#133, 2026-10-14).
  */
 export async function discoveryBatch(
   config: RepoConfig,

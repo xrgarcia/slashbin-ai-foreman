@@ -313,7 +313,7 @@ export async function runReconcileStage(
   // event: it persists every cycle until the EM clears it, so re-emitting each
   // reconcile pass floods Discord with the identical line (~every 2 min) and
   // trains the reader to ignore the channel — the alarm defeats itself.
-  // Observed 2026-07-19 on Slashbin-console#661 (Ray: "i keep seeing this
+  // Observed 2026-07-19 on console#661 (owner: "i keep seeing this
   // messages"). The warning fires on transition INTO the dead-zone; the entry
   // clears when the issue leaves it, so a genuine re-entry alerts again.
   try {

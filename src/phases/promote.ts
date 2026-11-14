@@ -35,7 +35,7 @@ export async function trySyncDrift(
   // "already open" is the normal state a few seconds later — and returning early
   // here meant it was never merged at all. `develop` then stays behind `main`,
   // the next promotion PR goes BEHIND, and branch protection refuses it.
-  // (Slashbin-console#779: open 2h48m over ~140 no-op cycles, blocking #782.)
+  // (console#779: open 2h48m over ~140 no-op cycles, blocking #782.)
   const existing = await codeHost().findOpenSyncPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, syncLogger);
   if (existing) {
     if (await codeHost().tryMergeSyncPR(repoConfig.githubRepo, existing.number, repoConfig.repoPath, syncLogger, repoConfig.productionBranch)) {
@@ -67,7 +67,7 @@ export async function trySyncDrift(
  * a batch (its PRs at their head commits) that already ended is not filed
  * again, a new Dependabot push is a new batch, and the same batch filed three
  * times in 24 h is held and put to the EM. Nothing is kept in memory, so a
- * restart cannot reopen a loop (jerky-mcp-services #690-#1081, 2026-11-05).
+ * restart cannot reopen a loop (mcp-services #690-#1081, 2026-11-05).
  * The steps (discovery, security selection, issue composer, filer) are
  * collaborators in `src/dependency-batch/`.
  *
@@ -99,7 +99,7 @@ export function tryFileDependencyBatchIssue(
 
 /**
  * Follow the release PR from open to merged, so the items it carries show as
- * waiting on it and then as done (Slashbin-console#1185 sat "in progress"
+ * waiting on it and then as done (console#1185 sat "in progress"
  * behind release PR #1206). Exported for the release stage, which calls it the
  * moment the SRE merges, so the board does not wait a pass.
  */
@@ -399,7 +399,7 @@ export async function tryPromotion(
     // develop has ZERO file changes vs main, so every ready-for-prod issue's work
     // is ALREADY in main — it was promoted, and there is nothing left to promote.
     // Retrying is futile by construction; no future cycle can produce a diff.
-    // (jerky_security_testing #110/#115/#117/#118/#122 kept the label for two
+    // (security_tests #110/#115/#117/#118/#122 kept the label for two
     // weeks, re-checked every poll, while their fixes had shipped on day one.)
     //
     // Safe: `ready for prod release` is only applied after the feature PR merges to

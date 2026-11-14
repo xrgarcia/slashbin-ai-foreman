@@ -154,7 +154,7 @@ async function hasOpenPR(
   } catch {
     // Unknown, never "no open PR". Read as null, a failed lookup made the
     // reconciler open a second PR for a branch that already had one: 10 refused
-    // `gh pr create` calls on jerky_service (PR #144) during the 2026-10-14
+    // `gh pr create` calls on orders_service (PR #144) during the 2026-10-14
     // ENOBUFS outage. The caller skips the branch until a pass can read it.
     return "unknown";
   }
@@ -168,7 +168,7 @@ async function hasOpenPR(
  * become invisible: the EM closes a PR unmerged, its commits stay on the branch,
  * and one cycle later the reconciler finds "commits ahead, no open PR"
  * and mints a fresh PR for the work that was just refused. Observed on
- * jerky_data_receiver (#72 rejected → #74 recreated it, bundled with new work).
+ * events_receiver (#72 rejected → #74 recreated it, bundled with new work).
  *
  * A merged PR is a completed delivery, not a refusal. `deliveredSha` is the head a merged
  * PR carried: a branch still sitting at that head (squash merges leave its commits "ahead" of

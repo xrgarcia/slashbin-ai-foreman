@@ -28,7 +28,7 @@ export interface QaPluginOptions {
  * One QA run's ceiling; past it the child is killed and the PR gets an "errored" comment.
  * QA reviews serially, one Codex run per 4 shots (slashbin_ai_qa `lib/review.mjs` BATCH_SIZE)
  * plus a 2-run control, each allowed 900 s (`lib/review.mjs:113`, `lib/codex.mjs:49`), so its
- * own ceiling grows with the pages a PR touches. Slashbin-console PR #1518 (a `shared/schema.ts`
+ * own ceiling grows with the pages a PR touches. console PR #1518 (a `shared/schema.ts`
  * change fans out to all 18 routes, 72 shots, 18 batches) was still reviewing when 20 minutes
  * killed it (2026-10-29 21:03Z, capture had taken 4 min). 90 minutes covers that review; a
  * longer one is a tooling hold (`qa-errored`) that retries without charging (slashbin-ai-foreman#137).
@@ -49,7 +49,7 @@ export function qaStepOf(stderr: string): "setup" | "capture" | "review" {
 
 /**
  * The registry bearer's runner key (EM#794 C): QA reads the registry with it. Names only; the runner
- * hands the value to the QA child alone. Config `qaBearerKey` (a profile pins it to its one home).
+ * hands the value to the QA child alone. Config `qaBearerKey` (a deployment may pin it to its one home).
  * The team bot's SLASHBIN_MCP_ROUTER_BEARER is retired (it answers 401) and is no longer asked for.
  */
 export const qaBearerKeys = (config: AgentConfig): string[] => [config.qaBearerKey];

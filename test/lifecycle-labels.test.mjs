@@ -198,7 +198,7 @@ test("dead-zone recovery writes configured names and never the production gate",
 });
 
 test("dead-zone recovery never moves an issue backwards from a later stage", async () => {
-  // jerky_ops#15, 2026-10-15: a stale `pr pending actions` beside `release
+  // ops_portal#15, 2026-10-15: a stale `pr pending actions` beside `release
   // pending` was "recovered" to `pr merged`, 28s after the release stage moved it.
   const c = load();
   const L = c.lifecycleLabels;

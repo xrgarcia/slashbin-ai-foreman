@@ -1,4 +1,4 @@
-// slashbin-io-docs#645: a QA FAIL that was QA's own defect left the card at `pr pending actions`, owned by revise, and
+// docs-site#645: a QA FAIL that was QA's own defect left the card at `pr pending actions`, owned by revise, and
 // the EM's `**EM QA re-run` comment was read only on the review/QA path, so nothing ever re-ran QA. Revise now sends the
 // card back to review (no session) when the re-run is newer than every QA report for the head. Real phase, fake `gh`/`claude`.
 import { test, before, after, beforeEach } from "node:test";

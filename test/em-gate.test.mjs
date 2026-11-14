@@ -5,7 +5,7 @@
 // the guarantee is: whatever the agent does, an EM gate that existed before a
 // review run still exists after it.
 //
-// Origin: Slashbin-io-docs, 2026-08-04. The gate was signed at 20:20:15Z and
+// Origin: docs-site, 2026-08-04. The gate was signed at 20:20:15Z and
 // overwritten with `pr approved` at 20:22:12Z by a review run that had started
 // at 20:11:59Z — before the gate existed, so the trigger-time exclusion in
 // findPRsNeedingReview could not see it. findReadyForProdIssues then returned an
@@ -97,7 +97,7 @@ test("multiple revoked gates in one run are all restored", () => {
 //
 // The first version of this guard snapshotted which issues held the gate BEFORE
 // a review run and restored those. It shipped, and then failed on the exact
-// scenario the bug report described. Slashbin-io-docs#269:
+// scenario the bug report described. docs-site#269:
 //
 //   13:52:25Z  review run triggered   -> snapshot taken, gate not yet applied
 //   13:57:41Z  EM signs the gate      -> invisible to the snapshot

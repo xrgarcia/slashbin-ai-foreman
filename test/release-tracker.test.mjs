@@ -30,7 +30,7 @@ test("releaseIssues: a #N inside a carried title is a mention, not a carried iss
     "## Production Promotion", "", "### Issues included",
     "- #491: Bound tokens read documents by audience (EM#1284 F1a)",
     "- #18: Departments landing pages (follow-up to #11)",
-    "- #7: Port the fix from xrgarcia/other#12",
+    "- #7: Port the fix from acme/other#12",
     "", "Closes nothing; see #99", "PR 40: unlinked work",
   ].join("\n");
   assert.deepEqual(releaseIssues(body), [491, 18, 7]);

@@ -6,7 +6,7 @@
  * A review session's cwd is the EM repo, so it does not have the code it is
  * reviewing, and nothing in the prompt or the skill ever said where to get it.
  * Left to improvise, every run invented its own answer: `git clone` into /tmp
- * under a name it made up — `sbc1006`, `js520`, `jerky_shipping_rev`,
+ * under a name it made up — `sbc1006`, `js520`, `shipping_rev`,
  * `cli-review`, then `cli-review-2` when it wanted a second one — and never
  * removed any of them.
  *

@@ -147,7 +147,7 @@ Work autonomously. Do not ask questions.`;
   // Landed protocol, in the common prompt so a repo-local skill hears it too
   // (the built-in skill carries it as well). Without it "all 16 already on
   // features" ended as prose, no trailer, and the issue stayed open and approved
-  // while the issues blocked by it waited (jerky_skuvault_service#478, 2026-10-26).
+  // while the issues blocked by it waited (inventory_service#478, 2026-10-26).
   prompt += `\n\nIMPORTANT — Nothing-to-land protocol: if the work an issue asks for is ALREADY on ${config.baseBranch} (for example every dependency PR is already merged there), there is nothing to build and no PR to open. Comment the evidence on the issue (what you checked: PR numbers, SHAs), push nothing, then end your output with this exact line and nothing after it:\n\nFOREMAN_RESULT: landed issue=<the issue number> reason="<one-line evidence>"\n\nThe Foreman then closes the issue as completed, which releases every issue blocked by it. Never end with prose such as "No PR produced" or "No code change to land" alone: it is not heard, and the issue stays open. If the work cannot land and a person must act, use the skip protocol above instead.`;
 
   // Third Way: if a prior attempt failed, include context so Claude can adapt
@@ -180,7 +180,7 @@ Work autonomously. Do not ask questions.`;
   // A DECLARED skip, with no new commits, is authoritative — and it has to be
   // checked here, ahead of every PR heuristic below.
   //
-  // Slashbin-console#841, 2026-09-02. The agent correctly refused to commit a
+  // console#841, 2026-09-02. The agent correctly refused to commit a
   // chore onto `features` because an unrelated billing PR (#843) was already
   // open on that branch and its skill forbids bundling the two. It emitted the
   // trailer exactly as instructed. But an open PR on the branch existed, so the

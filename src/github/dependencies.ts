@@ -54,7 +54,7 @@ export type { DependencyChange } from "../code-host.js";
  * than removing it.
  *
  * The production branch (`main` by default) stays excluded outright: a dependency update must never be worked
- * against the production branch, which is what `jerky_shipping#237` closed on
+ * against the production branch, which is what `shipping_app#237` closed on
  * the producing side.
  *
  * Pure, exported and tested because that exclusion is the safety property.

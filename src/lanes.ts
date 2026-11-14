@@ -4,7 +4,7 @@ import { isCustomStage, stageName, type StageEntry, type StageType } from "./sta
 //
 // A repo pass used to run every stage in one serial loop, so a 30-minute
 // revision on a repo held up that repo's release, verify and review behind it
-// (jerky_service 2026-10-14: release PR #146 sat behind a revision and the next
+// (orders_service 2026-10-14: release PR #146 sat behind a revision and the next
 // build). Now each stage group is a LANE, and every (repo, lane) pair drives its
 // own loop. A lane runs at most one item per repo at a time; different lanes of
 // one repo run side by side; across repos the lane is as wide as the fleet.

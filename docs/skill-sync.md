@@ -76,7 +76,7 @@ PR, comments, labels or implements. Once the person's PR merges, the base is cur
 quiet until the golden changes.
 
 **Refreshing an untouched delivery.** An earlier delivery otherwise goes stale: the base still lacks the
-new golden, the branch exists, and step 2 would leave it on the old template for ever (jerky_com_marketing,
+new golden, the branch exists, and step 2 would leave it on the old template for ever (marketing_site,
 2026-11-03 to 11-11: four branches missing `ship` and carrying an old `pre-pr-check`). So when exactly one
 `feature/<N>-*` exists, the base is stale, and **all** of these hold, the branch is rebuilt as one fresh
 sync commit on the current `origin/<base>` and force-updated (status `refreshed`):

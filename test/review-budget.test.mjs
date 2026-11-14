@@ -1,6 +1,6 @@
 // Regression tests for the review phase's wall-clock budget (issue #41).
 //
-// Origin: jerky_skuvault_service, 2026-09-22, cycle 13577. A review dispatched at
+// Origin: inventory_service, 2026-09-22, cycle 13577. A review dispatched at
 // 22:03:03Z merged PR #362 at 22:08:36Z, ran `npm run verify` and the acceptance
 // script, and had finished its actual work by 22:11. It then spent the next 52
 // minutes polling a data backfill converging in dev — five consecutive 9-minute

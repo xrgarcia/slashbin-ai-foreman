@@ -237,7 +237,7 @@ export class Placement {
   /**
    * A held card its session's start could not move (Paperclip was down) takes
    * the session's column now. Otherwise the hold keeps every later writer off
-   * it, and it shows its old column for the whole session: jerky_service #131
+   * it, and it shows its old column for the whole session: orders_service #131
    * sat in To Do while the SRE verified it, after a 30-second outage
    * (2026-10-14).
    */

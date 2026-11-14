@@ -31,7 +31,7 @@ const all = () => readFileSync(calls, "utf8").split("\n").filter(Boolean).map((l
 const coversCalls = () => all().filter((a) => a.includes("covers"));
 const keysOf = (a) => a[a.indexOf("--keys") + 1].split(",");
 
-const CONSOLE = "xrgarcia/Slashbin-console";
+const CONSOLE = "acme/console";
 const config = {
   qaPath: qa, emRepoPath: em, qaSecretsRunner: "runner.mjs", qaRepos: [CONSOLE], sessionEnv: [],
   pollIntervalMs: 1500, qaBeforeMerge: true, techLeadPath: "/x", qaBearerKey: "BEARER@home",

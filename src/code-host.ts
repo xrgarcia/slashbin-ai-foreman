@@ -202,7 +202,7 @@ export interface IssueView {
 
 /** One deployment the host recorded for a commit, with the state of its latest status. */
 export interface DeploymentView {
-  /** The host's environment name, e.g. `jerky-com / development` (Railway's GitHub deployments). */
+  /** The host's environment name, e.g. `shop / development` (Railway's GitHub deployments). */
   environment: string;
   /** Lower-cased state of the deployment's newest status: `success`, `failure`, `in_progress`, ... */
   state: string;
@@ -318,7 +318,7 @@ export interface Announced {
  * rule is the part worth pinning, and the `gh` calls around it are not.
  *
  * A review run that dies is not automatically a review that achieved nothing.
- * On 2026-09-22 one merged `jerky_skuvault_service#362`, verified it, then spent
+ * On 2026-09-22 one merged `inventory_service#362`, verified it, then spent
  * its remaining 52 minutes polling a backfill that needed longer than the budget
  * it was never told about. The wall-clock kill reported `Review failed (1/2):
  * timed out`, skipped every post-condition check — they all lived inside the

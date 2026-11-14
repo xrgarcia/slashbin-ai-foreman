@@ -1,7 +1,7 @@
 // An open Foreman PR queues the next issue; it does not launch a session.
 // (foreman#208: the hold is policy now, ONE issue in flight per repo, not a shared-branch artifact; the gate text moved with it.)
 //
-// jerky_service #66/#70, 2026-10-05. The skill builds straight on `features`
+// orders_service #66/#70, 2026-10-05. The skill builds straight on `features`
 // and refuses to bundle a second issue into the open PR, so every cycle the
 // orchestrator launched a session that could only stop. Each one posted
 // "picked up" then "skipped" to Discord and moved the Paperclip card
@@ -53,7 +53,7 @@ test("an old skip on the open feature PR hands over to the gate", () => {
   assert.match(src, /pr\.repo === repoConfig\.githubRepo && pr\.number === featurePr\.number/);
 });
 
-// Ray, 2026-10-14: one issue in flight per repo, from build until verified on
+// The owner, 2026-10-14: one issue in flight per repo, from build until verified on
 // dev. Merging used to free the queue, so the next build started while the last
 // merge was still unverified, and a fix its verification asked for landed
 // behind work already built on top of it.

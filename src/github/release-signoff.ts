@@ -1,7 +1,7 @@
 // The EM's sign-off gate on a release PR (slashbin-ai-foreman#128).
 //
 // A release PR promotes ALL of `develop`, so an issue can ride in that the EM
-// never signed: Slashbin-console#1455 merged carrying #1434 and #1453, listed
+// never signed: console#1455 merged carrying #1434 and #1453, listed
 // and labelled `release pending` by the Foreman, neither ever `ready for prod
 // release`. `ready for prod release` is the EM's production sign-off, and a
 // release PR must not merge while it lists an open issue without it.
