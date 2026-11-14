@@ -289,9 +289,13 @@ test("report: hold attribution is linear and still right on a long history with 
     m += 2;
   }
   all.push({ at: t(m), repo: R, issue: 1, kind: "closed", stage: "done", detail: null });
-  const start = performance.now();
-  const [tl] = buildTimelines(all);
-  assert.ok(performance.now() - start < 1000);
+  // Count work, not time: the quadratic version made ~1.5M Date.parse calls here, a linear one a few thousand.
+  const realParse = Date.parse;
+  let parses = 0;
+  Date.parse = (x) => { parses++; return realParse(x); };
+  let tl;
+  try { [tl] = buildTimelines(all); } finally { Date.parse = realParse; }
+  assert.ok(parses < 50 * all.length, `${parses} Date.parse calls for ${all.length} rows`);
   // 500 visits of 2 minutes: 1 minute unrecorded, then 1 minute grant.
   assert.equal(Math.round(tl.holdHours.pendingVerification.grant * 60), 500);
   assert.equal(Math.round(tl.holdHours.pendingVerification.unrecorded * 60), 500);
