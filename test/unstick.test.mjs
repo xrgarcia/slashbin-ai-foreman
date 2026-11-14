@@ -174,8 +174,8 @@ test("a refusal spends no attempt and waits for the stated reset, else the upstr
 });
 
 test("the handoff give-up comment names the owner, the kind and the last answer", () => {
-  const c = handoffGiveUpComment("ray", { kind: "release-gate", reason: "r", attempts: 3, since: "s", lastCallAt: "l", detail: "d" });
-  assert.match(c, /@ray/);
+  const c = handoffGiveUpComment("alice", { kind: "release-gate", reason: "r", attempts: 3, since: "s", lastCallAt: "l", detail: "d" });
+  assert.match(c, /@alice/);
   assert.match(c, /`release-gate`/);
   assert.match(c, /acted 3 times/);
 });

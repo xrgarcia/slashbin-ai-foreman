@@ -139,7 +139,7 @@ value wins. Every key in full: [configuration.md#review-phase](configuration.md#
 | `reviewModel` | — | Model override for review runs (independent of `model`) |
 | `reviewMaxTurns` | `200` | Max turns (review + verify is long-running) |
 | `reviewMaxDurationMs` | `3600000` (60 min) | Max review duration |
-| `reviewAllowedTools` | `Read, Write, Edit, Bash, Glob, Grep, WebFetch` (the `slashbin` profile adds its MCP servers) | Tool surface for the review skill |
+| `reviewAllowedTools` | `Read, Write, Edit, Bash, Glob, Grep, WebFetch` (a deployment adds its MCP servers in `.ai-agent.json`) | Tool surface for the review skill |
 | `reviewerLogin` | — | GitHub login the review runs as (freshness guard). Unset = a verdict by any reviewer counts as current |
 | `reviewLabelReconcile` | `true` | Set the outcome label from the run's own trailer when the skill merged without labeling. Env: `AI_AGENT_REVIEW_LABEL_RECONCILE` |
 

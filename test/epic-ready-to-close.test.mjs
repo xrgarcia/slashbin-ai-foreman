@@ -11,12 +11,11 @@ import { tryUnstick } from "../dist/phases/unstick.js";
 import { epicRefs, epicChildClosedAlert, UNSTICK_KINDS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords } from "./issue-records.mjs";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 import { ForemanRuntime } from "../dist/runtime.js";
 let rt = new ForemanRuntime();
 
-/** The epic label Slashbin's issues use (`epicRefLabel`, from its profile). */
-const LABEL = slashbinProfile.epicRefLabel;
+/** The epic label Slashbin's issues use (`epicRefLabel`, set in the deployment config). */
+const LABEL = "engineering-manager";
 
 await startAgentPlugins();
 

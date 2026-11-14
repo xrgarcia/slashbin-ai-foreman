@@ -49,7 +49,7 @@ export function qaStepOf(stderr: string): "setup" | "capture" | "review" {
 
 /**
  * The registry bearer's runner key (EM#794 C): QA reads the registry with it. Names only; the runner
- * hands the value to the QA child alone. Config `qaBearerKey` (a profile pins it to its one home).
+ * hands the value to the QA child alone. Config `qaBearerKey` (a deployment may pin it to its one home).
  * The team bot's SLASHBIN_MCP_ROUTER_BEARER is retired (it answers 401) and is no longer asked for.
  */
 export const qaBearerKeys = (config: AgentConfig): string[] => [config.qaBearerKey];

@@ -11,10 +11,9 @@ import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
 import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { PaperclipClient, PaperclipClientError, createPaperclipClient } from "../dist/paperclip/client.js";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
-/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
-const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
+/** A credit header a Paperclip fork reads (`paperclip.commentAuthorHeader`, set in the deployment config). */
+const HEADER = "x-comment-author";
 
 const tmp = mkdtempSync(join(tmpdir(), "foreman-paperclip-test-"));
 test.after(() => rmSync(tmp, { recursive: true, force: true }));

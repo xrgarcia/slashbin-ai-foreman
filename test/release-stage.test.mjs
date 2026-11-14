@@ -205,8 +205,8 @@ const writeCfg = (name, extra) => {
   writeFileSync(p, JSON.stringify({ emRepoPath: tmp, repos: [{ name: "rel", repoPath: tmp, githubRepo: REPO }], ...extra }));
   return p;
 };
-// Slashbin's profile: its epic label (`engineering-manager #N`) is what the epic tests read.
-const config = loadConfig(writeCfg("cfg.json", { profile: "slashbin", techLeadPath: techLeadDir, srePath: sreDir }));
+// The deployment's epic label (`engineering-manager #N`) is what the epic tests read.
+const config = loadConfig(writeCfg("cfg.json", { epicRefLabel: "engineering-manager", epicRepo: "acme/slashbin-engineering-manager", prodGrantLabel: "deliver-to-prod", techLeadPath: techLeadDir, srePath: sreDir }));
 const repo = config.repos[0];
 
 const HEAD = "a".repeat(40);
@@ -552,7 +552,7 @@ test("merged R1: A unsaved, then the re-verification reports B while the drain s
   assert.ok(await bothRecorded(), "A and B, once each");
 });
 
-test("no epicRefLabel (no profile): a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
+test("no epicRefLabel: a prod close reads no epic and asks the EM nothing; the release still closes", async () => {
   const neutral = loadConfig(writeCfg("neutral.json", { techLeadPath: techLeadDir, srePath: sreDir }));
   assert.equal(neutral.repos[0].epicRefLabel, undefined);
   world(pending(), { approve: { exit: 0, out: "approved" }, deploy: DEPLOYED("pass") });
@@ -1560,7 +1560,7 @@ test("signoff: an issue the Foreman itself labelled before this fix is unsigned 
 
   // The EM applies `ready for prod release` himself: a label event by someone else.
   g = gh();
-  g.events = { 6: [{ label: "ready for prod release", by: "foreman-bot" }, { label: "ready for prod release", by: "ray" }] };
+  g.events = { 6: [{ label: "ready for prod release", by: "foreman-bot" }, { label: "ready for prod release", by: "alice" }] };
   writeFileSync(GH_STATE, JSON.stringify(g));
   assert.equal(await run(2), true);
   assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);

@@ -159,7 +159,7 @@ the repo and PR it was first seen on, and the SRE's evidence links. It is repo-l
 The EM routes it to the owner: an issue on the owning repo, or an SRE change request for a credential or infra
 fault (2026-10-31: an expired dev Stripe key was excluded for 8 days with no owner, SRE#369).
 `epic-ready-to-close` fires when the release stage closes an issue after its production verification and that issue
-names an epic (`<epicRefLabel> #N` in its body, `engineering-manager #N` in the `slashbin` profile; unset, this kind never fires; or in the body of the issue the issue it corrects names).
+names an epic (`<epicRefLabel> #N` in its body; unset, this kind never fires; or in the body of the issue the issue it corrects names).
 It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
@@ -190,7 +190,7 @@ every kind in `nextStep`: a `failed` entry whose 3 attempts are spent is called 
 so it is retried once the EM is fixed. Any other exit 3 stays `declined`.
 
 After 3 failed calls (`UNSTICK_MAX_ATTEMPTS`) the Foreman posts a give-up comment
-@-mentioning `unstickEscalationOwner` (owner, in the `slashbin` profile; unset, the give-up is only
+@-mentioning `unstickEscalationOwner` (unset, the give-up is only
 logged). **That comment means the EM failed its stage** — a give-up is never the first the owner hears
 of a stuck card.
 

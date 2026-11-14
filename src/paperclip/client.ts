@@ -123,7 +123,7 @@ export type PaperclipReads = { calls: number; rows: number };
 // Who a write is credited to: `agent:<agentId>` or `user:<userId>`, sent in the
 // configured `commentAuthorHeader` by an instance-admin board key; the comment's
 // author and the activity row's actor change, nothing else. Only an instance that
-// implements the header (a fork; the profile names it) honours it.
+// implements the header (a fork; config `paperclip.commentAuthorHeader` names it) honours it.
 /** The board's refusals of that header: not an admin board key, or an author it cannot credit. */
 const COMMENT_AUTHOR_REFUSED = /comment_author_override_(denied|invalid)/;
 
