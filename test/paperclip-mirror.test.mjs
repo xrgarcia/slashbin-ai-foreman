@@ -10,13 +10,12 @@ import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
 // Tiny retry waits so the clients' retries run at once; the real windows are backoff.paperclip / backoff.registry.
 configureBackoff({ ...DEFAULT_BACKOFF, paperclip: { ...DEFAULT_BACKOFF.paperclip, baseMs: 1, capMs: 2 }, registry: { ...DEFAULT_BACKOFF.registry, baseMs: 1, capMs: 2 } });
 
-/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
-const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
+/** A credit header a Paperclip fork reads (`paperclip.commentAuthorHeader`, set in the deployment config). */
+const HEADER = "x-comment-author";
 
 // GitHub reads every issue the existing tests snapshot as open: a card moves
 // only on a confirmed state (the closed-issue cases are in paperclip-closed-cards).
@@ -1217,8 +1216,8 @@ test("ownsCards: a closed issue with no card gets none; a cancelled card is neve
 });
 
 const HOLD = {
-  action: "blocked: on GitHub — waiting on legal (ray, 2026-10-14) https://github.com/example/r/issues/7#c2",
-  comment: "Held on GitHub by ray, 2026-10-14:\n\nwaiting on legal\n\nhttps://github.com/example/r/issues/7#c2",
+  action: "blocked: on GitHub — waiting on legal (alice, 2026-10-14) https://github.com/example/r/issues/7#c2",
+  comment: "Held on GitHub by alice, 2026-10-14:\n\nwaiting on legal\n\nhttps://github.com/example/r/issues/7#c2",
   commentUrl: "https://github.com/example/r/issues/7#c2",
 };
 
@@ -1255,7 +1254,7 @@ test("ownsCards: a generic hold is rewritten to the holder's reason; a Foreman r
 
 test("ownsCards: the holder's comment is credited to the agent whose githubLogin it is; a person's stays the key's user", async () => {
   const EM = "agent-em";
-  const held = (by) => ({ ...HOLD, author: by, comment: HOLD.comment.replace("ray", by), action: `${HOLD.action} ${by}` });
+  const held = (by) => ({ ...HOLD, author: by, comment: HOLD.comment.replace("alice", by), action: `${HOLD.action} ${by}` });
   for (const [by, want] of [["Slashbin-Engineering-Manager", `agent:${EM}`], ["owner-login", null]]) {
     const fake = fakePaperclip([ownedRow("todo", { description: `source: example/r#7\nGitHub: open · stage blocked\n\n${URL7}` })]);
     fake.boardAgents.push({ id: EM, name: "EM", metadata: { githubLogin: "slashbin-engineering-manager" } }, { id: "gone", name: "Old", status: "terminated", metadata: { githubLogin: "owner-login" } });
@@ -1450,7 +1449,7 @@ test("ownsCards: a closed issue's Blocked card goes to done or cancelled, whatev
   const fake = fakePaperclip([
     heldRow(7, "blocked: review of PR #8 failed 4× — paused 1 h"),
     heldRow(8, "waiting on branch features to free up"),
-    heldRow(9, "blocked: on GitHub — waiting on legal (ray, 2026-10-14) https://github.com/example/r/issues/9#c2"),
+    heldRow(9, "blocked: on GitHub — waiting on legal (alice, 2026-10-14) https://github.com/example/r/issues/9#c2"),
   ]);
   const { mirror } = mirrorOn(fake, OWNED);
   await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: [], cards: [card(7, { state: "completed" }), card(8, { state: "not_planned" }), card(9, { state: "completed" })] }, logger());
@@ -1575,7 +1574,7 @@ test("a deferred move never undoes the escalation the run it waited for made (SL
   await mirror.onState(item, "approved", "inReview", repoConfig, logger());
   assert.equal(fake.rows[0].status, "in_progress", "the move is deferred while the EM seat's run is in flight");
   // The EM seat's run escalates to the owner and ends: Blocked, on the EM, with the hop's descriptor.
-  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_ray_action): the owner card: SLA-4310" };
+  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_owner_action): the owner card: SLA-4310" };
   Object.assign(fake.rows[0], { status: "blocked", assigneeAgentId: "em-agent", unblockDescriptor: hop, executionRunId: null, checkoutRunId: null });
   const before = statusPatches(fake).length;
   await onSnap(mirror, "example/r", [], logger());
@@ -1601,7 +1600,7 @@ test("a deferred move GitHub has since moved past is dropped; the snapshot place
 });
 
 const escalateDuringRun = (row) => {
-  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_ray_action): the owner card: SLA-4310" };
+  const hop = { owner: { agentId: "em-agent" }, action: "Escalation in progress (process.escalate request_owner_action): the owner card: SLA-4310" };
   Object.assign(row, { status: "blocked", assigneeAgentId: "em-agent", unblockDescriptor: hop, executionRunId: null, checkoutRunId: null });
   return hop;
 };

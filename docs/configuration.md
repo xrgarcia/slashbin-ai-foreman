@@ -21,8 +21,8 @@ Every setting the Foreman reads, with its default, its environment override and 
 
 - **Where it lives.** `.ai-agent.json` (or `ai-agent.config.json`) in the daemon's working directory,
   or the file named by `--config <path>`. Start from `.ai-agent.example.json`.
-- **Precedence.** An environment variable beats the file; the file beats the selected `profile`; the profile
-  beats the neutral default ([profiles](config-guide.md#profiles)). Every key is optional except
+- **Precedence.** An environment variable beats the file; the file beats the neutral default.
+  Every key is optional except
   `repos[].name` and `repos[].repoPath`.
 - **Validation.** The whole file is checked when it loads. A wrong type or out-of-range value stops
   the daemon at start with the key named, never mid-run.
@@ -118,9 +118,9 @@ One entry per repo: `{ name, repoPath, ... }` plus any key marked per repo. When
 
 ### `profile`
 
-Type: string · Default: none
+Type: object · Default: none
 
-A named set of defaults for one operator's fleet (src/profiles/): each key it sets replaces the neutral default below, and a key this file sets still wins. `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name stops startup, naming the valid ones.
+Removed: a deployment's own values (logins, repo names, MCP tool lists) go in this file, which stays out of git. Set, it stops startup (see loadConfig).
 
 ### `pollIntervalMs`
 

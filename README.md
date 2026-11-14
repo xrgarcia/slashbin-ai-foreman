@@ -78,7 +78,6 @@ release needs both. The [starter setup](#start-with-one-repo) begins with PRs.
 | Discord *(not used by the daemon)* | Follow work through GitHub, logs, and the optional board without Discord. An exported bridge client is available for other agents. | [Discord client](docs/config-guide.md#discord-notifications) |
 | Programmatic usage | Start the daemon or run a pass from your own Node code through the package exports. | [Programmatic usage](docs/architecture.md#programmatic-usage) |
 | Plugins | GitHub, Paperclip and each agent sit behind one plugin contract; the core reaches none of them directly, so any can be replaced or left off. | [Plugins](#plugins), [architecture](docs/architecture.md#plugins) |
-| Config profiles | Keep one operator's logins, repo names and tool lists in a named profile instead of in the core. | [Profiles](docs/config-guide.md#profiles) |
 
 Sessions run unattended with Claude Code permission prompts disabled. Foreman limits
 the session environment, blocks common secret-printing operations, and redacts its
@@ -273,9 +272,9 @@ that names one. The core never imports GitHub or Paperclip code and never runs `
 [`docs/capabilities.md`](docs/capabilities.md) is generated from each plugin's catalog: what each
 role needs and what happens with it off. A stage whose role no plugin fills does not run: with no reviewer, a person merges. With
 no work source or code host, startup refuses. An operator's own values (logins, repo
-names, MCP tool lists) live in a profile under `src/profiles/`, selected with
-`"profile"`; each key resolves as neutral default, then profile, then `.ai-agent.json`,
-then env ([profiles](docs/config-guide.md#profiles)). Foreman keeps no local state file:
+names, MCP tool lists) live only in its git-ignored `.ai-agent.json`; each key resolves as
+neutral default, then `.ai-agent.json`, then env
+([a deployment's own values](docs/config-guide.md#a-deployments-own-values)). Foreman keeps no local state file:
 what it must remember across restarts is stored as records in the work source (on GitHub, a
 marker comment per issue and PR), so a restart resumes where it left off
 ([where state lives](docs/architecture.md#where-state-lives)).

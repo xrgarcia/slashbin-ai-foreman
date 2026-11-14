@@ -14,10 +14,9 @@ import { PaperclipMirror } from "../dist/paperclip/mirror.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
-/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
-const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
+/** A credit header a Paperclip fork reads (`paperclip.commentAuthorHeader`, set in the deployment config). */
+const HEADER = "x-comment-author";
 
 async function allOpen(ns) { return new Map(ns.map((n) => [n, "open"])); }
 
@@ -155,12 +154,12 @@ const transition = (m, to) => m.onEvent({ kind: "transition", item, from: "inRev
 
 test("#98: a person's hold on a Blocked card survives every cycle at its stage (SLA-2591)", async () => {
   const hold = { owner: "board", action: "the owner: deliver this to prod by hand, then close the issue" };
-  const fake = fakePaperclip([row7("blocked", { assigneeAgentId: null, assigneeUserId: "ray", unblockDescriptor: hold })]);
+  const fake = fakePaperclip([row7("blocked", { assigneeAgentId: null, assigneeUserId: "alice", unblockDescriptor: hold })]);
   const mirror = mirrorOn(fake);
   for (let i = 0; i < 3; i++) {
     await snapshot(mirror, ["pr approved"]);
     assert.equal(fake.rows[0].status, "blocked", `cycle ${i + 1}: the hold was undone`);
-    assert.equal(fake.rows[0].assigneeUserId, "ray", `cycle ${i + 1}: the card left the person holding it`);
+    assert.equal(fake.rows[0].assigneeUserId, "alice", `cycle ${i + 1}: the card left the person holding it`);
   }
   assert.equal(statusPatches(fake).length, 0);
   await snapshot(mirror, ["ready for prod release"]);
@@ -527,7 +526,7 @@ test("review owner R3: a card still held by the EM is unassigned on closure", as
 });
 
 test("review owner R4: closure of a card held by a person clears the user too", async () => {
-  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: null, assigneeUserId: "ray" })]);
+  const fake = fakePaperclip([row7("in_review", { assigneeAgentId: null, assigneeUserId: "alice" })]);
   const mirror = mirrorOn(fake);
   await closedSnap(mirror);
   assert.equal(fake.rows[0].status, "done");
@@ -541,17 +540,17 @@ const cardSnap = (mirror, card) => mirror.onEvent({ kind: "snapshot", repo: "exa
 
 test("human hold: an approved-for-human card ends with the human's assignee, and closed is nobody's", async () => {
   const fake = fakePaperclip([row7("backlog", { assigneeAgentId: null })]);
-  const mirror = mirrorOn(fake, { ownsCards: true, humanUserId: "ray-user" });
+  const mirror = mirrorOn(fake, { ownsCards: true, humanUserId: "alice-user" });
   await cardSnap(mirror, humanCard());
   assert.equal(fake.rows[0].status, "backlog");
-  assert.equal(fake.rows[0].assigneeUserId, "ray-user");
+  assert.equal(fake.rows[0].assigneeUserId, "alice-user");
   assert.equal(fake.rows[0].assigneeAgentId ?? null, null);
   // The label off: the card is nobody's again.
   await cardSnap(mirror, humanCard({ labels: [] }));
   assert.ok(unassigned(fake.rows[0]));
   // Back on, then the issue closes: Done is unassigned.
   await cardSnap(mirror, humanCard());
-  assert.equal(fake.rows[0].assigneeUserId, "ray-user");
+  assert.equal(fake.rows[0].assigneeUserId, "alice-user");
   await cardSnap(mirror, humanCard({ state: "completed" }));
   assert.equal(fake.rows[0].status, "done");
   assert.ok(unassigned(fake.rows[0]));
@@ -560,13 +559,13 @@ test("human hold: an approved-for-human card ends with the human's assignee, and
 test("human hold: a persisted block keeps its owner over the label", async () => {
   const store = memoryStore();
   const fake = fakePaperclip([row7("in_review")]);
-  const first = mirrorOn(fake, { humanUserId: "ray-user" }, store);
+  const first = mirrorOn(fake, { humanUserId: "alice-user" }, store);
   await snapshot(first, ["pr merged"]);
   await first.onEvent({ kind: "blocked", item, reason: "dev deploy failed", owner: "sre" }, logger());
-  const second = mirrorOn(fake, { ownsCards: true, humanUserId: "ray-user" }, store);
+  const second = mirrorOn(fake, { ownsCards: true, humanUserId: "alice-user" }, store);
   // The label lands on an issue still at pr merged: its card carries that stage, and the block holds.
   await snapshot(second, ["pr merged"], { foremanHeld: true }, { cards: [humanCard({ stage: issueStage(["pr merged", "approved-for-human"], false, LL, "approved") })] });
   assert.equal(fake.rows[0].status, "blocked");
   assert.equal(fake.rows[0].assigneeAgentId, "sre-agent");
-  assert.notEqual(fake.rows[0].assigneeUserId, "ray-user");
+  assert.notEqual(fake.rows[0].assigneeUserId, "alice-user");
 });

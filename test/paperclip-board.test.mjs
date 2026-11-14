@@ -37,15 +37,15 @@ test("stageTarget: defaults hand every card to the Foreman; a role takes its sta
 });
 
 test("stageTarget: no lifecycle stage is held by a user, so no result carries a userId key", () => {
-  const cfg = { agentId: "fm", humanUserId: "ray", roles: { em: { name: "EM", id: "em-1" } } };
+  const cfg = { agentId: "fm", humanUserId: "alice", roles: { em: { name: "EM", id: "em-1" } } };
   for (const st of PAPERCLIP_STAGES) assert.equal("userId" in stageTarget(cfg, st), false, st);
 });
 
 test("assigneeFor: approved-for-human goes to the user; nothing else is assigned, an EM-repo item included", () => {
   const EM = "acme/slashbin-engineering-manager";
-  const cfg = { agentId: "fm", humanUserId: "ray-user", roles: { em: { name: "Engineering Manager", id: "em-agent" } } };
-  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
-  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: EM }), { assigneeAgentId: null, assigneeUserId: "ray-user" });
+  const cfg = { agentId: "fm", humanUserId: "alice-user", roles: { em: { name: "Engineering Manager", id: "em-agent" } } };
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: "acme/svc" }), { assigneeAgentId: null, assigneeUserId: "alice-user" });
+  assert.deepEqual(assigneeFor(cfg, { labels: ["approved-for-human"], repo: EM }), { assigneeAgentId: null, assigneeUserId: "alice-user" });
   // An agent is never assigned: the EM agent is bridged and would wake on every row.
   assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: EM }), undefined);
   assert.equal(assigneeFor(cfg, { labels: ["approved"], repo: "acme/svc" }), undefined);
@@ -57,7 +57,7 @@ test("assigneeFor: an unset humanUserId leaves both null, never the Foreman's ag
 });
 
 test("assigneeFor: two identical calls return equal results", () => {
-  const cfg = { agentId: "fm", humanUserId: "ray-user" };
+  const cfg = { agentId: "fm", humanUserId: "alice-user" };
   for (const item of [{ labels: ["approved-for-human"], repo: "a/b" }, { labels: [], repo: "acme/slashbin-engineering-manager" }, { labels: [], repo: "a/b" }]) {
     assert.deepEqual(assigneeFor(cfg, item), assigneeFor(cfg, item));
   }

@@ -65,9 +65,9 @@ implementation, revision, and orphan-PR recovery. The example below leaves
 and promotion are included; automated review, verification, and release require
 the additional configuration described in [pipeline.md](pipeline.md).
 
-The core ships neutral. Slashbin's own deployment defaults (who an unstick give-up
-mentions, the QA repo, the review MCP tools) come from `"profile": "slashbin"`; see
-[Profiles](config-guide.md#profiles). Other deployments leave `profile` unset.
+The core ships neutral. A deployment's own values (who an unstick give-up mentions, the
+QA repo, the review MCP tools) go in its `.ai-agent.json`; see
+[A deployment's own values](config-guide.md#a-deployments-own-values).
 
 The smallest working config using those defaults:
 

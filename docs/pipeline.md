@@ -53,7 +53,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    its last merge has passed dev verification, so one issue is in flight per repo from
    build to verified on dev.
    **QA report (report-only, on when `qaPath` is set):** after a pass on a `qaRepos` repo
-   (none by default; the Console in the `slashbin` profile), the QA plugin (`src/plugins/qa.ts`) runs `qa.mjs check` once for that PR, in the background, and
+   (none by default), the QA plugin (`src/plugins/qa.ts`) runs `qa.mjs check` once for that PR, in the background, and
    posts `## QA Report (report-only)` on it. Nothing waits on it and it never holds or
    reworks the card; a crash or a 90-minute timeout (`QA_MAX_DURATION_MS`) becomes an "errored" comment. Once per
    PR: an existing comment with the heading ends it. `DEV_SESSION_MINT_KEY` reaches only

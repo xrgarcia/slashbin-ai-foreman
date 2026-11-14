@@ -61,23 +61,23 @@ test("the core's hold prefix is the plugin's, and both read as a Foreman block",
 test("holdReason: the labeller's newest comment from 15 minutes before the label on; none says so", () => {
   const events = [
     { createdAt: "2026-10-10T10:00:00Z", actor: { login: "old" }, label: { name: "blocked" } },
-    { createdAt: "2026-10-14T12:00:00Z", actor: { login: "ray" }, label: { name: "blocked" } },
-    { createdAt: "2026-10-14T13:00:00Z", actor: { login: "ray" }, label: { name: "bug" } },
+    { createdAt: "2026-10-14T12:00:00Z", actor: { login: "alice" }, label: { name: "blocked" } },
+    { createdAt: "2026-10-14T13:00:00Z", actor: { login: "alice" }, label: { name: "bug" } },
   ];
   const comments = [
-    { url: "https://github.com/o/r/issues/1#c1", createdAt: "2026-10-14T11:00:00Z", author: { login: "ray" }, body: "too early" },
-    { url: "https://github.com/o/r/issues/1#c2", createdAt: "2026-10-14T11:50:00Z", author: { login: "ray" }, body: "**Hold**: waiting on `legal`\nmore" },
+    { url: "https://github.com/o/r/issues/1#c1", createdAt: "2026-10-14T11:00:00Z", author: { login: "alice" }, body: "too early" },
+    { url: "https://github.com/o/r/issues/1#c2", createdAt: "2026-10-14T11:50:00Z", author: { login: "alice" }, body: "**Hold**: waiting on `legal`\nmore" },
     { url: "https://github.com/o/r/issues/1#c3", createdAt: "2026-10-14T12:05:00Z", author: { login: "someone" }, body: "not the holder" },
   ];
   const h = holdReason("blocked", events, comments);
-  assert.equal(h.action, `${HOLD_PREFIX}Hold: waiting on legal (ray, 2026-10-14) https://github.com/o/r/issues/1#c2`);
+  assert.equal(h.action, `${HOLD_PREFIX}Hold: waiting on legal (alice, 2026-10-14) https://github.com/o/r/issues/1#c2`);
   assert.equal(h.commentUrl, "https://github.com/o/r/issues/1#c2");
-  assert.ok(h.comment.startsWith("Held on GitHub by ray, 2026-10-14:\n\n**Hold**"));
+  assert.ok(h.comment.startsWith("Held on GitHub by alice, 2026-10-14:\n\n**Hold**"));
   assert.ok(isHoldComment(h.comment, { comment: h.comment, url: h.commentUrl }));
   assert.ok(!isHoldComment(`see ${h.commentUrl}`, { comment: h.comment, url: h.commentUrl }), "a mere link is not the copy");
 
   const none = holdReason("blocked", events, []);
-  assert.equal(none.action, `${HOLD_PREFIX}labelled blocked by ray on 2026-10-14; no reason posted on the issue`);
+  assert.equal(none.action, `${HOLD_PREFIX}labelled blocked by alice on 2026-10-14; no reason posted on the issue`);
   assert.equal(none.comment, null);
   assert.equal(holdReason("blocked", [], []).action, `${HOLD_PREFIX}labelled blocked by unknown on unknown date; no reason posted on the issue`);
 });

@@ -11,7 +11,6 @@ import { tryUnstick } from "../dist/phases/unstick.js";
 import { UNSTICK_MAX_ATTEMPTS } from "../dist/unstick.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, seed, recordOf } from "./issue-records.mjs";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 import { ForemanRuntime } from "../dist/runtime.js";
 let rt = new ForemanRuntime();
 
@@ -34,8 +33,8 @@ function setup(exitCode = 1) {
   mkdirSync(join(em, "bin"));
   writeFileSync(join(em, "bin/em.mjs"), `console.error("${"x".repeat(900)} session PARSE_ERROR"); process.exit(${exitCode});`);
   const repo = { name: "gr", githubRepo: "o/gr", repoPath: em, lifecycleLabels: { prApproved: "pr approved", readyForProd: "ready for prod release" } };
-  // Slashbin's owner, from its profile: the comment mentions exactly today's login.
-  const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } }, unstickEscalationOwner: slashbinProfile.unstickEscalationOwner };
+  // The deployment's owner login, from its config: the comment mentions exactly that login.
+  const config = { emRepoPath: em, sessionEnv: [], backoff: { verifyRetry: { maxAttempts: 3 } }, unstickEscalationOwner: "owner-login" };
   const hold = (reason) => seed(rt, repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason, attempts: 3 } });
   return { repo, config, hold };
 }

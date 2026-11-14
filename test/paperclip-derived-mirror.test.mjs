@@ -11,13 +11,12 @@ import { configureBackoff, DEFAULT_BACKOFF } from "../dist/backoff.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
 import { paperclipBoardDefaults } from "../dist/paperclip/config.js";
 import { issueStage } from "../dist/github-work-source.js";
-import { slashbinProfile } from "../dist/profiles/slashbin.js";
 
 // Tiny retry waits so the clients' retries run at once; the real windows are backoff.paperclip / backoff.registry.
 configureBackoff({ ...DEFAULT_BACKOFF, paperclip: { ...DEFAULT_BACKOFF.paperclip, baseMs: 1, capMs: 2 }, registry: { ...DEFAULT_BACKOFF.registry, baseMs: 1, capMs: 2 } });
 
-/** The credit header Slashbin's Paperclip fork reads (`paperclip.commentAuthorHeader`, from its profile). */
-const HEADER = slashbinProfile.paperclip.commentAuthorHeader;
+/** A credit header a Paperclip fork reads (`paperclip.commentAuthorHeader`, set in the deployment config). */
+const HEADER = "x-comment-author";
 
 // GitHub reads every issue the existing tests snapshot as open: a card moves
 // only on a confirmed state (the closed-issue cases are in paperclip-closed-cards).

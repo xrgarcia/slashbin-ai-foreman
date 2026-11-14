@@ -128,8 +128,6 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   // The EM publishes the alert kinds it accepts; a kind the Foreman sends that it lacks is an alert nobody receives.
   void checkKindContract(config, logger);
 
-  logger.info(config.profile ? `Config profile: ${config.profile}` : "Config profile: none (neutral defaults)");
-
   const repoNames = config.repos.map((r) => r.name).join(", ");
   const startLanes = lanesFor(config.stages);
   logger.info("Daemon starting", {

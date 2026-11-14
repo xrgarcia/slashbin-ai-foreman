@@ -167,7 +167,7 @@ Layout, plugin model and boundary: `docs/architecture.md`. The modules a change 
 
 - `plugins/` — `contract.ts` (roles), `registry.ts` (the core's only way in), `index.ts` (composition root), one file per plugin.
 - `lifecycle.ts` (the state machine; generates `docs/lifecycle.md`), `work-source.ts` (`emit()`/`advance()`), `adapters.ts` (the data contract), `code-host.ts` (typed, no raw `gh`).
-- `runtime.ts` + `phase-memory.ts`, `issue-records.ts` + `record-store.ts`, `profiles/`, `foreman-branch.ts`.
+- `runtime.ts` + `phase-memory.ts`, `issue-records.ts` + `record-store.ts`, `foreman-branch.ts`.
 - `stages.ts`, `lanes.ts`, `orchestrator.ts`, `daemon.ts`, `phases/` (`*-workflow.ts` run the Claude session), `dependency-batch/`, `session/` (runner, env, secret-gate, protocol).
 - Plugin code, off-limits to the core: `github.ts`, `github/`, `github-work-source.ts`, `github-state.ts`, `paperclip/`, `metrics/`.
 
@@ -210,6 +210,13 @@ a drain** (2026-10-16: a test build of an uncommitted edit made it refuse to sta
   `.ai-agent.json` files keep working unchanged. Every key is commented where it is
   declared; `docs/configuration.md` is generated from those comments and the generator
   fails on an uncommented key. `docs/README.md` is the docs index.
-- **Profiles** — operator-specific values (logins, repo names, header names) live in `src/profiles/`, nowhere else in `src/`.
+- **Public repo: no private names** — this code is published. No customer name, no
+  customer's or Slashbin's private repo or service name, no operator login or personal
+  name, no internal MCP server, Doppler project or Railway name may appear in any tracked
+  file: code, comments, tests, fixtures, docs, skills. Cite an incident by what happened
+  and the Foreman's own issue number, naming any other repo generically ("a customer's
+  orders service"). A deployment's own values go in its git-ignored `.ai-agent.json`.
+  `test/no-private-names.test.mjs` fails the build on a banned name (stored hashed, so the
+  guard does not publish them); ban a new one by adding its hash there.
 - **Metrics** — the opt-in `metrics` observer logs stage advances to SQLite; `npm run metrics:report` reads it (`docs/metrics.md`).
 - **Persistence** — work-source records survive restarts; the daemon resumes where it left off.

@@ -11,7 +11,6 @@ import { githubConventionsSchema, freezeGithubConventions, type GithubConvention
 import { backoffConfigSchema, mergeBackoff, type BackoffConfig } from "./backoff.js";
 import { runnerConfigSchema, type RunnerConfig } from "./refusal.js";
 import { skillSyncConfigSchema, mergeSkillSync, resolveSkillSync, type SkillSyncConfig } from "./skill-sync.js";
-import { applyProfile, profileNamed } from "./profiles/index.js";
 
 // --- Schemas ---
 
@@ -147,11 +146,9 @@ export const configSchema = z.object({
 
   // --- Global settings ---
 
-  // A named set of defaults for one operator's fleet (src/profiles/): each key it
-  // sets replaces the neutral default below, and a key this file sets still wins.
-  // `slashbin` is Slashbin's fleet. Unset = the neutral defaults. An unknown name
-  // stops startup, naming the valid ones.
-  profile: z.string().min(1).optional(),
+  // Removed: a deployment's own values (logins, repo names, MCP tool lists) go in
+  // this file, which stays out of git. Set, it stops startup (see loadConfig).
+  profile: z.unknown().optional(),
   // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
   // A poll interval of its own for named lanes, in milliseconds, keyed by lane name
@@ -583,8 +580,6 @@ export interface RepoConfig {
  * Use `config.repos[i]` to get the RepoConfig for each repo.
  */
 export interface AgentConfig {
-  /** The config profile selected (`profile`), undefined for the neutral defaults. */
-  profile?: string;
   repos: readonly RepoConfig[];
   /**
    * Every configured repo, even when `--repo` narrowed `repos` to one. Set only
@@ -798,11 +793,12 @@ function loadConfigFile(configPath?: string): Record<string, unknown> {
 // --- Config Loading ---
 
 export function loadConfig(configPath?: string): AgentConfig {
-  // The profile's values sit under the file's (src/profiles/index.ts), so from here
-  // on a profile value reads exactly like one the file set. Env still wins.
-  const rawFile = loadConfigFile(configPath);
-  const profileName = typeof rawFile.profile === "string" ? rawFile.profile : undefined;
-  const fileConfig = profileName ? applyProfile(rawFile, profileNamed(profileName)) : rawFile;
+  const fileConfig = loadConfigFile(configPath);
+  // Built-in profiles are gone: the code is public, so a deployment's names live only in its
+  // own .ai-agent.json. Fail loud rather than silently dropping the values a profile supplied.
+  if (fileConfig.profile !== undefined) {
+    throw new Error("Config key \"profile\" was removed: set its keys (unstickEscalationOwner, qaRepos, reviewAllowedTools, ...) directly in .ai-agent.json. See docs/upgrading.md.");
+  }
 
   const merged = {
     repoPath: process.env.AI_AGENT_REPO_PATH ?? fileConfig.repoPath,
@@ -847,7 +843,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     runner: fileConfig.runner,
     logFormat: process.env.AI_AGENT_LOG_FORMAT ?? fileConfig.logFormat,
     logLevel: process.env.AI_AGENT_LOG_LEVEL ?? fileConfig.logLevel,
-    profile: fileConfig.profile,
     repos: fileConfig.repos,
     // Review phase
     emRepoPath: process.env.AI_AGENT_EM_REPO_PATH ?? fileConfig.emRepoPath,
@@ -1045,7 +1040,6 @@ export function loadConfig(configPath?: string): AgentConfig {
   const paperclip = resolvePaperclipConfig(parsed.paperclip, repos.map((r) => r.githubRepo));
 
   return Object.freeze({
-    profile: parsed.profile,
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
     laneIntervalsMs: Object.freeze({ ...parsed.laneIntervalsMs }),

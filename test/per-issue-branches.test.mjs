@@ -31,7 +31,7 @@ test("a head is Foreman-owned iff it starts with branchPrefix or is the legacy f
   assert.equal(isForemanOwnedHead(cfg, "foreman/208-per-issue"), true);
   assert.equal(isForemanOwnedHead(cfg, "features"), true, "the legacy shared head still drains");
   assert.equal(isLegacyFeatureHead(cfg, "features"), true);
-  for (const human of ["ray/fix-x", "features-x", "feature/foreman/1", "develop", "main", "dependabot/npm/lodash", "", undefined, null]) {
+  for (const human of ["alice/fix-x", "features-x", "feature/foreman/1", "develop", "main", "dependabot/npm/lodash", "", undefined, null]) {
     assert.equal(isForemanOwnedHead(cfg, human), false, String(human));
   }
 });
@@ -129,7 +129,7 @@ beforeEach(() => arrange([]));
 // --- finding the Foreman's PRs ------------------------------------------------------------------
 
 test("the Foreman finds per-issue and legacy PRs into the base, never a human's", async () => {
-  arrange([pr(1, "ray/fix-x"), pr(2, "foreman/2-thing"), pr(3, "features"), pr(4, "foreman/4-other", "main"), pr(5, "dependabot/npm/x")]);
+  arrange([pr(1, "alice/fix-x"), pr(2, "foreman/2-thing"), pr(3, "features"), pr(4, "foreman/4-other", "main"), pr(5, "dependabot/npm/x")]);
   assert.deepEqual((await findOpenForemanPrs(repo())).map((p) => p.number), [2, 3]);
 });
 
@@ -147,7 +147,7 @@ test("a per-issue PR is found with its own head branch", async () => {
 });
 
 test("a human-named PR alone is no Foreman PR: nothing to review, revise or hold the repo", async () => {
-  arrange([pr(1, "ray/fix-x")]);
+  arrange([pr(1, "alice/fix-x")]);
   assert.equal(await findOpenFeaturePR(repo()), null);
 });
 
@@ -166,7 +166,7 @@ test("revise refuses a head the Foreman does not own, and pushes only to the PR'
 
 test("deleteMergedBranch refuses a human head, the legacy shared head, the base and production: no API call", async () => {
   arrange([]);
-  for (const head of ["ray/fix-x", "features", "develop", "main", "feature/foreman/1"]) {
+  for (const head of ["alice/fix-x", "features", "develop", "main", "feature/foreman/1"]) {
     assert.equal(await deleteMergedBranch(repo(), head), false, head);
   }
   assert.deepEqual(deletes(), []);
@@ -203,21 +203,21 @@ function remote(names) {
 }
 
 test("pruneMergedBranches deletes only a per-issue branch still at the head a merged PR delivered", async () => {
-  const r = remote(["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "ray/fix-x", "features"]);
+  const r = remote(["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "alice/fix-x", "features"]);
   try {
     const merged = (sha) => [{ number: 1, url: "u", mergedAt: "2026-11-02T00:00:00Z", headRefOid: sha, closedAt: "2026-11-02T00:00:00Z" }];
     arrange([pr(30, "foreman/3-open")], {
       "foreman/1-merged": merged(r.shas["foreman/1-merged"]),
       "foreman/2-moved": merged("b".repeat(40)),
       "foreman/4-rejected": [{ number: 4, url: "u", mergedAt: null, headRefOid: r.shas["foreman/4-rejected"], closedAt: "2026-11-02T00:00:00Z" }],
-      "ray/fix-x": merged(r.shas["ray/fix-x"]),
+      "alice/fix-x": merged(r.shas["alice/fix-x"]),
       features: merged(r.shas.features),
     });
-    const out = await pruneMergedBranches({ ...repo(), repoPath: r.clone }, logger, ["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "ray/fix-x", "features"]);
+    const out = await pruneMergedBranches({ ...repo(), repoPath: r.clone }, logger, ["foreman/1-merged", "foreman/2-moved", "foreman/3-open", "foreman/4-rejected", "alice/fix-x", "features"]);
     assert.deepEqual(out, ["foreman/1-merged"], "delivered and untouched since: deleted; moved on, open, rejected: kept");
     assert.equal(deletes().length, 1);
     assert.ok(deletes()[0].some((x) => x.endsWith("heads/foreman/1-merged")));
-    assert.ok(!calls().some((a) => a.some((x) => /ray\/fix-x|heads\/features/.test(String(x))) && a.includes("DELETE")), "a human head and the legacy head are never deleted, even when merged");
+    assert.ok(!calls().some((a) => a.some((x) => /alice\/fix-x|heads\/features/.test(String(x))) && a.includes("DELETE")), "a human head and the legacy head are never deleted, even when merged");
   } finally {
     rmSync(r.dir, { recursive: true, force: true });
   }
