@@ -160,5 +160,10 @@ Two consequences worth knowing:
   deliberately not retried — the budget is already spent. If you see them, raise
   `pollIntervalMs` or reduce the repo count.
 
+Idle spend (no work in flight) is also bounded by the fleet-state refresh (at most one bulk query per
+30 s, and none for a repo a change signal reports quiet), by `laneIntervalsMs` for the lanes that
+poll REST per repo, and by the verify scan no longer forcing a refresh on every pass. See
+[plugins](plugins.md).
+
 `issueSnapshotLimit` (default 500) caps the open issues fetched per snapshot; it must
 exceed a repo's open-issue count, and truncation is logged.

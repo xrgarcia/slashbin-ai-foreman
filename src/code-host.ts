@@ -364,6 +364,8 @@ export interface CodeHostStateOptions {
   persistPath?: string;
   logger: Logger;
   now?: () => number;
+  /** Narrows a time-driven refresh to the repos that need it (a change signal); see GitHubStateOptions. */
+  refreshGate?: (repos: string[]) => Promise<string[]>;
 }
 
 /** What the host said about one token: accepted, rejected (401), or unknown (no answer: network, 5xx, back-off). */
@@ -453,6 +455,8 @@ export interface CodeHost {
     url: string;
     headRefOid: string;
 } | undefined>;
+  /** True only when the fleet state authoritatively says no PR is open `head → base` (up to date, not cut short); false means ask. Never use it to decide to OPEN a PR. */
+  knownNoOpenPr(repo: string, head: string, base: string): Promise<boolean>;
   openIssueLabels(config: RepoConfig, logger: Logger): Promise<Array<{
     number: number;
     labels: string[];

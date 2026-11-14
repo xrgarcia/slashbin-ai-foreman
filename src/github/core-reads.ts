@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { DeploymentView, IssueTextRow } from "../code-host.js";
 import type { RepoConfig } from "../config.js";
 import { ghAsync } from "./gh.js";
+import { closedPrVersion, ghKeyed } from "./cache.js";
 import { branchPrefixOf, isForemanOwnedHead, isLegacyFeatureHead } from "../foreman-branch.js";
 
 /** `lastEditedAt` of issue `n` as GraphQL returns it: undefined when absent, null when never edited. Throws on a failed read. */
@@ -68,7 +69,9 @@ export async function openPrsForBranch(repo: string, head: string, base: string,
 export async function closedPrsForBranch(repo: string, head: string, base: string, cwd: string): Promise<{
   number: number; url: string; mergedAt: string | null; headRefOid: string; closedAt: string | null;
 }[]> {
-  const json = await ghAsync([
+  // The fleet state holds only OPEN PRs, so it cannot answer this; it can say when a PR was last seen
+  // to close, and the answer cannot change before then: the read repeats only on that.
+  const json = await ghKeyed(`closed:${repo}:${head}:${base}`, async () => await closedPrVersion(repo), [
     "pr", "list",
     "--repo", repo,
     "--head", head,

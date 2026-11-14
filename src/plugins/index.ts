@@ -28,3 +28,6 @@ export function registerBuiltinPlugins(runtime: ForemanRuntime): void {
   registerPlugin(new QaPlugin());
   registerPlugin(new EmPlugin());
 }
+
+export { registerExternalPlugins } from "./external.js";
+export type { ExternalPluginContext, ExternalPluginExport } from "./external.js";

@@ -15,6 +15,7 @@ export {
   isPrOpen,
   findOpenPrs,
   knownOpenPr,
+  knownNoOpenPr,
   ghKeyed,
   closedPrVersion,
 } from "./github/cache.js";
