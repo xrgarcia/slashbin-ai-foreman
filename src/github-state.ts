@@ -92,6 +92,13 @@ export interface GitHubStateOptions {
   runAsync: (args: string[]) => Promise<string>;
   logger: Logger;
   now?: () => number;
+  /**
+   * Narrows a time-driven refresh to the repos worth asking GitHub about: given the repos that already
+   * have a view, the ones it returns are refreshed. A repo with no view, or one this process wrote to,
+   * is refreshed regardless, and a gate that throws means every repo. Omitted, every stale refresh is
+   * of every repo, as it always was.
+   */
+  refreshGate?: (repos: string[]) => Promise<string[]>;
 }
 
 /** Changes per repo a delta reads before it falls back to a full sync of that repo. */
@@ -126,6 +133,8 @@ export class GitHubState {
   /** GraphQL points the state's own queries spent, as GitHub reported them. */
   private pointsSpent = 0;
   private queriesRun = 0;
+  /** Set by a failed refresh: the next one skips the refresh gate. */
+  private gateBypass = false;
   /** The async refresh in flight, shared by every concurrent `warm`. */
   private inFlight: Promise<void> | null = null;
   /** Bumped on every write mark; per repo, the value at its last mark. */
@@ -278,11 +287,25 @@ export class GitHubState {
     if (this.lastFailure && t - this.lastFailure.at < FAILURE_COOLDOWN_MS) return Promise.reject(this.lastFailure.err);
     const run = (async () => {
       try {
-        await this.driveAsync(this.refresh(stale ? o.repos : [...this.dirty]), o.runAsync);
+        let repos = stale ? o.repos : [...this.dirty];
+        // A change signal narrows the time-driven refresh to repos that changed (or are due a forced
+        // check). A failed refresh bypasses it once, so a repo the gate already spent is not left waiting.
+        if (stale && o.refreshGate && !this.gateBypass) {
+          let due: Set<string>;
+          try {
+            due = new Set(await o.refreshGate(o.repos.filter((r) => this.views.has(r))));
+          } catch {
+            due = new Set(o.repos);
+          }
+          repos = o.repos.filter((r) => !this.views.has(r) || due.has(r) || this.dirty.has(r));
+        }
+        if (repos.length > 0) await this.driveAsync(this.refresh(repos), o.runAsync);
         if (stale) this.lastRefreshAt = this.now();
         this.lastFailure = null;
+        this.gateBypass = false;
       } catch (err) {
         this.lastFailure = { at: this.now(), err };
+        this.gateBypass = true;
         throw err;
       } finally {
         this.inFlight = null;

@@ -154,6 +154,33 @@ export const configSchema = z.object({
   profile: z.string().min(1).optional(),
   // How often a poll cycle starts.
   pollIntervalMs: z.coerce.number().int().positive().default(300_000),
+  // A poll interval of its own for named lanes, in milliseconds, keyed by lane name
+  // (`reconcile`, `review`, `verify`, `release`, `build`, `branch-sync`, `dependabot`,
+  // `unstick`, `skill-deliver`, or a custom stage's id). A lane not listed polls on
+  // `pollIntervalMs`, so an existing config changes nothing. Slow a lane whose work
+  // changes rarely (branch sync, dependabot) to spend fewer GitHub calls while idle;
+  // the lanes that start sessions keep the short interval. Additive + OSS-safe.
+  laneIntervalsMs: z.record(z.string().min(1), z.coerce.number().int().positive()).default({}),
+  // Modules that register Foreman plugins at startup (docs/plugins.md): each entry is a
+  // path (absolute, `~/`, or relative to the config file) or a package name, dynamically
+  // imported once at startup; its default export is a plugin, a list of them, or a
+  // function returning either. A module that fails to load is logged and skipped, so the
+  // Foreman runs without it. Changing the list takes a restart. Additive + OSS-safe:
+  // empty by default.
+  plugins: z.array(z.string().min(1)).default([]),
+  // How a plugin's change signal (a plugin filling the `changeSignal` role,
+  // docs/plugins.md) is used. With no such plugin none of this does anything and the
+  // Foreman polls as it always did. Additive + OSS-safe.
+  changeSignal: z.object({
+    // A repo the signal calls quiet is checked anyway at least this often, so a missed
+    // webhook delays work by at most this long.
+    forceCheckMs: z.coerce.number().int().positive().default(300_000),
+    // Lanes that skip a pass for a quiet repo until its forced check. Only lanes whose
+    // work is a function of GitHub's state belong here: `branch-sync` and `dependabot`
+    // by default. A lane that acts on the clock (verify and release back-offs, unstick)
+    // or on local files (skill-deliver) should not be listed.
+    lanes: z.array(z.string().min(1)).default(["branch-sync", "dependabot"]),
+  }).prefault({}),
   // RETIRED, ignored. It capped how many repos ran their serial pass at once;
   // concurrency is now one loop per (repo, lane) — see src/lanes.ts — so there is
   // no whole-repo pass left to cap. A config that still sets it loads, with a
@@ -566,6 +593,12 @@ export interface AgentConfig {
    */
   allRepos?: readonly RepoConfig[];
   pollIntervalMs: number;
+  /** Per-lane poll interval overrides; a lane not listed uses `pollIntervalMs`. Optional: a hand-built test config means none. */
+  laneIntervalsMs?: Readonly<Record<string, number>>;
+  /** Module specifiers of external plugins, imported at startup (docs/plugins.md). Optional: a hand-built config means none. */
+  plugins?: readonly string[];
+  /** Change-signal settings; used only when a plugin fills the role. Optional: a hand-built config means the defaults. */
+  changeSignal?: Readonly<{ forceCheckMs: number; lanes: readonly string[] }>;
   /** Retired (lanes replaced it); kept only so the startup warning can name it. */
   maxConcurrentRepos?: number;
   /** Fleet-wide ceiling on concurrent session stages; 0 = none (default). */
@@ -744,6 +777,11 @@ export function concurrencyWarning(config: Pick<AgentConfig, "maxConcurrentRepos
  * `.ai-agent.json`, else `ai-agent.config.json`, in the working directory.
  * Undefined when none exists — `loadConfig` then runs on env and defaults alone.
  */
+/** How long a lane sleeps between passes: its own interval when `laneIntervalsMs` names it, else `pollIntervalMs`. */
+export function laneIntervalMs(config: Pick<AgentConfig, "pollIntervalMs" | "laneIntervalsMs">, lane: string): number {
+  return config.laneIntervalsMs?.[lane] ?? config.pollIntervalMs;
+}
+
 export function findConfigFile(configPath?: string): string | undefined {
   const paths = configPath
     ? [resolve(configPath)]
@@ -771,6 +809,9 @@ export function loadConfig(configPath?: string): AgentConfig {
     githubRepo: process.env.AI_AGENT_GITHUB_REPO ?? fileConfig.githubRepo,
     triggerLabel: process.env.AI_AGENT_TRIGGER_LABEL ?? fileConfig.triggerLabel,
     pollIntervalMs: process.env.AI_AGENT_POLL_INTERVAL_MS ?? fileConfig.pollIntervalMs,
+    laneIntervalsMs: fileConfig.laneIntervalsMs,
+    plugins: fileConfig.plugins,
+    changeSignal: fileConfig.changeSignal,
     maxConcurrentRepos: process.env.AI_AGENT_MAX_CONCURRENT_REPOS ?? fileConfig.maxConcurrentRepos,
     maxConcurrentSessions: process.env.AI_AGENT_MAX_CONCURRENT_SESSIONS ?? fileConfig.maxConcurrentSessions,
     trustManagedRepos: process.env.AI_AGENT_TRUST_MANAGED_REPOS ?? fileConfig.trustManagedRepos,
@@ -1007,6 +1048,9 @@ export function loadConfig(configPath?: string): AgentConfig {
     profile: parsed.profile,
     repos: Object.freeze(repos),
     pollIntervalMs: parsed.pollIntervalMs,
+    laneIntervalsMs: Object.freeze({ ...parsed.laneIntervalsMs }),
+    plugins: Object.freeze([...parsed.plugins]),
+    changeSignal: Object.freeze({ forceCheckMs: parsed.changeSignal.forceCheckMs, lanes: Object.freeze([...parsed.changeSignal.lanes]) }),
     ...(parsed.maxConcurrentRepos !== undefined ? { maxConcurrentRepos: parsed.maxConcurrentRepos } : {}),
     maxConcurrentSessions: parsed.maxConcurrentSessions,
     trustManagedRepos: parsed.trustManagedRepos,

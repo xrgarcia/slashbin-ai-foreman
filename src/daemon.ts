@@ -1,11 +1,12 @@
 import type { AgentConfig } from "./config.js";
-import { concurrencyWarning, loadConfig, releaseStageWarning } from "./config.js";
+import { concurrencyWarning, laneIntervalMs, loadConfig, releaseStageWarning } from "./config.js";
 import type { Logger } from "./logger.js";
 import { runLanePass, drainInFlight, requestShutdown } from "./orchestrator.js";
 import { lanesFor, setSessionLimit } from "./lanes.js";
 import { stageName } from "./stages.js";
 import { join } from "node:path";
-import { codeHost } from "./plugins/registry.js";
+import { changeSignal, codeHost } from "./plugins/registry.js";
+import { ChangeGate } from "./change-gate.js";
 import { addObserver } from "./work-source.js";
 import { stateDir } from "./state-dir.js";
 import { configureBackoff } from "./backoff.js";
@@ -52,6 +53,16 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
   rt.trust.trustManagedRepos(config.repos, logger);
 
   const host = codeHost();
+  // A plugin's change signal, when one is installed, lets a quiet repo skip its fleet-state refresh and
+  // the lanes in `changeSignal.lanes` until a change or the forced check; with none installed the gate
+  // says every repo is always due and nothing here differs from polling on the clock.
+  const gate = new ChangeGate({
+    signal: changeSignal,
+    forceMs: () => activeConfig.changeSignal?.forceCheckMs ?? 300_000,
+    repos: () => activeConfig.repos.map((r) => r.githubRepo),
+    logger,
+  });
+  const gatedLanes = (): ReadonlySet<string> => new Set(activeConfig.changeSignal?.lanes ?? ["branch-sync", "dependabot"]);
   host.configureIssueCache({
     ttlMs: config.issueCacheTtlMs,
     snapshotLimit: config.issueSnapshotLimit,
@@ -65,6 +76,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
     issueLimit: config.issueSnapshotLimit,
     persistPath: join(stateDir(), ".github-state.json"),
     logger,
+    refreshGate: (repos) => gate.dueRepos("state", repos),
   });
 
   // The Foreman's own in-flight work, beside the GitHub view: every step the work
@@ -127,6 +139,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
     // One loop per (repo, lane): each lane runs one item per repo at a time.
     lanes: startLanes.map((l) => `${l.name}[${l.stages.map(stageName).join(">")}]`).join(" "),
     laneLoops: startLanes.length * config.repos.length,
+    ...(Object.keys(config.laneIntervalsMs ?? {}).length > 0 ? { laneIntervalsMs: JSON.stringify(config.laneIntervalsMs) } : {}),
     maxConcurrentSessions: config.maxConcurrentSessions || "unbounded",
     issueCacheTtlMs: config.issueCacheTtlMs,
     // Requests/hour the discovery phases will now spend, so the budget is
@@ -135,6 +148,10 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
       config.repos.length * (3600_000 / config.pollIntervalMs),
     ),
   });
+
+  for (const lane of Object.keys(config.laneIntervalsMs ?? {})) {
+    if (!startLanes.some((l) => l.name === lane)) logger.warn(`laneIntervalsMs names "${lane}", which is not a lane of the configured stages — it changes nothing`);
+  }
 
   for (const repo of config.repos) {
     logger.info(`  repo: ${repo.name}`, {
@@ -211,6 +228,14 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
     let loopStopping = false;
     let wake: (() => void) | null = null;
     const key = loopKey(repoName, laneName);
+    // Sleep this lane's own interval; stop() wakes it.
+    const nap = (): Promise<void> => new Promise<void>((resolve) => {
+      wake = resolve;
+      setTimeout(() => {
+        wake = null;
+        resolve();
+      }, laneIntervalMs(activeConfig, laneName));
+    });
 
     const run = async (): Promise<void> => {
       const repoLogger = logger.child({ repo: repoName, lane: laneName });
@@ -239,6 +264,13 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
           repoLogger.info(repoConfig ? "Lane no longer in the configured stages — stopping its loop" : "Repo no longer in config — stopping its loop");
           laneLoops.delete(key);
           return;
+        }
+
+        // A quiet repo's pass of a state-only lane is skipped until a change or the forced check.
+        if (gatedLanes().has(laneName) && gate.active() && !(await gate.due(`lane:${laneName}`, repoConfig.githubRepo))) {
+          repoLogger.debug("No change signalled — lane pass skipped");
+          await nap();
+          continue;
         }
 
         let didWork = false;
@@ -281,13 +313,7 @@ export function startDaemon(rt: ForemanRuntime, config: AgentConfig, logger: Log
         if (stopping || loopStopping) return;
         if (didWork) continue; // more to do — go straight round again
 
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-          setTimeout(() => {
-            wake = null;
-            resolve();
-          }, activeConfig.pollIntervalMs);
-        });
+        await nap();
       }
     };
 
