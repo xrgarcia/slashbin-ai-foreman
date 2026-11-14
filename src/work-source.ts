@@ -1,8 +1,9 @@
-import type { WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
+import type { SnapshotItem, WaitingItem, WorkEvent, WorkItem, WorkObserver, WorkSourceAdapter } from "./adapters.js";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import { transition, type Move } from "./lifecycle.js";
 import type { Logger } from "./logger.js";
 import { fieldTable } from "./issue-records.js";
+import { gateWaitReason, unstickKey } from "./unstick.js";
 import { activeWorkSource, addObserver as addRegistryObserver, observers as registryObservers, observersWantSessionReports, observersWantSnapshot, setWorkSource } from "./plugins/registry.js";
 import type { ForemanRuntime } from "./runtime.js";
 
@@ -247,12 +248,20 @@ export async function publishSnapshot(rt: ForemanRuntime, repoConfig: RepoConfig
   const closed = !cards && source.closed ? await source.closed(repoConfig, logger) : undefined;
   const numbers = items.map((i) => i.item.issueNumber);
   const holds = await foremanHolds(rt, repoConfig, numbers, logger);
-  const held = fieldTable(await rt.records.loadIssueRecords(repoConfig, numbers), "verifyHeld");
+  const loaded = await rt.records.loadIssueRecords(repoConfig, numbers);
+  const held = fieldTable(loaded, "verifyHeld");
+  const now = Date.now();
+  // Why an item waits on the EM seat's gate, for the metrics log: derived from the release-gate unstick entry.
+  const withReason = (i: SnapshotItem): SnapshotItem => {
+    if (i.stage !== "pendingVerification" && i.stage !== "awaitingSignoff") return i;
+    const entry = loaded.records.get(i.item.issueNumber)?.unstick?.[unstickKey(i.item.issueNumber, "release-gate")];
+    return { ...i, waitReason: gateWaitReason(i.stage, i.item.issueNumber, entry, i.signoff, now) };
+  };
   const read = source.states?.bind(source);
   await emit(rt, {
     kind: "snapshot",
     repo: repoConfig.githubRepo,
-    items: items.map((i) => ({ ...(held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i), foremanHeld: holds(i.item.issueNumber) })),
+    items: items.map((i) => withReason({ ...(held[i.item.issueNumber] ? { ...i, verifyHeld: true } : i), foremanHeld: holds(i.item.issueNumber) })),
     ...(cards ? { cards } : {}),
     ...(closed ? { closed } : {}),
     ...(read ? { states: (ns: readonly number[]) => read(repoConfig, ns, logger) } : {}),
