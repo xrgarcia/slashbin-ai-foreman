@@ -25,9 +25,12 @@ export interface ChangeGateOptions {
   now?: () => number;
   /** The signal is asked at most this often, however many consumers call (default 5 s). */
   pollTtlMs?: number;
+  /** A signal call that has not answered by then counts as failed (default 10 s), so a hung plugin cannot stall polling. */
+  signalTimeoutMs?: number;
 }
 
 const DEFAULT_POLL_TTL_MS = 5_000;
+const DEFAULT_SIGNAL_TIMEOUT_MS = 10_000;
 
 export class ChangeGate {
   private cursor: string | null = null;
@@ -76,29 +79,45 @@ export class ChangeGate {
   private poll(signal: ChangeSignal): Promise<void> {
     if (this.polling) return this.polling;
     if (this.now() - this.lastPollAt < (this.o.pollTtlMs ?? DEFAULT_POLL_TTL_MS)) return Promise.resolve();
-    const run = (async () => {
-      try {
-        const report = await signal.changedSince(this.cursor, this.o.repos());
-        this.cursor = report.cursor;
-        if (report.changed === "all") this.allSeq++;
-        else for (const r of report.changed) this.seq.set(r, (this.seq.get(r) ?? 0) + 1);
-        if (this.failing) this.o.logger.info("change signal answering again");
-        this.failing = false;
-      } catch (err) {
-        // Fail open: a signal that cannot answer must never make work wait. Everything is due until it can.
-        this.allSeq++;
-        if (!this.failing) {
-          this.o.logger.warn("change signal failed — every repo is polled in full until it answers", {
-            error: err instanceof Error ? err.message.split("\n")[0] : String(err),
-          });
-        }
-        this.failing = true;
-      } finally {
-        this.lastPollAt = this.now();
-        this.polling = null;
-      }
-    })();
+    const run = this.ask(signal);
     this.polling = run;
+    // Cleared only after the assignment above, so a call that settles at once can never leave a settled
+    // promise stored: the next call after the TTL asks the signal again (a sync throw, a rejection, a timeout).
+    void run.finally(() => {
+      if (this.polling === run) this.polling = null;
+    });
     return run;
+  }
+
+  /** One signal call. Never rejects: any failure (sync throw, rejection, timeout) makes every repo due until it answers. */
+  private async ask(signal: ChangeSignal): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeoutMs = this.o.signalTimeoutMs ?? DEFAULT_SIGNAL_TIMEOUT_MS;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`change signal did not answer within ${timeoutMs} ms`)), timeoutMs);
+      });
+      // Promise.resolve().then(...) turns a synchronous throw into a rejection like any other.
+      const answer = Promise.resolve().then(() => signal.changedSince(this.cursor, this.o.repos()));
+      answer.catch(() => {}); // a late failure after the timeout won
+      const report = await Promise.race([answer, timeout]);
+      this.cursor = report.cursor;
+      if (report.changed === "all") this.allSeq++;
+      else for (const r of report.changed) this.seq.set(r, (this.seq.get(r) ?? 0) + 1);
+      if (this.failing) this.o.logger.info("change signal answering again");
+      this.failing = false;
+    } catch (err) {
+      // Fail open: a signal that cannot answer must never make work wait. Everything is due until it can.
+      this.allSeq++;
+      if (!this.failing) {
+        this.o.logger.warn("change signal failed — every repo is polled in full until it answers", {
+          error: err instanceof Error ? err.message.split("\n")[0] : String(err),
+        });
+      }
+      this.failing = true;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.lastPollAt = this.now();
+    }
   }
 }
