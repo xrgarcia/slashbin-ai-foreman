@@ -252,10 +252,11 @@ export async function publishSnapshot(rt: ForemanRuntime, repoConfig: RepoConfig
   const held = fieldTable(loaded, "verifyHeld");
   const now = Date.now();
   // Why an item waits on the EM seat's gate, for the metrics log: derived from the release-gate unstick entry.
+  const unsignedSets = new Map<unknown, Set<number>>(); // one set per release PR, not one scan per item
   const withReason = (i: SnapshotItem): SnapshotItem => {
     if (i.stage !== "pendingVerification" && i.stage !== "awaitingSignoff") return i;
     const entry = loaded.records.get(i.item.issueNumber)?.unstick?.[unstickKey(i.item.issueNumber, "release-gate")];
-    return { ...i, waitReason: gateWaitReason(i.stage, i.item.issueNumber, entry, i.signoff, now) };
+    return { ...i, waitReason: gateWaitReason(i.stage, i.item.issueNumber, entry, i.signoff ? (unsignedSets.get(i.signoff) ?? unsignedSets.set(i.signoff, new Set(i.signoff.unsigned)).get(i.signoff)) : undefined, now) };
   };
   const read = source.states?.bind(source);
   await emit(rt, {
