@@ -144,6 +144,8 @@ export async function listCarriedMerges(repoConfig: RepoConfig, logger: Logger, 
     }
     return merges;
   } catch (err) {
+    // The gate counted this change as seen: a stale listing must not stand in for the read that failed.
+    if (reusable) lastListing.delete(repo);
     logger.warn(`Release carry: could not list the merges ${productionBranch}..${baseBranch} carries; releasing the authorized issues only`, {
       ...formatGhError(err), repo,
     });

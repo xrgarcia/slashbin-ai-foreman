@@ -97,6 +97,8 @@ export class PhaseMemory {
   readonly releaseBackoff = new BackoffTracker();
   /** Per repo: when it was last scanned for releases to adopt. */
   readonly lastAdoptScan = new Map<string, number>();
+  /** repo → when its next EM QA re-run read is due (verify.ts `QA_RERUN_POLL_MS`). */
+  readonly qaRerunDueAt = new Map<string, number>();
   /** Per repo: when a held release last compared the production head with the one it was verified at. */
   readonly lastHeadProbe = new Map<string, number>();
   /** Per repo: the production head this pass already read, so a hold in the same pass records it without a second read. */

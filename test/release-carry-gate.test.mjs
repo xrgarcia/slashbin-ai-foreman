@@ -12,10 +12,11 @@ const dir = mkTmp("fake-gh-carry-");
 const log = join(dir, "calls");
 const body = join(dir, "body");
 const fail = join(dir, "fail");
+const cmpFail = join(dir, "cmpfail");
 writeFileSync(join(dir, "gh"), `#!/bin/sh
 echo "$1 $2 $3" >> "${log}"
 case "$1 $2 $3" in
-  "api repos/o/r/compare"*) printf '%s\\n' '{"sha":"a1","headline":"Merge pull request #5 from o/x"}' '{"sha":"a2","headline":"fix (#6)"}' ;;
+  "api repos/o/r/compare"*) if [ -s "${cmpFail}" ]; then echo "HTTP 422" >&2; exit 1; fi; printf '%s\\n' '{"sha":"a1","headline":"Merge pull request #5 from o/x"}' '{"sha":"a2","headline":"fix (#6)"}' ;;
   "pr view 5") if [ -s "${fail}" ]; then echo "HTTP 502" >&2; exit 1; fi; printf '{"state":"MERGED","title":"x","body":"%s","headRefName":"x","commits":[]}\\n' "$(cat "${body}")" ;;
   "pr view 6") echo "GraphQL: Could not resolve to a PullRequest with the number of 6." >&2; exit 1 ;;
 esac
@@ -27,7 +28,7 @@ const cfg = { githubRepo: "o/r", repoPath: tmpdir(), productionBranch: "main", b
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const calls = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : []);
 let changed = false;
-const reset = () => { writeFileSync(log, ""); writeFileSync(body, "Closes #40"); writeFileSync(fail, ""); changed = false; configureCarryGate(async () => changed); };
+const reset = () => { writeFileSync(log, ""); writeFileSync(body, "Closes #40"); writeFileSync(fail, ""); writeFileSync(cmpFail, ""); changed = false; configureCarryGate(async () => changed); };
 const issues = async (u) => (await listCarriedMerges(cfg, logger, u)).map((m) => [m.pr, m.issues]);
 
 test("a quiet repo reuses its listing: no compare, no PR reads", async () => {
@@ -74,4 +75,16 @@ test("no gate configured: every call reads, as before", async () => {
   const one = calls().length;
   await issues();
   assert.equal(calls().length, one * 2);
+});
+
+test("a failed compare after a change drops the stale listing, so the next quiet pass reads", async () => {
+  reset();
+  await issues();
+  writeFileSync(body, "Closes #40 Closes #42");
+  changed = true;
+  writeFileSync(cmpFail, "1");
+  assert.equal(await listCarriedMerges(cfg, logger), null);
+  writeFileSync(cmpFail, "");
+  changed = false;
+  assert.deepEqual(await issues(), [[5, [40, 42]]], "the change the failed read consumed is not lost");
 });
