@@ -27,7 +27,7 @@ let counts = { graphql: 0, core: 0 };
 let bySubcommand: Record<string, number> = {};
 /** Process-wide: REST calls by normalised endpoint, so an hour's core spend can be attributed. */
 let byEndpoint: Record<string, number> = {};
-/** Process-wide: REST calls by endpoint and the code that made them. */
+/** Process-wide: every call by endpoint (REST) or subcommand, and the code that made it. */
 let byCaller: Record<string, number> = {};
 /** Process-wide: the one usage-report timer. */
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -82,16 +82,14 @@ export function recordGhCall(args: string[]): void {
   const rest = args[0] === "api" && args[1] !== "graphql";
   const key = rest ? "api rest" : `${args[0] ?? ""} ${args[1] ?? ""}`.trim();
   bySubcommand[key] = (bySubcommand[key] ?? 0) + 1;
-  if (rest) {
-    const e = restEndpointKey(args);
-    byEndpoint[e] = (byEndpoint[e] ?? 0) + 1;
-    const limit = Error.stackTraceLimit;
-    Error.stackTraceLimit = 25;
-    const stack = new Error().stack;
-    Error.stackTraceLimit = limit;
-    const c = `${e} <- ${callerKey(stack)}`;
-    byCaller[c] = (byCaller[c] ?? 0) + 1;
-  }
+  const what = rest ? restEndpointKey(args) : key;
+  if (rest) byEndpoint[what] = (byEndpoint[what] ?? 0) + 1;
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 25;
+  const stack = new Error().stack;
+  Error.stackTraceLimit = limit;
+  const c = `${what} <- ${callerKey(stack)}`;
+  byCaller[c] = (byCaller[c] ?? 0) + 1;
 }
 
 /** The busiest REST endpoints, highest first, capped so the hourly line stays one readable line. */
@@ -118,7 +116,7 @@ export function configureGhUsage(opts: { intervalMs: number; logger: Logger; ext
     // which is how the first hourly line (2026-10-02 13:24) lost its breakdown.
     opts.logger.info("gh-usage: gh calls in the last interval", {
       intervalMs, ...snap, bySubcommand: JSON.stringify(snap.bySubcommand),
-      restByEndpoint: JSON.stringify(topEndpoints()), restByCaller: JSON.stringify(topEndpoints(12, byCaller)), ...(opts.extra?.() ?? {}),
+      restByEndpoint: JSON.stringify(topEndpoints()), byCaller: JSON.stringify(topEndpoints(15, byCaller)), ...(opts.extra?.() ?? {}),
     });
     counts = { graphql: 0, core: 0 };
     bySubcommand = {};
