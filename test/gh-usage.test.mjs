@@ -58,9 +58,12 @@ test("configureGhUsage: REST calls are attributed to the code that made them", a
   const logger = { debug() {}, warn() {}, error() {}, info: (msg, data) => lines.push(data), child() { return this; } };
   configureGhUsage({ intervalMs: 100, logger });
   (function hotReader() { recordGhCall(["api", "repos/a/b/issues/9/comments"]); })();
+  (function prPoller() { recordGhCall(["pr", "view", "5", "--json", "state"]); })();
   await new Promise((r) => setTimeout(r, 150));
-  const byCaller = JSON.parse(lines[0].restByCaller);
-  const key = Object.keys(byCaller)[0];
+  const pr = Object.keys(JSON.parse(lines[0].byCaller)).find((k) => k.startsWith("pr view <- "));
+  assert.ok(pr && pr.includes(":prPoller"), "GraphQL subcommands are attributed too: " + pr);
+  const byCaller = JSON.parse(lines[0].byCaller);
+  const key = Object.keys(byCaller).find((k) => k.startsWith("GET "));
   assert.ok(key.startsWith("GET repos/:repo/issues/:n/comments <- ") && key.includes(":hotReader"), key);
   configureGhUsage({ intervalMs: 3_600_000, logger: { info() {} } });
 });
