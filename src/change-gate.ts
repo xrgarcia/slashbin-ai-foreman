@@ -40,6 +40,10 @@ export class ChangeGate {
   private readonly seq = new Map<string, number>();
   private allSeq = 0;
   private readonly seen = new Map<string, { at: number; seq: number; all: number }>();
+  /** Per `repo\u0000branch`, how many reports said it moved. A report with no `moved` field bumps `repoMoves` instead: every branch of those repos moved. */
+  private readonly branchSeq = new Map<string, number>();
+  private readonly repoMoves = new Map<string, number>();
+  private readonly branchSeen = new Map<string, { at: number; moves: number; all: number }>();
   private failing = false;
 
   constructor(private readonly o: ChangeGateOptions) {}
@@ -66,6 +70,27 @@ export class ChangeGate {
     const forced = prior !== undefined && t - prior.at >= this.o.forceMs();
     if (!changed && !forced) return false;
     this.seen.set(key, { at: t, seq, all: this.allSeq });
+    return true;
+  }
+
+  /**
+   * Whether `consumer` must re-read something that depends only on the heads of `branches` in `repo`:
+   * true when one of them moved since this consumer last checked, when the signal could not tell
+   * (no `moved` field, "all", a failure), on the first check, or after `forceMs`. Records the check when true.
+   */
+  async branchesDue(consumer: string, repo: string, branches: readonly string[]): Promise<boolean> {
+    const signal = this.o.signal();
+    if (!signal) return true;
+    await this.poll(signal);
+    const key = `${consumer}\u0000${repo}\u0000${[...branches].sort().join(",")}`;
+    const t = this.now();
+    let moves = this.repoMoves.get(repo) ?? 0;
+    for (const b of branches) moves += this.branchSeq.get(`${repo}\u0000${b}`) ?? 0;
+    const prior = this.branchSeen.get(key);
+    const changed = !prior || prior.moves < moves || prior.all < this.allSeq;
+    const forced = prior !== undefined && t - prior.at >= this.o.forceMs();
+    if (!changed && !forced) return false;
+    this.branchSeen.set(key, { at: t, moves, all: this.allSeq });
     return true;
   }
 
@@ -103,7 +128,17 @@ export class ChangeGate {
       const report = await Promise.race([answer, timeout]);
       this.cursor = report.cursor;
       if (report.changed === "all") this.allSeq++;
-      else for (const r of report.changed) this.seq.set(r, (this.seq.get(r) ?? 0) + 1);
+      else {
+        for (const r of report.changed) this.seq.set(r, (this.seq.get(r) ?? 0) + 1);
+        if (report.moved === undefined) {
+          for (const r of report.changed) this.repoMoves.set(r, (this.repoMoves.get(r) ?? 0) + 1);
+        } else {
+          for (const m of report.moved) {
+            const k = `${m.repo}\u0000${m.branch}`;
+            this.branchSeq.set(k, (this.branchSeq.get(k) ?? 0) + 1);
+          }
+        }
+      }
       if (this.failing) this.o.logger.info("change signal answering again");
       this.failing = false;
     } catch (err) {

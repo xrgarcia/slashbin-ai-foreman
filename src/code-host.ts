@@ -368,6 +368,8 @@ export interface CodeHostStateOptions {
   refreshGate?: (repos: string[]) => Promise<string[]>;
   /** Whether a repo changed since release carry last listed its merges (a change signal); omitted, every call reads. */
   carryGate?: (repo: string) => Promise<boolean>;
+  /** Whether a branch-drift compare must re-read: one of these branches moved. Unset: every compare reads. */
+  driftGate?: (repo: string, branches: readonly string[]) => Promise<boolean>;
 }
 
 /** What the host said about one token: accepted, rejected (401), or unknown (no answer: network, 5xx, back-off). */

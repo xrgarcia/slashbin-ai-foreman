@@ -101,6 +101,19 @@ export function productionDriftFiles(drift: BranchDrift): number {
   return paths.filter((p) => !isNonProductionPath(p)).length;
 }
 
+let driftGate: ((repo: string, branches: readonly string[]) => Promise<boolean>) | null = null;
+const lastDrift = new Map<string, BranchDrift>();
+
+/**
+ * Install the branch-move gate (daemon wiring). A drift result is a function of the two branch heads
+ * alone, so while neither moved the last one is still the answer: ~12 pushes/hr to a production or base
+ * branch fleet-wide against ~450 webhook events/hr. Null clears it: every check reads.
+ */
+export function configureDriftGate(due: ((repo: string, branches: readonly string[]) => Promise<boolean>) | null): void {
+  driftGate = due;
+  lastDrift.clear();
+}
+
 /**
  * Check if develop has drifted behind main due to accumulated merge commits.
  * Returns the drift counts, or null if the check fails.
@@ -112,6 +125,9 @@ export async function checkBranchDrift(
   cwd: string,
   logger: Logger,
 ): Promise<BranchDrift | null> {
+  const key = `${repo}\u0000${productionBranch}...${baseBranch}`;
+  const last = lastDrift.get(key);
+  if (driftGate && last && !(await driftGate(repo, [productionBranch, baseBranch]).catch(() => true))) return last;
   try {
     const json = await ghAsync([
       "api", `repos/${repo}/compare/${productionBranch}...${baseBranch}`,
@@ -119,7 +135,7 @@ export async function checkBranchDrift(
     ], cwd);
 
     const result = JSON.parse(json);
-    return {
+    const drift: BranchDrift = {
       developAheadOfMain: result.ahead,
       developBehindMain: result.behind,
       // Changed files between main and develop. `ahead > 0 && files === 0` is the
@@ -130,7 +146,11 @@ export async function checkBranchDrift(
       developAheadFiles: result.files ?? 0,
       ...(Array.isArray(result.paths) ? { developAheadPaths: result.paths.filter((p: unknown): p is string => typeof p === "string") } : {}),
     };
+    if (driftGate) lastDrift.set(key, drift);
+    return drift;
   } catch (err) {
+    // The gate counted the move as seen: drop the stale answer so the next pass reads again.
+    lastDrift.delete(key);
     if (isBackoffRefusal(err)) {
       logger.debug("Failed to check branch drift — GitHub back-off active");
       return null;

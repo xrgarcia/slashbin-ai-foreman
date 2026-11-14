@@ -33,6 +33,14 @@ export interface ChangeReport {
   readonly changed: readonly string[] | "all";
   /** Opaque; handed back unchanged on the next call. */
   readonly cursor: string;
+  /**
+   * Optional, finer: the branches that moved (a push) since the cursor, per repo, as bare branch names
+   * (`main`, not `refs/heads/main`). A consumer that depends only on branch heads (the branch-drift
+   * compare) skips a repo whose other traffic (comments, checks, labels) changed nothing it reads.
+   * Omitted: every repo in `changed` counts as every branch moved, exactly as before. A signal that sets
+   * it must list every push it saw; a repo it reports as always changed (no events) is treated the same.
+   */
+  readonly moved?: ReadonlyArray<{ readonly repo: string; readonly branch: string }>;
 }
 
 /**
