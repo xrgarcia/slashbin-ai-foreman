@@ -107,9 +107,9 @@ store or a bad window prints nothing to stdout and exits 1.
 Nested runs (`parentRunId`) and duplicate end rows never count twice; `noWork` runs are not listed. Customer and price are the
 reader's (the EM repo's `invoice:weekly`), never this command's.
 
-Retention: rows older than `retentionDays` are deleted at start and at most hourly after, except the `blocked`,
-`unblocked` and `closed` rows of a card whose latest `blocked` row has no later `unblocked` or `closed` row (an open block
-never loses its start).
+Retention: rows older than `retentionDays` are deleted at start and at most hourly after, except the `blocked` rows of a block
+that reaches past the cutoff: an old `blocked` row stays unless a clear (`unblocked` or `closed`) of that card, also older than
+the cutoff, came after it. An open block, or one that cleared inside the window, never loses its start.
 
 ### Reading blocked time
 

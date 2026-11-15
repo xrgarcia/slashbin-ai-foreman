@@ -91,7 +91,9 @@ function groupByCard(rows: readonly MetricsRow[]): Map<string, MetricsRow[]> {
     if (row.issue === null || Number.isNaN(Date.parse(row.at))) continue;
     if (row.kind !== "blocked" && row.kind !== "unblocked" && row.kind !== "closed") continue;
     const key = `${row.repo}#${row.issue}`;
-    cards.set(key, [...(cards.get(key) ?? []), row]);
+    const list = cards.get(key);
+    if (list) list.push(row);
+    else cards.set(key, [row]);
   }
   return cards;
 }

@@ -82,7 +82,7 @@ function store(days = 90) {
 }
 const left = (db, issue) => db.prepare("SELECT kind FROM events WHERE issue = ? ORDER BY id").all(issue).map((r) => r.kind);
 
-test("retain keeps the rows of a 100-day-old open block, drops a cleared one and other old kinds", () => {
+test("retain keeps the start of a 100-day-old open block, drops cleared blocks and other old kinds", () => {
   const { db, rec, put } = store();
   put(1, 100, "blocked"); put(1, 99, "blocked"); put(1, 100, "claim");
   put(2, 100, "blocked"); put(2, 95, "unblocked");
@@ -92,7 +92,7 @@ test("retain keeps the rows of a 100-day-old open block, drops a cleared one and
   assert.deepEqual(left(db, 1), ["blocked", "blocked"]);
   assert.deepEqual(left(db, 2), []);
   assert.deepEqual(left(db, 3), []);
-  assert.deepEqual(left(db, 4), ["blocked", "unblocked", "blocked"]);
+  assert.deepEqual(left(db, 4), ["blocked"]);
 });
 
 test("after retention a 100-day-old open block still reads as one open interval", () => {
@@ -119,4 +119,27 @@ test("runBlocked prints JSON for a store, and refuses a missing file or a bad wi
   } finally {
     console.log = log; console.error = err;
   }
+});
+
+test("retain keeps the start of a block that cleared inside the window, so its week is not undercounted", () => {
+  const { db, rec } = store();
+  const put = (iso, kind) => db.prepare("INSERT INTO events (at, repo, issue, kind) VALUES (?, ?, 1, ?)").run(iso, R, kind);
+  put("2026-08-01T00:00:00Z", "blocked"); put("2026-11-05T12:00:00Z", "blocked"); put("2026-11-09T18:00:00Z", "unblocked");
+  rec.retain(true);
+  assert.deepEqual(left(db, 1), ["blocked", "blocked", "unblocked"]);
+  const rows = readBlocked(readBlockedRows(db), "2026-11-02", "2026-11-09", "2026-11-12T00:00:00Z").rows;
+  assert.ok(rows[0].hours > 150);
+});
+
+test("one card with tens of thousands of repeated blocked rows reads and retains in linear time", () => {
+  const { db, rec, put } = store();
+  db.exec("BEGIN");
+  for (let i = 0; i < 20_000; i++) put(1, 120 - i / 1000, "blocked");
+  db.exec("COMMIT");
+  const t0 = performance.now();
+  const rows = readBlocked(readBlockedRows(db), "2026-07-01", "2026-12-01", "2026-11-10T00:00:00Z").rows;
+  rec.retain(true);
+  assert.ok(performance.now() - t0 < 1500, "grouping and retention must not grow quadratically");
+  assert.equal(rows.length > 0 && rows.every((r) => r.open), true);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM events").get().n, 20_000);
 });
