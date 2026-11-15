@@ -2,6 +2,7 @@ import { registerPlugin, registeredPlugins } from "./registry.js";
 import { GitHubPlugin } from "./github.js";
 import { PaperclipPlugin } from "./paperclip.js";
 import { MetricsPlugin } from "./metrics.js";
+import { OtelPlugin } from "./otel.js";
 import { TechLeadPlugin } from "./tech-lead.js";
 import { SrePlugin } from "./sre.js";
 import { QaPlugin } from "./qa.js";
@@ -23,6 +24,7 @@ export function registerBuiltinPlugins(runtime: ForemanRuntime): void {
   registerPlugin(new GitHubPlugin((repo) => runtime.builds.isInFlight(repo)));
   registerPlugin(new PaperclipPlugin(runtime));
   registerPlugin(new MetricsPlugin());
+  registerPlugin(new OtelPlugin());
   registerPlugin(new TechLeadPlugin());
   registerPlugin(new SrePlugin());
   registerPlugin(new QaPlugin());

@@ -10,6 +10,7 @@ for each one left off, **When off** says what the Foreman does instead. `npm run
 | GitHub (`github`) | `workSource`, `codeHost` | `workSource` / `codeHost` is `github` (the default) |
 | Paperclip (`paperclip`) | `observer` | `paperclip.enabled`, with `companyId` and `agentId` |
 | Metrics (`metrics`) | `observer` | `metrics.enabled` |
+| OpenTelemetry (`otel`) | `observer` | `otel.enabled` |
 | Tech Lead (`tech-lead`) | `reviewer` | `techLeadPath` is set (and `reviewEnabled` turns the review stage on) |
 | SRE (`sre`) | `verifier`, `deployer` | `srePath` is set |
 | QA (`qa`) | `qa` | `qaPath` is set (covers `qaRepos`). It also needs `emRepoPath`, the Unstick agent's checkout, so turning QA on turns on Unstick too and needs its token |
@@ -44,6 +45,16 @@ Records how long each stage takes and how each item ends, for `npm run metrics:r
 - **Config:** `metrics.enabled`, `metrics.path`, `metrics.retentionDays`
 - **Env:** none
 - **When off:** Nothing is recorded; the lifecycle is unchanged.
+
+## OpenTelemetry (`otel`)
+
+Exports one trace per agent session to an OpenTelemetry-compatible tool you choose.
+
+- **Roles:** `observer`
+- **On when:** `otel.enabled`
+- **Config:** `otel.enabled`, `otel.serviceName`
+- **Env:** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`
+- **When off:** Nothing is exported and no OTEL_* variable is read; the lifecycle is unchanged.
 
 ## Tech Lead (`tech-lead`)
 

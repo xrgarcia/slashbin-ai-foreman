@@ -51,6 +51,10 @@
     "access": "public"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.223.2",
+    "@opentelemetry/resources": "^2.12.1",
+    "@opentelemetry/sdk-trace-base": "^2.12.1",
     "ws": "^8.22.0",
     "zod": "^4.0.0"
   },

@@ -494,6 +494,17 @@ export const configSchema = z.object({
     // Days of events kept; older rows are deleted at start and at most hourly after.
     retentionDays: z.number().int().min(1).default(90),
   }).prefault({}),
+
+  // --- OpenTelemetry ---
+  // The otel observer plugin (docs/otel.md): one trace per agent session over OTLP/HTTP.
+  // Global. Off unless `enabled`. The destination and credentials are the standard
+  // OTEL_EXPORTER_OTLP_* environment variables, never this file.
+  otel: z.object({
+    // Export session traces. Off by default.
+    enabled: z.boolean().default(false),
+    // The `service.name` on every span.
+    serviceName: z.string().min(1).default("foreman"),
+  }).prefault({}),
 });
 
 // --- Types ---
@@ -502,6 +513,9 @@ export interface DependabotConfig { readonly securityOnly: boolean }
 
 /** The metrics observer's settings (`metrics` block). */
 export interface MetricsConfig { readonly enabled: boolean; readonly path?: string; readonly retentionDays: number }
+
+/** The OpenTelemetry observer's settings (`otel` block). */
+export interface OtelConfig { readonly enabled: boolean; readonly serviceName: string }
 
 
 /** Configured names of the lifecycle labels. See `lifecycleLabelsSchema`. */
@@ -560,6 +574,8 @@ export interface RepoConfig {
   dependabot: DependabotConfig;
   /** The metrics observer's settings — the global value. */
   metrics: MetricsConfig;
+  /** The OpenTelemetry observer's settings — the global value. */
+  otel: OtelConfig;
   /** This repo's own skill-sync list; undefined follows skillSync.skills, [] opts out. */
   skillSyncSkills?: readonly string[];
   /** Sync-only (human lane): only the `skill-deliver` stage runs here; see the repo schema. */
@@ -670,6 +686,8 @@ export interface AgentConfig {
   dependabot: DependabotConfig;
   /** The metrics observer's settings (`metrics` block). */
   metrics: MetricsConfig;
+  /** The OpenTelemetry observer's settings (`otel` block). */
+  otel: OtelConfig;
 }
 
 // --- Helpers ---
@@ -876,6 +894,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     skillSync: mergeSkillSync(fileConfig.skillSync),
     dependabot: fileConfig.dependabot,
     metrics: fileConfig.metrics,
+    otel: fileConfig.otel,
   };
 
   // Remove undefined keys so Zod defaults apply
@@ -906,6 +925,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     github,
     dependabot: Object.freeze({ securityOnly: parsed.dependabot.securityOnly }),
     metrics: Object.freeze({ enabled: parsed.metrics.enabled, path: parsed.metrics.path, retentionDays: parsed.metrics.retentionDays }),
+    otel: Object.freeze({ enabled: parsed.otel.enabled, serviceName: parsed.otel.serviceName }),
     epicRefLabel: parsed.epicRefLabel,
     epicRepo: parsed.epicRepo,
     prodGrantLabel: parsed.prodGrantLabel,
@@ -1093,5 +1113,6 @@ export function loadConfig(configPath?: string): AgentConfig {
     skillSync: resolveSkillSync(parsed.skillSync),
     dependabot: globals.dependabot,
     metrics: globals.metrics,
+    otel: globals.otel,
   });
 }
