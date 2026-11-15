@@ -25,6 +25,17 @@ export interface QaManifest {
   regressions?: QaFinding[];
   noBaseline?: QaFinding[];
   preExisting?: QaFinding[];
+  /** QA's walk of the parent epic's acceptance criteria (report-only; seam pinned in engineering-manager#864). */
+  acceptance?: QaAcceptance;
+}
+
+/** `manifest.acceptance`, as slashbin_ai_qa writes it. */
+export interface QaAcceptance {
+  status: "walked" | "held" | "off";
+  issue?: string | null;
+  epic?: string | null;
+  hold?: { reason: string; owner?: string; resume?: string } | null;
+  criteria?: Array<{ section?: string; text: string; outcome: string; reason?: string; evidence?: string[] }>;
 }
 
 export interface QaFinding {
@@ -67,7 +78,7 @@ export function qaReportBody(pr: number, outcome: QaOutcome): string {
   lines.push("", "Pages checked:");
   if (pages.length === 0) lines.push("- none");
   for (const p of pages) lines.push(`- \`${p.route}\`${p.why ? ` — ${p.why}` : ""}`);
-  lines.push("", `Shots: ${(m.shots ?? []).length}`, "", NOT_A_GATE);
+  lines.push("", `Shots: ${(m.shots ?? []).length}`, ...acceptanceSection(m), "", NOT_A_GATE);
   return head + lines.join("\n");
 }
 
@@ -211,8 +222,33 @@ export function qaGateBody(pr: number, outcome: QaOutcome, marker: string = qaGa
   lines.push("", "Pages checked:");
   if (pages.length === 0) lines.push("- none");
   for (const p of pages) lines.push(`- \`${p.route}\`${p.why ? ` — ${p.why}` : ""}`);
-  lines.push("", `Shots: ${(m.shots ?? []).length}`);
+  lines.push("", `Shots: ${(m.shots ?? []).length}`, ...acceptanceSection(m));
   return head + lines.join("\n");
+}
+
+const OUTCOME_MARK: Record<string, string> = { pass: "✅ PASS", fail: "❌ FAIL", held: "⏸️ HELD", unexercised: "➖ UNEXERCISED" };
+
+/**
+ * The acceptance walk, criterion by criterion, grouped by the epic's sections. Nothing when QA did not walk
+ * (no block, or `off`). Report-only: it never touches the verdict line above it. Pure.
+ */
+export function acceptanceSection(m: QaManifest): string[] {
+  const a = m.acceptance;
+  if (!a || a.status === "off") return [];
+  const out = ["", "### Acceptance walk", `Epic: ${a.epic ?? "(none)"} · Issue: ${a.issue ?? "(none)"}`];
+  if (a.status === "held" || a.hold) {
+    const h = a.hold;
+    out.push(`Walk held: ${h?.reason ?? "(no reason recorded)"}`, `Owner: ${h?.owner ?? "(none recorded)"}`, `Resumes when: ${h?.resume ?? "(none recorded)"}`);
+    if (!a.criteria?.length) return out;
+  }
+  let section: string | undefined;
+  for (const c of a.criteria ?? []) {
+    if (c.section !== section) { section = c.section; out.push("", `**${section ?? "Criteria"}**`); }
+    const mark = OUTCOME_MARK[c.outcome] ?? c.outcome.toUpperCase();
+    const evidence = (c.outcome === "pass" || c.outcome === "fail") && c.evidence?.length ? ` (evidence: ${c.evidence.map((e) => `\`${e}\``).join(", ")})` : "";
+    out.push(`- ${mark}: ${c.text} — ${c.reason ?? "(no reason recorded)"}${evidence}`);
+  }
+  return out;
 }
 
 /** What the gate tells the verify stage: QA's regression lines, then the shot names (capped). Pure. */
