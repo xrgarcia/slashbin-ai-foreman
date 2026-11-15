@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import type { WorkItem } from "./adapters.js";
+import { recordRun, type RunBase, type SessionEnd } from "./session-run.js";
 import type { VerifyResult } from "./plugins/contract.js";
 import { qaFor, roleFor } from "./plugins/registry.js";
 import { codeHost } from "./plugins/registry.js";
@@ -96,6 +98,30 @@ export async function executeQa(repo: string, pr: number, deps: Pick<QaDeps, "ru
   }
 }
 
+/**
+ * What QA's verdict and exit code say together: a PASS needs exit 0, a FAIL exit 1, HELD exit 3; any other pairing is
+ * `inconsistent`. The one reading the report-only run, the verify gate and the pre-merge decision share; each adds its
+ * own checks (head sha, void PASS) on top. Pure, exported for tests.
+ */
+export function qaVerdictClass(m: Pick<QaManifest, "verdict">, exitCode: number): "PASS" | "FAIL" | "HELD" | "inconsistent" {
+  if (m.verdict === "PASS" && exitCode === 0) return "PASS";
+  if (m.verdict === "FAIL" && exitCode === 1) return "FAIL";
+  if (m.verdict === "HELD" && exitCode === 3) return "HELD";
+  return "inconsistent";
+}
+
+/**
+ * How a report-only QA run ended: a PASS (exit 0) or a FAIL (exit 1) is a delivered verdict. A HELD one (exit 3), an
+ * exit that disagrees with its verdict, and an errored run delivered nothing, so they are failed. Pure, exported for tests.
+ */
+export function qaReportEnd(o: QaOutcome, items: readonly WorkItem[]): SessionEnd & { workedItems: readonly WorkItem[] } {
+  if (o.kind === "errored") return { status: "failed", outcome: "failed", detail: o.detail, workedItems: items };
+  const { verdict } = o.manifest;
+  const cls = qaVerdictClass(o.manifest, o.exitCode);
+  const delivered = cls === "PASS" || cls === "FAIL";
+  return { status: delivered ? "finished" : "failed", outcome: delivered ? "completed" : "failed", detail: `report-only: ${verdict}`, workedItems: items };
+}
+
 /** The report-only QA runs in flight for one daemon: one report per PR at a time. */
 export class QaReports {
   private readonly inFlight = new Set<string>();
@@ -106,7 +132,7 @@ export class QaReports {
    * "errored" comment). At most one report per PR: an existing comment with the heading,
    * or a run already in flight in this process, ends it.
    */
-  async run(repo: string, pr: number, deps: QaDeps, logger: Logger): Promise<void> {
+  async run(repo: string, pr: number, deps: QaDeps, logger: Logger, track?: { base: RunBase }): Promise<void> {
     const key = `${repo}#${pr}`;
     if (this.inFlight.has(key)) return;
     this.inFlight.add(key);
@@ -117,7 +143,10 @@ export class QaReports {
         logger.info(`QA: ${key} already has a report; not running again`);
         return;
       }
-      const outcome = await executeQa(repo, pr, deps);
+      // The agent run itself is a ledger run (no card is held by it); a report found on the PR above ran nothing.
+      const outcome = track
+        ? await recordRun(track.base, logger, () => executeQa(repo, pr, deps), (o) => qaReportEnd(o, track.base.items))
+        : await executeQa(repo, pr, deps);
       if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
       else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
       await deps.post(pr, qaReportBody(pr, outcome));
@@ -280,6 +309,14 @@ async function postGateReport(pr: number, marker: string, body: string, deps: Qa
   }
 }
 
+/** The hold reason a QA FAIL verdict becomes: a delivered verdict, unlike the `qa-*` holds that say QA could not check. */
+export const QA_FAIL_REASON = "visual-qa-failed";
+
+/** Whether a gate result is a verdict someone delivered (an SRE pass or fail, QA's pass or FAIL), not QA failing to run. */
+export function isDeliveredVerdict(r: VerifyResult): boolean {
+  return r.kind === "verdict" && (r.pass || r.by !== "QA" || r.reason === QA_FAIL_REASON);
+}
+
 /**
  * The gate: given an SRE pass, run QA and return what the verify stage acts on.
  * PASS returns the SRE result untouched. FAIL becomes the existing visual-QA
@@ -299,7 +336,7 @@ export async function applyQaGate(
   const outcome = await executeQa(repo, pr, deps);
   const changed = await changedOf(pr, deps);
   // A void PASS (no shot of a client change) is keyed HELD, so it never reads as a PASS report.
-  const isVoid = outcome.kind === "manifest" && outcome.manifest.verdict === "PASS" && outcome.exitCode === 0 && isVoidQaPass((outcome.manifest.shots ?? []).length, changed);
+  const isVoid = outcome.kind === "manifest" && qaVerdictClass(outcome.manifest, outcome.exitCode) === "PASS" && isVoidQaPass((outcome.manifest.shots ?? []).length, changed);
   const marker = isVoid && outcome.kind === "manifest" ? `<!-- foreman-qa sha=${outcome.manifest.sha ?? "unknown"} verdict=HELD -->` : qaGateMarker(outcome);
   await postGateReport(pr, marker, qaGateBody(pr, outcome, marker), deps, deps.hasMarker ?? (async () => false), logger, changed);
   const hold = (reason: string, summary: string): VerifyResult => ({ ...sre, pass: false, reason, summary, by: "QA" });
@@ -309,10 +346,12 @@ export async function applyQaGate(
   }
   const { manifest: m, exitCode } = outcome;
   if (isVoid) return hold("qa-held-page-unplaced", `QA passed without a shot, but the PR changed client code: ${m.reason ?? ""}`);
-  if (m.verdict === "PASS" && exitCode === 0) return sre;
-  if (m.verdict === "FAIL" && exitCode === 1) return hold("visual-qa-failed", qaFailSummary(m));
-  if (m.verdict === "HELD" && exitCode === 3) return hold(`qa-held-${m.hold ?? "unknown"}`, `QA could not check: ${m.reason ?? ""}`);
-  return hold("qa-inconsistent", `QA exit ${exitCode} disagrees with verdict ${m.verdict}`);
+  switch (qaVerdictClass(m, exitCode)) {
+    case "PASS": return sre;
+    case "FAIL": return hold(QA_FAIL_REASON, qaFailSummary(m));
+    case "HELD": return hold(`qa-held-${m.hold ?? "unknown"}`, `QA could not check: ${m.reason ?? ""}`);
+    default: return hold("qa-inconsistent", `QA exit ${exitCode} disagrees with verdict ${m.verdict}`);
+  }
 }
 
 // --- QA before the merge (config.qaBeforeMerge) ---
@@ -512,13 +551,14 @@ export function decideQaBeforeMerge(outcome: QaOutcome, headSha: string, changed
   if (outcome.kind === "errored") return { kind: "hold", reason: "qa-errored", summary: `QA errored: ${outcome.detail}` };
   const { manifest: m, exitCode } = outcome;
   const named = Boolean(m.sha) && sameSha(m.sha!, headSha);
-  if (m.verdict === "PASS" && exitCode === 0 && isVoidQaPass((m.shots ?? []).length, changed)) {
+  const cls = qaVerdictClass(m, exitCode);
+  if (cls === "PASS" && isVoidQaPass((m.shots ?? []).length, changed)) {
     return { kind: "hold", reason: "qa-held-page-unplaced", summary: `QA passed without a shot, but the PR changed client code: ${m.reason ?? ""}` };
   }
-  if (m.verdict === "PASS" && exitCode === 0 && named) return { kind: "pass", reused: false };
-  if (m.verdict === "FAIL" && exitCode === 1 && named) return { kind: "fail", summary: qaFailSummary(m), reused: false };
-  if (m.verdict === "HELD" && exitCode === 3) return { kind: "hold", reason: `qa-held-${m.hold ?? "unknown"}`, summary: `QA could not check: ${m.reason ?? ""}` };
-  const why = (m.verdict === "PASS" || m.verdict === "FAIL") && !named && (exitCode === (m.verdict === "PASS" ? 0 : 1))
+  if (cls === "PASS" && named) return { kind: "pass", reused: false };
+  if (cls === "FAIL" && named) return { kind: "fail", summary: qaFailSummary(m), reused: false };
+  if (cls === "HELD") return { kind: "hold", reason: `qa-held-${m.hold ?? "unknown"}`, summary: `QA could not check: ${m.reason ?? ""}` };
+  const why = (cls === "PASS" || cls === "FAIL") && !named
     ? `QA ${m.verdict} names ${m.sha ?? "no sha"}, but the approved head is ${headSha}`
     : `QA exit ${exitCode} disagrees with verdict ${m.verdict}`;
   return { kind: "hold", reason: "qa-inconsistent", summary: why };

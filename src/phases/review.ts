@@ -20,6 +20,7 @@ import { MAX_REVIEW_ATTEMPTS_PER_HEAD } from "../step-attempts.js";
 import { rulingAnswersStalemate } from "../no-commit-streak.js";
 import { codeHost } from "../plugins/registry.js";
 import type { ForemanRuntime } from "../runtime.js";
+import { newRunId, NO_RESULT, stamp, type SessionEnd } from "../session-run.js";
 
 export async function tryReview(
   rt: ForemanRuntime,
@@ -213,11 +214,12 @@ async function reviewPass(
   activeRuns.set(runAbort, repoName);
   reviewLogger.info(`Triggering review for ${repoName} — PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")}), transcript: ${transcriptPath}`);
   events?.push({ message: `Reviewing ${repoConfig.githubRepo} PR #${candidate.prNumber} (issues: ${candidate.issueNumbers.map(n => `#${n}`).join(", ")})`, level: "info" });
-  const session: Omit<SessionEvent, "status"> = {
+  const session: Omit<SessionEvent, "status" | "at"> = {
     phase: "review", repo: repoConfig.githubRepo, pr: candidate.prNumber,
-    items: candidate.issueNumbers.map((n) => itemOf(repoConfig, n)),
+    items: candidate.issueNumbers.map((n) => itemOf(repoConfig, n)), runId: newRunId(),
   };
-  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
+  let ended: SessionEnd = { ...NO_RESULT, detail: "the session ended without a result" };
+  let workedItems = session.items;
   let report: SessionReport | undefined;
   const reviewSince = new Date();
   const reviewer = "Tech Lead";
@@ -233,14 +235,14 @@ async function reviewPass(
   };
 
   try {
-    await emit(rt, { kind: "session", session: { ...session, status: "started", reviewer } }, null, reviewLogger);
+    await emit(rt, { kind: "session", session: { ...session, status: "started", at: stamp(), reviewer } }, null, reviewLogger);
     // The reviewer's "wrote nothing" exit (its engine unavailable) is a wait,
     // never a hand-off: no failure is charged and the repo asks again after a backoff.agentUnavailable wait.
     const result = await agent.reviewPr(repoConfig, config, candidate.prNumber, reviewLogger, runAbort.signal, transcriptPath, onProgress, noMerge)
       .catch((e: unknown): ReviewFallback => ({ fallback: true, reason: `Tech Lead launch threw: ${String(e)}` }));
     if ("fallback" in result) {
       const wait = formatWait(rt.memory.reviewDefer.start(repoName, agentUnavailable));
-      ended = { status: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${wait}` };
+      ended = { status: "failed", outcome: "failed", detail: `Tech Lead could not take it (${result.reason}) — retried in ${wait}` };
       reviewLogger.info(`PR #${candidate.prNumber}: Tech Lead could not take it (${result.reason}) — no review this pass, retry in ${wait}`);
       // An unavailable work source is a silent tooling defer: the card is not moved to Blocked, so a blip
       // that clears on the next pass leaves no stale hold behind (foreman#180).
@@ -270,7 +272,10 @@ async function reviewPass(
         ? result.statusLine
         : (result.summary || "review completed").split("\n")[0].slice(0, 240);
       const prefix = result.statusLine ? "" : `PR #${candidate.prNumber} — `;
-      ended = { status: "finished", detail: outcome };
+      // A declared no-op (FOREMAN_REVIEW none, no trailer) delivered no verdict and worked nothing.
+      const noOp = (result.trailers ?? []).length === 0;
+      ended = { status: "finished", outcome: noOp ? "noWork" : "completed", detail: outcome };
+      if (noOp) workedItems = [];
       events?.push({ message: `Reviewed ${repoConfig.githubRepo} — ${prefix}${outcome}`, level: "info" });
       return true;
     }
@@ -285,9 +290,10 @@ async function reviewPass(
       await codeHost().findIssuesStillUnderReview(repoConfig, candidate.issueNumbers, reviewLogger),
     );
 
-    ended = { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
+    ended = { status: "failed", outcome: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (plan.workLanded) {
-      ended = { status: "finished", detail: `merged PR #${plan.mergedPrs.join(", #")}, then the run ended: ${result.error}` };
+      // The merge landed but the run did not come back with a verdict: finished for the card, not a delivered review.
+      ended = { status: "finished", outcome: "failed", detail: `merged PR #${plan.mergedPrs.join(", #")}, then the run ended: ${result.error}` };
       await notifyOnce(rt, "merged", repoConfig, [...new Set(mergedRefs.map((m) => m.issueNumber))], reviewLogger);
       await reportReviewOutcomes(rt, repoConfig, candidate.issueNumbers, reviewLogger);
       reviewLogger.warn(
@@ -349,7 +355,7 @@ async function reviewPass(
     progress.close();
     const milestones = progress.milestones;
     if (milestones.length > 0) report = { ...(report ?? {}), milestones };
-    await emit(rt, { kind: "session", session: { ...session, ...ended, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In
     // `finally` for the same reason as the label repair below: a run that threw

@@ -16,6 +16,7 @@ import { codeHost } from "../plugins/registry.js";
 import type { PendingRevisionInfo } from "../code-host.js";
 import { isForemanOwnedHead } from "../foreman-branch.js";
 import type { ForemanRuntime } from "../runtime.js";
+import { newRunId, NO_RESULT, stamp, type SessionEnd } from "../session-run.js";
 
 export async function tryRevision(
   rt: ForemanRuntime,
@@ -184,17 +185,17 @@ export async function tryRevision(
   activeRuns.set(runAbort, repoName);
   rt.builds.started(repoName);
   revLogger.info(`Triggering PR revision for ${repoName} — PR #${pending.pr.number}, issues: ${pending.issueNumbers.map(n => `#${n}`).join(", ")}`);
-  const session: Omit<SessionEvent, "status"> = {
+  const session: Omit<SessionEvent, "status" | "at"> = {
     phase: "revise", repo: repoConfig.githubRepo, pr: pending.pr.number,
-    items: pending.issueNumbers.map((n) => itemOf(repoConfig, n)),
+    items: pending.issueNumbers.map((n) => itemOf(repoConfig, n)), runId: newRunId(),
   };
-  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
+  let ended: SessionEnd = { ...NO_RESULT, detail: "the session ended without a result" };
   let report: SessionReport | undefined;
 
   try {
     // A read that fails (the branch sha after the session, the QA lines) throws out of here: the pass fails closed,
     // the marker saved at admission stays as it is (outcome unknown), and nothing is written to take back.
-    await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, revLogger);
+    await emit(rt, { kind: "session", session: { ...session, status: "started", at: stamp() } }, null, revLogger);
     // QA before the merge: its FAIL is a PR comment, not a review, so the session is handed its failing lines.
     const qaFeedback = (await qaBeforeMergeApplies(repoConfig, config)) === true ? await latestQaFailLines(repoConfig, pending.pr.number, revLogger) : undefined;
     const result = await revisePRFeedback(
@@ -203,8 +204,8 @@ export async function tryRevision(
     ).catch(reportLaunchThrew);
     reportRunResult(runnerName(), !!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
-      ? { status: "finished", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
-      : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
+      ? { status: "finished", outcome: result.noCommit ? "noWork" : "completed", detail: result.noCommit ? `no commit: ${result.noCommitReason ?? "branch already correct"}` : "changes pushed, back to review" }
+      : { status: "failed", outcome: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (wantsSessionReports() && result.success) {
       const pr = await prReport(repoConfig, pending.pr.number, revLogger);
       report = { ...(result.summary ? { text: result.summary } : {}), ...(pr ? { pr } : {}) };
@@ -325,7 +326,7 @@ export async function tryRevision(
   } finally {
     activeRuns.delete(runAbort);
     rt.builds.ended(repoName);
-    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(report ? { report } : {}) } }, null, revLogger);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: session.items, ...(report ? { report } : {}) } }, null, revLogger);
   }
 }
 

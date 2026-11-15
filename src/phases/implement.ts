@@ -21,6 +21,7 @@ import { HandoffNotSaved } from "../unstick.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
+import { newRunId, NO_RESULT, stamp, type SessionEnd } from "../session-run.js";
 
 /**
  * Classify a recorded skip reason as transient + currently-resolved. Returns
@@ -607,11 +608,11 @@ export async function tryBatchImplementation(
   activeRuns.set(runAbort, repoName);
   rt.builds.started(repoName);
   repoLogger.info(`Triggering batch implementation for ${repoName}`);
-  const session: Omit<SessionEvent, "status"> = {
-    phase: "implement", repo: repoConfig.githubRepo, items: actionableIssues.map((n) => itemOf(repoConfig, n)),
+  const session: Omit<SessionEvent, "status" | "at"> = {
+    phase: "implement", repo: repoConfig.githubRepo, items: actionableIssues.map((n) => itemOf(repoConfig, n)), runId: newRunId(),
   };
   // How the session ended, for observers; anything that leaves without setting it threw.
-  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the session ended without a result" };
+  let ended: SessionEnd = { ...NO_RESULT, detail: "the session ended without a result" };
   let report: SessionReport | undefined;
   // The items the session actually worked. A run builds one of its batch; the
   // outcome is told only to that one, never to the issues it left alone.
@@ -623,7 +624,7 @@ export async function tryBatchImplementation(
     // Tell the source the Foreman is starting on its batch, before the session.
     for (const n of actionableIssues) await emit(rt, { kind: "claim", item: itemOf(repoConfig, n) }, repoConfig, repoLogger);
     const goals = await startReport(repoConfig, actionableIssues, repoLogger);
-    await emit(rt, { kind: "session", session: { ...session, status: "started", ...(goals ? { report: goals } : {}) } }, null, repoLogger);
+    await emit(rt, { kind: "session", session: { ...session, status: "started", at: stamp(), ...(goals ? { report: goals } : {}) } }, null, repoLogger);
 
     // A stale skill copy is brought to the golden in a commit the session
     // builds on and pushes with its work (docs/skill-sync.md). The code makes
@@ -646,12 +647,12 @@ export async function tryBatchImplementation(
       .catch(reportLaunchThrew);
     reportRunResult(runnerName(), !!result.upstreamLimit, result.upstreamLimit?.reason, result.upstreamLimit?.resetAtMs);
     ended = result.success
-      ? { status: "finished", detail: result.prUrl ? `PR ${result.prUrl}` : "commits added to the open PR" }
+      ? { status: "finished", outcome: "completed", detail: result.prUrl ? `PR ${result.prUrl}` : "commits added to the open PR" }
       : result.landed
-        ? { status: "finished", detail: `#${result.landedIssue} already landed: ${result.landedReason ?? "no evidence given"}` }
+        ? { status: "finished", outcome: "noWork", detail: `#${result.landedIssue} already landed: ${result.landedReason ?? "no evidence given"}` }
       : result.skipped
-        ? { status: "finished", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
-        : { status: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
+        ? { status: "finished", outcome: "noWork", detail: `skipped: ${result.skipReason ?? "no reason given"}` }
+        : { status: "failed", outcome: "failed", detail: result.upstreamLimit ? `upstream limit: ${result.upstreamLimit.reason}` : result.error || "unknown" };
     if (wantsSessionReports()) {
       // Commits on the open PR leave no URL: its head branch names the PR.
       const pr = result.success ? await prReport(repoConfig, result.prUrl ?? (await codeHost().findOpenFeaturePR(repoConfig))?.headBranch ?? repoConfig.baseBranch, repoLogger) : undefined;
@@ -929,7 +930,7 @@ export async function tryBatchImplementation(
     activeRuns.delete(runAbort);
     rt.builds.ended(repoName);
     if (skillSync) await settleSkillSync(repoConfig, skillSync, repoLogger);
-    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: (worked ?? []).map((n) => itemOf(repoConfig, n)), ...(worked ? { worked } : {}), ...(report ? { report } : {}) } }, null, repoLogger);
   }
 }
 

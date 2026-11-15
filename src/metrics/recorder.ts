@@ -98,9 +98,9 @@ export class MetricsRecorder {
     try { this.db.close(); } catch { /* already closed */ }
   }
 
-  private insert(repo: string, issue: number | null, kind: string, stage: string | null, detail: Record<string, unknown> | null): void {
+  private insert(repo: string, issue: number | null, kind: string, stage: string | null, detail: Record<string, unknown> | null, at?: string): void {
     this.db.prepare("INSERT INTO events (at, repo, issue, kind, stage, detail) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(new Date(this.now()).toISOString(), repo, issue, kind, stage, detail ? JSON.stringify(detail) : null);
+      .run(at ?? new Date(this.now()).toISOString(), repo, issue, kind, stage, detail ? JSON.stringify(detail) : null);
   }
 
   private lastStage(item: WorkItem): string | null {
@@ -217,11 +217,17 @@ export class MetricsRecorder {
         return;
       case "session": {
         const s = event.session;
-        for (const item of s.items) {
+        // One row per item, so a card's own history shows the session; a run with no items still writes one row (no
+        // issue), so it never disappears from the ledger. The worked list rides on the first row only: the reader
+        // unions a run's rows, and a copy per row would store N cards N times.
+        const worked = s.workedItems?.map(({ repo, issueNumber }) => ({ repo, issueNumber }));
+        const targets: ReadonlyArray<{ repo: string; issueNumber: number | null }> = s.items.length ? s.items : [{ repo: s.repo, issueNumber: null }];
+        targets.forEach((item, i) => {
           this.insert(item.repo, item.issueNumber, "session", null, compact({
             phase: s.phase, status: s.status, pr: s.pr, reviewer: s.reviewer, detail: s.detail,
-          }));
-        }
+            runId: s.runId, parentRunId: s.parentRunId, outcome: s.outcome, workedItems: i === 0 ? worked : undefined,
+          }), validAt(s.at));
+        });
         return;
       }
       case "release":
@@ -244,6 +250,11 @@ export class MetricsRecorder {
     this.db.exec("DELETE FROM item_stage WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.repo = item_stage.repo AND e.issue = item_stage.issue)");
     this.db.exec("DELETE FROM item_hold WHERE NOT EXISTS (SELECT 1 FROM item_stage s WHERE s.repo = item_hold.repo AND s.issue = item_hold.issue)");
   }
+}
+
+/** The producer's own stamp for an event when it is a real ISO time (a duration is the run's, not the observer queue's), else undefined. */
+function validAt(at: string | undefined): string | undefined {
+  return at !== undefined && !Number.isNaN(Date.parse(at)) ? new Date(at).toISOString() : undefined;
 }
 
 /** Drop undefined fields so the stored JSON carries only what was present. */

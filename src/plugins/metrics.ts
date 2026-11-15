@@ -8,6 +8,7 @@ import type { Logger } from "../logger.js";
 import { stateDir } from "../state-dir.js";
 import { MetricsRecorder, openMetricsDb, readRows, sqlite } from "../metrics/recorder.js";
 import { aggregate, buildTimelines, formatReport } from "../metrics/report.js";
+import { readRuns, readSessionRows } from "../metrics/runs.js";
 import type { ForemanPlugin, PluginContext, PluginCatalogEntry } from "./contract.js";
 
 /** The database file: `metrics.path` (`~` expanded), else `foreman-metrics.db` in the state directory. */
@@ -47,6 +48,41 @@ export async function runReport(config: AgentConfig, argv: readonly string[] = p
   }
 }
 
+/**
+ * `metrics:runs --from <iso> --to <iso> --json`: the billable runs ending in [from, to), as JSON on stdout (docs/metrics.md).
+ * On an unreadable store (or a bad window) nothing goes to stdout and it exits 1.
+ */
+export async function runRuns(config: AgentConfig, argv: readonly string[] = process.argv.slice(3)): Promise<boolean> {
+  const { values } = parseArgs({
+    args: [...argv], strict: false,
+    options: { from: { type: "string" }, to: { type: "string" }, json: { type: "boolean" }, config: { type: "string" } },
+  });
+  const { from, to } = values as { from?: string; to?: string };
+  if (!from || !to || Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) {
+    console.error("usage: metrics:runs --from <ISO UTC> --to <ISO UTC> --json");
+    return false;
+  }
+  const path = metricsPath(config);
+  if (!existsSync(path)) {
+    console.error(`No metrics database at ${path}.`);
+    return false;
+  }
+  let out: string;
+  try {
+    const db = new (sqlite().DatabaseSync)(path, { readOnly: true });
+    try {
+      out = JSON.stringify(readRuns(readSessionRows(db), from, to), null, 2);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.error(`metrics:runs: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  console.log(out);
+  return true;
+}
+
 class MetricsObserver implements WorkObserver {
   constructor(private readonly recorder: MetricsRecorder) {}
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
@@ -65,13 +101,14 @@ export class MetricsPlugin implements ForemanPlugin {
   readonly roles = ["observer"] as const;
   readonly catalog: PluginCatalogEntry = {
     name: "Metrics",
-    purpose: "Records how long each stage takes and how each item ends, for `npm run metrics:report`.",
+    purpose: "Records how long each stage takes and how each item ends, for `npm run metrics:report`, and each agent run with its outcome and worked cards for `npm run metrics:runs`.",
     onWhen: "`metrics.enabled`",
     requires: { config: ["metrics.enabled", "metrics.path", "metrics.retentionDays"], env: [] },
     whenOff: "Nothing is recorded; the lifecycle is unchanged.",
   };
   readonly commands = {
     "metrics:report": (config: AgentConfig) => runReport(config),
+    "metrics:runs": (config: AgentConfig) => runRuns(config),
   };
   private recorder: MetricsRecorder | null = null;
   private obs: MetricsObserver | null = null;
