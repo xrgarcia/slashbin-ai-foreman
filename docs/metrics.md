@@ -32,7 +32,7 @@ Raw events only; durations are computed when read. Table `events(id, at, repo, i
 | `closed` | `done` or `notPlanned` | the item closed (once) |
 | `hold` | none | why an item waits at `pendingVerification` or `awaitingSignoff` (the EM seat's release gate): `detail` is `{stage, reason}`, one row each time the reason changes, again on re-entry |
 | `claim`, `blocked`, `unblocked`, `escalated`, `merged`, `promoted`, `verifyWaiting` | none | context rows |
-| `session` | none | one row per item a session lists (`detail`: phase, status, pr, reviewer, detail) |
+| `session` | none | one row per item a session lists (`detail`: phase, status, pr, reviewer, detail, and the run fields below) |
 | `release` | none | one row per issue in a release PR (`detail`: state, pr) |
 
 An implement session lists a whole batch of candidates but builds one, so pickup is derived by the
@@ -55,6 +55,57 @@ knows the open release PRs). Separately, a snapshot-seen A -> B -> A within 10 m
 keeps B): a safety net, not a substitute for the two views agreeing. The Foreman's own moves are never suppressed.
 (shipping_app#856 alternated `pendingVerification` and `awaitingRelease` every pass, ~2000 rows, 2026-11-10, because
 only the card view read the open release PR; both views now share that read.)
+
+## The run ledger
+
+Every agent run writes a start and an end in the `session` rows, so what a run came to and which cards it worked
+can be read back (foreman#329). Phases: `implement`, `revise`, `review`, `verify`, `qa`, plus two that hold no card
+on the board: `prodVerify` (one run per SRE production verification or soak call; a verdict read from an
+already-posted comment runs nothing and records nothing) and `em` (one run per `em.mjs unstick` call; none when
+`emRepoPath` or `EM_GITHUB_TOKEN` is missing). The Paperclip mirror ignores those two phases.
+
+Each session row's `detail` adds:
+
+| key | on | meaning |
+|---|---|---|
+| `runId` | every start and end | one value per run (`crypto.randomUUID()`); the rows of a run on N cards share it |
+| `parentRunId` | a nested run | QA inside a review or verify run carries the enclosing run's id |
+| `outcome` | an end | `completed`, `noWork` or `failed`, set by the phase at its own end site; independent of `status` |
+| `workedItems` | an end | `[{repo, issueNumber}]`, the cards the run worked or verified; `[]` when none |
+
+`at` on a session row is stamped by the phase when the run starts and ends (the recorder's own clock only when
+absent), so a duration is the run's, not the observer queue's.
+
+- **completed**: a delivered verdict, including a review requesting changes and a failing QA or SRE verdict.
+- **noWork**: a skip, an already-landed issue, a revise with no commit, a production verification with nothing to verify, an EM call that ruled out of scope.
+- **failed**: an error, a defer, a wait, no result, or a review whose merge landed but whose run did not return a verdict.
+
+The `em` run's outcome comes from the EM's own answer, the line `EM unstick-result {"verdict","readable","worked"}`
+that `bin/em.mjs unstick` prints before its human line, not from the exit code. `completed`: `acted` or `escalated` with the
+answer read back. `noWork`: `out-of-scope`. `failed`: the unknown-kind refusal, a failure, a refusal, a timeout, a
+missing or unparsable result line, or an unreadable answer. `workedItems` is the result line's `worked`: the keyed card, plus
+the `signedSiblings` the answer lists when it has any.
+
+Rows written before this carry no `runId` and are never billed.
+
+### Reading the runs
+
+```
+npm run -s metrics:runs -- --from <ISO UTC> --to <ISO UTC> --json
+```
+
+The window is half-open `[from, to)`; a run belongs to the window its end falls in. JSON on stdout, exit 0; an unreadable
+store or a bad window prints nothing to stdout and exits 1.
+
+- `billable`: completed top-level runs, each `{runId, phase, outcome, startedAt, endedAt, durationMs, shares}`. `shares` splits
+  `durationMs` equally across the run's cards, integers that sum exactly, the remainder to the first in (repo, issueNumber) order.
+- `failed`: failed top-level runs, the same shape (never billed; a failed run that listed no cards has no shares).
+- `unclassified`: `{runId, repo, issueNumber, reason}`, never billed. `noRunId`: an end row from before the ledger.
+  `noEnd`: a start with no end anywhere. `noStart`, `noOutcome`, `noWorkedItems`: a completed run that cannot be priced.
+  `orphanNested`: a nested run whose enclosing run does not end in the window.
+
+Nested runs (`parentRunId`) and duplicate end rows never count twice; `noWork` runs are not listed. Customer and price are the
+reader's (the EM repo's `invoice:weekly`), never this command's.
 
 Retention: rows older than `retentionDays` are deleted at start and at most hourly after.
 

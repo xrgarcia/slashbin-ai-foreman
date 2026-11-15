@@ -1,4 +1,6 @@
+import type { WorkItem } from "../adapters.js";
 import type { AgentConfig, RepoConfig } from "../config.js";
+import { recordRun, type SessionEnd } from "../session-run.js";
 import type { Logger } from "../logger.js";
 import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { cliTail, lastLine, runAgentCli, type CliRun } from "./agent-cli.js";
@@ -42,12 +44,61 @@ export function rejectedAsUnknownKind(r: Pick<CliRun, "stdout" | "stderr">, kind
   return !r.stdout.trim() && r.stderr.split("\n").some((l) => l.trim() === line);
 }
 
+/** The result line `em.mjs unstick` prints just before its human line (docs/metrics.md): what the EM itself says it did. */
+const EM_RESULT_PREFIX = "EM unstick-result ";
+const EM_VERDICTS: readonly string[] = ["acted", "escalated", "out-of-scope"];
+
+/** What the EM's result line says: its verdict, whether its answer was readable, and the cards it worked. */
+export interface EmResult {
+  verdict: "acted" | "escalated" | "out-of-scope";
+  readable: boolean;
+  worked: WorkItem[];
+}
+
+const isCard = (c: unknown): c is WorkItem => {
+  const w = c as { repo?: unknown; issueNumber?: unknown } | null;
+  return typeof w?.repo === "string" && Number.isInteger(w.issueNumber);
+};
+
+/**
+ * The EM's result line in its stdout, or null when there is none or it is not the contract's shape (an older EM,
+ * a crash before the answer, an unknown-kind refusal). Pure, exported for tests.
+ */
+export function parseEmResult(stdout: string): EmResult | null {
+  const line = stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith(EM_RESULT_PREFIX)).pop();
+  if (!line) return null;
+  try {
+    const v = JSON.parse(line.slice(EM_RESULT_PREFIX.length)) as { verdict?: unknown; readable?: unknown; worked?: unknown };
+    if (typeof v.verdict !== "string" || !EM_VERDICTS.includes(v.verdict) || typeof v.readable !== "boolean") return null;
+    if (!Array.isArray(v.worked) || !v.worked.every(isCard)) return null;
+    return { verdict: v.verdict as EmResult["verdict"], readable: v.readable, worked: v.worked.map((c) => ({ repo: c.repo, issueNumber: c.issueNumber })) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How the seat run ended, from the EM's own verdict (not the exit code, which carries no worked cards).
+ * completed: `acted` (exit 0) or `escalated` (exit 2) with the answer read back. noWork: `out-of-scope` (exit 3).
+ * failed: the unknown-kind refusal, a failure, a refusal, a timeout, no result line, or an unreadable answer.
+ */
+export function emRunEnd(outcome: UnstickOutcome, result: EmResult | null): SessionEnd & { workedItems: readonly WorkItem[] } {
+  const detail = `${outcome.kind}${result ? `: ${result.verdict}` : ""}`;
+  const workedItems = result?.worked ?? [];
+  const read = result?.readable === true;
+  const completed = read && ((outcome.kind === "invoked" && result.verdict === "acted") || (outcome.kind === "escalated" && result.verdict === "escalated"));
+  if (completed) return { status: "finished", outcome: "completed", detail, workedItems };
+  if (outcome.kind === "declined" && result?.verdict === "out-of-scope") return { status: "finished", outcome: "noWork", detail, workedItems };
+  return { status: "failed", outcome: "failed", detail, workedItems };
+}
+
 /**
  * Ask the EM to unstick `issue` (`em.mjs unstick --repo --issue --kind --reason`),
  * cwd the EM checkout. Exit 2 escalated, 3 declined; otherwise a run whose
  * output ends in the runner's refusal (out of tokens, rate-limited) is `refused`
  * whatever its exit code, since a seat that never looked has not acted; else
- * exit 0 invoked, anything else failed.
+ * exit 0 invoked, anything else failed. Each call is one `em` run, recorded with the keyed card
+ * and the cards the EM says it worked; no run is recorded when it cannot start.
  */
 export async function unstickViaEm(
   repoConfig: RepoConfig,
@@ -63,9 +114,23 @@ export async function unstickViaEm(
   if (!em) return { kind: "failed", detail: "emRepoPath not configured" };
   if (!process.env.EM_GITHUB_TOKEN) return { kind: "failed", detail: "EM_GITHUB_TOKEN not set" };
   logger.info(`Asking the EM to unstick ${repoConfig.githubRepo}#${issue} (${kind})`);
-  const r = await runAgentCli(em, "bin/em.mjs",
-    ["unstick", "--repo", repoConfig.githubRepo, "--issue", String(issue), "--kind", kind, "--reason", reason],
-    buildEmEnv(agentConfig), agentConfig, emUnstickMaxDurationMs(kind), abortSignal, transcriptPath);
+  const keyed: WorkItem = { repo: repoConfig.githubRepo, issueNumber: issue };
+  const { outcome } = await recordRun(
+    { phase: "em", repo: repoConfig.githubRepo, items: [keyed], reviewer: "EM" },
+    logger,
+    async () => {
+      const r = await runAgentCli(em, "bin/em.mjs",
+        ["unstick", "--repo", repoConfig.githubRepo, "--issue", String(issue), "--kind", kind, "--reason", reason],
+        buildEmEnv(agentConfig), agentConfig, emUnstickMaxDurationMs(kind), abortSignal, transcriptPath);
+      return { outcome: classifyUnstick(r, kind), result: parseEmResult(r.stdout) };
+    },
+    ({ outcome, result }) => emRunEnd(outcome, result),
+  );
+  return outcome;
+}
+
+/** The unstick outcome of one finished `em.mjs unstick` run. */
+function classifyUnstick(r: CliRun, kind: string): UnstickOutcome {
   const last = lastLine(r);
   if (!r.timedOut && r.code === 2) return { kind: "escalated", detail: last };
   if (!r.timedOut && r.code === 3) {

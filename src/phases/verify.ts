@@ -9,7 +9,7 @@ import type { BlockKind } from "../unblock.js";
 import { emit, advance } from "../work-source.js";
 import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
-import { applyQaGate, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
+import { applyQaGate, isDeliveredVerdict, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { fieldTable, type VerifyHold } from "../issue-records.js";
 import { handoffSubject } from "../unstick.js";
@@ -17,6 +17,7 @@ import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type Backoff
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
 import { codeHost } from "../plugins/registry.js";
 import type { ForemanRuntime } from "../runtime.js";
+import { newRunId, NO_RESULT, stamp, type SessionEnd } from "../session-run.js";
 
 /**
  * Whether new commits on base may reopen an exhausted hold. Not one the SRE
@@ -482,15 +483,15 @@ export async function tryVerify(
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
-  const session: Omit<SessionEvent, "status"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE" };
+  const session: Omit<SessionEvent, "status" | "at"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE", runId: newRunId() };
   let scheduled: { resumeAt: string; waitReason: string } | undefined;
-  let ended: { status: "finished" | "failed"; detail: string } = { status: "failed", detail: "the verification ended without a result" };
+  let ended: SessionEnd = { ...NO_RESULT, detail: "the verification ended without a result" };
   const issues = target.issueNumbers.map((n) => `#${n}`).join(", ");
   vlog.info(`Verifying ${repoName} PR #${target.prNumber} in dev (issues: ${issues}), transcript: ${transcriptPath}`);
   events?.push({ message: `Verifying ${repoConfig.githubRepo} PR #${target.prNumber} in dev (issues: ${issues})`, level: "info" });
 
   try {
-    await emit(rt, { kind: "session", session: { ...session, status: "started" } }, null, vlog);
+    await emit(rt, { kind: "session", session: { ...session, status: "started", at: stamp() } }, null, vlog);
     const forceKey = `${repoName}#${target.prNumber}`;
     const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath, rt.memory.verifyForce.has(forceKey))
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
@@ -517,10 +518,12 @@ export async function tryVerify(
       r = { ...sre, pass: false, reason: "qa-coverage-unknown", summary: "QA could not say whether it covers this repo (its registry was unavailable or the question timed out)", by: "QA" };
     } else if (sre.kind === "verdict" && sre.pass && ((config.qaGate && !qaBeforeMerge && qaCovers === true) || qaAgain)) {
       // QA is its own board stage (qaReviewing, its own seat): the card moves there while the gate runs.
-      const qaSession = { ...session, phase: "qa" as const, reviewer: "QA" };
-      await emit(rt, { kind: "session", session: { ...qaSession, status: "started" } }, null, vlog);
+      // QA runs inside this verify run: its own run, parented, so the verify run's time is never counted twice.
+      const qaSession = { ...session, phase: "qa" as const, reviewer: "QA", runId: newRunId(), parentRunId: session.runId };
+      await emit(rt, { kind: "session", session: { ...qaSession, status: "started", at: stamp() } }, null, vlog);
       r = await applyQaGate(sre, repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
-      await emit(rt, { kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed" } }, null, vlog);
+      // A QA verdict is delivered whether it passes or fails; a hold, an error or a crash is not.
+      await emit(rt, { kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed", outcome: isDeliveredVerdict(r) ? "completed" : "failed", workedItems: items, at: stamp() } }, null, vlog);
     }
 
     if (r.kind === "verdict" && r.pass) {
@@ -535,7 +538,7 @@ export async function tryVerify(
       if (!config.qaGate && !qaBeforeMerge && qaCovers === true) {
         void rt.qaReports.run(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
       }
-      ended = { status: "finished", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
+      ended = { status: "finished", outcome: "completed", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
       events?.push({ message: `✅ ${repoConfig.githubRepo} PR #${target.prNumber} verified in dev — ${issues} → "${repoConfig.lifecycleLabels.prApproved}"`, level: "info" });
       return true;
     }
@@ -546,7 +549,7 @@ export async function tryVerify(
       const waitMs = rt.memory.verifyDefer.start(repoName, agentUnavailable);
       const wait = formatWait(waitMs);
       scheduled = { resumeAt: new Date(Date.now() + waitMs).toISOString(), waitReason: `the SRE could not run (${reason})` };
-      ended = { status: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
+      ended = { status: "failed", outcome: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
       vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
       const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
       for (const n of target.issueNumbers) await emit(rt, { kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
@@ -560,7 +563,7 @@ export async function tryVerify(
       }
       await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       scheduled = { resumeAt: plan.retryAt, waitReason: reason };
-      ended = { status: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
+      ended = { status: "failed", outcome: "failed", detail: `waiting — PR #${target.prNumber} is observable from ${plan.retryAt}` };
       vlog.info(`Verify of PR #${target.prNumber} waits until ${plan.retryAt}`);
       events?.push({ message: `⏳ ${repoConfig.githubRepo} ${issues}: dev verification resumes at ${plan.retryAt.slice(0, 16)}Z (${reason})`, level: "info" });
       const why = `waiting until ${plan.retryAt.slice(0, 16)}Z: the SRE says PR #${target.prNumber} is not observable before then (${reason}) — dev verification resumes automatically then`;
@@ -592,13 +595,14 @@ export async function tryVerify(
     const why = `dev verification of PR #${target.prNumber} did not pass (${reason}) — attempt ${attempts}/${verifyRetry.maxAttempts}` +
       (plan.kind === "decide" ? "; the EM decides the fix (a follow-up issue or a spec edit releases it)" : final ? "; no more retries, a person must look" : `; retrying in ${formatWait(backoffDelay(attempts, verifyRetry))}`);
     for (const n of target.issueNumbers) await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: why, ...(isDeployFailureHold(reason) ? { owner: "sre" as const } : {}) }, repoConfig, vlog);
-    ended = { status: "failed", detail: why };
+    // A failing verdict (the SRE's or QA's) is a delivered one; an error result is not.
+    ended = { status: "failed", outcome: isDeliveredVerdict(r) ? "completed" : "failed", detail: why };
     vlog.warn(`${repoName}: ${why}`);
     events?.push({ message: `⏸️ ${repoConfig.githubRepo} ${issues}: ${why}`, level: final ? "error" : "warn" });
     return false;
   } finally {
     activeRuns.delete(runAbort);
-    await emit(rt, { kind: "session", session: { ...session, ...ended, ...(scheduled ?? {}) } }, null, vlog);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: items, ...(scheduled ?? {}) } }, null, vlog);
   }
 }
 

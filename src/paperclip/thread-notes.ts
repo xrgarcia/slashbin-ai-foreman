@@ -75,6 +75,8 @@ export class ThreadNotes {
 
   /** A session started, changed hands or ended: one note per item, then the agent's status. */
   async onSession(event: SessionEvent, _logger: Logger): Promise<void> {
+    // An SRE production verification or an EM seat run is a run record for the metrics ledger, not a stage a card sits in.
+    if (!(event.phase in SESSION_STAGE)) return;
     await this.lease.recovery;
     this.lease.trackSession(event);
 

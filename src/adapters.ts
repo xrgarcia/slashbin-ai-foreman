@@ -354,7 +354,15 @@ export interface ReleaseEvent {
 }
 
 /** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */
-export type SessionPhase = "implement" | "revise" | "review" | "verify" | "qa";
+export type SessionPhase = "implement" | "revise" | "review" | "verify" | "qa" | "prodVerify" | "em";
+
+/**
+ * What an agent run came to, set by the producer at its own end site (docs/metrics.md). Independent of `status`: a
+ * `finished` session can be `failed`, because `finished` cannot tell no-work from work.
+ * `completed`: a delivered verdict, including a review requesting changes and a failing QA or SRE verdict.
+ * `noWork`: skipped, already landed, or no commit. `failed`: an error, a defer, a wait, or no result.
+ */
+export type SessionOutcome = "completed" | "noWork" | "failed";
 
 /**
  * A session's lifecycle. `handoff` is a review passing from one reviewer to
@@ -371,6 +379,19 @@ export interface SessionEvent {
   /** On a `qa` session: it runs before the merge (config.qaBeforeMerge), so the card's fallback is review, not `merged`. */
   readonly qaBeforeMerge?: boolean;
   readonly detail?: string;
+  /** One value per agent run, on every start and end event of it (`crypto.randomUUID()`). */
+  readonly runId: string;
+  /** A nested run (QA inside a review or verify): the enclosing run's id. Absent otherwise. */
+  readonly parentRunId?: string;
+  /** Required on a `finished` or `failed` end; absent on `started` and `handoff`. */
+  readonly outcome?: SessionOutcome;
+  /** On an end: the cards the run actually worked or verified; `[]` when none. Not `worked`, which is implement's issue numbers. */
+  readonly workedItems?: ReadonlyArray<WorkItem>;
+  /**
+   * When the event happened, ISO UTC. Stamped by the producer, so a run's duration is not the observer
+   * queue's delay; the recorder falls back to its own clock when absent.
+   */
+  readonly at?: string;
   /**
    * On a verify end that is a scheduled wait, not a failure (the SRE says the PR is not observable yet, or could
    * not run): the ISO time the Foreman retries, and why. Observers render it as a schedule.

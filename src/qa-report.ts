@@ -280,6 +280,14 @@ async function postGateReport(pr: number, marker: string, body: string, deps: Qa
   }
 }
 
+/** The hold reason a QA FAIL verdict becomes: a delivered verdict, unlike the `qa-*` holds that say QA could not check. */
+export const QA_FAIL_REASON = "visual-qa-failed";
+
+/** Whether a gate result is a verdict someone delivered (an SRE pass or fail, QA's pass or FAIL), not QA failing to run. */
+export function isDeliveredVerdict(r: VerifyResult): boolean {
+  return r.kind === "verdict" && (r.pass || r.by !== "QA" || r.reason === QA_FAIL_REASON);
+}
+
 /**
  * The gate: given an SRE pass, run QA and return what the verify stage acts on.
  * PASS returns the SRE result untouched. FAIL becomes the existing visual-QA
@@ -310,7 +318,7 @@ export async function applyQaGate(
   const { manifest: m, exitCode } = outcome;
   if (isVoid) return hold("qa-held-page-unplaced", `QA passed without a shot, but the PR changed client code: ${m.reason ?? ""}`);
   if (m.verdict === "PASS" && exitCode === 0) return sre;
-  if (m.verdict === "FAIL" && exitCode === 1) return hold("visual-qa-failed", qaFailSummary(m));
+  if (m.verdict === "FAIL" && exitCode === 1) return hold(QA_FAIL_REASON, qaFailSummary(m));
   if (m.verdict === "HELD" && exitCode === 3) return hold(`qa-held-${m.hold ?? "unknown"}`, `QA could not check: ${m.reason ?? ""}`);
   return hold("qa-inconsistent", `QA exit ${exitCode} disagrees with verdict ${m.verdict}`);
 }

@@ -54,6 +54,8 @@ import { codeHost } from "../plugins/registry.js";
 import { releaseTagName } from "../config-schema/github.js";
 import type { ReleasePrView } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
+import type { WorkItem } from "../adapters.js";
+import { recordRun, type SessionEnd } from "../session-run.js";
 
 /** The SRE's soak window: it runs once this long after the merge. */
 export const SOAK_DELAY_MS = 30 * 60_000;
@@ -113,10 +115,31 @@ export function splitByIssueRows(issues: readonly number[], hold: string, rows: 
   return { passing, held };
 }
 
-/** Production verification (or the soak) by the enabled verifier; an error result when none is enabled. */
-function verifyProd(repoConfig: RepoConfig, config: AgentConfig, pr: number, logger: Logger, signal: AbortSignal, path: string, mode: "prod" | "soak", recheck = false): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
+/**
+ * Production verification (or the soak) by the enabled verifier; an error result when none is enabled. Each call is one
+ * `prodVerify` run, recorded with the release's issues as the cards it verified. A verdict read from an already-posted
+ * comment never reaches here, so it records nothing.
+ */
+function verifyProd(repoConfig: RepoConfig, config: AgentConfig, rel: Pick<ProdRelease, "pr" | "issues">, logger: Logger, signal: AbortSignal, path: string, mode: "prod" | "soak", recheck = false): Promise<VerifyResult | { kind: "nothing"; reason: string }> {
   const v = roleFor("verifier", config);
-  return v ? v.verifyProd(repoConfig, config, pr, logger, signal, path, mode, recheck) : Promise.resolve({ kind: "error", error: "no verifier is enabled" });
+  const items = rel.issues.map((n) => itemOf(repoConfig, n));
+  return recordRun(
+    { phase: "prodVerify", repo: repoConfig.githubRepo, pr: rel.pr, items, reviewer: "SRE" },
+    logger,
+    () => v ? v.verifyProd(repoConfig, config, rel.pr, logger, signal, path, mode, recheck) : Promise.resolve({ kind: "error" as const, error: "no verifier is enabled" }),
+    (r) => prodVerifyEnd(r, mode, items),
+  );
+}
+
+/** How a production verification ended. completed: a verdict (a held one too). noWork: nothing to verify. failed: an error. Pure, exported for tests. */
+export function prodVerifyEnd(r: VerifyResult | { kind: "nothing"; reason: string }, mode: "prod" | "soak", items: readonly WorkItem[]): SessionEnd & { workedItems: readonly WorkItem[] } {
+  const said = r.kind === "verdict" ? (r.pass ? "pass" : r.reason ?? "held") : r.kind === "nothing" ? r.reason : r.error;
+  return {
+    status: r.kind === "error" ? "failed" : "finished",
+    outcome: r.kind === "verdict" ? "completed" : r.kind === "nothing" ? "noWork" : "failed",
+    detail: `${mode}: ${said}`,
+    workedItems: items,
+  };
 }
 
 /** The evidence link for a verification the SRE just posted: its latest Production Verification comment. */
@@ -869,7 +892,7 @@ async function mergedVerdict(rt: ForemanRuntime, repoConfig: RepoConfig, config:
   }
   const path = transcript(repoConfig, `verify-pr${rel.pr}`, cycleNumber);
   logger.info(`Release PR #${rel.pr}: SRE prod verification, transcript: ${path}`);
-  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "prod"));
+  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel, logger, signal, path, "prod"));
   if (r.kind === "nothing") return { kind: "defer", reason: r.reason };
   return await fromVerifyResult(rt, r, repoConfig, rel.pr, logger);
 }
@@ -1023,7 +1046,7 @@ async function settleSoak(
 async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, logger: Logger, cycleNumber: number): Promise<void> {
   const path = transcript(repoConfig, `soak-pr${rel.pr}`, cycleNumber);
   logger.info(`Release PR #${rel.pr}: SRE 30-minute soak, transcript: ${path}`);
-  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel.pr, logger, signal, path, "soak"));
+  const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, rel, logger, signal, path, "soak"));
   await settleSoak(rt, repoConfig, config, rel, r, logger, false);
 }
 
@@ -1332,12 +1355,12 @@ export async function tryRelease(
     // held it, and a prod pass would close the reopened issues with the soak's finding unanswered (foreman#80).
     if (soakHeld(held)) {
       rlog.info(`Release PR #${held.pr}: re-soaking after ${held.hold ?? "a soak hold"}, transcript: ${path}`);
-      const sr = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held.pr, rlog, signal, path, "soak", true));
+      const sr = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held, rlog, signal, path, "soak", true));
       await settleSoak(rt, repoConfig, config, held, sr, rlog, true);
       return true;
     }
     rlog.info(`Release PR #${held.pr}: re-verifying production after ${held.hold ?? "a hold"}, transcript: ${path}`);
-    const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held.pr, rlog, signal, path, "prod"));
+    const r = await asRun(repoConfig, (signal) => verifyProd(repoConfig, config, held, rlog, signal, path, "prod"));
     const v: Verdict = r.kind === "nothing" ? { kind: "defer", reason: r.reason } : await fromVerifyResult(rt, r, repoConfig, held.pr, rlog);
     await settle(rt, repoConfig, config, held, v, rlog);
     return true;
