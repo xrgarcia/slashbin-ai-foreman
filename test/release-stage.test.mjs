@@ -182,6 +182,16 @@ mkdirSync(join(techLeadDir, "bin"), { recursive: true });
 mkdirSync(join(sreDir, "bin"), { recursive: true });
 writeFileSync(join(techLeadDir, "bin", "tech-lead.mjs"), agentScript("tech-lead"));
 writeFileSync(join(sreDir, "bin", "sre.mjs"), agentScript("sre"));
+// The EM's follow-up booking (scripts/routines/deferred-verify.mjs in emRepoPath, which is tmp): logs the call and
+// answers from CTL.schedule (default: booked).
+mkdirSync(join(tmp, "scripts", "routines"), { recursive: true });
+writeFileSync(join(tmp, "scripts", "routines", "deferred-verify.mjs"), `import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(AGENT_LOG)}, JSON.stringify(["em", ...args]) + "\\n");
+const r = JSON.parse(fs.readFileSync(${JSON.stringify(CTL)}, "utf8")).schedule ?? { exit: 0, out: "scheduled R1 Deferred verify: o/r at then o/r:100=5" };
+process.stdout.write((r.out ?? "") + "\\n");
+process.exit(r.exit ?? 0);
+`);
 
 const ENV = {
   PATH: `${bin}:${process.env.PATH}`,
@@ -2191,13 +2201,16 @@ const TIME_WAIT = (eligible) => ({
 });
 const waitNotes = (n) => commentsOn(n).filter((b) => b.startsWith("**Live in production; waiting until"));
 
-test("a time wait on prod verification says so once per eligible_at on each issue, and closes nothing", async () => {
-  world(pending(), { approve: { exit: 0 }, deploy: TIME_WAIT("2026-12-01T06:00:00.000Z"), prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: "2026-12-01T06:00:00.000Z" }) });
+test("a time wait within 24 hours says so once per eligible_at on each issue, and closes nothing", async () => {
+  const soon = (h) => new Date(Math.ceil((Date.now() + h * 3_600_000) / 60_000) * 60_000).toISOString();
+  const [first, second] = [soon(6), soon(12)];
+  const at = (t) => `${t.slice(0, 10)} ${t.slice(11, 16)} UTC`;
+  world(pending(), { approve: { exit: 0 }, deploy: TIME_WAIT(first), prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: first }) });
   assert.equal(await run(), true);
   for (const n of [5, 6]) {
     const notes = waitNotes(n);
     assert.equal(notes.length, 1, `#${n} hears it once`);
-    assert.match(notes[0], /waiting until 2026-12-01 06:00 UTC/);
+    assert.match(notes[0], new RegExp(`waiting until ${at(first)}`));
     assert.match(notes[0], /verified the deploy/);
     assert.match(notes[0], /Nothing is needed from anyone/);
     assert.match(notes[0], /https:\/\/example\.test\/pv/, "the SRE's evidence is linked");
@@ -2205,30 +2218,31 @@ test("a time wait on prod verification says so once per eligible_at on each issu
     assert.ok(!gh().issues[n].labels.includes("prod verification held"), `#${n} is not labelled held`);
   }
   const rel = (await prodReleases())[100];
-  assert.equal(rel.retryAt, "2026-12-01T06:00:00.000Z");
-  assert.equal(rel.waitNoted, "2026-12-01T06:00:00.000Z");
+  assert.equal(rel.retryAt, first);
+  assert.equal(rel.waitNoted, first);
 
   // The same time again (a later pass, a restart): nothing more is said.
   await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
-  setCtl({ prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: "2026-12-01T06:00:00.000Z" }) });
+  setCtl({ prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: first }) });
   await run(2);
   for (const n of [5, 6]) assert.equal(waitNotes(n).length, 1, `#${n} is not told again`);
+  assert.equal(agentCalls().filter((c) => c[0] === "em").length, 0, "a wait within 24 hours books no follow-up");
 
   // A new time says it again.
   await editRel(100, (r) => { r.retryAt = new Date(Date.now() - 1000).toISOString(); });
-  setCtl({ prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: "2026-12-08T06:00:00.000Z" }) });
+  setCtl({ prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: second }) });
   await run(3);
   for (const n of [5, 6]) {
     assert.equal(waitNotes(n).length, 2, `#${n} hears the changed time`);
-    assert.match(waitNotes(n)[1], /waiting until 2026-12-08 06:00 UTC/);
+    assert.match(waitNotes(n)[1], new RegExp(`waiting until ${at(second)}`));
     assert.equal(gh().issues[n].state, "OPEN");
   }
 });
 
 // The release already waiting when this shipped (security_tests#431: retryAt 2026-12-01, saved before waits were
 // announced) is not due for weeks, so the settle path never runs for it: it is announced on an ordinary pass instead.
-test("a stored merged release already waiting on a future time is announced once, with no verification and the time unchanged", async () => {
-  const at = new Date(Date.now() + 19 * 86_400_000).toISOString();
+test("a stored merged release already waiting under 24 hours is announced once, with no verification and the time unchanged", async () => {
+  const at = new Date(Date.now() + 20 * 3_600_000).toISOString();
   const t0 = new Date(Date.now() - 3_600_000).toISOString();
   world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60)], compareFiles: 0, prodHead: MERGE });
   await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: at });
@@ -2241,6 +2255,54 @@ test("a stored merged release already waiting on a future time is announced once
   assert.equal(rel.waitNoted, at);
   await run(2);
   assert.equal(waitNotes(5).length, 1, "not told again on the next pass or after a restart");
+});
+
+// Owner, 2026-11-15: a check observable only after the next 24 hours is a scheduled Paperclip follow-up, not an open
+// card; the card closes on everything observable now. security_tests#407/#412/#429/#436 sat live for up to 19 days.
+const FAR = "2026-12-01T06:00:00.000Z";
+const farAway = () => new Date(Math.ceil((Date.now() + 16 * 86_400_000) / 60_000) * 60_000).toISOString();
+const closeNotes = (n) => commentsOn(n).filter((b) => /scheduled follow-up/.test(b));
+
+test("a time wait past 24 hours books the EM's follow-up, then closes the issues with it named", async () => {
+  const far = farAway();
+  world(pending(), { approve: { exit: 0 }, deploy: TIME_WAIT(far), prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: far }) });
+  assert.equal(await run(), true);
+  const booked = agentCalls().filter((c) => c[0] === "em");
+  assert.equal(booked.length, 1, "one follow-up booked");
+  assert.deepEqual(booked[0].slice(1), ["schedule", "--repo", REPO, "--pr", "100", "--issues", "5,6", "--at", far]);
+  for (const n of [5, 6]) {
+    assert.equal(gh().issues[n].state, "CLOSED", `#${n} closes`);
+    assert.equal(waitNotes(n).length, 0, `#${n} is not told to wait`);
+    assert.equal(closeNotes(n).length, 1, `#${n} names the follow-up once`);
+    assert.match(closeNotes(n)[0], /routine R1/);
+    assert.match(closeNotes(n)[0], /reopens this issue if it fails/);
+  }
+  const rel = (await prodReleases())[100];
+  assert.equal(rel?.phase, "soaking", "the release goes on to its soak");
+  assert.equal(rel.retryAt, undefined);
+});
+
+test("a time wait past 24 hours that cannot be booked keeps the card open and waiting, never closed unchecked", async () => {
+  const far = farAway();
+  world(pending(), { approve: { exit: 0 }, deploy: TIME_WAIT(far), prod: V1({ outcome: "hold", hold: "wait-until", eligible_at: far }), schedule: { exit: 1, out: "paperclip down" } });
+  assert.equal(await run(), true);
+  for (const n of [5, 6]) {
+    assert.equal(gh().issues[n].state, "OPEN", `#${n} stays open`);
+    assert.equal(waitNotes(n).length, 1, `#${n} hears the wait`);
+  }
+  assert.equal((await prodReleases())[100].retryAt, far);
+});
+
+test("a stored release already waiting past 24 hours is closed onto a follow-up on an ordinary pass, with no verification", async () => {
+  const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60)], compareFiles: 0, prodHead: MERGE });
+  await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: FAR, waitNoted: FAR });
+  await run();
+  assert.equal(agentCalls().filter((c) => c[1] === "verify").length, 0, "nothing is verified");
+  assert.deepEqual(agentCalls().filter((c) => c[0] === "em").map((c) => c.at(-1)), [FAR], "booked at the SRE's time");
+  assert.equal(gh().issues[5].state, "CLOSED");
+  assert.match(closeNotes(5)[0], /2026-12-01 06:00 UTC/);
+  assert.equal((await prodReleases())[100]?.phase, "soaking");
 });
 
 // --- A `predeploy-stop` is asked about again (the SRE's pre-deploy check only reads) --------------------------------

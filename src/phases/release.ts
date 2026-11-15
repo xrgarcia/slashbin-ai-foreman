@@ -1049,6 +1049,31 @@ async function announceWait(
   }
 }
 
+/**
+ * A check observable only after the next 24 hours is a scheduled Paperclip follow-up, not an open card; the card
+ * closes on everything observable now (owner, 2026-11-15: security_tests#407/#412/#429/#436 sat live in production for
+ * up to 19 days waiting on a monthly cron). The EM books the follow-up, which re-runs the SRE's prod verification at
+ * that time and reopens the issues if it fails. False, and the release waits as before, when the time is within
+ * 24 hours or nothing was booked: a card is never closed on a check nobody will run.
+ */
+async function deferToFollowUp(
+  rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, v: Extract<Verdict, { kind: "wait" }>, logger: Logger,
+): Promise<boolean> {
+  const at = Date.parse(v.retryAt);
+  if (!Number.isFinite(at) || at - now() <= MAX_TIME_HOLD_MS) return false;
+  const booked = await roleFor("unstick", config)?.scheduleProdFollowUp?.(repoConfig, config, rel.pr, rel.issues, v.retryAt, logger);
+  if (!booked) {
+    logger.warn(`Release PR #${rel.pr}: its follow-up at ${v.retryAt} could not be booked; waiting on the card instead`);
+    return false;
+  }
+  rt.memory.releaseBackoff.clear(`${repoConfig.githubRepo}#${rel.pr}`);
+  const why = statedReason(v.reason, v.hold) ?? "the part of the SRE's production check that cannot be observed before then";
+  logger.info(`Release PR #${rel.pr}: ${why} is a scheduled follow-up at ${v.retryAt} (${booked}); closing on the rest`);
+  await passRelease(rt, repoConfig, { ...rel, retryAt: undefined }, rel.phase === "held" ? "prodReverified" : "prodVerified", v.evidence, logger,
+    `everything observable now passed; ${why} is re-checked at ${utcMinute(v.retryAt)} by a scheduled follow-up (${booked.replace(/^scheduled /, "routine ")}), which reopens this issue if it fails`);
+  return true;
+}
+
 /** Act on a verdict for a release that has merged (first verification, or a held re-verify). */
 async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, rel: ProdRelease, v: Verdict, logger: Logger): Promise<void> {
   const key = `${repoConfig.githubRepo}#${rel.pr}`;
@@ -1064,6 +1089,7 @@ async function settle(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
       await holdFailing(rt, repoConfig, config, rel, v, v.rows, "prodHeld", rel.phase === "held" ? "prodReverified" : "prodVerified", logger);
       return;
     case "wait":
+      if (await deferToFollowUp(rt, repoConfig, config, rel, v, logger)) return;
       logger.info(`Release PR #${rel.pr}: the SRE can verify the rest after ${v.retryAt} (${v.hold})`);
       await settleWait(rt, repoConfig, rel, v, logger);
       return;
@@ -1439,7 +1465,10 @@ export async function tryRelease(
   // A tracked release acts on its issues (verifies, comments, closes, records): it waits while any of them is unreadable.
   const gate = await rt.records.actionableIssues(repoConfig, current.flatMap((r) => r.issues));
   const said = new Set<number>();
+  /** Releases closed onto a follow-up this pass: their stored record moved on, this view of it did not. */
+  const closedNow = new Set<number>();
   const ready = (rel: ProdRelease) => {
+    if (closedNow.has(rel.pr)) return false;
     if (rt.memory.releaseBackoff.waiting(`${repoConfig.githubRepo}#${rel.pr}`)) return false;
     const blocked = rel.issues.filter((n) => gate.loaded.unavailable.has(n));
     if (blocked.length > 0) {
@@ -1449,6 +1478,17 @@ export async function tryRelease(
     }
     return true;
   };
+
+  // A merged release waiting more than 24 hours on a time the SRE named (saved before follow-ups were booked): book
+  // the follow-up and close it now. Not an action: nothing is verified, the SRE's earlier verdict stands.
+  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && Date.parse(r.retryAt) - now() > MAX_TIME_HOLD_MS)) {
+    try {
+      const evidence = await evidenceFor(repoConfig, w.pr, rlog);
+      if (await deferToFollowUp(rt, repoConfig, config, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog)) closedNow.add(w.pr);
+    } catch (err) {
+      rlog.warn(`Release PR #${w.pr}: could not book its follow-up: ${errText(err)}`);
+    }
+  }
 
   // A merged release waiting on a time the SRE named (a `merged` release has a `retryAt` only from a wait) that was
   // saved before waits were announced: say so now, once. It is not an action: nothing is verified early and the

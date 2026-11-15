@@ -199,6 +199,32 @@ export async function publishedKindsViaEm(agentConfig: AgentConfig, logger: Logg
   return null;
 }
 
+/** How long one `deferred-verify.mjs schedule` may run (a few Paperclip calls). */
+export const EM_FOLLOW_UP_MAX_DURATION_MS = 2 * 60_000;
+
+/**
+ * Book the EM's Paperclip follow-up for a release's deferred production check
+ * (`scripts/routines/deferred-verify.mjs schedule`). The EM owns the one scheduler; the Foreman only asks. Returns
+ * its `scheduled <routine> <title> <spec>` line, or null on any failure. Never throws.
+ */
+export async function scheduleProdFollowUpViaEm(
+  repoConfig: RepoConfig, agentConfig: AgentConfig, pr: number, issues: readonly number[], at: string, logger: Logger,
+): Promise<string | null> {
+  const em = agentConfig.emRepoPath;
+  if (!em) return null;
+  try {
+    const r = await runAgentCli(em, "scripts/routines/deferred-verify.mjs",
+      ["schedule", "--repo", repoConfig.githubRepo, "--pr", String(pr), "--issues", issues.join(","), "--at", at],
+      buildEmEnv(agentConfig), agentConfig, EM_FOLLOW_UP_MAX_DURATION_MS);
+    const line = r.stdout.trim().split("\n").pop() ?? "";
+    if (!r.timedOut && r.code === 0 && line.startsWith("scheduled ")) return line;
+    logger.warn(`EM follow-up for ${repoConfig.githubRepo} PR #${pr} not booked (${r.timedOut ? "timed out" : `exit ${r.code}`}): ${cliTail(r)}`);
+  } catch (err) {
+    logger.warn(`EM follow-up for ${repoConfig.githubRepo} PR #${pr} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return null;
+}
+
 export class EmPlugin implements ForemanPlugin {
   readonly id = "em";
   readonly roles = ["unstick"] as const;
@@ -209,7 +235,7 @@ export class EmPlugin implements ForemanPlugin {
     requires: { config: ["emRepoPath", "unstickEscalationOwner"], env: ["EM_GITHUB_TOKEN"] },
     whenOff: "Stuck or held work stays where it is until a person clears it; nothing escalates it.",
   };
-  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm, publishedKinds: publishedKindsViaEm };
+  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm, publishedKinds: publishedKindsViaEm, scheduleProdFollowUp: scheduleProdFollowUpViaEm };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.emRepoPath);
   }

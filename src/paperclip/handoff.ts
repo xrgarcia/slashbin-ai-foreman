@@ -155,7 +155,7 @@ export const STAGE_HANDOFF: Readonly<Record<Stage, StageHandoff>> = Object.freez
   },
   prodVerifyHeld: {
     act: true,
-    todo: "Sort the hold: read the newest production-verification comment on {issue}. A wait (`wait-until-…`, no traffic yet, a soak) needs nothing, the Foreman re-verifies on a back-off. A check that could not observe the outcome is a verifier defect: file it. Production actually broken: file a new corrective issue. Never re-verify by hand.",
+    todo: "Sort the hold: read the newest production-verification comment on {issue}. A wait (`wait-until-…` within 24 hours, no traffic yet, a soak) needs nothing, the Foreman re-verifies on a back-off. A check observable only after the next 24 hours is a scheduled Paperclip follow-up, not an open card: the card closes on everything observable now. A check that could not observe the outcome is a verifier defect: file it. Production actually broken: file a new corrective issue. Never re-verify by hand.",
     next: "sort the prod-verification hold on {issue}",
     why: "deployed to production, but prod verification held or failed (`{prodVerifyHeld}`)",
     done: "a prod re-verification passes and the issue closes, or the corrective issue is filed",

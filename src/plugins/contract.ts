@@ -225,6 +225,12 @@ export interface Unsticker {
    * it and never kept as a second copy (foreman#232). Null when it could not be read; never throws.
    */
   publishedKinds?(config: AgentConfig, logger: Logger): Promise<readonly string[] | null>;
+  /**
+   * Book a scheduled follow-up that re-runs a release's production verification at `at` (ISO UTC), for a check that
+   * cannot be observed within the next 24 hours, so the release's issues can close now (owner, 2026-11-15). Returns
+   * what was booked (one line, for the issues' close comment), or null when nothing was; never throws.
+   */
+  scheduleProdFollowUp?(repo: RepoConfig, config: AgentConfig, pr: number, issues: readonly number[], at: string, logger: Logger): Promise<string | null>;
 }
 
 /** The agent roles, each named as its field on ForemanPlugin. */
