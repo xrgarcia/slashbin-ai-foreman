@@ -145,7 +145,7 @@ retried on `backoff.releaseRetry` (5 min → 2 h) — wait.
   lift `blocked` by hand only to release it sooner. The recorded stop is what marks the block as the
   Foreman's: a `blocked` a person applied (an issue the record does not name, or one whose label any
   other account ever applied) is never retried, and neither are `merge-refused-repeatedly` and
-  `merge-blocked-check`. Any other outcome of a re-check (owner-hold, Tech Lead refusal, a transient failure) puts `blocked` back and keeps the record. A `predeploy-stop` raised before this record existed has none: lift it by hand once.
+  `merge-blocked-check`. A re-check that ends in a Tech Lead refusal, `merge-refused-repeatedly` or `merge-blocked-check` puts `blocked` back and ends the timed retry (the record is deleted: a person decides). An `owner-hold` or a transient failure puts `blocked` back and keeps the record. A `predeploy-stop` raised before this record existed has none: lift it by hand once.
 
 Build-side refusals (no card move; one comment each): a missing or invalid `## Acceptance`,
 an unmet Pre-Flight readiness fence, an unmerged blocked-by link (silent), a dead blocker

@@ -2357,11 +2357,29 @@ test("predeploy-stop: a transient failure on the re-check keeps the record and p
   assert.equal(await run(3), false, "inside the back-off");
 });
 
-test("predeploy-stop: a Tech Lead refusal on the re-check keeps the record too", async () => {
+test("predeploy-stop: a Tech Lead refusal on the re-check ends the timed retry", async () => {
   await dueAfterFirstStop(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 4, out: "head moved" }], deploy: [STOP(1)] });
   assert.equal(await run(2), true);
-  assert.ok(await stopRecord(), "still recorded");
+  assert.equal(await stopRecord(), undefined, "no record: a person decides now");
   for (const n of [5, 6]) assert.ok(gh().issues[n].labels.includes("blocked"));
+  await ageStop(RECHECK_MS * 3).catch(() => {});
+  rt = withFreshMemory(rt);
+  assert.equal(await run(3), false);
+  assert.equal(agentCalls().length, 3, "no further approval or deploy");
+});
+
+test("predeploy-stop: a merge-refused-repeatedly or merge-blocked-check on the re-check ends the timed retry", async () => {
+  for (const hold of ["merge-refused-repeatedly", "merge-blocked-check"]) {
+    const end = { exit: 0, out: `SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=${hold}` };
+    await dueAfterFirstStop(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), end] });
+    assert.equal(await run(2), true);
+    assert.equal(await stopRecord(), undefined, `${hold}: the retry record is gone`);
+    for (const n of [5, 6]) assert.ok(gh().issues[n].labels.includes("blocked"), `${hold}: #${n} stays blocked`);
+    withEvents(FOREMAN_LABELS);
+    rt = withFreshMemory(rt);
+    assert.equal(await run(3), false);
+    assert.equal(agentCalls().length, 4, `${hold}: no further approval or deploy`);
+  }
 });
 
 test("predeploy-stop: a person's blocked is never retried", async () => {

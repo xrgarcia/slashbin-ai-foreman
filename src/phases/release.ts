@@ -508,7 +508,7 @@ async function stopRelease(
   rt: ForemanRuntime, repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger,
   /** Set for a `predeploy-stop`: the head and the STOP's full text, kept so the SRE is asked again later and an identical STOP stays silent. */
   predeploy?: { head: string; reason: string; recheckMs: number },
-  /** Set during a re-check, for any other stop: the retry record stays (its clock restarts), because this retry did not end the predeploy-stop. */
+  /** Set during a re-check that ended in `owner-hold` only: the retry record stays (its clock restarts). Every other non-predeploy stop (Tech Lead refusal, merge-refused-repeatedly, merge-blocked-check) ends the timed retry. */
   keep?: PredeployStop,
 ): Promise<{ recorded: boolean }> {
   let repeat = false;
@@ -1239,7 +1239,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   const approval = await asRun(repoConfig, (signal) =>
     roleFor("reviewer", config)?.approvePromotion(repoConfig, config, pr.number, pr.headSha, logger, signal, approvePath) ?? Promise.resolve({ kind: "retry" as const, reason: "no reviewer is enabled" }));
   if (approval.kind === "refused") {
-    await stopRelease(rt, repoConfig, pr.number, pending, `the Tech Lead refused to approve it at \`${short(pr.headSha)}\`: ${approval.reason}`, undefined, logger, undefined, recheck ?? undefined);
+    await stopRelease(rt, repoConfig, pr.number, pending, `the Tech Lead refused to approve it at \`${short(pr.headSha)}\`: ${approval.reason}`, undefined, logger);
     return true;
   }
   if (approval.kind === "retry") {
@@ -1285,7 +1285,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
         const said = diagnosis ?? `unread ${iso(now())}`;
         predeploy = { head: pr.headSha, reason: [plan.reason, said, r.trailer.holdReason ?? ""].join("\n"), recheckMs: config.backoff.predeployStopRecheckMs };
       }
-      const { recorded } = await stopRelease(rt, repoConfig, pr.number, pending, plan.reason, r.trailer.evidence, logger, predeploy, predeploy ? undefined : recheck ?? undefined);
+      const { recorded } = await stopRelease(rt, repoConfig, pr.number, pending, plan.reason, r.trailer.evidence, logger, predeploy, !predeploy && r.trailer.hold === "owner-hold" ? recheck ?? undefined : undefined);
       // A stop that could not be recorded is not due again by its clock: back off instead of asking the SRE every pass.
       if (predeploy && !recorded) rt.memory.releaseBackoff.start(key, config.backoff.releaseRetry);
       return true;
