@@ -8,6 +8,7 @@ import type { Logger } from "../logger.js";
 import { stateDir } from "../state-dir.js";
 import { MetricsRecorder, openMetricsDb, readRows, sqlite } from "../metrics/recorder.js";
 import { aggregate, buildTimelines, formatReport } from "../metrics/report.js";
+import { readBlocked, readBlockedRows, parseWindowEdge } from "../metrics/blocked.js";
 import { readRuns, readSessionRows } from "../metrics/runs.js";
 import type { ForemanPlugin, PluginContext, PluginCatalogEntry } from "./contract.js";
 
@@ -83,6 +84,50 @@ export async function runRuns(config: AgentConfig, argv: readonly string[] = pro
   return true;
 }
 
+/**
+ * `metrics:blocked --from <date|ISO> --to <date|ISO> [--now <ISO>] [--db <path>] [--json]`: each card's blocked hours per
+ * Central week, one interval per block (docs/metrics.md). A bare date is that day's Central midnight. `--db` reads a
+ * store other than the configured one; `--now` replaces the clock, which fixes where an open block stops.
+ * On an unreadable store or a bad argument nothing goes to stdout and it exits 1.
+ */
+export async function runBlocked(config: AgentConfig, argv: readonly string[] = process.argv.slice(3)): Promise<boolean> {
+  const { values } = parseArgs({
+    args: [...argv], strict: false,
+    options: { from: { type: "string" }, to: { type: "string" }, now: { type: "string" }, db: { type: "string" }, json: { type: "boolean" }, config: { type: "string" } },
+  });
+  const { from, to } = values as { from?: string; to?: string };
+  const now = (values.now as string | undefined) ?? new Date().toISOString();
+  if (!from || !to || [from, to].some((v) => Number.isNaN(parseWindowEdge(v))) || Number.isNaN(Date.parse(now))) {
+    console.error("usage: metrics:blocked --from <YYYY-MM-DD|ISO> --to <YYYY-MM-DD|ISO> [--now <ISO>] [--db <path>] [--json]");
+    return false;
+  }
+  const path = (values.db as string | undefined) ?? metricsPath(config);
+  if (!existsSync(path)) {
+    console.error(`No metrics database at ${path}.`);
+    return false;
+  }
+  let out: ReturnType<typeof readBlocked>;
+  try {
+    const db = new (sqlite().DatabaseSync)(path, { readOnly: true });
+    try {
+      out = readBlocked(readBlockedRows(db), from, to, now);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.error(`metrics:blocked: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  if (values.json) {
+    console.log(JSON.stringify(out, null, 2));
+  } else {
+    for (const r of out.rows) {
+      console.log(`${r.repo}#${r.issue}  ${r.week}  ${r.incomplete ? "incomplete" : `${r.hours}h`}${r.open ? "  open" : ""}`);
+    }
+  }
+  return true;
+}
+
 class MetricsObserver implements WorkObserver {
   constructor(private readonly recorder: MetricsRecorder) {}
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
@@ -101,7 +146,7 @@ export class MetricsPlugin implements ForemanPlugin {
   readonly roles = ["observer"] as const;
   readonly catalog: PluginCatalogEntry = {
     name: "Metrics",
-    purpose: "Records how long each stage takes and how each item ends, for `npm run metrics:report`, and each agent run with its outcome and worked cards for `npm run metrics:runs`.",
+    purpose: "Records how long each stage takes and how each item ends, for `npm run metrics:report`, each agent run with its outcome and worked cards for `npm run metrics:runs`, and each card's blocked time, one interval per block by Central week, for `npm run metrics:blocked`.",
     onWhen: "`metrics.enabled`",
     requires: { config: ["metrics.enabled", "metrics.path", "metrics.retentionDays"], env: [] },
     whenOff: "Nothing is recorded; the lifecycle is unchanged.",
@@ -109,6 +154,7 @@ export class MetricsPlugin implements ForemanPlugin {
   readonly commands = {
     "metrics:report": (config: AgentConfig) => runReport(config),
     "metrics:runs": (config: AgentConfig) => runRuns(config),
+    "metrics:blocked": (config: AgentConfig) => runBlocked(config),
   };
   private recorder: MetricsRecorder | null = null;
   private obs: MetricsObserver | null = null;

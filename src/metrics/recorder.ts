@@ -240,13 +240,21 @@ export class MetricsRecorder {
     }
   }
 
-  /** Delete events past retention, and item_stage rows left with no events. At most hourly. */
+  /** Delete events past retention (an open block's rows excepted), and item_stage rows left with no events. At most hourly. */
   retain(force = false): void {
     const t = this.now();
     if (!force && this.lastRetention && t - this.lastRetention < HOUR) return;
     this.lastRetention = t;
     const cutoff = new Date(t - this.retentionDays * DAY).toISOString();
-    this.db.prepare("DELETE FROM events WHERE at < ?").run(cutoff);
+    // An open block keeps its start row however old it is: the blocked read needs it. The block is open when the card's
+    // latest `blocked` row has no later `unblocked` or `closed` row; its blocked/unblocked/closed rows are kept.
+    this.db.prepare(`DELETE FROM events AS ev WHERE at < ? AND NOT (
+      kind IN ('blocked', 'unblocked', 'closed')
+      AND EXISTS (
+        SELECT 1 FROM events b WHERE b.repo = ev.repo AND b.issue = ev.issue AND b.kind = 'blocked'
+          AND b.id = (SELECT MAX(id) FROM events WHERE repo = ev.repo AND issue = ev.issue AND kind = 'blocked')
+          AND NOT EXISTS (SELECT 1 FROM events c WHERE c.repo = b.repo AND c.issue = b.issue AND c.kind IN ('unblocked', 'closed') AND c.id > b.id)
+      ))`).run(cutoff);
     this.db.exec("DELETE FROM item_stage WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.repo = item_stage.repo AND e.issue = item_stage.issue)");
     this.db.exec("DELETE FROM item_hold WHERE NOT EXISTS (SELECT 1 FROM item_stage s WHERE s.repo = item_hold.repo AND s.issue = item_hold.issue)");
   }
