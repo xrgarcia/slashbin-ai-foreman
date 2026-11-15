@@ -24,6 +24,12 @@ cd "$(dirname "$0")/.."
 if [ -L node_modules ] || ! node -e 'import("./dist/config.js")' >/dev/null 2>&1; then
   echo "refused: dist/ cannot load its dependencies (node_modules is a symlink or broken); run npm ci && npm run build"; exit 1
 fi
+# Refuse a build that does not type-check. 2026-11-14 8:03 pm: a deploy ran tsc with
+# three @opentelemetry packages missing from node_modules; tsc still emitted dist/,
+# dist/config.js loaded, and the Foreman restarted into a crash (down ~2.5 min).
+if ! npx --no-install tsc --noEmit -p . >/dev/null 2>&1; then
+  echo "refused: the source does not type-check against node_modules (npx tsc --noEmit); run npm ci && npm run build"; exit 1
+fi
 since=$(date "+%Y-%m-%d %H:%M:%S")
 env -i HOME="$HOME" PATH="$PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
   systemctl --user --no-block restart "$UNIT" || { echo "restart failed"; exit 1; }
