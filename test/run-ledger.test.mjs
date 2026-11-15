@@ -10,7 +10,7 @@ import { readRuns, readSessionRows, splitDuration } from "../dist/metrics/runs.j
 import { aggregate, buildTimelines } from "../dist/metrics/report.js";
 import { parseEmResult, emRunEnd, unstickViaEm } from "../dist/plugins/em.js";
 import { prodVerifyEnd } from "../dist/phases/release.js";
-import { isDeliveredVerdict, QA_FAIL_REASON } from "../dist/qa-report.js";
+import { isDeliveredVerdict, QA_FAIL_REASON, QaReports, qaReportEnd } from "../dist/qa-report.js";
 import { addObserver, drainObservers } from "../dist/work-source.js";
 import { runRuns } from "../dist/plugins/metrics.js";
 import { recordRun } from "../dist/session-run.js";
@@ -127,13 +127,13 @@ test("each phase's end site sets the outcome the spec names", () => {
   assert.match(implement, /skipped: true|result\.skipped\s*\n?\s*\? \{ status: "finished", outcome: "noWork"/);
   assert.match(implement, /result\.landed\s*\n?\s*\? \{ status: "finished", outcome: "noWork"/);
   assert.match(implement, /result\.success\s*\n?\s*\? \{ status: "finished", outcome: "completed"/);
-  assert.match(src("phases/review.ts"), /ended = \{ status: "finished", outcome: "completed", detail: outcome \}/, "a changes-requested review is a delivered verdict");
+  assert.match(src("phases/review.ts"), /outcome: noOp \? "noWork" : "completed", detail: outcome \}/, "a changes-requested review is a delivered verdict; a declared no-op is not");
   assert.match(src("phases/review.ts"), /ended = \{ status: "finished", outcome: "failed", detail: `merged PR/);
   assert.match(src("phases/revise.ts"), /outcome: result\.noCommit \? "noWork" : "completed"/);
   assert.match(src("phases/verify.ts"), /outcome: isDeliveredVerdict\(r\) \? "completed" : "failed", detail: why/, "a failing SRE or QA verdict is completed");
   assert.match(src("phases/verify.ts"), /parentRunId: session\.runId/, "the nested QA carries the verify run's id");
   assert.match(src("phases/qa-before-merge.ts"), /parentRunId: session\.runId/);
-  assert.match(src("phases/qa-before-merge.ts"), /outcome: decision\.kind === "hold" \? "failed" : "completed"/);
+  assert.match(src("phases/qa-before-merge.ts"), /outcome: decision\.kind === "hold" \? "failed" : reused \? "noWork" : "completed"/);
   for (const f of ["implement", "review", "revise", "verify", "qa-before-merge"]) {
     assert.doesNotMatch(src(`phases/${f}.ts`), /ended = \{ status: "(finished|failed)", detail/, `${f} has an end with no outcome`);
   }
@@ -230,4 +230,54 @@ test("metrics:runs --json prints the contract shape; an unreadable store prints 
   } finally {
     console.error = err;
   }
+});
+
+test("a production wait or tooling deferral is failed, never billable; a delivered fail stays completed", () => {
+  const items = [card(1), card(2)];
+  for (const reason of ["wait-until-20261116T0600Z", "codex-unavailable"]) {
+    for (const mode of ["prod", "soak"]) assert.equal(prodVerifyEnd({ kind: "verdict", pass: false, reason }, mode, items).outcome, "failed", `${mode} ${reason}`);
+  }
+  assert.equal(prodVerifyEnd({ kind: "verdict", pass: false, reason: "prod-failing" }, "prod", items).outcome, "completed");
+  assert.equal(prodVerifyEnd({ kind: "verdict", pass: true }, "prod", items).outcome, "completed");
+});
+
+test("a run with no cards stays in the ledger, and a run's worked list is stored once, not once per card", () => {
+  const f = fixture();
+  f.session({ runId: "c1", phase: "review", status: "started", items: [], at: at(0) });
+  f.session({ runId: "c1", phase: "review", status: "finished", outcome: "completed", items: [], workedItems: [], at: at(1000) });
+  f.session({ runId: "c2", phase: "review", status: "started", items: [], at: at(0) });
+  f.session({ runId: "c2", phase: "review", status: "failed", outcome: "failed", items: [], workedItems: [], at: at(2000) });
+  const out = f.read();
+  assert.deepEqual(out.unclassified.map((u) => [u.runId, u.reason]), [["c1", "noWorkedItems"]]);
+  assert.deepEqual(out.failed.map((r) => [r.runId, r.durationMs, r.shares.length]), [["c2", 2000, 0]]);
+  const many = Array.from({ length: 100 }, (_, i) => card(i + 1));
+  f.run("big", "implement", many, 0, 5000);
+  const bytes = f.db.prepare("SELECT SUM(LENGTH(detail)) AS n FROM events WHERE kind = 'session' AND detail LIKE '%\"big\"%'").get().n;
+  assert.ok(bytes < 100 * 400, `stored ${bytes} bytes for 100 cards`);
+  assert.equal(f.read().billable.find((r) => r.runId === "big").shares.length, 100, "every card association is recoverable");
+});
+
+test("report-only QA is a ledger run of its own, ends by its outcome, and a report already on the PR runs nothing", async () => {
+  const f = fixture();
+  addObserver({ onEvent: async (event, log) => f.rec.record(event, log), wantsSnapshot: () => false });
+  const manifest = { verdict: "FAIL", reason: "x", pages: [], shots: [] };
+  const deps = (over = {}) => ({ hasReport: async () => false, post: async () => {}, run: async () => ({ kind: "manifest", exitCode: 1, manifest }), ...over });
+  const track = { base: { phase: "qaReport", repo: R, pr: 9, items: [card(1), card(2)], reviewer: "QA" } };
+  await new QaReports().run(R, 9, deps(), logger, track);
+  await new QaReports().run(R, 10, deps({ hasReport: async () => true }), logger, { base: { ...track.base, pr: 10 } });
+  await new QaReports().run(R, 11, deps({ run: async () => ({ kind: "errored", detail: "boom" }) }), logger, { base: { ...track.base, pr: 11 } });
+  await drainObservers();
+  const out = readRuns(readSessionRows(f.db), "2000-01-01T00:00:00.000Z", new Date(Date.now() + 60_000).toISOString());
+  assert.deepEqual(out.billable.map((r) => [r.phase, r.outcome, r.shares.map((s) => s.issueNumber)]), [["qaReport", "completed", [1, 2]]], "a FAIL verdict is delivered; the existing report ran nothing");
+  assert.deepEqual(out.failed.map((r) => r.phase), ["qaReport"], "the errored run is listed as failed");
+  assert.equal(qaReportEnd({ kind: "errored", detail: "d" }, []).outcome, "failed");
+  const paperclip = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf8");
+  assert.match(paperclip, /phase: "qaReport"/, "the post-verify QA run is tracked");
+});
+
+test("a declared review no-op and a reused QA verdict record noWork with no cards", () => {
+  const src = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
+  assert.match(src("phases/review.ts"), /const noOp = \(result\.trailers \?\? \[\]\)\.length === 0;[\s\S]*if \(noOp\) workedItems = \[\];/);
+  assert.match(src("phases/qa-before-merge.ts"), /workedItems: reused \? \[\] : items/);
+  assert.match(src("phases/qa-before-merge.ts"), /outcome: decision\.reused \? "noWork" : "completed"[\s\S]*if \(decision\.reused\) workedItems = \[\];/);
 });

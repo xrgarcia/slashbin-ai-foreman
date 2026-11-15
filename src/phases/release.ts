@@ -131,12 +131,18 @@ function verifyProd(repoConfig: RepoConfig, config: AgentConfig, rel: Pick<ProdR
   );
 }
 
-/** How a production verification ended. completed: a verdict (a held one too). noWork: nothing to verify. failed: an error. Pure, exported for tests. */
+/** A verdict that is a wait or a deferral (verifyHoldPlan), not a graded result. */
+const isUndelivered = (r: { pass: boolean; reason?: string }): boolean => !r.pass && ["defer", "wait"].includes(verifyHoldPlan(r.reason ?? "held").kind);
+
+/**
+ * How a production verification ended. completed: a delivered verdict, a failing one too. noWork: nothing to verify.
+ * failed: an error, a scheduled wait or a tooling deferral (the SRE did not deliver a verdict). Pure, exported for tests.
+ */
 export function prodVerifyEnd(r: VerifyResult | { kind: "nothing"; reason: string }, mode: "prod" | "soak", items: readonly WorkItem[]): SessionEnd & { workedItems: readonly WorkItem[] } {
   const said = r.kind === "verdict" ? (r.pass ? "pass" : r.reason ?? "held") : r.kind === "nothing" ? r.reason : r.error;
   return {
     status: r.kind === "error" ? "failed" : "finished",
-    outcome: r.kind === "verdict" ? "completed" : r.kind === "nothing" ? "noWork" : "failed",
+    outcome: r.kind === "verdict" ? (isUndelivered(r) ? "failed" : "completed") : r.kind === "nothing" ? "noWork" : "failed",
     detail: `${mode}: ${said}`,
     workedItems: items,
   };

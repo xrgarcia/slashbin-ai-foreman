@@ -59,10 +59,10 @@ only the card view read the open release PR; both views now share that read.)
 ## The run ledger
 
 Every agent run writes a start and an end in the `session` rows, so what a run came to and which cards it worked
-can be read back (foreman#329). Phases: `implement`, `revise`, `review`, `verify`, `qa`, plus two that hold no card
-on the board: `prodVerify` (one run per SRE production verification or soak call; a verdict read from an
+can be read back (foreman#329). Phases: `implement`, `revise`, `review`, `verify`, `qa`, plus three that hold no card
+on the board: `qaReport` (the report-only QA that runs after a dev verification has ended; a report already on the PR runs nothing and records nothing), `prodVerify` (one run per SRE production verification or soak call; a verdict read from an
 already-posted comment runs nothing and records nothing) and `em` (one run per `em.mjs unstick` call; none when
-`emRepoPath` or `EM_GITHUB_TOKEN` is missing). The Paperclip mirror ignores those two phases.
+`emRepoPath` or `EM_GITHUB_TOKEN` is missing). The Paperclip mirror ignores those three phases.
 
 Each session row's `detail` adds:
 
@@ -71,14 +71,14 @@ Each session row's `detail` adds:
 | `runId` | every start and end | one value per run (`crypto.randomUUID()`); the rows of a run on N cards share it |
 | `parentRunId` | a nested run | QA inside a review or verify run carries the enclosing run's id |
 | `outcome` | an end | `completed`, `noWork` or `failed`, set by the phase at its own end site; independent of `status` |
-| `workedItems` | an end | `[{repo, issueNumber}]`, the cards the run worked or verified; `[]` when none |
+| `workedItems` | an end | `[{repo, issueNumber}]`, the cards the run worked or verified; `[]` when none. Stored on the run's first row only (the reader unions the rows), so storage grows with the card count, not its square. A run with no items still writes one row, with no issue |
 
 `at` on a session row is stamped by the phase when the run starts and ends (the recorder's own clock only when
 absent), so a duration is the run's, not the observer queue's.
 
 - **completed**: a delivered verdict, including a review requesting changes and a failing QA or SRE verdict.
-- **noWork**: a skip, an already-landed issue, a revise with no commit, a production verification with nothing to verify, an EM call that ruled out of scope.
-- **failed**: an error, a defer, a wait, no result, or a review whose merge landed but whose run did not return a verdict.
+- **noWork**: a skip, an already-landed issue, a revise with no commit, a review that declared a no-op (`FOREMAN_REVIEW none`, no trailer), a QA verdict read back off the PR (no agent launched, and a reused FAIL launches no review either), a production verification with nothing to verify, an EM call that ruled out of scope. A noWork run records `workedItems: []`.
+- **failed**: an error, a defer, a wait (a production verification that answers `wait-until-...` or a tooling hold too), no result, or a review whose merge landed but whose run did not return a verdict.
 
 The `em` run's outcome comes from the EM's own answer, the line `EM unstick-result {"verdict","readable","worked"}`
 that `bin/em.mjs unstick` prints before its human line, not from the exit code. `completed`: `acted` or `escalated` with the

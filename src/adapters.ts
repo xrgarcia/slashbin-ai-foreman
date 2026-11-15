@@ -354,7 +354,7 @@ export interface ReleaseEvent {
 }
 
 /** One session the Foreman runs for a repo: building, revising, reviewing or verifying in dev. */
-export type SessionPhase = "implement" | "revise" | "review" | "verify" | "qa" | "prodVerify" | "em";
+export type SessionPhase = "implement" | "revise" | "review" | "verify" | "qa" | "qaReport" | "prodVerify" | "em";
 
 /**
  * What an agent run came to, set by the producer at its own end site (docs/metrics.md). Independent of `status`: a

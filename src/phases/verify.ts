@@ -536,7 +536,8 @@ export async function tryVerify(
       await rt.records.saveFieldChanges(repoConfig, "verifyHeld", persisted, kept);
       // Report-only QA (gate off), after the card has moved and not awaited: it can never delay or hold it.
       if (!config.qaGate && !qaBeforeMerge && qaCovers === true) {
-        void rt.qaReports.run(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog);
+        void rt.qaReports.run(repoConfig.githubRepo, target.prNumber, realQaDeps(repoConfig, config, vlog), vlog,
+          { base: { phase: "qaReport", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "QA" } });
       }
       ended = { status: "finished", outcome: "completed", detail: `PR #${target.prNumber} verified in dev (deploy ${r.trailer.deploy})` };
       events?.push({ message: `✅ ${repoConfig.githubRepo} PR #${target.prNumber} verified in dev — ${issues} → "${repoConfig.lifecycleLabels.prApproved}"`, level: "info" });

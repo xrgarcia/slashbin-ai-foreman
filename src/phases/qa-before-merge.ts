@@ -84,6 +84,7 @@ export async function tryQaBeforeMerge(
   // The QA check runs inside the review run above: its own run, parented, so the time is never counted twice.
   const qaSession: Omit<SessionEvent, "status" | "at"> = { phase: "qa", repo: repoConfig.githubRepo, pr: prNumber, items, reviewer: "QA", qaBeforeMerge: true, runId: newRunId(), parentRunId: session.runId };
   let ended: SessionEnd = { ...NO_RESULT, detail: "the QA step ended without a result" };
+  let workedItems = items;
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   qlog.info(`QA before merge: ${repoName} PR #${prNumber} at ${headSha.slice(0, 7)}`);
@@ -93,14 +94,18 @@ export async function tryQaBeforeMerge(
     await emit(rt, { kind: "session", session: { ...qaSession, status: "started", at: stamp() } }, null, qlog);
     const qaDeps = deps ?? realQaLocalDeps(repoConfig, config, qlog);
     const decision: QaPreMergeDecision = await runQaBeforeMerge(repoConfig.githubRepo, prNumber, headSha, qaDeps, qlog);
-    await emit(rt, { kind: "session", session: { ...qaSession, status: decision.kind === "pass" ? "finished" : "failed", outcome: decision.kind === "hold" ? "failed" : "completed", workedItems: items, at: stamp(), detail: decision.kind } }, null, qlog);
+    // A verdict read back off the PR launched no agent: no fresh run, so nothing to bill.
+    const reused = decision.kind !== "hold" && decision.reused;
+    await emit(rt, { kind: "session", session: { ...qaSession, status: decision.kind === "pass" ? "finished" : "failed", outcome: decision.kind === "hold" ? "failed" : reused ? "noWork" : "completed", workedItems: reused ? [] : items, at: stamp(), detail: decision.kind } }, null, qlog);
 
     if (decision.kind === "fail") {
       for (const n of issueNumbers) await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, qlog);
       // A QA FAIL is a review round (reports.ts counts its report), so REVIEW_ROUNDS_ALERT bounds the loop.
       // A reused FAIL posted no report, so it says it stands, or the round would go uncounted (foreman#167).
       if (decision.reused) await qaDeps.post(prNumber, qaFailStandsBody(headSha)).catch((e: unknown) => qlog.warn(`QA: PR #${prNumber} standing FAIL not posted: ${String(e).slice(0, 200)}`));
-      ended = { status: "finished", outcome: "completed", detail: `QA failed PR #${prNumber}; sent back to the builder` };
+      // A reused FAIL launches no agent at all (the Tech Lead is not called either): the outer run did no work.
+      ended = { status: "finished", outcome: decision.reused ? "noWork" : "completed", detail: `QA failed PR #${prNumber}; sent back to the builder` };
+      if (decision.reused) workedItems = [];
       events?.push({ message: `❌ ${repoConfig.githubRepo} PR #${prNumber}: QA failed it — sent back to the builder, the SRE does not see it`, level: "warn" });
       return "handled";
     }
@@ -188,6 +193,6 @@ export async function tryQaBeforeMerge(
     return "handled";
   } finally {
     activeRuns.delete(runAbort);
-    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: items } }, null, qlog);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems } }, null, qlog);
   }
 }

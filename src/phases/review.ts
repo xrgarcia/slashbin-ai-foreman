@@ -219,6 +219,7 @@ async function reviewPass(
     items: candidate.issueNumbers.map((n) => itemOf(repoConfig, n)), runId: newRunId(),
   };
   let ended: SessionEnd = { ...NO_RESULT, detail: "the session ended without a result" };
+  let workedItems = session.items;
   let report: SessionReport | undefined;
   const reviewSince = new Date();
   const reviewer = "Tech Lead";
@@ -271,7 +272,10 @@ async function reviewPass(
         ? result.statusLine
         : (result.summary || "review completed").split("\n")[0].slice(0, 240);
       const prefix = result.statusLine ? "" : `PR #${candidate.prNumber} — `;
-      ended = { status: "finished", outcome: "completed", detail: outcome };
+      // A declared no-op (FOREMAN_REVIEW none, no trailer) delivered no verdict and worked nothing.
+      const noOp = (result.trailers ?? []).length === 0;
+      ended = { status: "finished", outcome: noOp ? "noWork" : "completed", detail: outcome };
+      if (noOp) workedItems = [];
       events?.push({ message: `Reviewed ${repoConfig.githubRepo} — ${prefix}${outcome}`, level: "info" });
       return true;
     }
@@ -351,7 +355,7 @@ async function reviewPass(
     progress.close();
     const milestones = progress.milestones;
     if (milestones.length > 0) report = { ...(report ?? {}), milestones };
-    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: session.items, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
+    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems, reviewer, ...(report ? { report } : {}) } }, null, reviewLogger);
 
     // Hand the checkout back if nothing else is queued for this repo. In
     // `finally` for the same reason as the label repair below: a run that threw

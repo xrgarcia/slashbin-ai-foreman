@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, RepoConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import type { WorkItem } from "./adapters.js";
+import { recordRun, type RunBase, type SessionEnd } from "./session-run.js";
 import type { VerifyResult } from "./plugins/contract.js";
 import { qaFor, roleFor } from "./plugins/registry.js";
 import { codeHost } from "./plugins/registry.js";
@@ -96,6 +98,13 @@ export async function executeQa(repo: string, pr: number, deps: Pick<QaDeps, "ru
   }
 }
 
+/** How a report-only QA run ended: a verdict (a FAIL too) is delivered, an errored run is not. Pure, exported for tests. */
+export function qaReportEnd(o: QaOutcome, items: readonly WorkItem[]): SessionEnd & { workedItems: readonly WorkItem[] } {
+  return o.kind === "errored"
+    ? { status: "failed", outcome: "failed", detail: o.detail, workedItems: items }
+    : { status: "finished", outcome: "completed", detail: `report-only: ${o.manifest.verdict}`, workedItems: items };
+}
+
 /** The report-only QA runs in flight for one daemon: one report per PR at a time. */
 export class QaReports {
   private readonly inFlight = new Set<string>();
@@ -106,7 +115,7 @@ export class QaReports {
    * "errored" comment). At most one report per PR: an existing comment with the heading,
    * or a run already in flight in this process, ends it.
    */
-  async run(repo: string, pr: number, deps: QaDeps, logger: Logger): Promise<void> {
+  async run(repo: string, pr: number, deps: QaDeps, logger: Logger, track?: { base: RunBase }): Promise<void> {
     const key = `${repo}#${pr}`;
     if (this.inFlight.has(key)) return;
     this.inFlight.add(key);
@@ -117,7 +126,10 @@ export class QaReports {
         logger.info(`QA: ${key} already has a report; not running again`);
         return;
       }
-      const outcome = await executeQa(repo, pr, deps);
+      // The agent run itself is a ledger run (no card is held by it); a report found on the PR above ran nothing.
+      const outcome = track
+        ? await recordRun(track.base, logger, () => executeQa(repo, pr, deps), (o) => qaReportEnd(o, track.base.items))
+        : await executeQa(repo, pr, deps);
       if (outcome.kind === "errored") logger.warn(`QA: ${key} errored: ${outcome.detail}`);
       else logger.info(`QA: ${key} ${outcome.manifest.verdict} (report-only)`);
       await deps.post(pr, qaReportBody(pr, outcome));
