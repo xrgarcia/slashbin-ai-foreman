@@ -98,11 +98,15 @@ export async function executeQa(repo: string, pr: number, deps: Pick<QaDeps, "ru
   }
 }
 
-/** How a report-only QA run ended: a verdict (a FAIL too) is delivered, an errored run is not. Pure, exported for tests. */
+/**
+ * How a report-only QA run ended: a PASS (exit 0) or a FAIL (exit 1) is a delivered verdict. A HELD one (exit 3), an
+ * exit that disagrees with its verdict, and an errored run delivered nothing, so they are failed. Pure, exported for tests.
+ */
 export function qaReportEnd(o: QaOutcome, items: readonly WorkItem[]): SessionEnd & { workedItems: readonly WorkItem[] } {
-  return o.kind === "errored"
-    ? { status: "failed", outcome: "failed", detail: o.detail, workedItems: items }
-    : { status: "finished", outcome: "completed", detail: `report-only: ${o.manifest.verdict}`, workedItems: items };
+  if (o.kind === "errored") return { status: "failed", outcome: "failed", detail: o.detail, workedItems: items };
+  const { verdict } = o.manifest;
+  const delivered = (verdict === "PASS" && o.exitCode === 0) || (verdict === "FAIL" && o.exitCode === 1);
+  return { status: delivered ? "finished" : "failed", outcome: delivered ? "completed" : "failed", detail: `report-only: ${verdict}`, workedItems: items };
 }
 
 /** The report-only QA runs in flight for one daemon: one report per PR at a time. */

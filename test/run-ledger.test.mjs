@@ -271,6 +271,10 @@ test("report-only QA is a ledger run of its own, ends by its outcome, and a repo
   assert.deepEqual(out.billable.map((r) => [r.phase, r.outcome, r.shares.map((s) => s.issueNumber)]), [["qaReport", "completed", [1, 2]]], "a FAIL verdict is delivered; the existing report ran nothing");
   assert.deepEqual(out.failed.map((r) => r.phase), ["qaReport"], "the errored run is listed as failed");
   assert.equal(qaReportEnd({ kind: "errored", detail: "d" }, []).outcome, "failed");
+  const held = { kind: "manifest", exitCode: 3, manifest: { verdict: "HELD", hold: "x", pages: [], shots: [] } };
+  assert.deepEqual([qaReportEnd(held, []).status, qaReportEnd(held, []).outcome], ["failed", "failed"], "a HELD verdict is not delivered");
+  assert.equal(qaReportEnd({ kind: "manifest", exitCode: 0, manifest: { verdict: "FAIL", pages: [], shots: [] } }, []).outcome, "failed", "an exit that disagrees with its verdict is not delivered");
+  assert.equal(qaReportEnd({ kind: "manifest", exitCode: 0, manifest: { verdict: "PASS", pages: [], shots: [] } }, []).outcome, "completed");
   const paperclip = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf8");
   assert.match(paperclip, /phase: "qaReport"/, "the post-verify QA run is tracked");
 });
