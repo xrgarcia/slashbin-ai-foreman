@@ -1481,7 +1481,9 @@ export async function tryRelease(
 
   // A merged release waiting more than 24 hours on a time the SRE named (saved before follow-ups were booked): book
   // the follow-up and close it now. Not an action: nothing is verified, the SRE's earlier verdict stands.
-  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && Date.parse(r.retryAt) - now() > MAX_TIME_HOLD_MS)) {
+  // One per pass: a conversion closes issues, and each close reads the repo's open issues, so converting a backlog in
+  // one pass costs releases x backlog. The rest convert on the next passes (Tech Lead S2, foreman#334).
+  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && Date.parse(r.retryAt) - now() > MAX_TIME_HOLD_MS).slice(0, 1)) {
     try {
       const evidence = await evidenceFor(repoConfig, w.pr, rlog);
       if (await deferToFollowUp(rt, repoConfig, config, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog)) closedNow.add(w.pr);

@@ -2259,7 +2259,6 @@ test("a stored merged release already waiting under 24 hours is announced once, 
 
 // Owner, 2026-11-15: a check observable only after the next 24 hours is a scheduled Paperclip follow-up, not an open
 // card; the card closes on everything observable now. security_tests#407/#412/#429/#436 sat live for up to 19 days.
-const FAR = "2026-12-01T06:00:00.000Z";
 const farAway = () => new Date(Math.ceil((Date.now() + 16 * 86_400_000) / 60_000) * 60_000).toISOString();
 const closeNotes = (n) => commentsOn(n).filter((b) => /scheduled follow-up/.test(b));
 
@@ -2295,14 +2294,31 @@ test("a time wait past 24 hours that cannot be booked keeps the card open and wa
 
 test("a stored release already waiting past 24 hours is closed onto a follow-up on an ordinary pass, with no verification", async () => {
   const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  const far = farAway();
   world({ issues: [issue(5, "release pending")], prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60)], compareFiles: 0, prodHead: MERGE });
-  await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: FAR, waitNoted: FAR });
+  await seedRelease(rt, repo, { pr: 100, headSha: HEAD, issues: [5], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: far, waitNoted: far });
   await run();
   assert.equal(agentCalls().filter((c) => c[1] === "verify").length, 0, "nothing is verified");
-  assert.deepEqual(agentCalls().filter((c) => c[0] === "em").map((c) => c.at(-1)), [FAR], "booked at the SRE's time");
+  assert.deepEqual(agentCalls().filter((c) => c[0] === "em").map((c) => c.at(-1)), [far], "booked at the SRE's time");
   assert.equal(gh().issues[5].state, "CLOSED");
-  assert.match(closeNotes(5)[0], /2026-12-01 06:00 UTC/);
+  assert.ok(closeNotes(5)[0].includes(`${far.slice(0, 16).replace("T", " ")} UTC`), closeNotes(5)[0]);
   assert.equal((await prodReleases())[100]?.phase, "soaking");
+});
+
+test("stored far waits convert one per pass, so a backlog never costs releases x open issues in one pass (Tech Lead S2)", async () => {
+  const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  const far = farAway();
+  world({ issues: [issue(5, "release pending"), issue(6, "release pending")],
+    prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60), mergedPr(101, "### Issues included\n- #6: Issue 6", MERGE, 50)], compareFiles: 0, prodHead: MERGE });
+  for (const [pr, n] of [[100, 5], [101, 6]]) {
+    await seedRelease(rt, repo, { pr, headSha: HEAD, issues: [n], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: far, waitNoted: far });
+  }
+  await run();
+  assert.equal(agentCalls().filter((c) => c[0] === "em").length, 1, "one booking this pass");
+  assert.equal([5, 6].filter((n) => gh().issues[n].state === "CLOSED").length, 1);
+  await run();
+  assert.equal(agentCalls().filter((c) => c[0] === "em").length, 2, "the other converts next pass");
+  assert.deepEqual([5, 6].map((n) => gh().issues[n].state), ["CLOSED", "CLOSED"]);
 });
 
 // --- A `predeploy-stop` is asked about again (the SRE's pre-deploy check only reads) --------------------------------
