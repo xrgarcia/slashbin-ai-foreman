@@ -460,6 +460,14 @@ Type: object · Default: `{"enabled":false,"retentionDays":90}`
 
 The metrics observer plugin (docs/metrics.md): a log of each work item's lifecycle stage advances in a local SQLite file, read back with `npm run metrics:report`. Global. Off unless `enabled`.
 
+## OpenTelemetry
+
+### `otel`
+
+Type: object · Default: `{"enabled":false,"serviceName":"foreman"}`
+
+The otel observer plugin (docs/otel.md): one trace per agent session over OTLP/HTTP. Global. Off unless `enabled`. The destination and credentials are the standard OTEL_EXPORTER_OTLP_* environment variables, never this file.
+
 ## Per-repo entries (`repos[]`)
 
 Each entry is one repo. Besides the keys marked *Per repo* above, an entry takes:
