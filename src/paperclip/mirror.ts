@@ -1,3 +1,4 @@
+import { prNumberFromUrl } from "../pr-url.js";
 // Mirrors the Foreman's work onto Paperclip (EM#417): each step the Foreman
 // reports on an issue becomes a note on that issue's Paperclip task, and the
 // step's lifecycle stage places the card: the agent holding it, its status and
@@ -300,8 +301,8 @@ export class PaperclipMirror implements WorkObserver {
   async onPrLink(item: WorkItem, prUrl: string, _repoConfig?: unknown, _logger?: Logger): Promise<void> {
     const id = await this.resolve(item, false);
     if (!id) return;
-    const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
-    if (n) this.prOf.set(id, { number: Number(n), url: prUrl });
+    const n = prNumberFromUrl(prUrl);
+    if (n !== undefined) this.prOf.set(id, { number: n, url: prUrl });
     await this.note(id, fill(PAPERCLIP_STEPS.prLink.note, { prUrl }), { event: "progress", tag: "prLink" });
   }
 

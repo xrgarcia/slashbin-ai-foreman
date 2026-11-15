@@ -4,6 +4,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import type { WorkEvent, WorkObserver, SessionEvent } from "../adapters.js";
 import type { AgentConfig } from "../config.js";
+import { prNumberFromUrl } from "../pr-url.js";
 import type { Logger } from "../logger.js";
 import type { ForemanPlugin, PluginContext, PluginCatalogEntry } from "./contract.js";
 
@@ -61,8 +62,8 @@ export class OtelObserver implements WorkObserver {
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
     try {
       if (event.kind === "prLink") {
-        const n = /\/pull\/(\d+)/.exec(event.prUrl)?.[1];
-        if (n) this.prByItem.set(`${event.item.repo}#${event.item.issueNumber}`, Number(n));
+        const n = prNumberFromUrl(event.prUrl);
+        if (n !== undefined) this.prByItem.set(`${event.item.repo}#${event.item.issueNumber}`, n);
       } else if (event.kind === "session") this.session(event.session);
       else if (event.kind === "claim" || event.kind === "transition" || event.kind === "blocked" || event.kind === "unblocked" || event.kind === "escalated" || event.kind === "merged" || event.kind === "promoted") {
         this.point(event.kind, event.item.repo, event.item.issueNumber);

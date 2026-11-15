@@ -94,10 +94,11 @@ export function drainObservers(): Promise<void> {
 }
 
 /** Shutdown: deliver queued events, then let each observer flush its buffer, each bounded by `timeoutMs`. Never throws. */
-export async function flushObservers(timeoutMs = 3000): Promise<void> {
-  await Promise.race([drainObservers(), new Promise<void>((r) => setTimeout(r, timeoutMs).unref())]).catch(() => undefined);
+export async function flushObservers(timeoutMs = 3000, drainMs = 35_000): Promise<void> {
+  // The drain budget exceeds one observer call's own hard timeout, so a flush never runs ahead of a delivery still in flight.
+  await Promise.race([drainObservers(), new Promise<void>((r) => setTimeout(r, drainMs).unref())]).catch(() => undefined);
   await Promise.all(registryObservers().map((o) => Promise.race([
-    Promise.resolve(o.flush?.()).catch(() => undefined),
+    (async () => { try { await o.flush?.(); } catch { /* best-effort */ } })(),
     new Promise<void>((r) => setTimeout(r, timeoutMs).unref()),
   ])));
 }

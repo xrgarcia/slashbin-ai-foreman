@@ -19,6 +19,7 @@ import { DependencyBatchSweep } from "../dependency-batch/sweep.js";
 import { BatchIssueComposer, BatchIssueFiler, DependencyDiscovery, OpenBatchIssueProbe, SecuritySelection } from "../dependency-batch/collaborators.js";
 import { DependencyBatchFilingPolicy } from "../dependency-batch/policy.js";
 import { dependencyBatchLoopAlert } from "../unstick.js";
+import { prNumberFromUrl } from "../pr-url.js";
 
 export async function trySyncDrift(
   repoConfig: RepoConfig,
@@ -483,8 +484,8 @@ export async function tryPromotion(
       issues: toList.map((i) => i.number),
     });
     const nums = issues.map((i) => i.number);
-    const prNumber = Number(/\/pull\/(\d+)/.exec(prUrl)?.[1]);
-    if (Number.isFinite(prNumber)) await codeHost().noteCarried(repoConfig, carry, prNumber, authorizedNums, promoLogger);
+    const prNumber = prNumberFromUrl(prUrl);
+    if (prNumber !== undefined) await codeHost().noteCarried(repoConfig, carry, prNumber, authorizedNums, promoLogger);
     if (releaseActive) {
       // The release PR owns them now: `ready for prod release` → `release pending`.
       await queue(nums);
