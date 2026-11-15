@@ -80,6 +80,14 @@ export const backoffConfigSchema = z.object({
   // after one window, longer each time; a merge clears it. Default 5 min rising
   // to 2 h.
   releaseRetry: z.object(win(300_000, 7_200_000, 2)).prefault({}),
+  // An open release PR whose SRE pre-deploy check said STOP (`hold=predeploy-stop`)
+  // has its issues labelled `blocked`. A fixed wait, not a growing one: no sooner
+  // than `predeployStopRecheckMs` after the last STOP the Foreman asks the SRE to run the
+  // pre-deploy check again (read-only: a STOP that still applies repeats, one
+  // that no longer applies promotes and the Foreman lifts `blocked` itself). Only
+  // this stop: a person's `blocked`, `merge-refused-repeatedly` and
+  // `merge-blocked-check` are never retried. Default 24 h.
+  predeployStopRecheckMs: ms.default(86_400_000),
   // A release that merged but whose prod verification held or failed. The SRE
   // re-verifies production after one window, longer each time, with no attempt
   // cap: the issue stays open at `prod verification held` until a pass closes

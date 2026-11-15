@@ -584,6 +584,8 @@ export interface CodeHost {
   /** The heading of the comment the release stage leaves when it stops for a person. */
   readonly RELEASE_STOP_MARK: string;
   addBlockedLabel(config: RepoConfig, num: number): Promise<void>;
+  /** True unless issue `num`'s `blocked` label is provably the release stage's own (a person's block is never retried). Throws on a failed read. */
+  blockedByPerson(config: RepoConfig, num: number): Promise<boolean>;
   addReleasePrIssues(config: RepoConfig, pr: ReleasePrView, issues: {
     number: number;
     title: string;

@@ -95,6 +95,8 @@ export class PhaseMemory {
 
   /** Per `repo#pr`: a release waiting after a passing failure (backoff.releaseRetry). */
   readonly releaseBackoff = new BackoffTracker();
+  /** `repo#pr#issue` whose `blocked` label is a person's (release.ts `predeployRecheck`): read once per process, never retried. */
+  readonly personBlocked = new Set<string>();
   /** Per repo: when it was last scanned for releases to adopt. */
   readonly lastAdoptScan = new Map<string, number>();
   /** repo → when its next EM QA re-run read is due (verify.ts `QA_RERUN_POLL_MS`). */

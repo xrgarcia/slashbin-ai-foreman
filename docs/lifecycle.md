@@ -166,7 +166,11 @@ lifecycle label; the one label a person writes is the EM's `ready for prod relea
 3. **SRE** merges, deploys and verifies (`sre.mjs deploy`, up to `sreDeployMaxDurationMs`). Its
    `SRE_DEPLOY` trailer decides the outcome: `hold=predeploy-stop`, `merge-refused-repeatedly` and
    `merge-blocked-check` block (`DEPLOY_STOPS`, src/phases/release.ts); every other hold, and
-   any run without a trailer, is retried.
+   any run without a trailer, is retried. A `predeploy-stop` is also recorded on the release PR and asked
+   about again: no sooner than `backoff.predeployStopRecheckMs` (24 h) after the last STOP the SRE
+   re-runs its read-only pre-deploy check. A PROMOTE merges and the Foreman lifts `blocked` itself; a repeat
+   STOP keeps it, restarts the clock, and is not commented again unless its reason changed. A `blocked` a
+   person applied, and the other two stops, are never retried.
 4. **Tag.** Once merged, the merge commit gets an annotated tag named by `github.releaseTagFormat`
    (reused if one is already there). Never a GitHub Release object, never a `v` prefix.
 5. **Close or hold.** A pass comments on each issue (tag, merge commit, evidence), strips its lifecycle

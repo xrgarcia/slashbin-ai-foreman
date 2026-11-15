@@ -187,6 +187,26 @@ export async function findReleaseStop(config: RepoConfig, num: number): Promise<
   return { pr, hold };
 }
 
+/**
+ * True unless the `blocked` label on issue `num` is provably the release stage's own: the latest release-stop comment
+ * ({@link RELEASE_STOP_MARK}) exists, and every `blocked` labelling event on the issue was made by that comment's
+ * author (the Foreman, which writes both with one token). Any other actor, or no stop comment at all, means a person
+ * blocked it and it is never retried. Throws on a failed read (the caller treats that as a person's).
+ */
+export async function blockedByPerson(config: RepoConfig, num: number): Promise<boolean> {
+  const rows = (await ghAsync([
+    "api", `repos/${config.githubRepo}/issues/${num}/comments?per_page=100`, "--paginate",
+    "--jq", ".[] | {body: .body, by: .user.login} | @json",
+  ], config.repoPath)).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { body?: string; by?: string });
+  const stop = rows.filter((r) => (r.body ?? "").startsWith(RELEASE_STOP_MARK)).at(-1);
+  if (!stop?.by) return true;
+  const events = (await ghAsync([
+    "api", `repos/${config.githubRepo}/issues/${num}/events?per_page=100`, "--paginate",
+    "--jq", '.[] | select(.event=="labeled") | {label: .label.name, by: .actor.login} | @json',
+  ], config.repoPath)).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as { label?: string; by?: string });
+  return events.some((e) => e.label === config.github.blockedLabel && e.by !== stop.by);
+}
+
 /** The SHA of the production branch's head. Throws on a failed read. */
 export async function productionHead(config: RepoConfig): Promise<string> {
   return (await ghAsync(["api", `repos/${config.githubRepo}/commits/${config.productionBranch}`, "--jq", ".sha"], config.repoPath)).trim();
