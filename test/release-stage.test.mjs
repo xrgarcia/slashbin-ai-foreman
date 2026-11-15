@@ -23,6 +23,7 @@ import { tryRelease, SOAK_DELAY_MS, REARM_SETTLE_MS } from "../dist/phases/relea
 import { tryPromotion } from "../dist/phases/promote.js";
 import { STALL_CHECK_CYCLE_INTERVAL } from "../dist/phases/common.js";
 import { parseDeployTrailer } from "../dist/plugins/sre.js";
+import { formatResultV1 } from "../dist/contract/result-v1.js";
 import { readPvResult, configureIssueCache, productionDriftFiles, mergedPrNumber } from "../dist/github.js";
 import { releaseTagName } from "../dist/github/conventions.js";
 import { loadConfig, releaseStageWarning } from "../dist/config.js";
@@ -48,6 +49,7 @@ const GH_STATE = join(tmp, "gh-state.json");
 const GH_LOG = join(tmp, "gh.log");
 const CTL = join(tmp, "ctl.json");
 const AGENT_LOG = join(tmp, "agents.log");
+const SNAP = join(tmp, "deploy-labels.log");
 const REPO = "example/rel";
 
 // A fake gh over GH_STATE: issues, PRs, comments, tag refs and tag objects.
@@ -157,6 +159,10 @@ const q = ctl[kind];
 const r = (Array.isArray(q) ? q.shift() : q) || { exit: 2, out: "no response configured for " + kind };
 fs.writeFileSync(${JSON.stringify(CTL)}, JSON.stringify(ctl));
 const pr = args[args.indexOf("--pr") + 1];
+if (kind === "deploy") {
+  const g = JSON.parse(fs.readFileSync(${JSON.stringify(GH_STATE)}, "utf8"));
+  fs.appendFileSync(${JSON.stringify(SNAP)}, JSON.stringify(Object.fromEntries(Object.values(g.issues).map((i) => [i.number, i.labels]))) + "\\n");
+}
 if (r.merge || r.pv || r.closeIssues) {
   const st = JSON.parse(fs.readFileSync(${JSON.stringify(GH_STATE)}, "utf8"));
   if (r.merge) Object.assign(st.prs[pr], { state: "MERGED", mergeCommit: { oid: r.merge }, mergedAt: new Date().toISOString() });
@@ -233,6 +239,7 @@ function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {
   writeFileSync(CTL, JSON.stringify(ctl));
   writeFileSync(GH_LOG, "");
   writeFileSync(AGENT_LOG, "");
+  writeFileSync(SNAP, "");
   stateDir = mkdtempSync(join(tmp, "state-"));
   setStatePath(stateDir);
   rt = new ForemanRuntime();
@@ -2238,30 +2245,42 @@ test("a stored merged release already waiting on a future time is announced once
 
 // --- A `predeploy-stop` is asked about again (the SRE's pre-deploy check only reads) --------------------------------
 
-const STOP = (evidence = "https://example.test/stop") =>
-  ({ exit: 0, out: `SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=predeploy-stop evidence=${evidence}` });
+const PV_URL = (n) => `https://github.com/${REPO}/pull/100#issuecomment-${9000 + n}`;
+/** The SRE's pre-deploy comment `n`: the verdict line and gap class are the diagnosis; the URL differs on every run. */
+const PV_COMMENT = (n, breaks, gap = "spec-defect") => ({
+  url: PV_URL(n), at: new Date().toISOString(), by: "sre-bot",
+  body: `## Pre-Deploy Validation — ${REPO}#100\n\n### Verdict\nSTOP — ${breaks}\n\n**Gap**: ${gap} — nothing · **Validated by**: SRE · **Timestamp**: \`${new Date().toISOString()}\``,
+});
+const STOP = (n) => ({ exit: 0, out: `SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=predeploy-stop evidence=${PV_URL(n)}` });
+/** A world whose release PR already carries the SRE's pre-deploy comments, one per run. */
+const stopWorld = (breaks, ctl) => world({ ...pending(), comments: { 100: breaks.map((b, i) => PV_COMMENT(i + 1, b)) } }, ctl);
 const RECHECK_MS = DEFAULT_BACKOFF.predeployStopRecheckMs;
 const FOREMAN_LABELS = { 5: [{ label: "blocked", by: "foreman-bot" }], 6: [{ label: "blocked", by: "foreman-bot" }] };
 const withEvents = (events) => { const st = gh(); st.events = events; writeFileSync(GH_STATE, JSON.stringify(st)); };
-const editBlocked = (n, on) => {
-  const st = gh();
-  const l = st.issues[n].labels.filter((x) => x !== "blocked");
-  st.issues[n].labels = on ? [...l, "blocked"] : l;
-  writeFileSync(GH_STATE, JSON.stringify(st));
-};
 /** Pretend the last STOP was `ms` ago. */
 const ageStop = (ms) => rt.records.updatePrRecord(repo, 100, (d) => { d.predeployStop.at = new Date(Date.now() - ms).toISOString(); });
 const stopRecord = async () => (await prRecordOf(rt, repo, 100)).predeployStop;
 const stopComments = (n) => commentsOn(n).filter((b) => b.startsWith("**Release stopped: needs a person.**"));
+/** The issues' labels as they stood when each SRE deploy ran (the fake SRE writes them). */
+const labelsAtDeploy = () => readFileSync(SNAP, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+/** The first STOP, then the clock moved to just past the interval, with the Foreman's own label events. */
+async function dueAfterFirstStop(breaks, ctl) {
+  stopWorld(breaks, ctl);
+  assert.equal(await run(), true);
+  withEvents(FOREMAN_LABELS);
+  await ageStop(RECHECK_MS + 60_000);
+  rt = withFreshMemory(rt);
+}
 
 test("predeploy-stop: the stop is recorded, the interval defaults to 24 h, and nothing re-runs before it", async () => {
   assert.equal(RECHECK_MS, 24 * 3_600_000);
-  world(pending(), { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(), STOP()] });
+  stopWorld(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), STOP(2)] });
   assert.equal(await run(), true);
   const rec = await stopRecord();
   assert.deepEqual(rec.issues, [5, 6]);
   assert.equal(rec.head, HEAD);
   assert.ok(Math.abs(Date.now() - Date.parse(rec.at)) < 60_000);
+  assert.doesNotMatch(rec.reason, /issuecomment/, "the evidence URL is not part of the stored reason");
   for (const n of [5, 6]) assert.equal(stopComments(n).length, 1);
 
   withEvents(FOREMAN_LABELS);
@@ -2271,49 +2290,78 @@ test("predeploy-stop: the stop is recorded, the interval defaults to 24 h, and n
   assert.equal(agentCalls().length, 2, "neither the Tech Lead nor the SRE ran again");
 });
 
-test("predeploy-stop: after the interval the SRE runs again; a repeat STOP stays silent and restarts the clock", async () => {
-  world(pending(), { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(), STOP()] });
-  await run();
-  withEvents(FOREMAN_LABELS);
-  await ageStop(RECHECK_MS + 60_000);
-  rt = withFreshMemory(rt);
-  assert.equal(await run(2), true, "due: the release is asked about again");
+test("predeploy-stop: the Foreman's blocked is lifted before the SRE is called, and put back on a repeat STOP, which stays silent", async () => {
+  await dueAfterFirstStop(["registry row x not validated", "registry row x not validated"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), STOP(2)] });
+  assert.equal(await run(2), true, "due: the SRE is asked again");
   assert.deepEqual(agentCalls().map((c) => c[1]), ["approve-promotion", "deploy", "approve-promotion", "deploy"]);
+  const snaps = labelsAtDeploy();
   for (const n of [5, 6]) {
-    assert.ok(gh().issues[n].labels.includes("blocked"), `#${n} stays blocked`);
-    assert.equal(commentsOn(n).length, 1, `#${n}: no new comment for an identical STOP`);
+    assert.ok(!snaps[1][n].includes("blocked"), `#${n}: blocked was lifted when the SRE ran`);
+    assert.ok(gh().issues[n].labels.includes("blocked"), `#${n}: blocked is back after the STOP`);
+    assert.equal(commentsOn(n).length, 1, `#${n}: a new evidence URL with the same diagnosis posts nothing`);
   }
-  assert.ok(Math.abs(Date.now() - Date.parse((await stopRecord()).at)) < 60_000, "the 24 h clock restarted");
+  const rec = await stopRecord();
+  assert.ok(rec, "the record stays");
+  assert.ok(Math.abs(Date.now() - Date.parse(rec.at)) < 60_000, "the 24 h clock restarted");
   rt = withFreshMemory(rt);
   assert.equal(await run(3), false, "and it waits again");
   assert.equal(agentCalls().length, 4);
 });
 
-test("predeploy-stop: a STOP whose reason changed is commented once", async () => {
-  world(pending(), { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP("https://example.test/one"), STOP("https://example.test/two")] });
-  await run();
-  withEvents(FOREMAN_LABELS);
-  await ageStop(RECHECK_MS + 60_000);
-  rt = withFreshMemory(rt);
+test("predeploy-stop: a STOP whose diagnosis changed is commented once", async () => {
+  await dueAfterFirstStop(["registry row x not validated", "health check y is red"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), STOP(2)] });
   assert.equal(await run(2), true);
   for (const n of [5, 6]) {
     assert.equal(stopComments(n).length, 2);
-    assert.match(stopComments(n)[1], /example\.test\/two/);
+    assert.match(stopComments(n)[1], /issuecomment-9002/);
   }
 });
 
-test("predeploy-stop: a PROMOTE on the re-check lifts blocked and the release goes on", async () => {
-  world(pending(), { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(), DEPLOYED("pass", " evidence=https://example.test/pv")] });
-  await run();
-  withEvents(FOREMAN_LABELS);
-  await ageStop(RECHECK_MS + 60_000);
-  rt = withFreshMemory(rt);
+test("predeploy-stop: a PROMOTE on the re-check proceeds, and the hold and its record are gone", async () => {
+  await dueAfterFirstStop(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), DEPLOYED("pass", " evidence=https://example.test/pv")] });
   assert.equal(await run(2), true);
+  assert.ok(!labelsAtDeploy()[1][5].includes("blocked"), "lifted for the call");
   const tag = gh().refs[0].ref.replace("refs/tags/", "");
   assertClosedVerified(5, { tag });
   assertClosedVerified(6, { tag });
   assert.ok(commentsOn(5).some((b) => /pre-deploy re-check of release PR #100 passed/.test(b)), "the lift is said once");
   assert.equal((await prRecordOf(rt, repo, 100)).predeployStop, undefined, "the stop record is gone");
+});
+
+const OWNER_HOLD = (v1) => {
+  const legacy = "SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=owner-hold";
+  return { exit: 0, out: v1 ? `${legacy}\n${formatResultV1({ schema: 1, role: "deployer", outcome: "held", pr: 100, merged: false, verify: "none", hold: "owner-hold", hold_class: "person", reason_text: "Held by the owner (blocked)" })}` : legacy };
+};
+
+test("predeploy-stop: an owner-hold (person class) keeps the record, puts the label back and restarts the clock", async () => {
+  await dueAfterFirstStop(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), OWNER_HOLD(true)] });
+  const before = await stopRecord();
+  assert.equal(await run(2), true);
+  for (const n of [5, 6]) assert.ok(gh().issues[n].labels.includes("blocked"), `#${n} blocked again`);
+  const rec = await stopRecord();
+  assert.ok(rec, "the retry record is not deleted by a non-predeploy outcome");
+  assert.deepEqual(rec.issues, before.issues);
+  assert.equal(rec.reason, before.reason);
+  assert.ok(Date.parse(rec.at) > Date.parse(before.at), "the next try is a full interval away");
+  rt = withFreshMemory(rt);
+  assert.equal(await run(3), false);
+  assert.equal(agentCalls().length, 4);
+});
+
+test("predeploy-stop: a transient failure on the re-check keeps the record and puts the label back", async () => {
+  await dueAfterFirstStop(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), { exit: 3, out: "codex unavailable" }] });
+  const before = await stopRecord();
+  assert.equal(await run(2), true);
+  for (const n of [5, 6]) assert.ok(gh().issues[n].labels.includes("blocked"), `#${n} blocked again`);
+  assert.deepEqual(await stopRecord(), before, "the record is untouched; the retry back-off decides the next try");
+  assert.equal(await run(3), false, "inside the back-off");
+});
+
+test("predeploy-stop: a Tech Lead refusal on the re-check keeps the record too", async () => {
+  await dueAfterFirstStop(["registry row x not validated"], { approve: [{ exit: 0 }, { exit: 4, out: "head moved" }], deploy: [STOP(1)] });
+  assert.equal(await run(2), true);
+  assert.ok(await stopRecord(), "still recorded");
+  for (const n of [5, 6]) assert.ok(gh().issues[n].labels.includes("blocked"));
 });
 
 test("predeploy-stop: a person's blocked is never retried", async () => {
@@ -2323,7 +2371,7 @@ test("predeploy-stop: a person's blocked is never retried", async () => {
   assert.equal(agentCalls().length, 0);
 
   // A record exists, but the release has a blocked issue the stop does not name.
-  world(pending(), { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(), DEPLOYED("pass")] });
+  stopWorld(["x"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), DEPLOYED("pass")] });
   await run();
   await rt.records.updatePrRecord(repo, 100, (d) => { d.predeployStop.issues = [5]; });
   await ageStop(RECHECK_MS + 60_000);
@@ -2334,14 +2382,14 @@ test("predeploy-stop: a person's blocked is never retried", async () => {
   assert.equal(gh().refs.length, 0);
 
   // The record names it, but a person applied the label: the label events say who.
-  world(pending(), { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(), DEPLOYED("pass")] });
+  stopWorld(["x"], { approve: [{ exit: 0 }, { exit: 0 }], deploy: [STOP(1), DEPLOYED("pass")] });
   await run();
   withEvents({ 5: [{ label: "blocked", by: "foreman-bot" }], 6: [{ label: "blocked", by: "foreman-bot" }, { label: "blocked", by: "a-person" }] });
   await ageStop(RECHECK_MS + 60_000);
   rt = withFreshMemory(rt);
   assert.equal(await run(2), false, "a person labelled #6");
   assert.equal(agentCalls().length, 2);
-  assert.ok(gh().issues[5].labels.includes("blocked") && gh().issues[6].labels.includes("blocked"));
+  assert.ok(gh().issues[5].labels.includes("blocked") && gh().issues[6].labels.includes("blocked"), "nothing was lifted");
 });
 
 test("the other stops are never retried", async () => {

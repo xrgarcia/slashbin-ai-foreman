@@ -139,13 +139,13 @@ retried on `backoff.releaseRetry` (5 min → 2 h) — wait.
 - **`predeploy-stop` re-checks itself.** The Foreman records the stop on the release PR
   (`predeployStop`: time, issues, head, the SRE's reason). No sooner than
   `backoff.predeployStopRecheckMs` (default 24 h) after the last STOP, it asks the SRE to run the
-  pre-deploy check again (read-only). A **PROMOTE** merges the release, and the Foreman lifts `blocked` from
+  pre-deploy check again (read-only; the SRE's deploy returns `owner-hold` without validating while an issue is `blocked`, so the Foreman lifts its own `blocked` first and puts it back on anything but a merge). A **PROMOTE** merges the release, and the Foreman lifts `blocked` from
   those issues itself and goes on as usual. A **repeat STOP** keeps `blocked`, restarts the 24 h clock and posts
-  **no** comment when the reason is the same as the last one; it comments only when the reason changed. You
+  **no** comment when the SRE's diagnosis (verdict text and gap class, never the evidence URL) is the same as the last one; it comments only when the reason changed. You
   lift `blocked` by hand only to release it sooner. The recorded stop is what marks the block as the
   Foreman's: a `blocked` a person applied (an issue the record does not name, or one whose label any
   other account ever applied) is never retried, and neither are `merge-refused-repeatedly` and
-  `merge-blocked-check`. A `predeploy-stop` raised before this record existed has none: lift it by hand once.
+  `merge-blocked-check`. Any other outcome of a re-check (owner-hold, Tech Lead refusal, a transient failure) puts `blocked` back and keeps the record. A `predeploy-stop` raised before this record existed has none: lift it by hand once.
 
 Build-side refusals (no card move; one comment each): a missing or invalid `## Acceptance`,
 an unmet Pre-Flight readiness fence, an unmerged blocked-by link (silent), a dead blocker

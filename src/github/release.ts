@@ -188,6 +188,22 @@ export async function findReleaseStop(config: RepoConfig, num: number): Promise<
 }
 
 /**
+ * What the SRE's pre-deploy comment at `evidenceUrl` diagnosed, without its URL, id or timestamp: the verdict line under
+ * `### Verdict` (the `breaks` text) and the gap class. Two STOPs with the same diagnosis read the same, whatever comment
+ * each was posted in. Null when the comment is not on the PR or has no verdict line: the caller then says nothing is
+ * known and does not treat it as a repeat. Throws on a failed read.
+ */
+export async function readPredeployDiagnosis(config: RepoConfig, pr: number, evidenceUrl: string | undefined): Promise<string | null> {
+  if (!evidenceUrl) return null;
+  const hit = (await comments(config, pr)).find((c) => c.url === evidenceUrl);
+  if (!hit) return null;
+  const verdict = /^### Verdict\s*\n(.+)$/m.exec(hit.body)?.[1]?.trim();
+  if (!verdict) return null;
+  const gapClass = /\*\*Gap\*\*:\s*([A-Za-z-]+)/.exec(hit.body)?.[1] ?? "";
+  return `${verdict}\ngap=${gapClass}`;
+}
+
+/**
  * True unless the `blocked` label on issue `num` is provably the release stage's own: the latest release-stop comment
  * ({@link RELEASE_STOP_MARK}) exists, and every `blocked` labelling event on the issue was made by that comment's
  * author (the Foreman, which writes both with one token). Any other actor, or no stop comment at all, means a person

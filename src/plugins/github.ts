@@ -145,6 +145,7 @@ export function githubCodeHost(
     RELEASE_STOP_MARK: release.RELEASE_STOP_MARK,
     addBlockedLabel: release.addBlockedLabel,
     blockedByPerson: release.blockedByPerson,
+    readPredeployDiagnosis: release.readPredeployDiagnosis,
     addReleasePrIssues: release.addReleasePrIssues,
     ensureReleaseTag: release.ensureReleaseTag,
     findPvComment: release.findPvComment,
