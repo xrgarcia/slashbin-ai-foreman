@@ -285,3 +285,10 @@ test("a declared review no-op and a reused QA verdict record noWork with no card
   assert.match(src("phases/qa-before-merge.ts"), /workedItems: reused \? \[\] : items/);
   assert.match(src("phases/qa-before-merge.ts"), /outcome: decision\.reused \? "noWork" : "completed"[\s\S]*if \(decision\.reused\) workedItems = \[\];/);
 });
+
+test("one verdict/exit classification serves the report-only run, the gate and the pre-merge decision", async () => {
+  const { qaVerdictClass } = await import("../dist/qa-report.js");
+  assert.deepEqual([["PASS", 0], ["FAIL", 1], ["HELD", 3], ["PASS", 1], ["FAIL", 0], ["HELD", 0]].map(([v, c]) => qaVerdictClass({ verdict: v }, c)), ["PASS", "FAIL", "HELD", "inconsistent", "inconsistent", "inconsistent"]);
+  const src = readFileSync(new URL("../src/qa-report.ts", import.meta.url), "utf8");
+  assert.equal((src.match(/exitCode === [013]/g) ?? []).length, 3, "only qaVerdictClass compares verdict and exit");
+});
