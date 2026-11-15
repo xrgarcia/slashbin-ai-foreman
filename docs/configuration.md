@@ -518,6 +518,7 @@ which only means it retries sooner.
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
 | `paperclip` | 1 s, 1 s | `maxAttempts` 3 |
 | `registry` | 1 s, 1 s | `maxAttempts` 3 |
+| `predeployStopRecheckMs` | 24 h | — |
 | `stuckMergeGraceMs` | 15 min | — |
 | `maxCiBounces` | — | `2` |
 
@@ -607,6 +608,12 @@ The release stage could not finish a release this pass for a passing reason: the
 | `baseMs` | `300000` (5 min) | `AI_AGENT_BACKOFF_RELEASE_RETRY_BASE_MS` |
 | `capMs` | `7200000` (2 h) | `AI_AGENT_BACKOFF_RELEASE_RETRY_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_RELEASE_RETRY_FACTOR` |
+
+### `backoff.predeployStopRecheckMs`
+
+An open release PR whose SRE pre-deploy check said STOP (`hold=predeploy-stop`) has its issues labelled `blocked`. A fixed wait, not a growing one: no sooner than `predeployStopRecheckMs` after the last STOP the Foreman asks the SRE to run the pre-deploy check again (read-only: a STOP that still applies repeats, one that no longer applies promotes and the Foreman lifts `blocked` itself). Only this stop: a person's `blocked`, `merge-refused-repeatedly` and `merge-blocked-check` are never retried. Default 24 h.
+
+Default: `86400000` (24 h) · Env: `AI_AGENT_BACKOFF_PREDEPLOY_STOP_RECHECK_MS`
 
 ### `backoff.prodVerifyRetry`
 

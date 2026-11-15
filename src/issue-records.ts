@@ -71,6 +71,22 @@ export interface ProdRelease {
   adopted?: boolean;
 }
 
+/**
+ * The Foreman's own record that it blocked a release PR's issues for `predeploy-stop`. It is what separates
+ * that block from a person's `blocked`, which is never retried: only issues named here, whose label the Foreman
+ * itself applied, are re-checked (release.ts `predeployRecheck`).
+ */
+export interface PredeployStop {
+  /** ISO time of the last STOP: the re-check is due `backoff.predeployStopRecheckMs` after it. */
+  at: string;
+  /** The issues the Foreman blocked for it. */
+  issues: number[];
+  /** The release head the SRE stopped. */
+  head: string;
+  /** What the STOP said (evidence and reason text): an identical one is not commented again. */
+  reason: string;
+}
+
 /** Consecutive no-commit revisions on one PR head. A different head starts afresh. */
 export interface NoCommitStreak {
   head: string;
@@ -222,6 +238,8 @@ export interface PrRecord {
   release?: ProdRelease;
   /** The release PR was announced open and its end is not yet announced (was the single `release` pointer). */
   tracked?: SavedRelease;
+  /** The SRE's pre-deploy check said STOP on this release PR and the Foreman blocked its issues; what lets it re-check later. */
+  predeployStop?: PredeployStop;
   /** Consecutive no-commit revisions of this PR at one head (was `noCommitStreaks[pr]`). */
   noCommit?: NoCommitStreak;
   /** This PR was the last one closed unmerged on its branch, and the EM was alerted that the branch still stands at this head (was `rejectedBranches[branch]`). */
@@ -243,7 +261,7 @@ export interface InputAttempt {
 }
 
 export type PrField = keyof PrRecord;
-const PR_FIELDS: readonly PrField[] = ["release", "tracked", "noCommit", "rejectedHead", "attempts"];
+const PR_FIELDS: readonly PrField[] = ["release", "tracked", "predeployStop", "noCommit", "rejectedHead", "attempts"];
 
 /** What a read of several PRs found. `unavailable` is never "no record": nothing may act on those PRs this cycle. */
 export interface PrRecords {

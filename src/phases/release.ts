@@ -42,7 +42,7 @@ import type { DeployTrailer, IssueAcceptance, VerifyResult } from "../plugins/co
 import { parseWaitUntil } from "../contract/result-v1.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues } from "../release-tracker.js";
-import type { ProdRelease } from "../issue-records.js";
+import type { PredeployStop, ProdRelease } from "../issue-records.js";
 import { fieldTable } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
@@ -504,20 +504,115 @@ export function deployHoldPlan(
   return { kind: "backoff" };
 }
 
-async function stopRelease(rt: ForemanRuntime, repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger): Promise<void> {
+async function stopRelease(
+  rt: ForemanRuntime, repoConfig: RepoConfig, pr: number | null, issues: number[], reason: string, evidence: string | undefined, logger: Logger,
+  /** Set for a `predeploy-stop`: the head and the STOP's full text, kept so the SRE is asked again later and an identical STOP stays silent. */
+  predeploy?: { head: string; reason: string; recheckMs: number },
+  /** Set during a re-check that ended in `owner-hold` only: the retry record stays (its clock restarts). Every other non-predeploy stop (Tech Lead refusal, merge-refused-repeatedly, merge-blocked-check) ends the timed retry. */
+  keep?: PredeployStop,
+): Promise<{ recorded: boolean }> {
+  let repeat = false;
+  let recorded = true;
+  if (pr) {
+    // What the last STOP said, read before it is replaced: a repeat of it is not commented again. An unreadable record says it again.
+    const prev = predeploy ? (await rt.records.loadPrRecord(repoConfig, pr))?.predeployStop : undefined;
+    repeat = !!prev && prev.reason === predeploy!.reason;
+    recorded = await rt.records.updatePrRecord(repoConfig, pr, (d) => {
+      if (predeploy) d.predeployStop = { at: iso(now()), issues: [...issues], head: predeploy.head, reason: predeploy.reason } satisfies PredeployStop;
+      else if (keep) d.predeployStop = { ...keep, at: iso(now()) };
+      else delete d.predeployStop;
+    });
+    if (!recorded) logger.warn(`Release PR #${pr}: could not record the stop; it is not re-checked until the record saves`);
+  }
+  const blockedLabel = repoConfig.github.blockedLabel;
   const body =
     `${codeHost().RELEASE_STOP_MARK} ${pr ? `Release PR #${pr}: ` : ""}${reason}${evidence ? ` (${evidence})` : ""}. ` +
-    `The Foreman will not retry it while this issue carries \`${repoConfig.github.blockedLabel}\`; remove the label to release it again.`;
+    (predeploy
+      ? `The Foreman asks the SRE to run the pre-deploy check again ${formatWait(predeploy.recheckMs)} after this stop and lifts \`${blockedLabel}\` ` +
+        `itself when it passes; a repeat of this stop is not commented again. A \`${blockedLabel}\` you apply yourself is never retried, ` +
+        "and removing the label releases it at once."
+      : `The Foreman will not retry it while this issue carries \`${blockedLabel}\`; remove the label to release it again.`);
   for (const n of issues) {
     try {
       await codeHost().addBlockedLabel(repoConfig, n);
     } catch (err) {
       logger.warn(`Could not block #${n}: ${errText(err)}`);
     }
+    if (repeat) continue;
     await comment(repoConfig, n, body, logger);
     await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: `release stopped: ${reason}` }, repoConfig, logger);
   }
-  logger.warn(`${pr ? `Release PR #${pr}` : "Release"} stopped (${reason}); blocked ${issues.map((n) => `#${n}`).join(", ")}`);
+  logger.warn(`${pr ? `Release PR #${pr}` : "Release"} stopped (${reason}); blocked ${issues.map((n) => `#${n}`).join(", ")}${repeat ? " (same stop as last time; not commented)" : ""}`);
+  return { recorded };
+}
+
+/**
+ * Is this open release PR's `predeploy-stop` due for the SRE's re-check? Only when the Foreman's own record says it
+ * blocked every issue that is blocked now (a `blocked` it did not record is a person's), no `blocked` label on them was
+ * ever applied by anyone but the Foreman, and `backoff.predeployStopRecheckMs` has passed since the last
+ * STOP. Returns the record, or null: left blocked.
+ */
+async function predeployRecheck(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, pr: number, rec: PredeployStop | undefined, blocked: number[], logger: Logger): Promise<PredeployStop | null> {
+  if (!rec) return null;
+  if (!(now() >= Date.parse(rec.at) + config.backoff.predeployStopRecheckMs)) return null;
+  // Linear: the recorded issues once, then each blocked issue against them.
+  const recorded = new Set(rec.issues);
+  if (blocked.some((n) => !recorded.has(n))) return null;
+  for (const n of blocked) {
+    const key = `${repoConfig.githubRepo}#${pr}#${n}`;
+    if (rt.memory.personBlocked.has(key)) return null;
+    try {
+      if (await codeHost().blockedByPerson(repoConfig, n)) {
+        rt.memory.personBlocked.add(key);
+        logger.info(`Release PR #${pr}: #${n} is blocked by a person; the pre-deploy stop is not re-checked`);
+        return null;
+      }
+    } catch (err) {
+      logger.warn(`Could not tell who blocked #${n}; the pre-deploy stop is not re-checked this pass: ${errText(err)}`);
+      return null;
+    }
+  }
+  return rec;
+}
+
+/**
+ * Before the SRE is asked again: lift `blocked` from the issues the Foreman itself stopped (the SRE's deploy returns
+ * `owner-hold` without validating while any carried issue has it). False when a label could not be lifted: the ones
+ * lifted are put back and the SRE is not called.
+ */
+async function liftForRecheck(repoConfig: RepoConfig, pr: number, issues: number[], logger: Logger): Promise<boolean> {
+  const lifted: number[] = [];
+  for (const n of issues) {
+    try {
+      await codeHost().removeBlockedLabel(repoConfig, n);
+      lifted.push(n);
+    } catch (err) {
+      logger.warn(`Release PR #${pr}: could not lift ${repoConfig.github.blockedLabel} from #${n} for the pre-deploy re-check: ${errText(err)}`);
+      await reapplyBlocked(repoConfig, lifted, logger);
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Put the Foreman's own `blocked` back on `issues` after a re-check that did not promote. */
+async function reapplyBlocked(repoConfig: RepoConfig, issues: number[], logger: Logger): Promise<void> {
+  for (const n of issues) {
+    try {
+      await codeHost().addBlockedLabel(repoConfig, n);
+    } catch (err) {
+      logger.warn(`Could not re-apply ${repoConfig.github.blockedLabel} to #${n}: ${errText(err)}`);
+    }
+  }
+}
+
+/** The re-check passed (the SRE merged; `blocked` is already lifted): say so on each issue and drop the retry record. */
+async function finishPredeployRecheck(rt: ForemanRuntime, repoConfig: RepoConfig, pr: number, issues: number[], logger: Logger): Promise<void> {
+  for (const n of issues) {
+    await comment(repoConfig, n, `The SRE's pre-deploy re-check of release PR #${pr} passed. The Foreman lifted \`${repoConfig.github.blockedLabel}\` and the release went on.`, logger);
+  }
+  await rt.records.updatePrRecord(repoConfig, pr, (d) => { delete d.predeployStop; });
+  logger.info(`Release PR #${pr}: pre-deploy re-check passed; lifted ${repoConfig.github.blockedLabel} from ${issues.map((n) => `#${n}`).join(", ")}`);
 }
 
 /**
@@ -1102,10 +1197,14 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   const pending = issues.filter((i) => codeHost().hasLabel(i, repoConfig.lifecycleLabels.releasePending)).map((i) => i.number);
   if (pending.length === 0) return false;
   const stopped = issues.filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number);
-  if (stopped.length > 0) {
+  // A `predeploy-stop` the Foreman recorded is asked about again once its interval has passed (the SRE's pre-deploy
+  // check only reads); every other `blocked` is a person's, or a stop that needs one, and holds the release.
+  const recheck = stopped.length > 0 ? await predeployRecheck(rt, repoConfig, config, open.number, own.predeployStop, stopped, logger) : null;
+  if (stopped.length > 0 && !recheck) {
     logger.debug(`Release PR #${open.number}: ${stopped.map((n) => `#${n}`).join(", ")} blocked; not deploying`);
     return false;
   }
+  if (recheck) logger.info(`Release PR #${open.number}: re-checking the pre-deploy stop of ${stopped.map((n) => `#${n}`).join(", ")} (last STOP ${recheck.at})`);
 
   let pr: ReleasePrView;
   try {
@@ -1158,6 +1257,14 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
     logger.warn(`Release PR #${pr.number}: not deploying; retry in ${formatWait(ms)}`);
     return true;
   }
+  // A recorded predeploy-stop is re-checked with the Foreman's own `blocked` lifted: the SRE would not validate a release
+  // whose issue carries it. It is put back below on every outcome but a merge.
+  if (recheck && !(await liftForRecheck(repoConfig, pr.number, stopped, logger))) {
+    await dropRelease(rt, repoConfig, pr.number, logger);
+    const ms = rt.memory.releaseBackoff.start(key, config.backoff.releaseRetry);
+    logger.warn(`Release PR #${pr.number}: pre-deploy re-check not run; retry in ${formatWait(ms)}`);
+    return true;
+  }
   const deployPath = transcript(repoConfig, `deploy-pr${pr.number}`, cycleNumber);
   logger.info(`Release PR #${pr.number}: Tech Lead approved at ${short(pr.headSha)}; SRE deploying, transcript: ${deployPath}`);
   const r = await asRun(repoConfig, (signal) => roleFor("deployer", config)?.deploy(repoConfig, config, pr.number, pr.headSha, logger, signal, deployPath) ?? Promise.resolve({ kind: "retry" as const, reason: "no deployer is enabled" }));
@@ -1165,9 +1272,22 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   if (r.kind !== "trailer" || !r.trailer.merged) {
     // If this cannot be cleared the next pass reads the PR: still open, the "deploying" record is dropped then.
     await dropRelease(rt, repoConfig, pr.number, logger);
+    // The re-check did not promote: the Foreman's `blocked` goes back first, whatever the outcome.
+    if (recheck) await reapplyBlocked(repoConfig, stopped, logger);
     const plan = r.kind === "trailer" ? deployHoldPlan(r.trailer, now()) : undefined;
     if (plan?.kind === "stop" && r.kind === "trailer") {
-      await stopRelease(rt, repoConfig, pr.number, pending, plan.reason, r.trailer.evidence, logger);
+      let predeploy: { head: string; reason: string; recheckMs: number } | undefined;
+      if (r.trailer.hold === "predeploy-stop") {
+        // The SRE's diagnosis (its `breaks` text and gap class), never the evidence URL: each run posts a new comment.
+        let diagnosis: string | null = null;
+        try { diagnosis = await codeHost().readPredeployDiagnosis(repoConfig, pr.number, r.trailer.evidence); } catch (err) { logger.warn(`Could not read the pre-deploy diagnosis: ${errText(err)}`); }
+        // An unreadable diagnosis is unknown, never "the same as last time".
+        const said = diagnosis ?? `unread ${iso(now())}`;
+        predeploy = { head: pr.headSha, reason: [plan.reason, said, r.trailer.holdReason ?? ""].join("\n"), recheckMs: config.backoff.predeployStopRecheckMs };
+      }
+      const { recorded } = await stopRelease(rt, repoConfig, pr.number, pending, plan.reason, r.trailer.evidence, logger, predeploy, !predeploy && r.trailer.hold === "owner-hold" ? recheck ?? undefined : undefined);
+      // A stop that could not be recorded is not due again by its clock: back off instead of asking the SRE every pass.
+      if (predeploy && !recorded) rt.memory.releaseBackoff.start(key, config.backoff.releaseRetry);
       return true;
     }
     if (plan?.kind === "wait") {
@@ -1183,6 +1303,8 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   }
 
   rt.memory.releaseBackoff.clear(key);
+  // The pre-deploy re-check passed: the hold goes before anything below acts on the issues (a blocked one is left alone).
+  if (recheck) await finishPredeployRecheck(rt, repoConfig, pr.number, stopped, logger);
   const tr = r.trailer;
   let mergeSha = tr.mergeSha;
   if (!mergeSha) {
