@@ -143,3 +143,32 @@ test("disabled: no observer; enabled with no endpoint warns once and exports not
   assert.equal(warns.length, 1);
   assert.equal(p.observer, undefined);
 });
+
+test("the production implement shape (prLink, then a finished event with no pr) still carries foreman.pr", async () => {
+  const s = await sink();
+  const sess = (status, extra = {}) => ({ kind: "session", session: { phase: "implement", status, repo: R, items: [item(1), item(2), item(3)], ...extra } });
+  await run({ OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${s.port}` }, [
+    sess("started"),
+    { kind: "prLink", item: item(2), prUrl: "https://github.com/o/r/pull/7" },
+    sess("finished", { worked: [2] }),
+    sess("started", { items: [item(4)] }),
+    sess("finished", { items: [item(4)], report: { pr: { number: 11 } } }),
+  ]);
+  s.close();
+  const spans = spansOf(s.bodies);
+  assert.equal(attr(spans[0], "foreman.pr"), 7);
+  assert.deepEqual(attr(spans[0], "foreman.items.worked"), [2]);
+  assert.equal(attr(spans[1], "foreman.pr"), 11);
+});
+
+test("flush pushes buffered spans out at shutdown", async () => {
+  const s = await sink();
+  const restore = withEnv({ OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${s.port}` });
+  const p = new OtelPlugin();
+  const logger = mkLogger([]);
+  p.start(cfg(), { logger, configText: () => null });
+  await p.observer.onEvent({ kind: "claim", item: item(1) }, logger);
+  await p.observer.flush();
+  p.stop(); restore(); s.close();
+  assert.equal(spansOf(s.bodies).length, 1);
+});

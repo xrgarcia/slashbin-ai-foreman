@@ -328,6 +328,8 @@ export interface WorkObserver {
    */
   wantsSessionReports?(): boolean;
   wantsSnapshot?(): boolean;
+  /** Called once at shutdown, after queued events are delivered: push out anything buffered. Bounded by the caller. */
+  flush?(): Promise<void>;
 }
 
 /**

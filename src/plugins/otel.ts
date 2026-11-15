@@ -52,13 +52,18 @@ const sessionKey = (s: SessionEvent): string => `${s.repo}|${s.phase}|${s.pr ?? 
 /** The observer: one span per session, one zero-length trace per lifecycle event. Never throws, never awaits an export. */
 export class OtelObserver implements WorkObserver {
   private readonly started = new Map<string, number>();
+  /** The PR each item's `prLink` named: the production implement envelope carries no `pr`. */
+  private readonly prByItem = new Map<string, number>();
   constructor(private readonly provider: BasicTracerProvider, private readonly serviceName: string) {}
 
   private tracer() { return this.provider.getTracer(this.serviceName); }
 
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
     try {
-      if (event.kind === "session") this.session(event.session);
+      if (event.kind === "prLink") {
+        const n = /\/pull\/(\d+)/.exec(event.prUrl)?.[1];
+        if (n) this.prByItem.set(`${event.item.repo}#${event.item.issueNumber}`, Number(n));
+      } else if (event.kind === "session") this.session(event.session);
       else if (event.kind === "claim" || event.kind === "transition" || event.kind === "blocked" || event.kind === "unblocked" || event.kind === "escalated" || event.kind === "merged" || event.kind === "promoted") {
         this.point(event.kind, event.item.repo, event.item.issueNumber);
       } else if (event.kind === "release") {
@@ -82,7 +87,8 @@ export class OtelObserver implements WorkObserver {
       "foreman.phase": s.phase, "foreman.status": s.status, "foreman.repo": s.repo,
       "foreman.items": s.items.map((i) => i.issueNumber),
     };
-    if (s.pr !== undefined) attrs["foreman.pr"] = s.pr;
+    const pr = s.pr ?? s.report?.pr?.number ?? this.linkedPr(s);
+    if (pr !== undefined) attrs["foreman.pr"] = pr;
     if (s.reviewer) attrs["foreman.reviewer"] = s.reviewer;
     if (s.worked) attrs["foreman.items.worked"] = [...s.worked];
     else if (s.phase === "implement") attrs["foreman.items.candidates"] = true;
@@ -96,10 +102,19 @@ export class OtelObserver implements WorkObserver {
     const span = this.open.get(key) ?? this.begin(key, s, start);
     this.open.delete(key);
     this.started.delete(key);
+    for (const i of s.items) this.prByItem.delete(`${s.repo}#${i.issueNumber}`);
     span.setAttributes(attrs);
     if (s.status === "failed") span.setStatus({ code: SpanStatusCode.ERROR });
     span.end();
   }
+
+  private linkedPr(s: SessionEvent): number | undefined {
+    const ids = s.worked ?? s.items.map((i) => i.issueNumber);
+    for (const n of ids) { const pr = this.prByItem.get(`${s.repo}#${n}`); if (pr !== undefined) return pr; }
+    return undefined;
+  }
+
+  async flush(): Promise<void> { await this.provider.forceFlush(); }
 
   private readonly open = new Map<string, Span>();
   private begin(key: string, s: SessionEvent, start: number | undefined): Span {

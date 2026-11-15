@@ -93,6 +93,15 @@ export function drainObservers(): Promise<void> {
   return queue;
 }
 
+/** Shutdown: deliver queued events, then let each observer flush its buffer, each bounded by `timeoutMs`. Never throws. */
+export async function flushObservers(timeoutMs = 3000): Promise<void> {
+  await Promise.race([drainObservers(), new Promise<void>((r) => setTimeout(r, timeoutMs).unref())]).catch(() => undefined);
+  await Promise.all(registryObservers().map((o) => Promise.race([
+    Promise.resolve(o.flush?.()).catch(() => undefined),
+    new Promise<void>((r) => setTimeout(r, timeoutMs).unref()),
+  ])));
+}
+
 /**
  * Register an observer. No de-duplication: registering the same instance twice
  * is a boot-path bug, and doubled events make it visible instead of hiding it.

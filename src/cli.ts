@@ -13,7 +13,7 @@ import { checkCredentials } from "./credentials.js";
 import { registerBuiltinPlugins, registerExternalPlugins } from "./plugins/index.js";
 import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
 import type { PluginContext } from "./plugins/contract.js";
-import { workSourceRefusal } from "./work-source.js";
+import { flushObservers, workSourceRefusal } from "./work-source.js";
 import { ForemanRuntime } from "./runtime.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -237,6 +237,7 @@ async function main(rt: ForemanRuntime): Promise<void> {
 
     const shutdown = async () => {
       await daemon.stop();
+      await flushObservers();
       releasePidFile(claim.path);
       process.exit(0);
     };
