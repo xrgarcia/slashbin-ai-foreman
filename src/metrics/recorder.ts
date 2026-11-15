@@ -240,13 +240,21 @@ export class MetricsRecorder {
     }
   }
 
-  /** Delete events past retention, and item_stage rows left with no events. At most hourly. */
+  /** Delete events past retention (a block still running past the cutoff keeps its start row), and item_stage rows left with no events. At most hourly. */
   retain(force = false): void {
     const t = this.now();
     if (!force && this.lastRetention && t - this.lastRetention < HOUR) return;
     this.lastRetention = t;
     const cutoff = new Date(t - this.retentionDays * DAY).toISOString();
-    this.db.prepare("DELETE FROM events WHERE at < ?").run(cutoff);
+    // A block that reaches back past the cutoff keeps its start row, so the blocked read still sees where it began:
+    // an old `blocked` row stays unless a clear (`unblocked`/`closed`) of that card, also past the cutoff, came after it.
+    // The latest such clear per card is found once into a keyed temp table, so the delete is linear in the history.
+    this.db.exec("CREATE TEMP TABLE IF NOT EXISTS cleared_before_cutoff (repo TEXT NOT NULL, issue INTEGER NOT NULL, last_id INTEGER NOT NULL, PRIMARY KEY (repo, issue)) WITHOUT ROWID");
+    this.db.exec("DELETE FROM cleared_before_cutoff");
+    this.db.prepare("INSERT INTO cleared_before_cutoff SELECT repo, issue, MAX(id) FROM events WHERE kind IN ('unblocked', 'closed') AND issue IS NOT NULL AND at < ? GROUP BY repo, issue").run(cutoff);
+    this.db.prepare(`DELETE FROM events WHERE at < ? AND NOT (
+      kind = 'blocked' AND id > COALESCE((SELECT last_id FROM cleared_before_cutoff c WHERE c.repo = events.repo AND c.issue = events.issue), 0)
+    )`).run(cutoff);
     this.db.exec("DELETE FROM item_stage WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.repo = item_stage.repo AND e.issue = item_stage.issue)");
     this.db.exec("DELETE FROM item_hold WHERE NOT EXISTS (SELECT 1 FROM item_stage s WHERE s.repo = item_hold.repo AND s.issue = item_hold.issue)");
   }

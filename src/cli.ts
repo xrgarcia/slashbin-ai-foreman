@@ -35,6 +35,7 @@ Usage: slashbin-ai-agent [options]
        slashbin-ai-agent paperclip:doctor [--config <path>]
        slashbin-ai-agent metrics:report [--repo <name>] [--issue <n>] [--since <days>] [--json]
        slashbin-ai-agent metrics:runs --from <iso> --to <iso> --json
+       slashbin-ai-agent metrics:blocked --from <date> --to <date> [--now <iso>] [--db <path>] --json
 
 Options:
   --config <path>  Path to .ai-agent.json config file
@@ -51,6 +52,7 @@ Commands:
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
   metrics:report    Time each work item spent per lifecycle stage, from the metrics log (docs/metrics.md)
   metrics:runs      Every agent run that ended in [from, to), with its outcome and worked cards, as JSON (docs/metrics.md)
+  metrics:blocked   Each card's blocked hours per Central week, one interval per block, as JSON (docs/metrics.md)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
 repoPath, githubRepo, baseBranch, branchPrefix, triggerLabel, skillPath, prompt.

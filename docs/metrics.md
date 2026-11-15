@@ -107,7 +107,31 @@ store or a bad window prints nothing to stdout and exits 1.
 Nested runs (`parentRunId`) and duplicate end rows never count twice; `noWork` runs are not listed. Customer and price are the
 reader's (the EM repo's `invoice:weekly`), never this command's.
 
-Retention: rows older than `retentionDays` are deleted at start and at most hourly after.
+Retention: rows older than `retentionDays` are deleted at start and at most hourly after, except the `blocked` rows of a block
+that reaches past the cutoff: an old `blocked` row stays unless a clear (`unblocked` or `closed`) of that card, also older than
+the cutoff, came after it. An open block, or one that cleared inside the window, never loses its start.
+
+### Reading blocked time
+
+```
+npm run -s metrics:blocked -- --from <date> --to <date> [--now <ISO UTC>] [--db <path>] --json
+```
+
+One interval per block, from the card's `blocked` and `unblocked`/`closed` rows (foreman#330). The first `blocked` after a
+clear starts it; later `blocked` rows never restart or duplicate it, whatever their reason. Only an `unblocked` or a `closed`
+row ends it: a board label, a reason change, the report date and the retention cutoff do not.
+
+Weeks run Monday 00:00 to the next Monday 00:00 US Central (DST-aware, so a week can hold 167 or 169 hours). An interval is cut
+at those edges; one still open carries into each following week, to the week's end, and in the current week to `now`.
+`--from` and `--to` are Central dates (`YYYY-MM-DD`; an ISO instant also works) forming the half-open window `[from, to)`;
+a week overlapping it is reported whole. `--db` reads another store (default: the configured one); `--now` replaces the clock.
+JSON on stdout, exit 0; an unreadable store or a bad argument prints nothing to stdout and exits 1. Without `--json` it prints
+one text line per row.
+
+`rows` holds one object per card and week: `repo`, `issue`, `week` (the Monday, Central), `hours` (two decimals), `intervals`
+(blocks touching the week), `open: true` when a block has not cleared, `incomplete: true` when it cannot be established.
+`incomplete` is a card whose first block-related row is an `unblocked` (its start was lost); `hours` is `null`, never zero.
+The command names no customer; the EM joins that from its customer lookup.
 
 ## Reading it
 

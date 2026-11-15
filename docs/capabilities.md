@@ -38,7 +38,7 @@ Mirrors each issue onto a Paperclip board card and posts handoffs there for the 
 
 ## Metrics (`metrics`)
 
-Records how long each stage takes and how each item ends, for `npm run metrics:report`, and each agent run with its outcome and worked cards for `npm run metrics:runs`.
+Records how long each stage takes and how each item ends, for `npm run metrics:report`, each agent run with its outcome and worked cards for `npm run metrics:runs`, and each card's blocked time, one interval per block by Central week, for `npm run metrics:blocked`.
 
 - **Roles:** `observer`
 - **On when:** `metrics.enabled`

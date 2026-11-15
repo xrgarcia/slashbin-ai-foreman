@@ -40,6 +40,7 @@
     "paperclip:doctor": "node dist/cli.js paperclip:doctor",
     "metrics:report": "node dist/cli.js metrics:report",
     "metrics:runs": "node dist/cli.js metrics:runs",
+    "metrics:blocked": "node dist/cli.js metrics:blocked",
     "docs:generate": "node scripts/docs/generate-paperclip.mjs && node scripts/docs/generate-lifecycle.mjs && node scripts/docs/generate-configuration.mjs && node scripts/capabilities-doc.mjs",
     "docs:check": "node scripts/docs/generate-paperclip.mjs --check && node scripts/docs/generate-lifecycle.mjs --check && node scripts/docs/generate-configuration.mjs --check && node scripts/capabilities-doc.mjs --check",
     "schemas": "npm run build && node scripts/contract/generate-schemas.mjs"
