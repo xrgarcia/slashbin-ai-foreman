@@ -157,3 +157,14 @@ SELECT at, kind, stage FROM events
 WHERE repo = 'acme/example' AND issue = 42 AND stage IS NOT NULL
 ORDER BY at;
 ```
+
+## Shipping runs to the company record
+
+`metrics:ship` sends each finished run (`readRuns` billable and failed, never recomputed) to the data receiver, then one
+`watermark` event. The Foreman daemon spawns it detached after each run's end is recorded (only when
+the receiver base-URL variable, `BASE_URL_ENV` in `src/metrics/ship.ts`, is set), and a timer may also start it.
+
+- Env: the receiver base URL (`BASE_URL_ENV` in `src/metrics/ship.ts`), `SLASHBIN_EVENTS_SIGNING_KEY__FOREMAN_SESSION`, `SLASHBIN_EVENTS_SIGNING_KEY__WATERMARK`. With the URL or the run key unset it exits 0 and sends nothing; the outbox is the recovery copy.
+- State, in `<state-dir>/company-record/`: `foreman-session.outbox.jsonl` (one `{run}` line per run, never appended twice), `foreman-session.watermark.json` (byte offset after the last 202, plus `watermark_acked_period_end`, the one cursor: the last Chicago day a watermark 202 confirmed) and `foreman-session.lock` (held while its owner process lives, however long; only a dead owner's lock is recovered). A call that finds the lock held sends nothing and leaves `foreman-session.lock.again`; the owner re-reads the metrics store after releasing and ships what finished meanwhile. A torn last outbox line is completed if intact, cut off if not.
+- One request per run, in outbox order, 10 s timeout; only a 202 advances. Any other status, a network error or a timeout stops the run and exits non-zero; the next run resends from that run.
+- A run that is open (started, no end) is not sent and holds `acknowledged_through` one millisecond before its start; otherwise it is the send time. `period_end` is yesterday (Chicago); `period_start` is the day after the cursor, or on the first run the earliest outboxed day.
