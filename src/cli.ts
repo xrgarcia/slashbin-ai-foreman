@@ -11,6 +11,7 @@ import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
 import { checkCredentials } from "./credentials.js";
 import { registerBuiltinPlugins, registerExternalPlugins } from "./plugins/index.js";
+import { exitAfterFlush } from "./exit-after-flush.js";
 import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
 import type { PluginContext } from "./plugins/contract.js";
 import { flushObservers, workSourceRefusal } from "./work-source.js";
@@ -114,7 +115,7 @@ async function main(rt: ForemanRuntime): Promise<void> {
       process.exit(1);
     }
     const allPassed = await command(doctorConfig);
-    process.exit(allPassed ? 0 : 1);
+    await exitAfterFlush(allPassed ? 0 : 1);
   }
 
   // No config file and no repo in the env: loadConfig would default repoPath to
