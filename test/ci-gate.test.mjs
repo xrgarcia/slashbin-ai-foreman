@@ -62,3 +62,14 @@ test("the bounce comment carries the marker the bounce cap counts", () => {
   assert.ok(body.startsWith(CI_GATE_MARKER));
   assert.match(body, /\*\*tests\*\*/);
 });
+
+test("a set conclusion wins over a stale IN_PROGRESS status", () => {
+  const v = summarizeCheckRollup([run("Validate Migrations", "IN_PROGRESS", "SUCCESS")]);
+  assert.equal(v.state, "passing");
+  assert.deepEqual(v.pending, []);
+});
+
+test("a genuinely running check (null or empty conclusion) is still pending", () => {
+  assert.equal(summarizeCheckRollup([run("a", "IN_PROGRESS", null)]).state, "pending");
+  assert.equal(summarizeCheckRollup([run("a", "IN_PROGRESS", "")]).state, "pending");
+});
