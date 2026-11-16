@@ -32,8 +32,9 @@ export function summarizeCheckRollup(rollup: CheckRollupEntry[]): CheckVerdict {
   const failing: { name: string; url?: string }[] = [];
   const pending: string[] = [];
   for (const [name, entries] of byName) {
+    // A set conclusion wins over status: GitHub can leave a finished job at IN_PROGRESS with conclusion SUCCESS.
     const outcome = (e: CheckRollupEntry): string =>
-      (e.__typename === "StatusContext" ? e.state : e.status === "COMPLETED" ? e.conclusion : e.status ?? e.state) ?? "";
+      (e.__typename === "StatusContext" ? e.state : e.conclusion || e.status || e.state) ?? "";
     if (entries.some((e) => outcome(e) === "SUCCESS")) continue;
     if (entries.some((e) => PENDING_STATES.has(outcome(e)))) {
       pending.push(name);
