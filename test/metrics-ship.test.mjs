@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ship, shippableRuns, openRunStartMs, shipPaths } from "../dist/metrics/ship.js";
@@ -119,4 +119,55 @@ test("with no base URL or key nothing is sent and the outbox holds the run once"
   assert.equal(await ship({ dir, rows, nowMs: NOW }), true);
   assert.equal(readFileSync(shipPaths(dir).outbox, "utf8").trim().split("\n").length, 1);
   assert.equal(existsSync(shipPaths(dir).state), false);
+});
+
+test("a live owner's lock is never taken, however old; a dead owner's lock is recovered", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const p = shipPaths(dir);
+    mkdirSync(p.dir, { recursive: true });
+    writeFileSync(p.lock, String(process.pid)); // this process is alive
+    const old = new Date(NOW - 16 * 60_000);
+    utimesSync(p.lock, old, old);
+    const rows = run(1, "2026-11-09T10:00:00.000Z", "2026-11-09T11:00:00.000Z");
+    assert.equal(await ship(opts(dir, rows, s)), true);
+    assert.equal(s.reqs.length, 0);
+    assert.equal(existsSync(p.lock), true);
+    assert.equal(existsSync(p.outbox), false);
+    writeFileSync(p.lock, "2147483646"); // no such pid
+    assert.equal(await ship(opts(dir, rows, s)), true);
+    assert.equal(s.reqs.length >= 1, true);
+  } finally { await s.close(); }
+});
+
+test("a run that finishes during a shipment is shipped by the owner without another trigger", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const a = run(1, "2026-11-09T10:00:00.000Z", "2026-11-09T11:00:00.000Z");
+    const both = [...a, ...run(2, "2026-11-09T12:00:00.000Z", "2026-11-09T13:00:00.000Z")];
+    let second;
+    const s2 = await stub((rec) => {
+      if (rec.id === "r1" && !second) second = ship(opts(dir, both, s2)); // B arrives while A awaits its POST
+      return null;
+    });
+    const first = ship(opts(dir, a, s2, { reloadRows: () => both }));
+    assert.equal(await first, true);
+    assert.equal(await second, true);
+    assert.deepEqual(s2.reqs.filter((r) => r.source !== "watermark").map((r) => r.id), ["r1", "r2"]);
+    assert.equal(existsSync(shipPaths(dir).lock), false);
+    await s2.close();
+  } finally { await s.close(); }
+});
+
+test("an outbox record cut off before its newline is completed or dropped, never skipped", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const p = shipPaths(dir);
+    mkdirSync(p.dir, { recursive: true });
+    const rows = run(1, "2026-11-09T10:00:00.000Z", "2026-11-09T11:00:00.000Z");
+    await ship({ dir, rows, nowMs: NOW }); // outbox only
+    writeFileSync(p.outbox, readFileSync(p.outbox, "utf8").trimEnd()); // intact JSON, newline lost
+    assert.equal(await ship(opts(dir, rows, s)), true);
+    assert.equal(s.reqs.filter((r) => r.source !== "watermark").map((r) => r.id).join(), "r1");
+  } finally { await s.close(); }
 });

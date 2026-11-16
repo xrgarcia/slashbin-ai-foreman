@@ -98,17 +98,18 @@ export async function runShip(config: AgentConfig): Promise<boolean> {
     return true;
   }
   const nowMs = shipClock();
-  let rows;
-  try {
+  const read = (): ReturnType<typeof readSessionRows> => {
     const db = new (sqlite().DatabaseSync)(path, { readOnly: true });
-    try { rows = readSessionRows(db); } finally { db.close(); }
-  } catch (err) {
+    try { return readSessionRows(db); } finally { db.close(); }
+  };
+  let rows;
+  try { rows = read(); } catch (err) {
     console.error(`metrics:ship: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
   const env = process.env;
   return ship({
-    rows, nowMs, baseUrl: env[BASE_URL_ENV] || undefined, key: env[KEY_ENV] || undefined, watermarkKey: env[WATERMARK_KEY_ENV] || undefined,
+    rows, reloadRows: read, clock: () => shipClock(process.env), nowMs, baseUrl: env[BASE_URL_ENV] || undefined, key: env[KEY_ENV] || undefined, watermarkKey: env[WATERMARK_KEY_ENV] || undefined,
     log: (line) => console.log(`metrics:ship: ${line}`),
   });
 }

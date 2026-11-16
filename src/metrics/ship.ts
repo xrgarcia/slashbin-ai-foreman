@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { stateDir } from "../state-dir.js";
@@ -72,7 +72,7 @@ function writeState(file: string, state: State): void {
 }
 
 /** One lock per outbox. A release function, or null when another live shipper holds it. */
-function acquireLock(lockFile: string, staleMs = 15 * 60_000): (() => void) | null {
+function acquireLock(lockFile: string): (() => void) | null {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = openSync(lockFile, "wx");
@@ -86,7 +86,7 @@ function acquireLock(lockFile: string, staleMs = 15 * 60_000): (() => void) | nu
         const pid = Number(readFileSync(lockFile, "utf8"));
         let alive = true;
         try { process.kill(pid, 0); } catch (k) { alive = (k as NodeJS.ErrnoException).code === "EPERM"; }
-        stale = !alive || Date.now() - statSync(lockFile).mtimeMs > staleMs;
+        stale = !alive; // a live owner keeps the lock however long it drains; only a dead owner's lock is recovered
       } catch { stale = true; }
       if (!stale) return null;
       try { unlinkSync(lockFile); } catch { /* raced */ }
@@ -118,6 +118,18 @@ const outboxEntries = (outbox: string): Entry[] => {
   return out;
 };
 
+/** A crash can leave the outbox's last line without its newline. An intact record gets it; a torn one is cut off. */
+function repairTail(outbox: string): void {
+  if (!existsSync(outbox)) return;
+  const text = readFileSync(outbox, "utf8");
+  if (text === "" || text.endsWith("\n")) return;
+  const cut = text.lastIndexOf("\n") + 1;
+  let intact = false;
+  try { intact = !!(JSON.parse(text.slice(cut)) as Entry)?.run?.runId; } catch { /* torn */ }
+  if (intact) appendFileSync(outbox, "\n");
+  else truncateSync(outbox, Buffer.byteLength(text.slice(0, cut)));
+}
+
 /** The earliest start among top-level runs that started and have no end row: they hold the acknowledgement. */
 export function openRunStartMs(rows: readonly MetricsRow[]): number | null {
   const started = new Map<string, number>();
@@ -146,17 +158,43 @@ export interface ShipOptions {
   baseUrl?: string;
   key?: string;
   watermarkKey?: string;
+  /** Re-reads the session rows; the owner calls it when another run finished during its shipment. */
+  /** The clock for a reload pass. */
+  clock?: () => number;
+  reloadRows?: () => readonly MetricsRow[];
   log?: (line: string) => void;
 }
 
-/** Outbox the runs not yet in it, ship it, send one watermark. Resolves false when a send stopped. */
+/**
+ * Outbox the runs not yet in it, ship it, send one watermark. Resolves false when a send stopped. A call that finds a live
+ * shipper sends nothing: it leaves a `.again` marker, and the owner, after releasing, re-reads the rows (`reloadRows`) and
+ * ships again, so a run that finished during a shipment is neither lost nor waiting on another trigger.
+ */
 export async function ship(o: ShipOptions): Promise<boolean> {
   const p = shipPaths(o.dir);
   const log = o.log ?? ((): void => undefined);
+  const again = `${p.lock}.again`;
   mkdirSync(p.dir, { recursive: true });
-  const release = acquireLock(p.lock);
-  if (!release) { log("another shipper is running"); return true; }
-  try {
+  let rows = o.rows, nowMs = o.nowMs;
+  for (;;) {
+    let release = acquireLock(p.lock);
+    if (!release) {
+      writeFileSync(again, "");
+      release = acquireLock(p.lock); // the owner may have released between its marker check and ours
+      if (!release) { log("another shipper is running; it will pick this run up"); return true; }
+    }
+    let ok: boolean;
+    try { ok = await shipLocked({ ...o, rows, nowMs }, p, log); } finally { release(); }
+    if (!ok || !o.reloadRows || !existsSync(again)) return ok;
+    try { unlinkSync(again); } catch { /* raced */ }
+    rows = o.reloadRows();
+    if (o.clock) nowMs = o.clock();
+  }
+}
+
+async function shipLocked(o: ShipOptions, p: ReturnType<typeof shipPaths>, log: (line: string) => void): Promise<boolean> {
+  {
+    repairTail(p.outbox);
     const have = new Set(outboxEntries(p.outbox).map((e) => e.run.runId));
     const fresh = shippableRuns(o.rows, o.nowMs).filter((r) => !have.has(r.runId));
     if (fresh.length) appendFileSync(p.outbox, fresh.map((run) => JSON.stringify({ run })).join("\n") + "\n");
@@ -203,7 +241,7 @@ export async function ship(o: ShipOptions): Promise<boolean> {
     const done = chicagoDay(chicagoDayStartMs(ackMs) - 1), reach = done < periodEnd ? done : periodEnd;
     if (reach >= periodStart && (!cursor || reach > cursor)) writeState(p.state, { ...readState(p.state), watermark_acked_period_end: reach });
     return true;
-  } finally { release(); }
+  }
 }
 
 /** The clock; SLASHBIN_SHIPPER_NOW_MS pins it for tests only, production never sets it. */
