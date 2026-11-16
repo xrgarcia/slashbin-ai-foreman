@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import type { SessionEvent, SessionOutcome, WorkItem } from "./adapters.js";
 import type { Logger } from "./logger.js";
 import { emitProcessEvent } from "./work-source.js";
+import { BASE_URL_ENV } from "./metrics/ship.js";
 
 /** How a phase's session ended: the status observers act on, and the outcome the run ledger bills on. */
 export interface SessionEnd {
@@ -47,4 +49,22 @@ export async function recordRun<T>(
   }
   await emitProcessEvent({ kind: "session", session: { ...base, runId, ...end(result), at: stamp() } }, logger);
   return result;
+}
+
+/**
+ * After a run's end event is recorded, start `metrics:ship` detached so the run reaches the company record. It never
+ * fails the run: with no receiver base URL there is nothing to send and nothing is spawned; a spawn error is a warning.
+ * Two overlapping ships are harmless (the ship lock makes the later one a no-op).
+ */
+export function spawnShipAfterRun(logger: Logger): void {
+  if (!process.env[BASE_URL_ENV] || !process.argv[1]) return;
+  try {
+    const cfg = process.argv.indexOf("--config");
+    const args = [process.argv[1], "metrics:ship", ...(cfg >= 0 && process.argv[cfg + 1] ? ["--config", process.argv[cfg + 1]] : [])];
+    const child = spawn(process.execPath, args, { detached: true, stdio: "ignore", env: process.env });
+    child.on("error", (err) => logger.warn(`metrics:ship: could not start: ${err.message}`));
+    child.unref();
+  } catch (err) {
+    logger.warn(`metrics:ship: could not start: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

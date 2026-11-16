@@ -10,6 +10,8 @@ import { MetricsRecorder, openMetricsDb, readRows, sqlite } from "../metrics/rec
 import { aggregate, buildTimelines, formatReport } from "../metrics/report.js";
 import { readBlocked, readBlockedRows, parseWindowEdge } from "../metrics/blocked.js";
 import { readRuns, readSessionRows } from "../metrics/runs.js";
+import { BASE_URL_ENV, KEY_ENV, WATERMARK_KEY_ENV, ship, shipClock } from "../metrics/ship.js";
+import { spawnShipAfterRun } from "../session-run.js";
 import type { ForemanPlugin, PluginContext, PluginCatalogEntry } from "./contract.js";
 
 /** The database file: `metrics.path` (`~` expanded), else `foreman-metrics.db` in the state directory. */
@@ -85,6 +87,33 @@ export async function runRuns(config: AgentConfig, argv: readonly string[] = pro
 }
 
 /**
+ * `metrics:ship`: send each finished run (billable and failed, from `readRuns`) to the company-record receiver, then one
+ * watermark event (src/metrics/ship.ts, docs/metrics.md). Exit 0 when sent, nothing to send, or the base URL or key is
+ * unset (the outbox is the recovery copy); exit 1 when a send stops, the next run resends from the failed run.
+ */
+export async function runShip(config: AgentConfig): Promise<boolean> {
+  const path = metricsPath(config);
+  if (!existsSync(path)) {
+    console.log(`metrics:ship: no metrics database at ${path}, nothing to send`);
+    return true;
+  }
+  const nowMs = shipClock();
+  let rows;
+  try {
+    const db = new (sqlite().DatabaseSync)(path, { readOnly: true });
+    try { rows = readSessionRows(db); } finally { db.close(); }
+  } catch (err) {
+    console.error(`metrics:ship: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  const env = process.env;
+  return ship({
+    rows, nowMs, baseUrl: env[BASE_URL_ENV] || undefined, key: env[KEY_ENV] || undefined, watermarkKey: env[WATERMARK_KEY_ENV] || undefined,
+    log: (line) => console.log(`metrics:ship: ${line}`),
+  });
+}
+
+/**
  * `metrics:blocked --from <date|ISO> --to <date|ISO> [--now <ISO>] [--db <path>] [--json]`: each card's blocked hours per
  * Central week, one interval per block (docs/metrics.md). A bare date is that day's Central midnight. `--db` reads a
  * store other than the configured one; `--now` replaces the clock, which fixes where an open block stops.
@@ -132,6 +161,7 @@ class MetricsObserver implements WorkObserver {
   constructor(private readonly recorder: MetricsRecorder) {}
   async onEvent(event: WorkEvent, logger: Logger): Promise<void> {
     this.recorder.record(event, logger); // never throws
+    if (event.kind === "session" && (event.session.status === "finished" || event.session.status === "failed")) spawnShipAfterRun(logger);
   }
   // Closes and stage moves made outside the Foreman (the EM applying `ready for prod release`) only show in the snapshot.
   wantsSnapshot(): boolean { return true; }
@@ -148,13 +178,14 @@ export class MetricsPlugin implements ForemanPlugin {
     name: "Metrics",
     purpose: "Records how long each stage takes and how each item ends, for `npm run metrics:report`, each agent run with its outcome and worked cards for `npm run metrics:runs`, and each card's blocked time, one interval per block by Central week, for `npm run metrics:blocked`.",
     onWhen: "`metrics.enabled`",
-    requires: { config: ["metrics.enabled", "metrics.path", "metrics.retentionDays"], env: [] },
+    requires: { config: ["metrics.enabled", "metrics.path", "metrics.retentionDays"], env: [KEY_ENV, WATERMARK_KEY_ENV] },
     whenOff: "Nothing is recorded; the lifecycle is unchanged.",
   };
   readonly commands = {
     "metrics:report": (config: AgentConfig) => runReport(config),
     "metrics:runs": (config: AgentConfig) => runRuns(config),
     "metrics:blocked": (config: AgentConfig) => runBlocked(config),
+    "metrics:ship": (config: AgentConfig) => runShip(config),
   };
   private recorder: MetricsRecorder | null = null;
   private obs: MetricsObserver | null = null;

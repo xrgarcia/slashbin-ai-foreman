@@ -43,7 +43,7 @@ Records how long each stage takes and how each item ends, for `npm run metrics:r
 - **Roles:** `observer`
 - **On when:** `metrics.enabled`
 - **Config:** `metrics.enabled`, `metrics.path`, `metrics.retentionDays`
-- **Env:** none
+- **Env:** `SLASHBIN_EVENTS_SIGNING_KEY__FOREMAN_SESSION`, `SLASHBIN_EVENTS_SIGNING_KEY__WATERMARK`
 - **When off:** Nothing is recorded; the lifecycle is unchanged.
 
 ## OpenTelemetry (`otel`)
