@@ -1482,20 +1482,31 @@ export async function tryRelease(
   // A merged release waiting more than 24 hours on a time the SRE named (saved before follow-ups were booked): book
   // the follow-up and close it now. Not an action: nothing is verified, the SRE's earlier verdict stands.
   // One per pass: a conversion closes issues, and each close reads the repo's open issues, so converting a backlog in
-  // one pass costs releases x backlog. The rest convert on the next passes (Tech Lead S2, foreman#334).
-  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && Date.parse(r.retryAt) - now() > MAX_TIME_HOLD_MS).slice(0, 1)) {
+  // one pass costs releases x backlog. The rest convert on the next passes (Tech Lead S2, foreman#334). A booking that
+  // fails backs that release off, so the next pass tries another, and its wait is announced on the card as before.
+  const far = (r: ProdRelease) => Boolean(r.retryAt) && Date.parse(r.retryAt!) - now() > MAX_TIME_HOLD_MS;
+  const unbooked = new Set<number>();
+  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && far(r)).slice(0, 1)) {
+    let booked = false;
     try {
       const evidence = await evidenceFor(repoConfig, w.pr, rlog);
-      if (await deferToFollowUp(rt, repoConfig, config, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog)) closedNow.add(w.pr);
+      booked = await deferToFollowUp(rt, repoConfig, config, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog);
     } catch (err) {
       rlog.warn(`Release PR #${w.pr}: could not book its follow-up: ${errText(err)}`);
+    }
+    if (booked) closedNow.add(w.pr);
+    else {
+      rt.memory.releaseBackoff.start(`${repoConfig.githubRepo}#${w.pr}`, config.backoff.releaseRetry);
+      unbooked.add(w.pr);
     }
   }
 
   // A merged release waiting on a time the SRE named (a `merged` release has a `retryAt` only from a wait) that was
   // saved before waits were announced: say so now, once. It is not an action: nothing is verified early and the
-  // time is unchanged.
-  for (const w of current.filter((r) => r.phase === "merged" && ready(r) && r.retryAt && !due(r.retryAt) && r.waitNoted !== r.retryAt)) {
+  // time is unchanged. A wait past 24 hours is converted above instead, never announced, unless its booking failed:
+  // each announcement reads the repo's open issues, so announcing a backlog of far waits is releases x backlog.
+  for (const w of current.filter((r) => r.phase === "merged" && r.retryAt && !due(r.retryAt) && r.waitNoted !== r.retryAt
+    && (unbooked.has(r.pr) || (ready(r) && !far(r))))) {
     try {
       const evidence = await evidenceFor(repoConfig, w.pr, rlog);
       await announceWait(rt, repoConfig, w, { kind: "wait", retryAt: w.retryAt!, hold: "", ...(evidence ? { evidence } : {}) }, rlog);

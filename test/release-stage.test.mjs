@@ -188,7 +188,8 @@ mkdirSync(join(tmp, "scripts", "routines"), { recursive: true });
 writeFileSync(join(tmp, "scripts", "routines", "deferred-verify.mjs"), `import fs from "node:fs";
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(AGENT_LOG)}, JSON.stringify(["em", ...args]) + "\\n");
-const r = JSON.parse(fs.readFileSync(${JSON.stringify(CTL)}, "utf8")).schedule ?? { exit: 0, out: "scheduled R1 Deferred verify: o/r at then o/r:100=5" };
+let r = JSON.parse(fs.readFileSync(${JSON.stringify(CTL)}, "utf8")).schedule ?? { exit: 0, out: "scheduled R1 Deferred verify: o/r at then o/r:100=5" };
+if (r.rejectPr !== undefined) r = String(r.rejectPr) === args[args.indexOf("--pr") + 1] ? { exit: 1, out: "rejected" } : { exit: 0, out: "scheduled R2 Deferred verify" };
 process.stdout.write((r.out ?? "") + "\\n");
 process.exit(r.exit ?? 0);
 `);
@@ -2319,6 +2320,36 @@ test("stored far waits convert one per pass, so a backlog never costs releases x
   await run();
   assert.equal(agentCalls().filter((c) => c[0] === "em").length, 2, "the other converts next pass");
   assert.deepEqual([5, 6].map((n) => gh().issues[n].state), ["CLOSED", "CLOSED"]);
+});
+
+test("legacy far waits never announced are converted, not announced: no pass reads the open issues once per far wait (Tech Lead S2)", async () => {
+  const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  const far = farAway();
+  world({ issues: [issue(5, "release pending"), issue(6, "release pending")],
+    prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60), mergedPr(101, "### Issues included\n- #6: Issue 6", MERGE, 50)], compareFiles: 0, prodHead: MERGE });
+  for (const [pr, n] of [[100, 5], [101, 6]]) {
+    await seedRelease(rt, repo, { pr, headSha: HEAD, issues: [n], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: far });
+  }
+  await run();
+  assert.equal([5, 6].filter((n) => gh().issues[n].state === "CLOSED").length, 1, "one converts");
+  assert.equal(waitNotes(5).length + waitNotes(6).length, 0, "the other waits its turn unannounced");
+});
+
+test("a rejected booking backs that release off, so the next pass converts another; its wait is announced as before (Tech Lead S3)", async () => {
+  const t0 = new Date(Date.now() - 3_600_000).toISOString();
+  const far = farAway();
+  world({ issues: [issue(5, "release pending"), issue(6, "release pending")],
+    prs: [mergedPr(100, "### Issues included\n- #5: Issue 5", MERGE, 60), mergedPr(101, "### Issues included\n- #6: Issue 6", MERGE, 50)], compareFiles: 0, prodHead: MERGE },
+  { schedule: { rejectPr: 100 } });
+  for (const [pr, n] of [[100, 5], [101, 6]]) {
+    await seedRelease(rt, repo, { pr, headSha: HEAD, issues: [n], phase: "merged", mergeSha: MERGE, mergedAt: t0, attempts: 0, since: t0, retryAt: far });
+  }
+  await run();
+  assert.equal(gh().issues[5].state, "OPEN", "never closed unchecked");
+  assert.equal(waitNotes(5).length, 1, "its wait is announced on the card");
+  await run();
+  assert.deepEqual(agentCalls().filter((c) => c[0] === "em").map((c) => c[c.indexOf("--pr") + 1]), ["100", "101"]);
+  assert.equal(gh().issues[6].state, "CLOSED");
 });
 
 // --- A `predeploy-stop` is asked about again (the SRE's pre-deploy check only reads) --------------------------------
