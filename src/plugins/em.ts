@@ -209,16 +209,16 @@ export async function publishedKindsViaEm(agentConfig: AgentConfig, logger: Logg
 export const EM_DECOMPOSE_CANDIDATES_MAX_DURATION_MS = 15 * 60_000;
 
 /**
- * The epics due for a breakdown (`em.mjs decompose-candidates --json`: `[{epic, approvedAt}]`, oldest first). Null on any
+ * The epics due for a breakdown (`em.mjs decompose-candidates --json`: `[{epic, approvedAt, after?, requeue?}]`, oldest first). Null on any
  * failure, a missing `emRepoPath` or `EM_GITHUB_TOKEN`, or an EM too old to have the subcommand. Never throws.
  */
-export async function epicDecomposeViaEm(agentConfig: AgentConfig, logger: Logger): Promise<readonly { epic: number; approvedAt: string }[] | null> {
+export async function epicDecomposeViaEm(agentConfig: AgentConfig, logger: Logger): Promise<readonly { epic: number; approvedAt: string; after?: string; requeue?: number }[] | null> {
   const em = agentConfig.emRepoPath;
   if (!em || !process.env.EM_GITHUB_TOKEN) return null;
   try {
     const r = await runAgentCli(em, "bin/em.mjs", ["decompose-candidates", "--json"], buildEmEnv(agentConfig), agentConfig, EM_DECOMPOSE_CANDIDATES_MAX_DURATION_MS);
     const due: unknown = r.timedOut || r.code !== 0 ? null : JSON.parse(r.stdout);
-    if (Array.isArray(due) && due.every((d) => Number.isInteger(d?.epic) && typeof d?.approvedAt === "string")) return due;
+    if (Array.isArray(due) && due.every((d) => Number.isInteger(d?.epic) && typeof d?.approvedAt === "string" && (d.after === undefined || typeof d.after === "string") && (d.requeue === undefined || Number.isInteger(d.requeue)))) return due;
     logger.warn(`EM decompose-candidates unreadable (${r.timedOut ? "timed out" : r.code !== 0 ? `exit ${r.code}: ${cliTail(r)}` : "not a JSON array of {epic, approvedAt}"})`);
   } catch (err) {
     logger.warn(`EM decompose-candidates failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -447,8 +447,20 @@ export function epicChildClosedAlert(githubRepo: string, issue: number, epic: nu
   };
 }
 
-/** An epic the EM reports due for breakdown: open, `approved`, no child. `approvedAt` is its last `labeled approved` event. */
-export interface DecomposeCandidate { epic: number; approvedAt: string }
+/**
+ * An epic the EM reports due for breakdown: open, `approved`, and either no child or at a feature boundary (every filed
+ * child closed, the plan still listing unfiled features). `approvedAt` is its last `labeled approved` event; `after` is
+ * the last-filed child (`owner/repo#N`) at a boundary, absent when the epic has no child.
+ */
+export interface DecomposeCandidate { epic: number; approvedAt: string; after?: string; requeue?: number }
+
+/**
+ * The question's identity: one per approval, at a boundary one per last-filed child, and one per time the EM
+ * escalated it and the epic's Paperclip card was later cleared (`requeue`, counted by the EM from its own markers; a
+ * blocked card is never a candidate, so a requeue is only ever the card leaving `blocked`).
+ */
+export const decomposeTag = (c: DecomposeCandidate): string =>
+  `${c.epic}-${c.approvedAt}${c.after ? `-${c.after}` : ""}${c.requeue ? `-r${c.requeue}` : ""}`;
 
 /**
  * An approved epic with no child waits on a breakdown nothing else starts (EM#387 sat 20 days). One alert per
@@ -456,13 +468,15 @@ export interface DecomposeCandidate { epic: number; approvedAt: string }
  * asked twice. The answer lands on the epic itself (bin/em.mjs `answerTarget`).
  */
 export function epicDecomposeAlert(label: string, c: DecomposeCandidate): Alert {
+  const again = c.requeue ? ` The EM escalated this ${c.requeue === 1 ? "once" : `${c.requeue} times`} before and its card was cleared (requeue ${c.requeue}): read that escalation first.` : "";
   return {
-    kind: "epic-decompose", subject: 0, dedupeKey: `${c.epic}-${c.approvedAt}`,
-    reason: `${label} #${c.epic} was approved at ${c.approvedAt} and has no child issue. Break it down with /decompose-epic, one feature at a time.`,
+    kind: "epic-decompose", subject: 0, dedupeKey: decomposeTag(c),
+    reason: (c.after
+      ? `${label} #${c.epic} was approved at ${c.approvedAt}; every child it has is closed (last filed child: ${c.after}) and its plan lists features not filed yet. Break down the next one with /decompose-epic, one feature at a time.`
+      : `${label} #${c.epic} was approved at ${c.approvedAt} and has no child issue. Break it down with /decompose-epic, one feature at a time.`) + again,
   };
 }
 
-/** Whether an epic-decompose call is still open: pending, refused, or failed with attempts left. */
 /** Whether an epic-decompose call is still open: pending, refused, or failed with attempts left. */
 export function decomposeInFlight(table: Readonly<Record<string, UnstickEntry>>, maxAttempts: number = UNSTICK_MAX_ATTEMPTS): boolean {
   return Object.values(table).some((e) => e.kind === "epic-decompose" && (e.status === "pending" || e.status === "refused" || (e.status === "failed" && e.attempts < maxAttempts)));
@@ -476,7 +490,7 @@ export function nextDecompose(due: readonly DecomposeCandidate[], table: Readonl
   if (decomposeInFlight(table, maxAttempts)) return null;
   const mine = Object.values(table).filter((e) => e.kind === "epic-decompose");
   const seen = new Set(mine.map((e) => e.tag));
-  const next = due.find((c) => !seen.has(`${c.epic}-${c.approvedAt}`));
+  const next = due.find((c) => !seen.has(decomposeTag(c)));
   return next ? epicDecomposeAlert(label, next) : null;
 }
 
