@@ -224,7 +224,7 @@ export interface Unsticker {
    * The epics the EM says are due for a breakdown (open, `approved`, no child), oldest approval first. Null when it
    * could not be read; never throws. The "no child" test is the EM's own (`epic-coverage.mjs`), never copied here.
    */
-  epicDecompose?(config: AgentConfig, logger: Logger): Promise<readonly { epic: number; approvedAt: string }[] | null>;
+  epicDecompose?(config: AgentConfig, logger: Logger): Promise<readonly { epic: number; approvedAt: string; after?: string; requeue?: number }[] | null>;
   /**
    * The kinds the receiver says it accepts, published by the receiver itself so the sender's list is checked against
    * it and never kept as a second copy (foreman#232). Null when it could not be read; never throws.

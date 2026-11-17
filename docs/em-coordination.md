@@ -175,12 +175,13 @@ It is repo-level (issue 0), once per epic and closed issue, and never holds the 
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
 `epic-decompose` fires for an open epic in `epicRepo` that carries `approved`, none of `approved-for-human`, `blocked`
-or `owner-hold`, and has no child. "No child" is the EM's own test (`epic-coverage.mjs`, `scripts/lib/epic-children.mjs`),
+or `owner-hold`, and either has no child or is at a feature boundary: every filed child closed while the epic's
+numbered `**Decomposition plan` comment still lists unfiled features (the close gate's rule, EM#1074). Both tests are the EM's own (`epic-coverage.mjs`, `scripts/lib/epic-children.mjs`, `scripts/lib/epic-plan.mjs`, `scripts/lib/epic-decompose.mjs`),
 never copied here: the Foreman asks `bin/em.mjs decompose-candidates --json` (a board scan, so at most every 30 minutes,
-and not at all while a call is open) and gets `[{epic, approvedAt}]`, oldest approval first. It raises the oldest epic that has
-no question yet, one at a time, repo-level (issue 0) on the first repo that runs stages; `dedupeKey` is the epic and the time of its
-last `labeled approved` event, so a re-approval is a new question and a standing one is never asked twice. The EM runs
-`/decompose-epic <N>` under its one-feature-at-a-time rule and answers on the epic: acted only if a child exists afterwards,
+and not at all while a call is open) and gets `[{epic, approvedAt, after?, requeue?}]`, oldest approval first (`after` is the last-filed child at a boundary). An epic whose Paperclip card is `blocked` is left out of that list (the EM reads the card, `scripts/paperclip/blocked-epic-cards.mjs`; the Foreman cannot, its card index is per configured repo), so a blocked card is never dispatched and nothing retries it. An EM escalation or timeout leaves the epic's card blocked on its owner; the card leaving `blocked` is the only re-queue, shown as `requeue: n` (the EM's count of its own escalation markers) which makes a new question, not a timer or attempt counter. It raises the oldest epic that has
+no question yet, one at a time, repo-level (issue 0) on the first repo that runs stages; `dedupeKey` is the epic, the time of its
+last `labeled approved` event and, at a boundary, the last-filed child, so a re-approval or the next boundary is a new question and a standing one is never asked twice. One call is open across all epics (`decomposeInFlight`, read from the repo record, so a restart never starts a second); the next starts only after the EM's verdict is recorded. The EM runs
+`/decompose-epic <N>` under its one-feature-at-a-time rule and answers on the epic: acted only if a child exists afterwards (at a boundary: a child newer than `after`),
 else escalated. It replaces the Paperclip decompose-stage assignment (EM#2124 chat bridge looped todo/blocked; 12 epics overdue on 2026-11-17).
 `unlinked-fix` fires when a held dev verification #N holds the repo's queue, nothing corrects #N, and an approved
 issue's body mentions #N (§2). Its subject is that issue, once per issue and #N (`dedupeKey` #N), standing until the

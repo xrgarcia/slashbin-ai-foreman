@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { mkTmp } from "./tmp-dir.mjs";
 import { setStateDir as setStatePath } from "../dist/state-dir.js";
 import { tryUnstick, resetDecomposeThrottle } from "../dist/phases/unstick.js";
-import { UNSTICK_KINDS, EVENT_KINDS, epicDecomposeAlert, nextDecompose, decomposeInFlight } from "../dist/unstick.js";
+import { UNSTICK_KINDS, EVENT_KINDS, epicDecomposeAlert, nextDecompose, decomposeInFlight, decomposeTag } from "../dist/unstick.js";
 import { emUnstickMaxDurationMs } from "../dist/plugins/em.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords } from "./issue-records.mjs";
@@ -90,4 +90,34 @@ else console.log("acted");`);
   resetDecomposeThrottle();
   await tryUnstick(rt, { ...host, name: "other", githubRepo: "o/other" }, config, logger, 5, {});
   assert.equal(asks(), before, "only the host repo asks");
+});
+
+test("a feature boundary is its own question, keyed by the last-filed child, and still one at a time", () => {
+  const A2 = { ...A, after: "o/svc#7" };
+  const a = epicDecomposeAlert(LABEL, A2);
+  assert.equal(a.dedupeKey, "11-2026-11-01T00:00:00Z-o/svc#7");
+  assert.match(a.reason, /engineering-manager #11 was approved at .*last filed child: o\/svc#7\) and its plan lists features not filed yet/);
+  assert.notEqual(a.dedupeKey, epicDecomposeAlert(LABEL, A).dedupeKey, "the no-child question and the boundary are different questions");
+  const tagged = (c, status) => ({ ...entry(c, status), tag: decomposeTag(c) });
+  const t = (...es) => Object.fromEntries(es.map((e) => [`0:epic-decompose:${e.tag}`, e]));
+  // two eligible epics: the second waits for the first's verdict, whatever the boundary
+  assert.equal(nextDecompose([A2, B], t(tagged(A2, "pending")), LABEL), null);
+  assert.equal(nextDecompose([A2, B], t(tagged(A2, "invoked")), LABEL).dedupeKey, "12-2026-11-02T00:00:00Z");
+  // the same epic at its next boundary is a new question once the previous one is answered
+  const A3 = { ...A, after: "o/svc#9" };
+  assert.equal(nextDecompose([A3], t(tagged(A2, "invoked")), LABEL).dedupeKey, "11-2026-11-01T00:00:00Z-o/svc#9");
+  assert.equal(nextDecompose([A2], t(tagged(A2, "invoked")), LABEL), null, "a boundary is asked once");
+});
+
+test("an escalated epic whose card was cleared is a new question (requeue), never a timer", () => {
+  const tagged = (c, status) => ({ ...entry(c, status), tag: decomposeTag(c) });
+  const t = (...es) => Object.fromEntries(es.map((e) => [`0:epic-decompose:${e.tag}`, e]));
+  const R = { ...A, requeue: 1 };
+  assert.equal(decomposeTag(R), "11-2026-11-01T00:00:00Z-r1");
+  assert.match(epicDecomposeAlert(LABEL, R).reason, /escalated this once before and its card was cleared \(requeue 1\)/);
+  // the epic is absent from the EM's list while its card is blocked: nothing is dispatched, whatever the table holds
+  assert.equal(nextDecompose([], t(tagged(A, "escalated")), LABEL), null);
+  // the card left blocked: the EM lists it with requeue 1, and it is dispatched once
+  assert.equal(nextDecompose([R], t(tagged(A, "escalated")), LABEL).dedupeKey, decomposeTag(R));
+  assert.equal(nextDecompose([R], t(tagged(A, "escalated"), tagged(R, "invoked")), LABEL), null);
 });
