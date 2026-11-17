@@ -26,11 +26,11 @@ import { resolve } from "node:path";
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
-import type { UnstickOutcome } from "../plugins/contract.js";
+import type { UnstickOutcome, Unsticker } from "../plugins/contract.js";
 import { fieldTable } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
@@ -106,6 +106,44 @@ export function applyOutcome(cur: UnstickEntry, o: UnstickOutcome, nowMs: number
   };
 }
 
+/** How often the EM is asked which approved epics have no child: its answer is a six-minute board scan. */
+export const EPIC_DECOMPOSE_CHECK_MS = 30 * 60_000;
+let lastDecomposeCheck = 0;
+/** Test seam: forget when the last check ran. */
+export function resetDecomposeThrottle(): void { lastDecomposeCheck = 0; }
+
+/**
+ * The repo that carries the epic-decompose questions: the epics live in `epicRepo`, which is no configured repo,
+ * so the repo-level record of the first repo that runs stages holds them (one deterministic place, one asker).
+ */
+export function decomposeHost(config: AgentConfig): RepoConfig | undefined {
+  return config.repos.find((r) => !r.syncOnly);
+}
+
+/**
+ * An open epic of `epicRepo` that is approved, held by nothing and has no child wakes the EM once, one at a time
+ * (docs/em-coordination.md §3). Raises at most one alert into `repoConfig`'s repo record; never throws.
+ */
+async function raiseDecompose(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, unsticker: Unsticker, log: Logger): Promise<void> {
+  const label = repoConfig.epicRefLabel;
+  if (!config.epicRepo || !label || !unsticker.epicDecompose || decomposeHost(config)?.name !== repoConfig.name) return;
+  if (Date.now() - lastDecomposeCheck < EPIC_DECOMPOSE_CHECK_MS || isUpstreamBlocked("github")) return;
+  try {
+    const record = await rt.records.loadRepoRecord(repoConfig);
+    if (record === null) return;
+    const table = record?.unstick ?? {};
+    // One at a time: while a call is open, nothing is asked and no scan is paid for.
+    if (decomposeInFlight(table)) return;
+    lastDecomposeCheck = Date.now();
+    const due = await unsticker.epicDecompose(config, log);
+    if (!due) return;
+    const alert = nextDecompose([...due].sort((x, y) => x.approvedAt.localeCompare(y.approvedAt)), table, label);
+    if (alert && await rt.handoffs.raise(repoConfig, alert)) log.info(`Asking the EM to break down ${label} #${alert.dedupeKey.split("-")[0]} (approved, no child)`);
+  } catch (err) {
+    log.warn(`Could not check for approved epics with no child: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Returns how many EM calls this pass made. Never throws. */
 export async function tryUnstick(
   rt: ForemanRuntime,
@@ -133,6 +171,7 @@ export async function tryUnstick(
     const open = issues ? new Set(issues.map((i) => i.number)) : null;
     // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
     const loaded = await rt.records.loadIssueRecords(repoConfig, open ?? []);
+    await raiseDecompose(rt, repoConfig, config, unsticker, log);
     // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
     const repoRecord = await rt.records.loadRepoRecord(repoConfig);
     const candidates: UnstickCandidate[] = derivedCandidates({

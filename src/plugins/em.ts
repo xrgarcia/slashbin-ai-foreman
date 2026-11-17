@@ -30,7 +30,13 @@ export const EM_UNSTICK_MAX_DURATION_MS = 20 * 60_000;
  * (`sessionBudget`, bin/em.mjs). 20 minutes killed console#1552's on 2026-10-31.
  */
 export const EM_UNSTICK_REWORK_MAX_DURATION_MS = 40 * 60_000;
+/**
+ * A breakdown runs the board scan before and after its session (~6 min each) around a 45-minute session
+ * (`sessionBudget`, bin/em.mjs).
+ */
+export const EM_UNSTICK_DECOMPOSE_MAX_DURATION_MS = 70 * 60_000;
 export function emUnstickMaxDurationMs(kind: string): number {
+  if (kind === "epic-decompose") return EM_UNSTICK_DECOMPOSE_MAX_DURATION_MS;
   return kind === "rework-decision" ? EM_UNSTICK_REWORK_MAX_DURATION_MS : EM_UNSTICK_MAX_DURATION_MS;
 }
 
@@ -199,6 +205,27 @@ export async function publishedKindsViaEm(agentConfig: AgentConfig, logger: Logg
   return null;
 }
 
+/** How long `em.mjs decompose-candidates` may run: one board scan (~6 min) with room for a slow GitHub. */
+export const EM_DECOMPOSE_CANDIDATES_MAX_DURATION_MS = 15 * 60_000;
+
+/**
+ * The epics due for a breakdown (`em.mjs decompose-candidates --json`: `[{epic, approvedAt}]`, oldest first). Null on any
+ * failure, a missing `emRepoPath` or `EM_GITHUB_TOKEN`, or an EM too old to have the subcommand. Never throws.
+ */
+export async function epicDecomposeViaEm(agentConfig: AgentConfig, logger: Logger): Promise<readonly { epic: number; approvedAt: string }[] | null> {
+  const em = agentConfig.emRepoPath;
+  if (!em || !process.env.EM_GITHUB_TOKEN) return null;
+  try {
+    const r = await runAgentCli(em, "bin/em.mjs", ["decompose-candidates", "--json"], buildEmEnv(agentConfig), agentConfig, EM_DECOMPOSE_CANDIDATES_MAX_DURATION_MS);
+    const due: unknown = r.timedOut || r.code !== 0 ? null : JSON.parse(r.stdout);
+    if (Array.isArray(due) && due.every((d) => Number.isInteger(d?.epic) && typeof d?.approvedAt === "string")) return due;
+    logger.warn(`EM decompose-candidates unreadable (${r.timedOut ? "timed out" : r.code !== 0 ? `exit ${r.code}: ${cliTail(r)}` : "not a JSON array of {epic, approvedAt}"})`);
+  } catch (err) {
+    logger.warn(`EM decompose-candidates failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return null;
+}
+
 /** How long one `deferred-verify.mjs schedule` may run (a few Paperclip calls). */
 export const EM_FOLLOW_UP_MAX_DURATION_MS = 2 * 60_000;
 
@@ -235,7 +262,7 @@ export class EmPlugin implements ForemanPlugin {
     requires: { config: ["emRepoPath", "unstickEscalationOwner"], env: ["EM_GITHUB_TOKEN"] },
     whenOff: "Stuck or held work stays where it is until a person clears it; nothing escalates it.",
   };
-  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm, publishedKinds: publishedKindsViaEm, scheduleProdFollowUp: scheduleProdFollowUpViaEm };
+  readonly unstick: Unsticker = { unstick: unstickViaEm, grantState: grantStateViaEm, publishedKinds: publishedKindsViaEm, epicDecompose: epicDecomposeViaEm, scheduleProdFollowUp: scheduleProdFollowUpViaEm };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.emRepoPath);
   }

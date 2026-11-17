@@ -276,7 +276,7 @@ GitHub login @-mentioned when the EM cannot be reached for a stuck hold (foreman
 
 Type: string · Default: none
 
-The name issue bodies give the epic tracker in `<label> #N` references (the `## References` convention). When an issue closes in production, each epic it names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
+The name issue bodies give the epic tracker in `<label> #N` references (the `## References` convention). When an issue closes in production, each epic it names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised. With `epicRepo` also set, an approved epic there with no child raises `epic-decompose` (docs/em-coordination.md §3).
 
 ### `epicRepo`
 
