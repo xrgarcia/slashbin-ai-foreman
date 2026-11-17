@@ -306,7 +306,7 @@ export const configSchema = z.object({
   unstickEscalationOwner: z.string().min(1).optional(),
   // The name issue bodies give the epic tracker in `<label> #N` references (the
   // `## References` convention). When an issue closes in production, each epic it
-  // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised.
+  // names raises `epic-ready-to-close` to the EM. Unset = no epic is read or raised. With `epicRepo` also set, an approved epic there with no child raises `epic-decompose` (docs/em-coordination.md §3).
   epicRefLabel: z.string().min(1).optional(),
   // The repo the epics `epicRefLabel` names live in (`owner/name`). An epic closed there is never asked about:
   // the epic-close ask goes only for an epic still open. Unset = open or closed is not checked.
