@@ -48,6 +48,7 @@ export const UNSTICK_KINDS = [
   "epic-ready-to-close",
   "dependency-batch-loop",
   "unlinked-fix",
+  "epic-decompose",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -125,7 +126,7 @@ export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): stri
 /** The kinds only an event can report: there is no persisted condition to read them from. */
 /** Immutable constant (not state): the kinds only an event can report. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
-  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop", "unlinked-fix",
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop", "unlinked-fix", "epic-decompose",
 ]);
 
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */
@@ -444,6 +445,39 @@ export function epicChildClosedAlert(githubRepo: string, issue: number, epic: nu
     kind: "epic-ready-to-close", subject: 0, dedupeKey: `${epic}-${issue}`,
     reason: `${githubRepo}#${issue} was closed as completed after its production verification; it belongs to ${label} #${epic}. Close the epic if this was its last open child.`,
   };
+}
+
+/** An epic the EM reports due for breakdown: open, `approved`, no child. `approvedAt` is its last `labeled approved` event. */
+export interface DecomposeCandidate { epic: number; approvedAt: string }
+
+/**
+ * An approved epic with no child waits on a breakdown nothing else starts (EM#387 sat 20 days). One alert per
+ * epic and approval: `approvedAt` is in the reason, so a re-approval is a new question and a standing one is never
+ * asked twice. The answer lands on the epic itself (bin/em.mjs `answerTarget`).
+ */
+export function epicDecomposeAlert(label: string, c: DecomposeCandidate): Alert {
+  return {
+    kind: "epic-decompose", subject: 0, dedupeKey: `${c.epic}-${c.approvedAt}`,
+    reason: `${label} #${c.epic} was approved at ${c.approvedAt} and has no child issue. Break it down with /decompose-epic, one feature at a time.`,
+  };
+}
+
+/** Whether an epic-decompose call is still open: pending, refused, or failed with attempts left. */
+/** Whether an epic-decompose call is still open: pending, refused, or failed with attempts left. */
+export function decomposeInFlight(table: Readonly<Record<string, UnstickEntry>>, maxAttempts: number = UNSTICK_MAX_ATTEMPTS): boolean {
+  return Object.values(table).some((e) => e.kind === "epic-decompose" && (e.status === "pending" || e.status === "refused" || (e.status === "failed" && e.attempts < maxAttempts)));
+}
+
+/**
+ * Which epic to hand the EM next: at most one at a time. Nothing while one is in flight; else the oldest approval that has no entry yet, whatever its status (an answered or
+ * escalated epic is never asked again for the same approval). `table` is the repo record's questions; `due` is oldest first.
+ */
+export function nextDecompose(due: readonly DecomposeCandidate[], table: Readonly<Record<string, UnstickEntry>>, label: string, maxAttempts: number = UNSTICK_MAX_ATTEMPTS): Alert | null {
+  if (decomposeInFlight(table, maxAttempts)) return null;
+  const mine = Object.values(table).filter((e) => e.kind === "epic-decompose");
+  const seen = new Set(mine.map((e) => e.tag));
+  const next = due.find((c) => !seen.has(`${c.epic}-${c.approvedAt}`));
+  return next ? epicDecomposeAlert(label, next) : null;
 }
 
 /**

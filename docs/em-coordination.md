@@ -157,7 +157,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -174,6 +174,14 @@ names an epic (`<epicRefLabel> #N` in its body; unset, this kind never fires; or
 It is repo-level (issue 0), once per epic and closed issue, and never holds the release. The EM runs its READY TO
 CLOSE check for the epic and closes it only if every child is done: closing is the hand-off to the PO, and nothing
 else makes it (foreman#151).
+`epic-decompose` fires for an open epic in `epicRepo` that carries `approved`, none of `approved-for-human`, `blocked`
+or `owner-hold`, and has no child. "No child" is the EM's own test (`epic-coverage.mjs`, `scripts/lib/epic-children.mjs`),
+never copied here: the Foreman asks `bin/em.mjs decompose-candidates --json` (a board scan, so at most every 30 minutes,
+and not at all while a call is open) and gets `[{epic, approvedAt}]`, oldest approval first. It raises the oldest epic that has
+no question yet, one at a time, repo-level (issue 0) on the first repo that runs stages; `dedupeKey` is the epic and the time of its
+last `labeled approved` event, so a re-approval is a new question and a standing one is never asked twice. The EM runs
+`/decompose-epic <N>` under its one-feature-at-a-time rule and answers on the epic: acted only if a child exists afterwards,
+else escalated. It replaces the Paperclip decompose-stage assignment (EM#2124 chat bridge looped todo/blocked; 12 epics overdue on 2026-11-17).
 `unlinked-fix` fires when a held dev verification #N holds the repo's queue, nothing corrects #N, and an approved
 issue's body mentions #N (§2). Its subject is that issue, once per issue and #N (`dedupeKey` #N), standing until the
 issue closes. The EM confirms it is the fix and adds the link (#N blocked by it, or it a sub-issue of #N), or rules it
