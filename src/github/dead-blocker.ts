@@ -43,7 +43,7 @@ export function dependentRepo(d: Dependent, own: string): string {
 /** `#N`, or `owner/repo#N` for a dependent in another repo. */
 export function dependentRef(d: Dependent, own: string): string {
   const repo = dependentRepo(d, own);
-  return repo === own ? `#${d.number}` : `${repo}#${d.number}`;
+  return repo.toLowerCase() === own.toLowerCase() ? `#${d.number}` : `${repo}#${d.number}`;
 }
 
 /**

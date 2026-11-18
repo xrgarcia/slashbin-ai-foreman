@@ -33,7 +33,7 @@ export function unmetBlockers(blockers: Blocker[], labels: LifecycleLabels): Blo
 /** `#108`, or `owner/repo#108` for a blocker in another repo. */
 export function blockerRef(b: Blocker, repo: string): string {
   const other = b.repository_url?.match(/repos\/([^/]+\/[^/]+)$/)?.[1];
-  return other && other !== repo ? `${other}#${b.number}` : `#${b.number}`;
+  return other && other.toLowerCase() !== repo.toLowerCase() ? `${other}#${b.number}` : `#${b.number}`;
 }
 
 /** Every issue recorded as blocking `issue`. Throws on a gh failure. */

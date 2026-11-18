@@ -7,15 +7,17 @@
 //   3. F's title says `follow-up to #N`: kept so everything already filed still works.
 // `mentions`: the issues of this repo F's body names (`#N`, `repo#N`, `owner/repo#N`). A mention never makes F a fix;
 // the core uses it only to say that F looks like one (unlinked-fix). A new signal is added here and nowhere else.
+// "This repo" is the configured name or the canonical one GitHub reports (a transferred repo), case-insensitively.
 
 import type { Relation } from "../adapters.js";
 import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { getOpenIssues } from "./cache.js";
-import { dependentRepo, dependentsOf } from "./dead-blocker.js";
+import { dependentsOf } from "./dead-blocker.js";
 import { ghAsync } from "./gh.js";
 import { blockersOf } from "./blockers.js";
 import { readIssueBody } from "./readiness.js";
+import { isOwnRow } from "./repo-identity.js";
 
 /** Every issue a title says it follows up ("— follow-up to #N"), in order. The one parser for that phrase. */
 export function titleCorrects(title: string): number[] {
@@ -50,7 +52,7 @@ async function parentOf(config: RepoConfig, n: number): Promise<number | null> {
   }
   const p = JSON.parse(raw || "null") as { number?: number; repository_url?: string } | null;
   if (typeof p?.number !== "number") return null;
-  if (p.repository_url && !p.repository_url.endsWith(`/repos/${config.githubRepo}`)) return null;
+  if (!(await isOwnRow(p.repository_url, config.githubRepo, config.repoPath))) return null;
   return p.number;
 }
 
@@ -63,14 +65,22 @@ export async function relationsOf(config: RepoConfig, issues: readonly number[],
   const titles = new Map((await getOpenIssues(config.githubRepo, config.repoPath, logger)).map((i) => [i.number, i.title]));
   const out = new Map<number, Relation>();
   for (const n of new Set(issues)) {
-    const blocks = (await dependentsOf(config.githubRepo, n, config.repoPath))
-      .filter((d) => dependentRepo(d, config.githubRepo) === config.githubRepo)
-      .map((d) => d.number);
+    const blocks: number[] = [];
+    for (const d of await dependentsOf(config.githubRepo, n, config.repoPath)) {
+      if (await isOwnRow(d.repository_url, config.githubRepo, config.repoPath)) blocks.push(d.number);
+    }
     const parent = await parentOf(config, n);
     const corrects = [...new Set([...blocks, ...(parent === null ? [] : [parent]), ...titleCorrects(titles.get(n) ?? "")])].filter((m) => m !== n);
     const mentions = bodyMentions(await readIssueBody(config, n), config.githubRepo).filter((m) => m !== n);
     out.set(n, { corrects, mentions });
   }
+  return out;
+}
+
+/** The numbers of the rows that are this repo's own. */
+async function keepOwn(rows: { number: number; repository_url?: string }[], config: RepoConfig): Promise<number[]> {
+  const out: number[] = [];
+  for (const r of rows) if (await isOwnRow(r.repository_url, config.githubRepo, config.repoPath)) out.push(r.number);
   return out;
 }
 
@@ -81,10 +91,9 @@ export async function relationsOf(config: RepoConfig, issues: readonly number[],
  * "no corrective" would be a guess.
  */
 export async function correctorsOf(config: RepoConfig, holder: number, logger: Logger): Promise<number[]> {
-  const own = (repoUrl: string | undefined): boolean => (repoUrl?.match(/repos\/([^/]+\/[^/]+)$/)?.[1] ?? config.githubRepo) === config.githubRepo;
-  const blockers = (await blockersOf(config.githubRepo, holder, config.repoPath)).filter((b) => own(b.repository_url)).map((b) => b.number);
-  const subs = (JSON.parse(await ghAsync(["api", `repos/${config.githubRepo}/issues/${holder}/sub_issues`], config.repoPath) || "[]") as { number: number; repository_url?: string }[])
-    .filter((i) => own(i.repository_url)).map((i) => i.number);
+  const own = (rows: { number: number; repository_url?: string }[]) => keepOwn(rows, config);
+  const blockers = await own(await blockersOf(config.githubRepo, holder, config.repoPath));
+  const subs = await own(JSON.parse(await ghAsync(["api", `repos/${config.githubRepo}/issues/${holder}/sub_issues`], config.repoPath) || "[]"));
   // Every state: the corrective that merged is usually closed by now (security_tests#436 ends "follow-up to #407").
   const found = JSON.parse(await ghAsync(["issue", "list", "--repo", config.githubRepo, "--state", "all", "--search", `"follow-up to #${holder}" in:title`, "--json", "number,title", "--limit", "100"], config.repoPath) || "[]") as { number: number; title: string }[];
   const titled = found.filter((i) => titleCorrects(i.title).includes(holder)).map((i) => i.number);
