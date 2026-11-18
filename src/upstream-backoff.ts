@@ -170,7 +170,8 @@ function schedule(u: Upstream, windowMs: number): void {
  * waits one minute and a bit, then probes resources.search; the hour-scale upstream window is for core and GraphQL.
  * 2026-11-18: search trips took the hour window and stopped every lane each hour after a restart.
  */
-const SEARCH_WINDOW_MS = 65_000;
+/** A search-bucket trip waits on the `search` group, never `upstream`'s. */
+const searchWindow = (consecutive: number): number => backoffDelay(consecutive, backoffSettings().search);
 const searchTrip = (u: Upstream): boolean => u === "github" && stateOf(u).trippedResource === "search";
 
 function enter(u: Upstream, reason: string, resetAtMs?: number): void {
@@ -182,7 +183,7 @@ function enter(u: Upstream, reason: string, resetAtMs?: number): void {
   s.state = "blocked";
   s.probeOut = false;
   s.resetAtMs = resetAtMs !== undefined && resetAtMs > now ? resetAtMs : undefined;
-  const windowMs = searchTrip(u) ? SEARCH_WINDOW_MS : windowFor(s.consecutive);
+  const windowMs = searchTrip(u) ? searchWindow(s.consecutive) : windowFor(s.consecutive);
   schedule(u, windowMs);
   notify(`Foreman backing off ${nameOf(u)} for ${formatDuration(windowMs)} — ${reason}`, "warn");
   // Not awaited: the state machine is synchronous and must not wait on an
@@ -199,7 +200,7 @@ function extend(u: Upstream, resetAtMs?: number): void {
   s.probeOut = false;
   const stated = resetAtMs !== undefined && resetAtMs > now ? resetAtMs : undefined;
   s.resetAtMs = u !== "github" ? stated : undefined;
-  const base = searchTrip(u) ? SEARCH_WINDOW_MS : windowFor(s.consecutive);
+  const base = searchTrip(u) ? searchWindow(s.consecutive) : windowFor(s.consecutive);
   const windowMs = Math.max(base, stated !== undefined ? stated - now : 0);
   schedule(u, windowMs);
   notify(

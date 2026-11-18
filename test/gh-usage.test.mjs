@@ -10,6 +10,13 @@ test("ghResource: api is core unless graphql; every other subcommand is graphql"
   assert.equal(ghResource(["api", "search/issues?q=x", "--jq", ".items"]), "search");
   assert.equal(ghResource(["api", "-X", "GET", "/search/issues?q=x"]), "search");
   assert.equal(ghResource(["api", "-X", "POST", "repos/a/b/issues", "-f", "title=search/x"]), "core");
+  // A flag's value is never the endpoint (Tech Lead S3 on PR #344).
+  assert.equal(ghResource(["api", "--jq", ".items", "search/issues?q=x"]), "search");
+  assert.equal(ghResource(["api", "-H", "Accept: application/vnd.github+json", "search/issues?q=x"]), "search");
+  assert.equal(ghResource(["api", "--hostname", "github.com", "search/issues?q=x"]), "search");
+  assert.equal(ghResource(["api", "--paginate", "search/issues?q=x"]), "search");
+  assert.equal(ghResource(["api", "--method=GET", "/search/issues?q=x"]), "search");
+  assert.equal(ghResource(["api", "--jq", "search/x", "repos/a/b"]), "core");
 });
 
 test("configureGhUsage: one summary per interval, counters reset on each emit", async () => {

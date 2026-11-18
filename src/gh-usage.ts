@@ -15,6 +15,19 @@ import type { Logger } from "./logger.js";
 
 export type GhResource = "graphql" | "core" | "search";
 
+/** `gh api` flags that take no value; every other flag consumes the next argument unless written `--flag=value`. */
+const GH_API_BOOLEAN_FLAGS = new Set(["--paginate", "--slurp", "-i", "--include", "--silent", "--verbose"]);
+
+/** The first positional argument of `gh api` — its endpoint — skipping flags and their values (`-H x`, `--jq .items`). */
+function apiEndpoint(rest: string[]): string | undefined {
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (!a.startsWith("-")) return a;
+    if (!a.includes("=") && !GH_API_BOOLEAN_FLAGS.has(a)) i++;
+  }
+  return undefined;
+}
+
 /**
  * `gh api <path>` is REST (core) unless the path is `graphql` or a `search/` endpoint; every other subcommand goes
  * over GraphQL. Search is its own bucket, 30 requests a minute (docs.github.com/en/rest/search/search#rate-limit).
@@ -23,7 +36,7 @@ export type GhResource = "graphql" | "core" | "search";
  */
 export function ghResource(args: string[]): GhResource {
   if (args[0] !== "api") return "graphql";
-  const path = args.slice(1).find((a) => !a.startsWith("-") && a !== "GET" && a !== "POST" && a !== "PATCH" && a !== "PUT" && a !== "DELETE");
+  const path = apiEndpoint(args.slice(1));
   if (path === "graphql") return "graphql";
   return path?.replace(/^\//, "").startsWith("search/") ? "search" : "core";
 }

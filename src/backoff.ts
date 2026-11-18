@@ -100,6 +100,10 @@ export const backoffConfigSchema = z.object({
   // Default 2 min rising to 1 h. The old top-level `upstreamBackoffBaseMs` /
   // `upstreamBackoffCapMs` still set `baseMs` / `capMs`.
   upstream: z.object(win(120_000, 3_600_000, 2)).prefault({}),
+  // GitHub's search bucket (30 requests a minute) refused work. Its own window,
+  // not `upstream`'s hour-scale one: the bucket refills each minute. Default 65 s
+  // rising to 5 min. 2026-11-18: a search trip windowed as core paused every lane for an hour.
+  search: z.object(win(65_000, 300_000, 2)).prefault({}),
   // A handoff the unstick stage made (the agent plugin said it was invoked) that
   // has not moved the issue. The handoff is called again once a window has passed
   // since the last call, longer each time, up to `maxRecalls` times; then the
