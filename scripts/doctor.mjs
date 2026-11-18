@@ -98,6 +98,14 @@ for (const [role, needs] of [["workSource", "select work from"], ["codeHost", "o
   else line("FAIL", role, `no installed plugin is "${id}", so the Foreman has nothing to ${needs} and refuses to start. Set "${role}" to "github" (the default).`);
 }
 
+// The daemon refuses to start (exit 78) when metrics are on and the company-record shipper config is blank.
+{
+  const { shipConfigRefusal } = await import(join(root, "dist", "credentials.js"));
+  const refusal = shipConfigRefusal(config);
+  if (refusal) line("FAIL", "shipper config", refusal);
+  else line("PASS", "shipper config", config.metrics?.enabled === true ? "receiver URL and both signing keys set" : "metrics off, nothing to ship");
+}
+
 // --- Tokens (set or unset; a value is never printed) ---
 
 if (process.env.FOREMAN_GITHUB_TOKEN) {

@@ -10,6 +10,7 @@
 
 import type { TokenProbe } from "./code-host.js";
 import { unstickStageReady, type AgentConfig } from "./config.js";
+import { BASE_URL_ENV, KEY_ENV, WATERMARK_KEY_ENV } from "./metrics/ship.js";
 
 /** The GitHub tokens this config needs: the Foreman's always, the EM's when the unstick stage runs. */
 export function requiredCredentials(config: AgentConfig): string[] {
@@ -66,4 +67,21 @@ export async function checkCredentials(
     };
   }
   return { refusal: null, unverified };
+}
+
+/**
+ * The daemon's company-record shipper config (EM#2104). Without it spawnShipAfterRun returns silently, so the
+ * daemon ran for days shipping nothing and every invoice week read partial (2026-11-17: the unit's Doppler key
+ * list never carried these). The daemon refuses to start without them; --once runs do not ship and are exempt.
+ */
+export function shipConfigRefusal(config: { metrics?: { enabled?: boolean } }, env: NodeJS.ProcessEnv = process.env): string | null {
+  // Only the metrics observer ships (spawnShipAfterRun runs from it); a disabled one needs none of this.
+  if (config.metrics?.enabled !== true) return null;
+  const missing = [BASE_URL_ENV, KEY_ENV, WATERMARK_KEY_ENV].filter((name) => !env[name]?.trim());
+  if (!missing.length) return null;
+  return (
+    `missing company-record shipper config: ${missing.join(", ")}. Without ${missing.length > 1 ? "them" : "it"} no ` +
+    `foreman-session event reaches the receiver and every invoice week reads partial. Add ` +
+    `${missing.length > 1 ? "them" : "it"} to the service unit's Doppler --keys list (prd).`
+  );
 }
