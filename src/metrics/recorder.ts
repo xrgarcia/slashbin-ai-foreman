@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { WAIT_REASONS, type WaitReason, type WorkEvent, type WorkItem } from "../adapters.js";
 import type { Logger } from "../logger.js";
 import type { MetricsRow } from "./report.js";
+import { isWorkedCard } from "./runs.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
@@ -160,7 +161,7 @@ export class MetricsRecorder {
       this.retain();
       this.db.exec("BEGIN");
       try {
-        this.apply(event);
+        this.apply(event, logger);
         this.db.exec("COMMIT");
       } catch (err) {
         try { this.db.exec("ROLLBACK"); } catch { /* none open */ }
@@ -171,7 +172,7 @@ export class MetricsRecorder {
     }
   }
 
-  private apply(event: WorkEvent): void {
+  private apply(event: WorkEvent, logger?: Logger): void {
     switch (event.kind) {
       case "transition":
         this.insert(event.item.repo, event.item.issueNumber, "transition", event.stage, {
@@ -220,7 +221,9 @@ export class MetricsRecorder {
         // One row per item, so a card's own history shows the session; a run with no items still writes one row (no
         // issue), so it never disappears from the ledger. The worked list rides on the first row only: the reader
         // unions a run's rows, and a copy per row would store N cards N times.
-        const worked = s.workedItems?.map(({ repo, issueNumber }) => ({ repo, issueNumber }));
+        const real = s.workedItems?.filter(isWorkedCard);
+        if (real && s.workedItems && real.length !== s.workedItems.length) logger?.warn(`metrics: dropped ${s.workedItems.length - real.length} worked item(s) with no issue number from run ${s.runId ?? "?"}`);
+        const worked = real?.map(({ repo, issueNumber }) => ({ repo, issueNumber }));
         const targets: ReadonlyArray<{ repo: string; issueNumber: number | null }> = s.items.length ? s.items : [{ repo: s.repo, issueNumber: null }];
         targets.forEach((item, i) => {
           this.insert(item.repo, item.issueNumber, "session", null, compact({

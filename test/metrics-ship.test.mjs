@@ -171,3 +171,63 @@ test("an outbox record cut off before its newline is completed or dropped, never
     assert.equal(s.reqs.filter((r) => r.source !== "watermark").map((r) => r.id).join(), "r1");
   } finally { await s.close(); }
 });
+
+test("a worked card with issue number 0 is never billed or shipped (widgets#0)", async () => {
+  const rows = [
+    row(1, "2026-11-09T10:00:00.000Z", { phase: "unstick", status: "started", runId: "z1" }),
+    row(2, "2026-11-09T10:10:00.000Z", { phase: "unstick", status: "finished", outcome: "completed", runId: "z1", workedItems: [{ repo: "o/widgets", issueNumber: 0 }, { repo: R, issueNumber: 7 }] }),
+  ];
+  const [r] = shippableRuns(rows, NOW);
+  assert.deepEqual(r.shares.map((s) => `${s.repo}#${s.issueNumber}`), [`${R}#7`]);
+  assert.equal(r.shares[0].ms, r.durationMs);
+  const { parseEmResult } = await import("../dist/plugins/em.js");
+  const out = parseEmResult(`EM unstick-result ${JSON.stringify({ verdict: "acted", readable: true, worked: [{ repo: "o/widgets", issueNumber: 0 }, { repo: R, issueNumber: 7 }] })}`);
+  assert.deepEqual(out.worked, [{ repo: R, issueNumber: 7 }]);
+});
+
+test("a run already queued with an issue-0 share ships scrubbed, the full duration on the real card", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const q = { runId: "z1", phase: "unstick", startedAt: "2026-11-09T10:00:00.000Z", endedAt: "2026-11-09T10:10:00.000Z", durationMs: 600000, outcome: "completed",
+      shares: [{ repo: "o/widgets", issueNumber: 0, ms: 300000 }, { repo: R, issueNumber: 7, ms: 300000 }] };
+    mkdirSync(shipPaths(dir).dir, { recursive: true });
+    writeFileSync(shipPaths(dir).outbox, JSON.stringify({ run: q }) + "\n");
+    assert.equal(await ship(opts(dir, [], s)), true);
+    const sent = s.reqs.find((r) => r.json.run);
+    assert.deepEqual(sent.json.run.shares, [{ repo: R, issueNumber: 7, ms: 600000 }]);
+  } finally { await s.close(); }
+});
+
+test("a queued failed run whose only share is issue 0 still ships, with no shares", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const q = { runId: "f1", phase: "unstick", startedAt: "2026-11-09T10:00:00.000Z", endedAt: "2026-11-09T10:10:00.000Z", durationMs: 600000, outcome: "failed",
+      shares: [{ repo: "o/widgets", issueNumber: 0, ms: 600000 }] };
+    mkdirSync(shipPaths(dir).dir, { recursive: true });
+    writeFileSync(shipPaths(dir).outbox, JSON.stringify({ run: q }) + "\n");
+    assert.equal(await ship(opts(dir, [], s)), true);
+    const sent = s.reqs.find((r) => r.json.run);
+    assert.equal(sent.json.run.runId, "f1");
+    assert.deepEqual(sent.json.run.shares, []);
+  } finally { await s.close(); }
+});
+
+test("a past day acknowledged short of its end is re-sent after the cursor has moved on", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const rows = [...run(1, "2026-11-08T10:00:00.000Z", "2026-11-08T11:00:00.000Z")];
+    assert.equal(await ship(opts(dir, rows, s)), true);
+    const st = state(dir);
+    // a day acked short: 11-09 acknowledged at 11-10T03:35Z, before the Chicago day ended at 06:00Z
+    writeFileSync(shipPaths(dir).state, JSON.stringify({ ...st, watermark_acked_period_end: "2026-11-09", day_acks: { ...st.day_acks, "2026-11-09": "2026-11-10T03:35:00.000Z" } }));
+    s.reqs.length = 0;
+    assert.equal(await ship(opts(dir, rows, s)), true);
+    const wm = s.reqs.find((r) => r.source === "watermark");
+    assert.equal(wm.json.period_start, "2026-11-09");
+    assert.equal(wm.json.period_end, "2026-11-09");
+    assert.ok(Date.parse(wm.json.acknowledged_through) >= Date.parse("2026-11-10T06:00:00.000Z"));
+    s.reqs.length = 0;
+    await ship(opts(dir, rows, s));
+    assert.equal(s.reqs.filter((r) => r.source === "watermark").length, 0, "full-day ack: nothing re-sent");
+  } finally { await s.close(); }
+});
