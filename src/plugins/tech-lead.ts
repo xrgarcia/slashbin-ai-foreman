@@ -1,6 +1,6 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
+import { pickEnv, shipperEnvNames, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { SUMMARY_DISPLAY_LIMIT, extractStreamResult, type ReviewResult, type ReviewTrailer } from "../session/protocol.js";
 import { readResultV1, waitUntilSlug, type RoleResult } from "../contract/result-v1.js";
 import { recordContractPath } from "../contract/usage.js";
@@ -29,6 +29,8 @@ export function buildTechLeadEnv(agentConfig: AgentConfig, repoConfig: RepoConfi
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("TECH_LEAD_")), env);
   pickEnv(["TECHLEAD_GITHUB_KEY"], env);
+  // Company-record shipper (EM#2104): the exact names the Tech Lead's detached drain reads, nothing wider.
+  pickEnv(shipperEnvNames("tech-lead-review"), env);
   // The configured label names, exactly as every Claude session gets them
   // (buildSessionEnv), so the Tech Lead never writes a hardcoded name.
   setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);

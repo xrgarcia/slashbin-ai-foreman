@@ -1,6 +1,6 @@
 import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { pickEnv, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
+import { pickEnv, shipperEnvNames, setLabelEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { SUMMARY_DISPLAY_LIMIT, extractStreamResult, type ReviewTrailer } from "../session/protocol.js";
 import { readResultV1, waitUntilSlug, type RoleResult } from "../contract/result-v1.js";
 import { recordContractPath } from "../contract/usage.js";
@@ -25,6 +25,8 @@ export function buildSreEnv(agentConfig: AgentConfig, repoConfig: RepoConfig): R
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
   setLabelEnv(env, repoConfig.triggerLabel, repoConfig.lifecycleLabels, repoConfig.github);
   pickEnv(Object.keys(process.env).filter((n) => n.startsWith("SRE_")), env);
+  // Company-record shipper (EM#2104): the exact names the SRE's detached drain reads, nothing wider.
+  pickEnv(shipperEnvNames("sre-verification"), env);
   if (agentConfig.emRepoPath && !env.SRE_EM_REPO) env.SRE_EM_REPO = agentConfig.emRepoPath;
   setContractReaderEnv(env, agentConfig.emRepoPath);
   return env;

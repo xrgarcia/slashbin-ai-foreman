@@ -39,6 +39,10 @@ Environment=AI_AGENT_EM_REPO_PATH=/path/to/slashbin-engineering-manager
 
 # The daemon refuses to run without its own GitHub token (there is no fallback to
 # gh's login); supply it through your secret manager (the doppler wrapper above).
+#   Company-record shipping (EM#2104): the outer doppler run must also inject the receiver URL,
+#   SLASHBIN_EVENTS_SIGNING_KEY__WATERMARK, and one signing key per role shipped from a child:
+#   __FOREMAN_SESSION (the daemon), __TECH_LEAD_REVIEW, __SRE_VERIFICATION. The Tech Lead and SRE
+#   builders pass only those names on to their child.
 #   FOREMAN_GITHUB_TOKEN   always
 #   TECHLEAD_GITHUB_KEY    review on, or sync PRs merged automatically
 #   SRE_GITHUB_KEY         srePath set

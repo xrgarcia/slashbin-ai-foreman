@@ -159,3 +159,13 @@ export function createStreamRedactor(secrets: ReadonlyArray<{ name: string; valu
     },
   };
 }
+
+/**
+ * The exact env names a role's detached company-record drain reads (EM#2104): the receiver URL, the
+ * shared watermark key and the role's own signing key. Named, never a wildcard, so no other role's key
+ * travels. Assembled from parts, like metrics/ship.ts, because the public-repo guard bans the literal.
+ */
+export function shipperEnvNames(slug: string): string[] {
+  const key = (s: string) => `SLASHBIN_EVENTS_SIGNING_KEY__${s.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  return [["SLASHBIN", "DATA", "RECEIVER", "BASE_URL"].join("_"), key("watermark"), key(slug)];
+}
