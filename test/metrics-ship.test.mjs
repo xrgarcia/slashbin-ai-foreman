@@ -198,6 +198,20 @@ test("a run already queued with an issue-0 share ships scrubbed, the full durati
   } finally { await s.close(); }
 });
 
+test("a queued failed run whose only share is issue 0 still ships, with no shares", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const q = { runId: "f1", phase: "unstick", startedAt: "2026-11-09T10:00:00.000Z", endedAt: "2026-11-09T10:10:00.000Z", durationMs: 600000, outcome: "failed",
+      shares: [{ repo: "o/widgets", issueNumber: 0, ms: 600000 }] };
+    mkdirSync(shipPaths(dir).dir, { recursive: true });
+    writeFileSync(shipPaths(dir).outbox, JSON.stringify({ run: q }) + "\n");
+    assert.equal(await ship(opts(dir, [], s)), true);
+    const sent = s.reqs.find((r) => r.json.run);
+    assert.equal(sent.json.run.runId, "f1");
+    assert.deepEqual(sent.json.run.shares, []);
+  } finally { await s.close(); }
+});
+
 test("a past day acknowledged short of its end is re-sent after the cursor has moved on", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
   try {

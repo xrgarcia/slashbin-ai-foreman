@@ -81,12 +81,14 @@ export const isWorkedCard = (c: { repo?: unknown; issueNumber?: unknown } | null
 
 /**
  * A run as it ships: shares on no real card (issue 0) dropped and the duration re-split across the rest. A run
- * already persisted in the outbox before the rule existed goes through here too. Null when nothing is left to bill.
+ * already persisted in the outbox before the rule existed goes through here too. Null when a completed run has nothing left to bill.
  */
 export function scrubRun(run: RunRecord): RunRecord | null {
   if (run.shares.every(isWorkedCard)) return run;
   const cards = run.shares.filter(isWorkedCard).map(({ repo, issueNumber }) => ({ repo, issueNumber }));
-  return cards.length ? { ...run, shares: splitDuration(run.durationMs, cards) } : null;
+  // A failed run is never billed and ships with no shares; a completed one with no real card is not a run to bill.
+  if (!cards.length) return run.outcome === "failed" ? { ...run, shares: [] } : null;
+  return { ...run, shares: splitDuration(run.durationMs, cards) };
 }
 
 /** The cards a run's end row lists, malformed entries dropped. */
