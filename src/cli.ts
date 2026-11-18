@@ -9,7 +9,7 @@ import { startDaemon } from "./daemon.js";
 import { runCycle } from "./orchestrator.js";
 import { claimPidFile, releasePidFile } from "./pidfile.js";
 import { buildRefusal } from "./build-info.js";
-import { checkCredentials } from "./credentials.js";
+import { checkCredentials, shipConfigRefusal } from "./credentials.js";
 import { registerBuiltinPlugins, registerExternalPlugins } from "./plugins/index.js";
 import { exitAfterFlush } from "./exit-after-flush.js";
 import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlugins } from "./plugins/registry.js";
@@ -190,6 +190,11 @@ async function main(rt: ForemanRuntime): Promise<void> {
   }
   if (creds.unverified.length) {
     logger.warn(`Could not reach GitHub to check ${creds.unverified.join(", ")}; starting anyway.`);
+  }
+  const noShip = once ? null : shipConfigRefusal();
+  if (noShip) {
+    console.error(`Refusing to start: ${noShip}`);
+    process.exit(78);
   }
 
   if (once) {
