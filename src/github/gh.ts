@@ -155,6 +155,7 @@ const PROBE_GRAPHQL = ["api", "graphql", "-f", "query={rateLimit{remaining reset
  * NOT via `runGhAsync` (which refuses while blocked) and not counted as usage.
  *  - graphql: `gh api graphql` rateLimit. Clears only on remaining > 0; on 0
  *    its resetAt bounds the next window. A refused probe lands in catch.
+ *  - search: `gh api rate_limit` resources.search (its own 30-a-minute bucket).
  *  - core (or unknown): `gh api rate_limit` resources.core, as before.
  * No stored token (ambient gh auth): probe with the ambient auth.
  * A probe that itself fails never clears; it extends on the computed window.
@@ -172,9 +173,11 @@ export async function probeGitHub(trip: { token?: string; resource?: GhResource 
       const parsed = typeof rl?.resetAt === "string" ? Date.parse(rl.resetAt) : NaN;
       return { clear: false, resetAtMs: Number.isFinite(parsed) ? parsed : undefined };
     }
-    const core = JSON.parse(await run(["api", "rate_limit"]))?.resources?.core as RateResource | undefined;
-    if (typeof core?.remaining === "number" && core.remaining > 0) return { clear: true };
-    return { clear: false, resetAtMs: typeof core?.reset === "number" ? core.reset * 1000 : undefined };
+    // search and core are separate REST buckets; probe the one that tripped (a search trip probed as core cleared blind).
+    const bucket = trip.resource === "search" ? "search" : "core";
+    const rest = JSON.parse(await run(["api", "rate_limit"]))?.resources?.[bucket] as RateResource | undefined;
+    if (typeof rest?.remaining === "number" && rest.remaining > 0) return { clear: true };
+    return { clear: false, resetAtMs: typeof rest?.reset === "number" ? rest.reset * 1000 : undefined };
   } catch (err) {
     console.warn(`[upstream] GitHub rate_limit probe failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
     return { clear: false };

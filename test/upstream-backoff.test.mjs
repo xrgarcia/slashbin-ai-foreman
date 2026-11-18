@@ -120,6 +120,32 @@ test("the entry window renders as 2 minutes at the default base", () => {
   assert.match(r.notes[0].t, /^Foreman backing off GitHub for 2 minutes — /);
 });
 
+test("a search-bucket trip waits about a minute, not the hour-scale core window (2026-11-18)", () => {
+  const r = runCase(`
+    writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});
+    try { await G.ghAsync(["api", "search/issues?q=x", "--jq", ".items[]"], "."); } catch {}
+    console.log(JSON.stringify({ notes, blocked: B.isUpstreamBlocked("github") }));
+  `, { baseMs: 3_600_000, capMs: 3_600_000 });
+  assert.equal(r.blocked, true);
+  assert.match(r.notes[0].t, /^Foreman backing off GitHub for 1 minute — /);
+});
+
+test("a search trip is probed on resources.search: spare core never clears it (2026-11-18)", () => {
+  const r = runCase(`
+    const P = await import(${JSON.stringify(url("github/gh.js"))});
+    const reset = nowSec() + 40;
+    writeFileSync(F.rate, JSON.stringify({ resources: { core: { remaining: 4800, reset }, search: { remaining: 0, reset } } }));
+    const spent = await P.probeGitHub({ resource: "search" });
+    const core = await P.probeGitHub({ resource: "core" });
+    writeFileSync(F.rate, JSON.stringify({ resources: { core: { remaining: 4800, reset }, search: { remaining: 30, reset } } }));
+    const refilled = await P.probeGitHub({ resource: "search" });
+    console.log(JSON.stringify({ spent, core, refilled, reset }));
+  `);
+  assert.deepEqual(r.spent, { clear: false, resetAtMs: r.reset * 1000 });
+  assert.deepEqual(r.core, { clear: true });
+  assert.deepEqual(r.refilled, { clear: true });
+});
+
 test("a failed probe extends with a doubled window; a passing probe clears and resumes", () => {
   const r = runCase(`
     writeFileSync(F.err, ${JSON.stringify(LIMIT_ERR)});

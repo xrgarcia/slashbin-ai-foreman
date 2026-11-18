@@ -7,6 +7,9 @@ test("ghResource: api is core unless graphql; every other subcommand is graphql"
   assert.equal(ghResource(["pr", "view", "1"]), "graphql");
   assert.equal(ghResource(["api", "repos/a/b/compare/x...y"]), "core");
   assert.equal(ghResource(["api", "graphql", "-f", "query={}"]), "graphql");
+  assert.equal(ghResource(["api", "search/issues?q=x", "--jq", ".items"]), "search");
+  assert.equal(ghResource(["api", "-X", "GET", "/search/issues?q=x"]), "search");
+  assert.equal(ghResource(["api", "-X", "POST", "repos/a/b/issues", "-f", "title=search/x"]), "core");
 });
 
 test("configureGhUsage: one summary per interval, counters reset on each emit", async () => {

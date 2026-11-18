@@ -65,6 +65,9 @@ interface CommentRow { id: number; login?: string; body: string }
 // Keep the marker test inside jq so a thread of unrelated comments costs no output.
 const COMMENT_FILTER = `.[] | select(.body | startswith("${RECORD_MARKER}")) | {id, login: .user.login, body}`;
 
+/** 2.5 s apart keeps anchor searches at 24 a minute, under search's 30. */
+const SEARCH_SPACING_MS = 2_500;
+
 export class GitHubRecordStore {
   private readonly cache = new Map<string, Entry>();
   /** The anchor issue of each repo's record, once found: null = looked for, none exists yet. */
@@ -76,7 +79,20 @@ export class GitHubRecordStore {
    */
   private readonly queues = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly io: RecordStoreIo) {}
+  /**
+   * Anchor searches go one at a time, SEARCH_SPACING_MS apart: search is GitHub's 30-a-minute bucket, and an empty
+   * anchor cache (every restart) looks up every repo at once. 2026-11-18: ~31 in a burst tripped it each hour.
+   */
+  private searchGate: Promise<void> = Promise.resolve();
+
+  constructor(private readonly io: RecordStoreIo, private readonly searchSpacingMs = SEARCH_SPACING_MS) {}
+
+  private paced<T>(call: () => T | Promise<T>): Promise<T> {
+    const turn = this.searchGate.then(call);
+    const spacing = this.searchSpacingMs;
+    this.searchGate = turn.then(() => undefined, () => undefined).then(() => (spacing > 0 ? new Promise<void>((r) => setTimeout(r, spacing)) : undefined));
+    return turn;
+  }
 
   /** Run `fn` after every earlier operation on `id` settles. */
   private serial<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -174,7 +190,7 @@ export class GitHubRecordStore {
     if (!self) throw new Error("the Foreman's login could not be resolved");
     if (known === undefined) {
       const q = encodeURIComponent(`repo:${repo} is:issue author:${self} in:title "${REPO_RECORD_TITLE}"`);
-      const out = await this.io.run(["api", `search/issues?q=${q}&per_page=30&sort=created&order=asc`, "--jq", `.items[] | select(.title == "${REPO_RECORD_TITLE}") | .number`], cwd);
+      const out = await this.paced(() => this.io.run(["api", `search/issues?q=${q}&per_page=30&sort=created&order=asc`, "--jq", `.items[] | select(.title == "${REPO_RECORD_TITLE}") | .number`], cwd));
       const first = out.split("\n").map((l) => Number(l.trim())).find((n) => Number.isFinite(n) && n > 0);
       this.anchors.set(repo, first ?? null);
       if (first !== undefined) return first;
