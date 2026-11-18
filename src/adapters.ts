@@ -388,6 +388,11 @@ export interface SessionEvent {
   /** On an end: the cards the run actually worked or verified; `[]` when none. Not `worked`, which is implement's issue numbers. */
   readonly workedItems?: ReadonlyArray<WorkItem>;
   /**
+   * Issue numbers whose card the session must not place: an escalated tooling hold's card is Blocked, and its
+   * re-ask is a run for the ledger but not a stage the card moves to (slashbin-ai-foreman#350). Absent = none.
+   */
+  readonly cardHeld?: ReadonlyArray<number>;
+  /**
    * When the event happened, ISO UTC. Stamped by the producer, so a run's duration is not the observer
    * queue's delay; the recorder falls back to its own clock when absent.
    */

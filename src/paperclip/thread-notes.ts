@@ -90,6 +90,8 @@ export class ThreadNotes {
     });
     let leaseChanged = false;
     for (const item of event.items) {
+      // A card the session must not place (an escalated tooling hold, Blocked until a verdict): no move, no note.
+      if (event.cardHeld?.includes(item.issueNumber)) continue;
       const id = await this.index.resolve(item, false);
       if (!id) continue;
       if (phase === "qa") {

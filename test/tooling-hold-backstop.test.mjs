@@ -156,13 +156,13 @@ test("exactly one blocked event naming the slug, the PR and the age", async () =
 /**
  * Issue 1's Paperclip card as the mirror places it (src/paperclip/thread-notes.ts, placement.ts): a session start
  * moves the card to its session stage and clears its block; a `blocked` during a session is restored when it ends,
- * else the end returns the card to the merged fallback; `blocked` / `unblocked` outside a session set and clear it.
+ * else the end returns the card to the merged fallback; `blocked` / `unblocked` outside a session set and clear it. A session that names the card in `cardHeld` does not touch it.
  */
 function cardOf(events) {
   const card = { stage: "in_review", blocked: null };
   let held = null;
   for (const e of events) {
-    if (e.kind === "session" && e.session.items.some((i) => i.issueNumber === 1)) {
+    if (e.kind === "session" && e.session.items.some((i) => i.issueNumber === 1) && !e.session.cardHeld?.includes(1)) {
       if (e.session.status === "started") { held = { restore: null }; card.stage = "in_progress"; card.blocked = null; }
       else if (held) { card.stage = held.restore ?? "in_review"; held = null; }
     } else if (e.kind === "blocked" && e.item.issueNumber === 1) {
@@ -191,8 +191,9 @@ test("after escalation, deferred re-asks leave the Paperclip card Blocked until 
     await drainObservers();
     assert.deepEqual(h.asked, [11, 11, 11], "the escalated PR is still re-asked");
     const after = seen.slice(escalatedAt);
-    assert.ok(!after.some((e) => e.kind === "session" && e.session.items.some((i) => i.issueNumber === 1)),
-      "a deferred re-ask of an escalated hold is not a session on its card");
+    const reasks = after.filter((e) => e.kind === "session" && e.session.items.some((i) => i.issueNumber === 1));
+    assert.equal(reasks.length, 4, "each re-ask is still a run, started and ended, for the metrics ledger");
+    assert.ok(reasks.every((e) => e.session.cardHeld?.includes(1)), "but its card is held where it is");
     const card = cardOf(seen);
     assert.equal(card.stage, "blocked", "still Blocked after the re-asks");
     assert.match(card.blocked, /evidence-check-failed/);
