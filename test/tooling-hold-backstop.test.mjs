@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerPlugin, startPlugins, setCodeHost, resetRegistryForTests } from "../dist/plugins/registry.js";
-import { registerWorkSource } from "../dist/work-source.js";
+import { registerWorkSource, addObserver, drainObservers } from "../dist/work-source.js";
 import { InMemoryRecordStore } from "../dist/record-store.js";
 import { ForemanRuntime } from "../dist/runtime.js";
 import { DEFAULT_BACKOFF } from "../dist/backoff.js";
@@ -150,6 +150,64 @@ test("exactly one blocked event naming the slug, the PR and the age", async () =
     assert.match(b[0].reason, /for 3 h/);
     assert.match(b[0].reason, /past the 2 h bound/);
     assert.ok(!h.log.some((e) => e.kind === "verifyWaiting"), "an escalated card is not moved back to waiting");
+  } finally { done(); }
+});
+
+/**
+ * Issue 1's Paperclip card as the mirror places it (src/paperclip/thread-notes.ts, placement.ts): a session start
+ * moves the card to its session stage and clears its block; a `blocked` during a session is restored when it ends,
+ * else the end returns the card to the merged fallback; `blocked` / `unblocked` outside a session set and clear it.
+ */
+function cardOf(events) {
+  const card = { stage: "in_review", blocked: null };
+  let held = null;
+  for (const e of events) {
+    if (e.kind === "session" && e.session.items.some((i) => i.issueNumber === 1)) {
+      if (e.session.status === "started") { held = { restore: null }; card.stage = "in_progress"; card.blocked = null; }
+      else if (held) { card.stage = held.restore ?? "in_review"; held = null; }
+    } else if (e.kind === "blocked" && e.item.issueNumber === 1) {
+      card.blocked = e.reason;
+      if (held) held.restore = "blocked"; else card.stage = "blocked";
+    } else if (e.kind === "unblocked" && e.item.issueNumber === 1) {
+      card.blocked = null;
+      if (held) held.restore = null; else card.stage = "in_review";
+    }
+  }
+  return card;
+}
+
+test("after escalation, deferred re-asks leave the Paperclip card Blocked until a verdict releases it", async () => {
+  const h = await harness();
+  const seen = [];
+  addObserver({ onEvent: async (e) => { seen.push(e); } });
+  try {
+    await seed(h.rt, REPO, 1, { toolingHeld: { reason: "evidence-check-failed", prNumber: 11, firstHeldAt: ago(3 * HOUR) } });
+    await verify(h); // escalates
+    await drainObservers();
+    assert.equal(cardOf(seen).stage, "blocked", "the escalation blocks the card");
+    const escalatedAt = seen.length;
+    await verify(h);
+    await verify(h); // two more deferred re-asks of the escalated PR
+    await drainObservers();
+    assert.deepEqual(h.asked, [11, 11, 11], "the escalated PR is still re-asked");
+    const after = seen.slice(escalatedAt);
+    assert.ok(!after.some((e) => e.kind === "session" && e.session.items.some((i) => i.issueNumber === 1)),
+      "a deferred re-ask of an escalated hold is not a session on its card");
+    const card = cardOf(seen);
+    assert.equal(card.stage, "blocked", "still Blocked after the re-asks");
+    assert.match(card.blocked, /evidence-check-failed/);
+    assert.match(card.blocked, /for 3 h/);
+    assert.equal(blocked(h).length, 1, "exactly one escalation notification");
+    const rec = await recordOf(h.rt, REPO, 1);
+    assert.ok(rec.toolingHeld.escalatedAt, "the hold is kept");
+    assert.equal(rec.verifyHeld, undefined, "and uncharged");
+    assert.equal(await build(h), "built", "later work proceeds");
+    h.merged = [{ issueNumber: 1, prNumber: 11 }];
+    h.verdict = PASS;
+    await verify(h);
+    await drainObservers();
+    assert.equal(cardOf(seen).blocked, null, "a pass verdict releases the card");
+    assert.equal((await recordOf(h.rt, REPO, 1)).toolingHeld, undefined);
   } finally { done(); }
 });
 

@@ -528,7 +528,14 @@ export async function tryVerify(
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
-  const session: Omit<SessionEvent, "status" | "at"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE", runId: newRunId() };
+  // An escalated tooling hold is Blocked on the board (slashbin-ai-foreman#350): its re-ask is not a session on that
+  // card, since a session start would move it to in progress and clear the block before any verdict. Only a
+  // verdict releases it (`unblocked`, then the pass or wait moves it); a charge re-blocks it with its own reason.
+  const sessionItems = items.filter((_, i) => {
+    const t = tooling[target.issueNumbers[i]];
+    return !(t?.escalatedAt && t.prNumber === target.prNumber);
+  });
+  const session: Omit<SessionEvent, "status" | "at"> = { phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items: sessionItems, reviewer: "SRE", runId: newRunId() };
   let scheduled: { resumeAt: string; waitReason: string } | undefined;
   let ended: SessionEnd = { ...NO_RESULT, detail: "the verification ended without a result" };
   const issues = target.issueNumbers.map((n) => `#${n}`).join(", ");
@@ -536,7 +543,7 @@ export async function tryVerify(
   events?.push({ message: `Verifying ${repoConfig.githubRepo} PR #${target.prNumber} in dev (issues: ${issues})`, level: "info" });
 
   try {
-    await emit(rt, { kind: "session", session: { ...session, status: "started", at: stamp() } }, null, vlog);
+    if (sessionItems.length > 0) await emit(rt, { kind: "session", session: { ...session, status: "started", at: stamp() } }, null, vlog);
     const forceKey = `${repoName}#${target.prNumber}`;
     const sre = await verifier.verifyDev(repoConfig, config, target.prNumber, vlog, runAbort.signal, transcriptPath, rt.memory.verifyForce.has(forceKey))
       .catch((e: unknown) => ({ kind: "error" as const, error: `SRE launch threw: ${String(e)}` }));
@@ -697,7 +704,7 @@ export async function tryVerify(
     return false;
   } finally {
     activeRuns.delete(runAbort);
-    await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: items, ...(scheduled ?? {}) } }, null, vlog);
+    if (sessionItems.length > 0) await emit(rt, { kind: "session", session: { ...session, ...ended, at: stamp(), workedItems: sessionItems, ...(scheduled ?? {}) } }, null, vlog);
   }
 }
 
