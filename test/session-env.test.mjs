@@ -177,3 +177,14 @@ test("Tech Lead and SRE envs carry the receiver URL, the watermark key and only 
   for (const n of Object.keys(set)) delete process.env[n];
   assert.equal(RECV in buildSreEnv(...args), false, "absent when unset");
 });
+
+test("secretValues redacts the forwarded shipper signing keys with sessionEnv empty (EM#2104)", () => {
+  const names = ["watermark", "foreman-session", "tech-lead-review", "sre-verification"].map((r) => shipperEnvNames(r)[2]);
+  names.forEach((n, i) => { process.env[n] = `dummy-signing-key-${i}-value`; });
+  const got = secretValues([]).map((s) => s.name);
+  for (const n of names) assert.ok(got.includes(n), n);
+  const red = createStreamRedactor(secretValues([]));
+  const out = red.push("x dummy-signing-key-2-va") + red.push("lue y") + red.flush();
+  assert.equal(out.includes("dummy-signing-key-2"), false);
+  for (const n of names) delete process.env[n];
+});
