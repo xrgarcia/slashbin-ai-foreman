@@ -514,6 +514,7 @@ which only means it retries sooner.
 | `releaseRetry` | 5 min, 10 min, 20 min, 40 min, 1.3 h, 2 h | none |
 | `prodVerifyRetry` | 10 min, 20 min, 40 min, 1.3 h, 2.7 h, 5.3 h, 6 h | none |
 | `upstream` | 2 min, 4 min, 8 min, 16 min, 32 min, 1 h | none |
+| `search` | 1 min, 2 min, 4 min, 5 min | none |
 | `handoff` | 10 min, 30 min, 1.5 h, 4.5 h, 13.5 h, 24 h | `maxRecalls` 3 |
 | `gh` | 1 s, 3 s | `maxAttempts` 3 |
 | `paperclip` | 1 s, 1 s | `maxAttempts` 3 |
@@ -634,6 +635,16 @@ GitHub's rate limit or the runner's limit (see `runner`) refused work. The whole
 | `baseMs` | `120000` (2 min) | `AI_AGENT_BACKOFF_UPSTREAM_BASE_MS` |
 | `capMs` | `3600000` (1 h) | `AI_AGENT_BACKOFF_UPSTREAM_CAP_MS` |
 | `factor` | `2` | `AI_AGENT_BACKOFF_UPSTREAM_FACTOR` |
+
+### `backoff.search`
+
+GitHub's search bucket (30 requests a minute) refused work. Its own window, not `upstream`'s hour-scale one: the bucket refills each minute. Default 65 s rising to 5 min. 2026-11-18: a search trip windowed as core paused every lane for an hour.
+
+| Field | Default | Env |
+|---|---|---|
+| `baseMs` | `65000` (1 min) | `AI_AGENT_BACKOFF_SEARCH_BASE_MS` |
+| `capMs` | `300000` (5 min) | `AI_AGENT_BACKOFF_SEARCH_CAP_MS` |
+| `factor` | `2` | `AI_AGENT_BACKOFF_SEARCH_FACTOR` |
 
 ### `backoff.handoff`
 
