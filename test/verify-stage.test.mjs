@@ -115,10 +115,12 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged
   const defer = src.slice(d, src.indexOf("verifyDefer.clear(repoName)", d));
   const wait = src.slice(src.indexOf('if (plan.kind === "wait")'), src.indexOf("let attempts = 0;"));
   const charge = src.slice(src.indexOf("let attempts = 0;"));
-  for (const [name, b] of [["defer", defer], ["wait", wait]]) {
-    assert.match(b, /kind: "verifyWaiting"/, name);
-    assert.doesNotMatch(b, /kind: "blocked"/, name);
-  }
+  for (const [name, b] of [["defer", defer], ["wait", wait]]) assert.match(b, /kind: "verifyWaiting"/, name);
+  assert.doesNotMatch(wait, /kind: "blocked"/);
+  // A tooling hold blocks only when it escalates past toolingHoldLimitMs (slashbin-ai-foreman#350), once, uncharged.
+  assert.equal(defer.match(/kind: "blocked"/g)?.length, 1, "the defer's one blocked is the escalation");
+  assert.match(defer, /for \(const n of escalating[^\n]*\) \{\n\s*const blockedWhy = toolingHoldEscalation\(/);
+  assert.match(defer, /kind: "blocked", item: itemOf\(repoConfig, n\), reason: blockedWhy/);
   assert.match(charge, /kind: "blocked"/);
 });
 

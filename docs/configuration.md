@@ -180,7 +180,13 @@ How many approved issues one build claims. The Foreman picks them before the ses
 
 Type: boolean · Default: `true` · Env: `AI_AGENT_BUILD_WAITS_FOR_DEV_VERIFY`
 
-Hold a repo's next build until its last merge has passed dev verification, not just merged. One issue is in flight per repo, from build to verified on dev, so a fix the verification calls for lands before the next issue is built on top. A merge whose verification waits on a person (attempts spent) or on a named time frees the repo. No effect without an SRE (srePath). Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+Hold a repo's next build until its last merge has passed dev verification, not just merged. One issue is in flight per repo, from build to verified on dev, so a fix the verification calls for lands before the next issue is built on top. A merge whose verification waits on a person (attempts spent), on a named time, or on a tooling hold past toolingHoldLimitMs frees the repo. No effect without an SRE (srePath). Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
+
+### `toolingHoldLimitMs`
+
+Type: integer · Default: `7200000` (2 h) · Env: `AI_AGENT_TOOLING_HOLD_LIMIT_MS`
+
+How long a merge's dev verification may stay on a tooling hold (the verifier or its checker could not run: a TOOLING_HOLDS slug, deferred and never charged) before it stops holding the repo. Measured from the first such hold on the PR, which is recorded, so a restart keeps the age. Past it the issue is blocked once with the slug, PR and age; it no longer holds the next build, other merges are verified before it, and it is still re-asked, uncharged, until the verifier returns a verdict.
 
 ### `backoff`
 
