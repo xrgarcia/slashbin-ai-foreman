@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SESSION_ENV_ESSENTIALS, buildSessionEnv, secretValues, createStreamRedactor } from "../dist/session/env.js";
+import { SESSION_ENV_ESSENTIALS, buildSessionEnv, secretValues, createStreamRedactor, shipperEnvNames } from "../dist/session/env.js";
+const RECV = shipperEnvNames("x")[0];
 import { redactAll } from "../dist/redact.js";
 import { buildTechLeadEnv } from "../dist/plugins/tech-lead.js";
 import { buildSreEnv } from "../dist/plugins/sre.js";
@@ -154,4 +155,36 @@ test("createStreamRedactor: no secrets passes chunks through and holds nothing",
   const r = createStreamRedactor([]);
   assert.equal(r.push("abc"), "abc");
   assert.equal(r.flush(), "");
+});
+
+test("Tech Lead and SRE envs carry the receiver URL, the watermark key and only their own shipper key (EM#2104)", () => {
+  const set = { [RECV]: "https://r.example", SLASHBIN_EVENTS_SIGNING_KEY__WATERMARK: "wm",
+    SLASHBIN_EVENTS_SIGNING_KEY__TECH_LEAD_REVIEW: "tl", SLASHBIN_EVENTS_SIGNING_KEY__SRE_VERIFICATION: "sre",
+    SLASHBIN_EVENTS_SIGNING_KEY__FOREMAN_SESSION: "fs" };
+  Object.assign(process.env, set);
+  const args = [{ sessionEnv: [], emRepoPath: "/em" }, { triggerLabel: "approved", lifecycleLabels: labels }];
+  const tl = buildTechLeadEnv(...args);
+  const sre = buildSreEnv(...args);
+  for (const e of [tl, sre]) {
+    assert.equal(e[RECV], "https://r.example");
+    assert.equal(e.SLASHBIN_EVENTS_SIGNING_KEY__WATERMARK, "wm");
+    assert.equal("SLASHBIN_EVENTS_SIGNING_KEY__FOREMAN_SESSION" in e, false);
+  }
+  assert.equal(tl.SLASHBIN_EVENTS_SIGNING_KEY__TECH_LEAD_REVIEW, "tl");
+  assert.equal("SLASHBIN_EVENTS_SIGNING_KEY__SRE_VERIFICATION" in tl, false);
+  assert.equal(sre.SLASHBIN_EVENTS_SIGNING_KEY__SRE_VERIFICATION, "sre");
+  assert.equal("SLASHBIN_EVENTS_SIGNING_KEY__TECH_LEAD_REVIEW" in sre, false);
+  for (const n of Object.keys(set)) delete process.env[n];
+  assert.equal(RECV in buildSreEnv(...args), false, "absent when unset");
+});
+
+test("secretValues redacts the forwarded shipper signing keys with sessionEnv empty (EM#2104)", () => {
+  const names = ["watermark", "foreman-session", "tech-lead-review", "sre-verification"].map((r) => shipperEnvNames(r)[2]);
+  names.forEach((n, i) => { process.env[n] = `dummy-signing-key-${i}-value`; });
+  const got = secretValues([]).map((s) => s.name);
+  for (const n of names) assert.ok(got.includes(n), n);
+  const red = createStreamRedactor(secretValues([]));
+  const out = red.push("x dummy-signing-key-2-va") + red.push("lue y") + red.flush();
+  assert.equal(out.includes("dummy-signing-key-2"), false);
+  for (const n of names) delete process.env[n];
 });

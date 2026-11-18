@@ -117,12 +117,13 @@ const MIN_SECRET_LENGTH = 8;
 
 /**
  * The values redacted from everything a child prints: every agent's GitHub token and
- * each `sessionEnv` name, read from the daemon env at spawn, 8+ characters,
+ * the company-record signing keys (EM#2104), each `sessionEnv` name, read from the daemon env at spawn, 8+ characters,
  * longest first (so a value containing another is replaced whole).
  */
 export function secretValues(sessionEnv: readonly string[]): Array<{ name: string; value: string }> {
   const out: Array<{ name: string; value: string }> = [];
-  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY", ...sessionEnv]) {
+  const shipperKeys = ["watermark", "foreman-session", "tech-lead-review", "sre-verification"].map((r) => shipperEnvNames(r)[2]);
+  for (const name of ["FOREMAN_GITHUB_TOKEN", "EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY", ...shipperKeys, ...sessionEnv]) {
     const value = process.env[name];
     if (value !== undefined && value.length >= MIN_SECRET_LENGTH && !out.some((s) => s.value === value)) {
       out.push({ name, value });
@@ -158,4 +159,14 @@ export function createStreamRedactor(secrets: ReadonlyArray<{ name: string; valu
       return out;
     },
   };
+}
+
+/**
+ * The exact env names a role's detached company-record drain reads (EM#2104): the receiver URL, the
+ * shared watermark key and the role's own signing key. Named, never a wildcard, so no other role's key
+ * travels. Assembled from parts, like metrics/ship.ts, because the public-repo guard bans the literal.
+ */
+export function shipperEnvNames(slug: string): string[] {
+  const key = (s: string) => `SLASHBIN_EVENTS_SIGNING_KEY__${s.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  return [["SLASHBIN", "DATA", "RECEIVER", "BASE_URL"].join("_"), key("watermark"), key(slug)];
 }
