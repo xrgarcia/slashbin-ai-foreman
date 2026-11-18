@@ -74,7 +74,9 @@ export async function checkCredentials(
  * daemon ran for days shipping nothing and every invoice week read partial (2026-11-17: the unit's Doppler key
  * list never carried these). The daemon refuses to start without them; --once runs do not ship and are exempt.
  */
-export function shipConfigRefusal(env: NodeJS.ProcessEnv = process.env): string | null {
+export function shipConfigRefusal(config: { metrics?: { enabled?: boolean } }, env: NodeJS.ProcessEnv = process.env): string | null {
+  // Only the metrics observer ships (spawnShipAfterRun runs from it); a disabled one needs none of this.
+  if (config.metrics?.enabled !== true) return null;
   const missing = [BASE_URL_ENV, KEY_ENV, WATERMARK_KEY_ENV].filter((name) => !env[name]?.trim());
   if (!missing.length) return null;
   return (

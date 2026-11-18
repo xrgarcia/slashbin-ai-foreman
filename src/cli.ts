@@ -191,7 +191,7 @@ async function main(rt: ForemanRuntime): Promise<void> {
   if (creds.unverified.length) {
     logger.warn(`Could not reach GitHub to check ${creds.unverified.join(", ")}; starting anyway.`);
   }
-  const noShip = once ? null : shipConfigRefusal();
+  const noShip = once ? null : shipConfigRefusal(config);
   if (noShip) {
     console.error(`Refusing to start: ${noShip}`);
     process.exit(78);
