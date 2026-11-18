@@ -1415,6 +1415,40 @@ test("a card a wait finds in Blocked comes back to review", async () => {
   assert.equal(fake.rows[0].status, "in_review");
 });
 
+test("an escalated tooling hold stays Blocked through its re-asks' verify sessions (cardHeld); unblocked releases it", async () => {
+  // slashbin-ai-foreman#350: the escalating run blocks the card inside its session (restored on the end); later
+  // re-asks are verify sessions too (the metrics ledger records them) but carry the card in `cardHeld`.
+  const fake = fakePaperclip();
+  const { mirror } = mirrorOn(fake);
+  await mirror.onClaim(item, repoConfig, logger());
+  const run = (runId, extra = {}) => ({ phase: "verify", repo: "example/r", pr: 11, items: [item], reviewer: "SRE", runId, ...extra });
+  const why = "dev verification of PR #11 has been on a tooling hold (evidence-check-failed) for 3 h, past the 2 h bound";
+  await mirror.onEvent({ kind: "session", session: { ...run("a"), status: "started" } }, logger());
+  await mirror.onEvent({ kind: "blocked", item, reason: why }, logger());
+  await mirror.onEvent({ kind: "session", session: { ...run("a"), status: "failed", outcome: "failed", workedItems: [item] } }, logger());
+  assert.equal(fake.rows[0].status, "blocked", "the escalation blocks the card");
+  const patches = () => fake.calls.filter((c) => c.method === "PATCH" && c.body && "status" in c.body).length;
+  const before = patches();
+  for (const id of ["b", "c"]) {
+    await mirror.onEvent({ kind: "session", session: { ...run(id, { cardHeld: [7] }), status: "started" } }, logger());
+    await mirror.onEvent({ kind: "session", session: { ...run(id, { cardHeld: [7] }), status: "failed", outcome: "failed", workedItems: [item] } }, logger());
+    assert.equal(fake.rows[0].status, "blocked", `re-ask ${id} leaves it Blocked`);
+  }
+  assert.equal(patches(), before, "the re-asks move nothing");
+  // Without cardHeld the same re-ask is what lost the block (the review's reproduction).
+  const fake2 = fakePaperclip();
+  const m2 = mirrorOn(fake2).mirror;
+  await m2.onClaim(item, repoConfig, logger());
+  await m2.onEvent({ kind: "blocked", item, reason: why }, logger());
+  await m2.onEvent({ kind: "session", session: { ...run("d"), status: "started" } }, logger());
+  assert.notEqual(fake2.rows[0].status, "blocked");
+  // A pass: unblocked, then the advance; the card leaves Blocked.
+  await mirror.onEvent({ kind: "session", session: { ...run("e", { cardHeld: [7] }), status: "started" } }, logger());
+  await mirror.onEvent({ kind: "unblocked", item, reason: "dev verification returned a verdict" }, logger());
+  await mirror.onEvent({ kind: "session", session: { ...run("e", { cardHeld: [7] }), status: "finished", outcome: "completed", workedItems: [item] } }, logger());
+  assert.notEqual(fake.rows[0].status, "blocked", "a verdict releases the card");
+});
+
 test("a blocked event owned by the sre goes to the SRE seat with the deploy-failed handoff; unowned keeps the stage owner", async () => {
   const roles = { sre: { name: "SRE", id: "sre-agent" }, em: { name: "Engineering Manager", id: "em-agent" } };
   const board = { ...paperclipBoardDefaults().board, blocked: { ...paperclipBoardDefaults().board.blocked, owner: "em" } };
