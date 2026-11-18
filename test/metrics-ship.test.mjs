@@ -172,17 +172,30 @@ test("an outbox record cut off before its newline is completed or dropped, never
   } finally { await s.close(); }
 });
 
-test("a worked card with issue number 0 is never billed or shipped (jerky_shipping#0)", async () => {
+test("a worked card with issue number 0 is never billed or shipped (widgets#0)", async () => {
   const rows = [
     row(1, "2026-11-09T10:00:00.000Z", { phase: "unstick", status: "started", runId: "z1" }),
-    row(2, "2026-11-09T10:10:00.000Z", { phase: "unstick", status: "finished", outcome: "completed", runId: "z1", workedItems: [{ repo: "o/jerky_shipping", issueNumber: 0 }, { repo: R, issueNumber: 7 }] }),
+    row(2, "2026-11-09T10:10:00.000Z", { phase: "unstick", status: "finished", outcome: "completed", runId: "z1", workedItems: [{ repo: "o/widgets", issueNumber: 0 }, { repo: R, issueNumber: 7 }] }),
   ];
   const [r] = shippableRuns(rows, NOW);
   assert.deepEqual(r.shares.map((s) => `${s.repo}#${s.issueNumber}`), [`${R}#7`]);
   assert.equal(r.shares[0].ms, r.durationMs);
   const { parseEmResult } = await import("../dist/plugins/em.js");
-  const out = parseEmResult(`EM unstick-result ${JSON.stringify({ verdict: "acted", readable: true, worked: [{ repo: "o/jerky_shipping", issueNumber: 0 }, { repo: R, issueNumber: 7 }] })}`);
+  const out = parseEmResult(`EM unstick-result ${JSON.stringify({ verdict: "acted", readable: true, worked: [{ repo: "o/widgets", issueNumber: 0 }, { repo: R, issueNumber: 7 }] })}`);
   assert.deepEqual(out.worked, [{ repo: R, issueNumber: 7 }]);
+});
+
+test("a run already queued with an issue-0 share ships scrubbed, the full duration on the real card", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-")), s = await stub();
+  try {
+    const q = { runId: "z1", phase: "unstick", startedAt: "2026-11-09T10:00:00.000Z", endedAt: "2026-11-09T10:10:00.000Z", durationMs: 600000, outcome: "completed",
+      shares: [{ repo: "o/widgets", issueNumber: 0, ms: 300000 }, { repo: R, issueNumber: 7, ms: 300000 }] };
+    mkdirSync(shipPaths(dir).dir, { recursive: true });
+    writeFileSync(shipPaths(dir).outbox, JSON.stringify({ run: q }) + "\n");
+    assert.equal(await ship(opts(dir, [], s)), true);
+    const sent = s.reqs.find((r) => r.json.run);
+    assert.deepEqual(sent.json.run.shares, [{ repo: R, issueNumber: 7, ms: 600000 }]);
+  } finally { await s.close(); }
 });
 
 test("a past day acknowledged short of its end is re-sent after the cursor has moved on", async () => {

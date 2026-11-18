@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, 
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { stateDir } from "../state-dir.js";
-import { readRuns, type RunRecord } from "./runs.js";
+import { readRuns, scrubRun, type RunRecord } from "./runs.js";
 import type { MetricsRow } from "./report.js";
 
 /**
@@ -217,7 +217,10 @@ async function shipLocked(o: ShipOptions, p: ReturnType<typeof shipPaths>, log: 
         let entry: Entry;
         try { entry = JSON.parse(line.bytes.toString("utf8")) as Entry; if (!entry?.run?.runId) throw new Error("no run"); }
         catch (e) { console.error(`metrics:ship: unreadable outbox record at byte ${state.offset_bytes}: ${(e as Error).message}`); return false; }
-        const body = Buffer.from(JSON.stringify({ transformed_at: isoMs(o.nowMs), run: entry.run }), "utf8");
+        // A run queued before issue 0 was dropped is scrubbed on the way out; one with no real card left is not sent.
+        const run = scrubRun(entry.run);
+        if (!run) { Object.assign(state, { file: p.outbox, offset_bytes: line.end }); writeState(p.state, state); continue; }
+        const body = Buffer.from(JSON.stringify({ transformed_at: isoMs(o.nowMs), run }), "utf8");
         const r = await post(o.baseUrl, SLUG, o.key, entry.run.runId, body);
         if (!r.ok) { console.error(`metrics:ship: stopped at ${entry.run.runId}: ${r.error}`); return false; }
         Object.assign(state, { file: p.outbox, offset_bytes: line.end, last_event_id: entry.run.runId, acked_at: isoMs(Date.now()) });

@@ -4,6 +4,7 @@ import { recordRun, type SessionEnd } from "../session-run.js";
 import type { Logger } from "../logger.js";
 import { pickEnv, SESSION_ENV_ESSENTIALS } from "../session/env.js";
 import { cliTail, lastLine, runAgentCli, type CliRun } from "./agent-cli.js";
+import { isWorkedCard } from "../metrics/runs.js";
 import { detectRefusal } from "../refusal.js";
 import type { ForemanPlugin, Unsticker, UnstickOutcome, PluginCatalogEntry } from "./contract.js";
 
@@ -78,7 +79,7 @@ export function parseEmResult(stdout: string): EmResult | null {
     if (typeof v.verdict !== "string" || !EM_VERDICTS.includes(v.verdict) || typeof v.readable !== "boolean") return null;
     if (!Array.isArray(v.worked) || !v.worked.every(isCard)) return null;
     // A card with no real issue number (0) is dropped, not billed: the receiver can never resolve "repo#0".
-    return { verdict: v.verdict as EmResult["verdict"], readable: v.readable, worked: v.worked.filter((c) => c.issueNumber > 0).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber })) };
+    return { verdict: v.verdict as EmResult["verdict"], readable: v.readable, worked: v.worked.filter(isWorkedCard).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber })) };
   } catch {
     return null;
   }

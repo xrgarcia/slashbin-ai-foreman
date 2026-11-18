@@ -75,11 +75,25 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v 
 const cardKey = (c: RunCard): string => `${c.repo}#${c.issueNumber}`;
 const isEnd = (status: unknown): boolean => status === "finished" || status === "failed";
 
+/** The one worked-card eligibility rule: a real repo and a positive integer issue number (0 is no card). */
+export const isWorkedCard = (c: { repo?: unknown; issueNumber?: unknown } | null | undefined): boolean =>
+  typeof c?.repo === "string" && Number.isInteger(c?.issueNumber) && (c?.issueNumber as number) > 0;
+
+/**
+ * A run as it ships: shares on no real card (issue 0) dropped and the duration re-split across the rest. A run
+ * already persisted in the outbox before the rule existed goes through here too. Null when nothing is left to bill.
+ */
+export function scrubRun(run: RunRecord): RunRecord | null {
+  if (run.shares.every(isWorkedCard)) return run;
+  const cards = run.shares.filter(isWorkedCard).map(({ repo, issueNumber }) => ({ repo, issueNumber }));
+  return cards.length ? { ...run, shares: splitDuration(run.durationMs, cards) } : null;
+}
+
 /** The cards a run's end row lists, malformed entries dropped. */
 function cardsOf(v: unknown): RunCard[] {
   if (!Array.isArray(v)) return [];
-  // issueNumber 0 is no card (the EM once listed "jerky_shipping#0"): the receiver can never resolve it, so it is never billed.
-  return v.filter((c): c is RunCard => typeof c?.repo === "string" && Number.isInteger(c?.issueNumber) && c.issueNumber > 0).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber }));
+  // issueNumber 0 is no card: the receiver can never resolve it, so it is never billed.
+  return v.filter((c): c is RunCard => isWorkedCard(c)).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber }));
 }
 
 /**
