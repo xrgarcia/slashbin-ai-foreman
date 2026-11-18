@@ -13,16 +13,23 @@ import type { Logger } from "./logger.js";
  * `github.ts` already imports from `upstream-backoff.ts`.
  */
 
-export type GhResource = "graphql" | "core";
+export type GhResource = "graphql" | "core" | "search";
 
-/** `gh api <path>` is REST (core) unless the path is `graphql`; every other subcommand goes over GraphQL. */
+/**
+ * `gh api <path>` is REST (core) unless the path is `graphql` or a `search/` endpoint; every other subcommand goes
+ * over GraphQL. Search is its own bucket, 30 requests a minute (docs.github.com/en/rest/search/search#rate-limit).
+ * 2026-11-18: a restart's burst of ~31 repo-record anchor searches tripped it every hour, and the trip was probed
+ * and windowed as core, so a one-minute limit stopped every lane for an hour at a time.
+ */
 export function ghResource(args: string[]): GhResource {
-  if (args[0] === "api") return args[1] === "graphql" ? "graphql" : "core";
-  return "graphql";
+  if (args[0] !== "api") return "graphql";
+  const path = args.slice(1).find((a) => !a.startsWith("-") && a !== "GET" && a !== "POST" && a !== "PATCH" && a !== "PUT" && a !== "DELETE");
+  if (path === "graphql") return "graphql";
+  return path?.replace(/^\//, "").startsWith("search/") ? "search" : "core";
 }
 
 /** Process-wide: the gh call counters measure the process's one GitHub token budget. */
-let counts = { graphql: 0, core: 0 };
+let counts = { graphql: 0, core: 0, search: 0 };
 /** Process-wide: per-subcommand gh counts for the same process-wide budget. */
 let bySubcommand: Record<string, number> = {};
 /** Process-wide: REST calls by normalised endpoint, so an hour's core spend can be attributed. */
@@ -98,8 +105,8 @@ function topEndpoints(limit = 15, from: Record<string, number> = byEndpoint): Re
 }
 
 /** Current counters without resetting them. */
-export function ghUsageSnapshot(): { total: number; graphql: number; core: number; bySubcommand: Record<string, number> } {
-  return { total: counts.graphql + counts.core, ...counts, bySubcommand: { ...bySubcommand } };
+export function ghUsageSnapshot(): { total: number; graphql: number; core: number; search: number; bySubcommand: Record<string, number> } {
+  return { total: counts.graphql + counts.core + counts.search, ...counts, bySubcommand: { ...bySubcommand } };
 }
 
 /**
@@ -118,7 +125,7 @@ export function configureGhUsage(opts: { intervalMs: number; logger: Logger; ext
       intervalMs, ...snap, bySubcommand: JSON.stringify(snap.bySubcommand),
       restByEndpoint: JSON.stringify(topEndpoints()), byCaller: JSON.stringify(topEndpoints(15, byCaller)), ...(opts.extra?.() ?? {}),
     });
-    counts = { graphql: 0, core: 0 };
+    counts = { graphql: 0, core: 0, search: 0 };
     bySubcommand = {};
     byEndpoint = {};
     byCaller = {};
