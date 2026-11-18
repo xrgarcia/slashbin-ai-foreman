@@ -79,7 +79,9 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
    back to the builder (it counts as a review round, so three of them raise `needsRuling`); a run with no verdict holds the PR unmerged and retries.
    Code: `src/phases/qa-before-merge.ts`.
    **Holds that are not failures.** A tooling hold (the SRE or QA could not run) is asked again
-   shortly and charges no attempt. A hold the SRE names `wait-until-YYYYMMDDTHHMMZ` means the rest
+   shortly and charges no attempt. It is bounded: past `toolingHoldLimitMs` (default 2 h, from the
+   first hold on that PR, recorded on the issue) the card is blocked once with the slug, PR and age,
+   the repo's next build is freed, and it is still re-asked until a verdict unblocks it. A hold the SRE names `wait-until-YYYYMMDDTHHMMZ` means the rest
    becomes observable at that time: no attempt is charged, the PR is not picked again before it, the
    repo's next build is freed, and the card shows a scheduled verify with the resume time.
 4. **Promote** — opens or updates the promotion PR (base branch → production branch,

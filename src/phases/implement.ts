@@ -559,7 +559,7 @@ export async function tryBatchImplementation(
     return null;
   }
   const verifyHolds = fieldTable(mergedRecords, "verifyHeld");
-  const verifying = devVerifyHolding(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
+  const verifying = devVerifyHolding(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).

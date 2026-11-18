@@ -165,6 +165,21 @@ export interface VerifyHold {
   decision?: { files: string[]; evidence: string[]; verdict: string };
 }
 
+/**
+ * A merged PR's dev verification the verifier keeps deferring (a `TOOLING_HOLDS` slug: the checker could not run),
+ * written on every `defer` (slashbin-ai-foreman#350). Never charged: `verifyHeld` and its attempts are untouched.
+ * Once it outlives `toolingHoldLimitMs` it is escalated, once, and stops holding the repo's next build.
+ */
+export interface ToolingHold {
+  /** The newest tooling hold slug. */
+  reason: string;
+  prNumber: number;
+  /** ISO time of the first `defer` on this PR; kept while the same PR stays held, whatever the slug. */
+  firstHeldAt: string;
+  /** ISO time the hold passed its bound and was escalated (`blocked`); from then on it holds neither queue. */
+  escalatedAt?: string;
+}
+
 /** A passed prod verification: the evidence the promote stage's 0-diff path may close on. */
 export interface ProdVerified {
   pr: number;
@@ -181,6 +196,8 @@ export interface IssueRecord {
   skipped?: SkippedIssue;
   held?: HeldIssue;
   verifyHeld?: VerifyHold;
+  /** A dev verification held by the verifier's own tooling, and since when (slashbin-ai-foreman#350). */
+  toolingHeld?: ToolingHold;
   /** The EM questions asked about this issue, by `unstickKey` (src/unstick.ts). */
   unstick?: Record<string, UnstickEntry>;
   prodVerified?: ProdVerified;
@@ -205,7 +222,7 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "unstick", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "unstick", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
 
 /** A repo's own record is addressed with this number; no issue or PR is 0. */
 const REPO_RECORD_NUMBER = 0;

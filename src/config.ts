@@ -224,13 +224,22 @@ export const configSchema = z.object({
   // Hold a repo's next build until its last merge has passed dev verification,
   // not just merged. One issue is in flight per repo, from build to verified on
   // dev, so a fix the verification calls for lands before the next issue is
-  // built on top. A merge whose verification waits on a person (attempts spent)
-  // or on a named time frees the repo. No effect without an SRE (srePath).
+  // built on top. A merge whose verification waits on a person (attempts spent),
+  // on a named time, or on a tooling hold past toolingHoldLimitMs frees the
+  // repo. No effect without an SRE (srePath).
   // Env strings parsed as for reviewLabelReconcile: "false"/"0"/"no"/"off" turn it off.
   buildWaitsForDevVerify: z.preprocess(
     (v) => (typeof v === "string" ? !/^(0|false|no|off)$/i.test(v.trim()) : v),
     z.boolean(),
   ).default(true),
+  // How long a merge's dev verification may stay on a tooling hold (the
+  // verifier or its checker could not run: a TOOLING_HOLDS slug, deferred and
+  // never charged) before it stops holding the repo. Measured from the first
+  // such hold on the PR, which is recorded, so a restart keeps the age. Past
+  // it the issue is blocked once with the slug, PR and age; it no longer holds
+  // the next build, other merges are verified before it, and it is still
+  // re-asked, uncharged, until the verifier returns a verdict.
+  toolingHoldLimitMs: z.coerce.number().int().positive().default(7_200_000),
   // Every wait before the Foreman tries something again — declined issues,
   // failed verifications, an unavailable reviewer, failing repos, upstream
   // limits, gh retries — each exponential and tunable. See src/backoff.ts and
@@ -622,6 +631,8 @@ export interface AgentConfig {
   buildBatchSize: number;
   /** Hold a repo's next build until its last merge passes dev verification (default true). */
   buildWaitsForDevVerify: boolean;
+  /** How long a dev verification may stay on a tooling hold before it stops holding the repo (default 2 h; slashbin-ai-foreman#350). */
+  toolingHoldLimitMs: number;
   /** Every back-off and retry limit (see src/backoff.ts). */
   backoff: BackoffConfig;
   /** The agent runner's name and how it signals a refusal (see src/refusal.ts). */
@@ -832,6 +843,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     onboarding: process.env.AI_AGENT_ONBOARDING ?? fileConfig.onboarding,
     buildBatchSize: process.env.AI_AGENT_BUILD_BATCH_SIZE ?? fileConfig.buildBatchSize,
     buildWaitsForDevVerify: process.env.AI_AGENT_BUILD_WAITS_FOR_DEV_VERIFY ?? fileConfig.buildWaitsForDevVerify,
+    toolingHoldLimitMs: process.env.AI_AGENT_TOOLING_HOLD_LIMIT_MS ?? fileConfig.toolingHoldLimitMs,
     backoff: mergeBackoff(fileConfig.backoff, {
       skipBackoffMs: fileConfig.skipBackoffMs,
       upstreamBackoffBaseMs: fileConfig.upstreamBackoffBaseMs,
@@ -1071,6 +1083,7 @@ export function loadConfig(configPath?: string): AgentConfig {
     onboarding: parsed.onboarding,
     buildBatchSize: parsed.buildBatchSize,
     buildWaitsForDevVerify: parsed.buildWaitsForDevVerify,
+    toolingHoldLimitMs: parsed.toolingHoldLimitMs,
     backoff: Object.freeze(Object.fromEntries(Object.entries(parsed.backoff).map(([k, v]) =>
       [k, typeof v === "object" ? Object.freeze({ ...v }) : v]))) as BackoffConfig,
     runner: Object.freeze({
