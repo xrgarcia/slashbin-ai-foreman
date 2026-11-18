@@ -34,6 +34,8 @@ const DATA_SUFFIX = " -->";
 export interface RecordStoreIo {
   run(args: string[], cwd: string): Promise<string> | string;
   login(cwd: string): Promise<string | undefined> | string | undefined;
+  /** Told why a save failed; the save itself still resolves false. Absent, the reason is dropped. */
+  warn?(msg: string): void;
 }
 
 /** The comment body for a record. `<` and `>` are escaped so the JSON can never close its own HTML comment. */
@@ -72,6 +74,8 @@ export class GitHubRecordStore {
   private readonly cache = new Map<string, Entry>();
   /** The anchor issue of each repo's record, once found: null = looked for, none exists yet. */
   private readonly anchors = new Map<string, number | null>();
+  /** repo as configured → its current owner/name. Search does not follow a transfer; `repos/{repo}` does. */
+  private readonly names = new Map<string, string>();
   /**
    * The tail of each record's queue of loads and saves. The reads are async, so two
    * saves of one item could otherwise both see no comment and both post one; the
@@ -138,7 +142,10 @@ export class GitHubRecordStore {
       if (!Number.isFinite(commentId)) return false;
       this.cache.set(recordId(key), { commentId, json });
       return true;
-    } catch {
+    } catch (err) {
+      // A swallowed reason hid a renamed repo for six hours (2026-11-18): every hand-off failed as "could not be saved".
+      const { message, stderr } = formatGhError(err);
+      this.io.warn?.(`record save failed for ${recordId(key)}: ${stderr.split("\n")[0] || message.split("\n")[0]}`);
       return false;
     }
   }
@@ -183,13 +190,30 @@ export class GitHubRecordStore {
    * (and closed at once, so it is on no board) only when `create` and none exists. Null: none, and not created.
    * Throws when GitHub cannot be read.
    */
+  /**
+   * The repo's current owner/name. A transferred repo keeps answering at its old name everywhere but search, which
+   * refuses it (422), so a config naming the old owner could never find its anchor. Read once per repo; a failed
+   * read keeps the configured name (the search then fails exactly as before, and the save says why).
+   */
+  private async currentName(repo: string, cwd: string): Promise<string> {
+    const known = this.names.get(repo);
+    if (known !== undefined) return known;
+    let name = repo;
+    try {
+      const out = String(await this.io.run(["api", `repos/${repo}`, "--jq", ".full_name"], cwd)).trim();
+      if (/^[^/\s]+\/[^/\s]+$/.test(out)) name = out;
+    } catch { return repo; }
+    this.names.set(repo, name);
+    return name;
+  }
+
   private async anchorFor(repo: string, cwd: string, create: boolean): Promise<number | null> {
     const known = this.anchors.get(repo);
     if (known !== undefined && (known !== null || !create)) return known;
     const self = await this.io.login(cwd);
     if (!self) throw new Error("the Foreman's login could not be resolved");
     if (known === undefined) {
-      const q = encodeURIComponent(`repo:${repo} is:issue author:${self} in:title "${REPO_RECORD_TITLE}"`);
+      const q = encodeURIComponent(`repo:${await this.currentName(repo, cwd)} is:issue author:${self} in:title "${REPO_RECORD_TITLE}"`);
       const out = await this.paced(() => this.io.run(["api", `search/issues?q=${q}&per_page=30&sort=created&order=asc`, "--jq", `.items[] | select(.title == "${REPO_RECORD_TITLE}") | .number`], cwd));
       const first = out.split("\n").map((l) => Number(l.trim())).find((n) => Number.isFinite(n) && n > 0);
       this.anchors.set(repo, first ?? null);

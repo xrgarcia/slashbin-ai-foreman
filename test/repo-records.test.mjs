@@ -55,7 +55,7 @@ beforeEach(() => {
 // --- the repo key: a Foreman-owned anchor issue --------------------------------------------------------
 
 /** A fake gh over an issue board: search finds an anchor by title, POST creates, PATCH closes, comments hold the records. */
-function fakeIo({ failSearch = false } = {}) {
+function fakeIo({ failSearch = false, movedTo = null } = {}) {
   const calls = [];
   const issues = []; // { number, title, state }
   const comments = new Map(); // issue number -> [{ id, login, body }]
@@ -68,8 +68,11 @@ function fakeIo({ failSearch = false } = {}) {
       const arg = (k) => args.find((a) => a.startsWith(`${k}=`))?.slice(k.length + 1);
       if (url.startsWith("search/")) {
         if (failSearch) throw new Error("search is down");
+        // Like GitHub: search refuses a transferred repo's old name with a 422.
+        if (movedTo && !decodeURIComponent(url).includes(`repo:${movedTo} `)) throw new Error("HTTP 422: The listed users and repositories cannot be searched");
         return issues.filter((i) => i.title === REPO_RECORD_TITLE).map((i) => i.number).join("\n");
       }
+      if (/^repos\/[^/]+\/[^/]+$/.test(url) && !args.includes("PATCH")) return movedTo ?? url.slice("repos/".length);
       if (/^repos\/[^/]+\/[^/]+\/issues$/.test(url) && args.includes("POST")) {
         issues.push({ number: next, title: arg("title"), state: "open" });
         return String(next++);
@@ -120,6 +123,23 @@ test("repo key: a search that fails is unavailable on read and a failed save on 
   const gh = new GitHubRecordStore(fakeIo({ failSearch: true }).io);
   assert.equal((await gh.loadRecord(repoKey, repoA)).status, "unavailable");
   assert.equal(await gh.saveRecord(repoKey, { divergenceRuled: ["c:1"] }, repoA), false);
+});
+
+test("repo key: a repo transferred to a new owner still finds its anchor; search runs on the current name", async () => {
+  const f = fakeIo({ movedTo: "neworg/a" });
+  await new GitHubRecordStore(f.io).saveRecord(repoKey, { divergenceRuled: ["c:1"] }, repoA);
+  const after = new GitHubRecordStore(f.io);
+  assert.deepEqual(await after.loadRecord(repoKey, repoA), { status: "found", record: { divergenceRuled: ["c:1"] } });
+  assert.equal(await after.saveRecord(repoKey, { divergenceRuled: ["c:1", "c:2"] }, repoA), true);
+  assert.equal(f.issues.length, 1, "the restarted store found the anchor; it did not fail or create a second");
+});
+
+test("repo key: a failed save says why", async () => {
+  const warned = [];
+  const io = { ...fakeIo({ failSearch: true }).io, warn: (m) => warned.push(m) };
+  assert.equal(await new GitHubRecordStore(io).saveRecord(repoKey, { divergenceRuled: ["c:1"] }, repoA), false);
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /search is down/);
 });
 
 test("repo key: an issue and a PR numbered 0 never exist, so the repo key cannot collide with an item", async () => {

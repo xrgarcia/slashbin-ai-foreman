@@ -162,7 +162,11 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
 
   /** `identity` is the Foreman login, shared with the code host; a test gets its own. */
   constructor(private readonly identity: ForemanIdentity = new ForemanIdentity()) {
-    this.records = new GitHubRecordStore({ run: ghAsync, login: (cwd) => identity.loginAsync(cwd) });
+    this.records = new GitHubRecordStore({
+      run: ghAsync,
+      login: (cwd) => identity.loginAsync(cwd),
+      warn: (msg) => process.stderr.write(`[${new Date().toISOString()}] WARN  ${msg}\n`),
+    });
   }
 
   loadRecord(key: RecordKey, repoConfig: RepoConfig): Promise<RecordLoad> {
