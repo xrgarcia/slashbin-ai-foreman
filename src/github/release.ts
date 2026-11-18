@@ -11,6 +11,7 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { ghAsync } from "./gh.js";
+import { canonicalRepo } from "./repo-identity.js";
 import type { IssueView, ReleasePrView } from "../code-host.js";
 import type { IssueAcceptance } from "../plugins/contract.js";
 export type { IssueView, ReleasePrView } from "../code-host.js";
@@ -62,8 +63,10 @@ export async function latestMergedReleasePr(config: RepoConfig): Promise<Release
  * stage adopts when it did not deploy them itself. Throws on a failed read.
  */
 export async function recentMergedReleasePrs(config: RepoConfig, sinceIso?: string, limit = 20): Promise<ReleasePrView[]> {
+  // `--search` on a pre-transfer name answers empty, not an error: use the canonical name.
+  const repo = sinceIso ? await canonicalRepo(config.githubRepo, config.repoPath) : config.githubRepo;
   const out = await ghAsync([
-    "pr", "list", "--repo", config.githubRepo, "--state", "merged",
+    "pr", "list", "--repo", repo, "--state", "merged",
     "--base", config.productionBranch, "--head", config.baseBranch,
     ...(sinceIso ? ["--search", `merged:>=${sinceIso.slice(0, 19)}`] : []),
     "--json", PR_FIELDS, "--limit", String(limit),

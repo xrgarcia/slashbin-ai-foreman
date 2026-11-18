@@ -17,7 +17,7 @@ import { dependentsOf } from "./dead-blocker.js";
 import { ghAsync } from "./gh.js";
 import { blockersOf } from "./blockers.js";
 import { readIssueBody } from "./readiness.js";
-import { isOwnRow } from "./repo-identity.js";
+import { canonicalRepo, isOwnRow } from "./repo-identity.js";
 
 /** Every issue a title says it follows up ("— follow-up to #N"), in order. The one parser for that phrase. */
 export function titleCorrects(title: string): number[] {
@@ -95,7 +95,9 @@ export async function correctorsOf(config: RepoConfig, holder: number, logger: L
   const blockers = await own(await blockersOf(config.githubRepo, holder, config.repoPath));
   const subs = await own(JSON.parse(await ghAsync(["api", `repos/${config.githubRepo}/issues/${holder}/sub_issues`], config.repoPath) || "[]"));
   // Every state: the corrective that merged is usually closed by now (security_tests#436 ends "follow-up to #407").
-  const found = JSON.parse(await ghAsync(["issue", "list", "--repo", config.githubRepo, "--state", "all", "--search", `"follow-up to #${holder}" in:title`, "--json", "number,title", "--limit", "100"], config.repoPath) || "[]") as { number: number; title: string }[];
+  // Search on a pre-transfer name answers `[]`, not an error: ask under the canonical name.
+  const searchRepo = await canonicalRepo(config.githubRepo, config.repoPath);
+  const found = JSON.parse(await ghAsync(["issue", "list", "--repo", searchRepo, "--state", "all", "--search", `"follow-up to #${holder}" in:title`, "--json", "number,title", "--limit", "100"], config.repoPath) || "[]") as { number: number; title: string }[];
   const titled = found.filter((i) => titleCorrects(i.title).includes(holder)).map((i) => i.number);
   return [...new Set([...blockers, ...subs, ...titled])].filter((m) => m !== holder);
 }

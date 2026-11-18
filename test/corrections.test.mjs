@@ -35,6 +35,7 @@ args="$*"
 echo "$args" >> "$d/calls"
 n=$(echo "$args" | sed -n 's|.*issues/\\([0-9][0-9]*\\).*|\\1|p')
 case "$args" in
+  "issue list"*"--search"*) if [ -f "$d/SEARCH_ONLY" ]; then case "$args" in *"--repo $(cat "$d/SEARCH_ONLY") "*) cat "$d/issues.json" ;; *) echo '[]' ;; esac; else cat "$d/issues.json"; fi; exit 0 ;;
   "issue list"*) cat "$d/issues.json"; exit 0 ;;
 esac
 ${fail ? 'echo "HTTP 422: Validation Failed" >&2; exit 1' : ""}
@@ -121,6 +122,14 @@ test("a transferred repo: the canonical name (any case) counts as this repo, ano
     assert.deepEqual(r.get(11).corrects, [10]);
     assert.deepEqual(r.get(12).corrects, [10]);
     assert.deepEqual(await correctorsOf(cfg, 10, quiet), [11, 12, 13]);
+  });
+});
+
+test("correctorsOf: the title search runs under the canonical name; the pre-transfer name answers empty", async () => {
+  const dir = fakeGh(ISSUES, { CANON: "New/r\n", SEARCH_ONLY: "New/r" });
+  await withGh(dir, async (cfg) => {
+    assert.deepEqual(await correctorsOf(cfg, 10, quiet), [13], "the closed, title-matched corrective is found");
+    assert.match(readFileSync(join(dir, "calls"), "utf8"), /issue list --repo New\/r /);
   });
 });
 
