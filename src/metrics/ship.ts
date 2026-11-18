@@ -20,7 +20,7 @@ const keyEnv = (slug: string): string => `SLASHBIN_EVENTS_SIGNING_KEY__${slug.to
 export const KEY_ENV = keyEnv(SLUG);
 export const WATERMARK_KEY_ENV = keyEnv("watermark");
 
-interface State { file: string | null; offset_bytes: number; last_event_id: string | null; acked_at: string | null; watermark_acked_period_end?: string | null }
+interface State { file: string | null; offset_bytes: number; last_event_id: string | null; acked_at: string | null; watermark_acked_period_end?: string | null; day_acks?: Record<string, string> }
 interface PostResult { ok: boolean; error: string | null }
 interface Entry { run: RunRecord }
 
@@ -32,6 +32,13 @@ const chicagoDayStartMs = (ms: number): number => {
   return [5, 6].map((h) => base + h * 3_600_000).find((c) => chicagoDay(c) === day && chicagoDay(c - 1) !== day) as number;
 };
 const dayAfter = (d: string): string => new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+/** The UTC instant the Chicago day `d` ends (the next day's 00:00 Chicago). */
+const chicagoDayEndMs = (d: string): number => chicagoDayStartMs(Date.parse(`${dayAfter(d)}T18:00:00Z`));
+/** The earliest past day whose recorded acknowledgement does not cover the whole day, else null. Pure, exported for tests. */
+export function firstShortDay(dayAcks: Record<string, string> | undefined, periodEnd: string): string | null {
+  const short = Object.entries(dayAcks ?? {}).filter(([d, ack]) => d <= periodEnd && Date.parse(ack) < chicagoDayEndMs(d)).map(([d]) => d).sort();
+  return short[0] ?? null;
+}
 const dayBefore = (d: string): string => new Date(Date.parse(`${d}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
 
 export function shipPaths(dir: string = stateDir()): { dir: string; outbox: string; state: string; lock: string } {
@@ -230,13 +237,21 @@ async function shipLocked(o: ShipOptions, p: ReturnType<typeof shipPaths>, log: 
     let periodStart: string | null = null;
     if (cursor) periodStart = dayAfter(cursor);
     else for (const e of outboxEntries(p.outbox)) { const d = chicagoDay(Date.parse(e.run.endedAt)); if (!periodStart || d < periodStart) periodStart = d; }
-    if (cursor === periodEnd && sent === 0) { log("confirmed through yesterday"); return true; }
+    // A past day acknowledged short of its end is re-sent: the period reaches back to it, whatever the cursor says.
+    const shortDay = firstShortDay(readState(p.state).day_acks, periodEnd);
+    if (cursor === periodEnd && sent === 0 && !shortDay) { log("confirmed through yesterday"); return true; }
     if (!periodStart || periodStart > periodEnd) periodStart = periodEnd;
+    if (shortDay && shortDay < periodStart) periodStart = shortDay;
     if (!cursor) { cursor = dayBefore(periodStart); writeState(p.state, { ...readState(p.state), watermark_acked_period_end: cursor }); }
     const ack = isoMs(ackMs), instance = `${hostname()}:foreman`;
     const body = Buffer.from(JSON.stringify({ transformed_at: isoMs(o.nowMs), producer: SLUG, producer_instance: instance, period_start: periodStart, period_end: periodEnd, acknowledged_through: ack }), "utf8");
     const r = await post(o.baseUrl, "watermark", o.watermarkKey, `watermark:${SLUG}:${instance}:${periodEnd}:${ack}`, body);
     if (!r.ok) { console.error(`metrics:ship: watermark stopped: ${r.error}`); return false; }
+    // Record the acknowledgement each day of this period got, so a day that was acknowledged short is found again.
+    const acks = { ...(readState(p.state).day_acks ?? {}) };
+    for (let d = periodStart; d <= periodEnd; d = dayAfter(d)) acks[d] = ack;
+    for (const d of Object.keys(acks).sort().slice(0, -60)) delete acks[d];
+    writeState(p.state, { ...readState(p.state), day_acks: acks });
     // The cursor moves only to the last day whose next midnight is at or before acknowledged_through.
     const done = chicagoDay(chicagoDayStartMs(ackMs) - 1), reach = done < periodEnd ? done : periodEnd;
     if (reach >= periodStart && (!cursor || reach > cursor)) writeState(p.state, { ...readState(p.state), watermark_acked_period_end: reach });

@@ -78,7 +78,8 @@ const isEnd = (status: unknown): boolean => status === "finished" || status === 
 /** The cards a run's end row lists, malformed entries dropped. */
 function cardsOf(v: unknown): RunCard[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((c): c is RunCard => typeof c?.repo === "string" && Number.isInteger(c?.issueNumber)).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber }));
+  // issueNumber 0 is no card (the EM once listed "jerky_shipping#0"): the receiver can never resolve it, so it is never billed.
+  return v.filter((c): c is RunCard => typeof c?.repo === "string" && Number.isInteger(c?.issueNumber) && c.issueNumber > 0).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber }));
 }
 
 /**

@@ -77,7 +77,8 @@ export function parseEmResult(stdout: string): EmResult | null {
     const v = JSON.parse(line.slice(EM_RESULT_PREFIX.length)) as { verdict?: unknown; readable?: unknown; worked?: unknown };
     if (typeof v.verdict !== "string" || !EM_VERDICTS.includes(v.verdict) || typeof v.readable !== "boolean") return null;
     if (!Array.isArray(v.worked) || !v.worked.every(isCard)) return null;
-    return { verdict: v.verdict as EmResult["verdict"], readable: v.readable, worked: v.worked.map((c) => ({ repo: c.repo, issueNumber: c.issueNumber })) };
+    // A card with no real issue number (0) is dropped, not billed: the receiver can never resolve "repo#0".
+    return { verdict: v.verdict as EmResult["verdict"], readable: v.readable, worked: v.worked.filter((c) => c.issueNumber > 0).map((c) => ({ repo: c.repo, issueNumber: c.issueNumber })) };
   } catch {
     return null;
   }
