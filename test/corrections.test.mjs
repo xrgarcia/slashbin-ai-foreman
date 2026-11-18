@@ -4,13 +4,14 @@
 // `unlinked-fix` with one comment. A fake `gh` plays GitHub; the build-first check runs against the real plugin.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
 import { relationsOf, correctorsOf, bodyMentions, titleCorrects } from "../dist/github/corrections.js";
 import { dropIssueSnapshot } from "../dist/github/cache.js";
+import { dropCanonicalRepo, canonicalRepo } from "../dist/github/repo-identity.js";
 import { githubCodeHost } from "../dist/plugins/github.js";
 import { setCodeHost } from "../dist/plugins/registry.js";
 import { correctionsToBuild, unlinkedFixes } from "../dist/phases/verify.js";
@@ -34,6 +35,7 @@ args="$*"
 echo "$args" >> "$d/calls"
 n=$(echo "$args" | sed -n 's|.*issues/\\([0-9][0-9]*\\).*|\\1|p')
 case "$args" in
+  "issue list"*"--search"*) if [ -f "$d/SEARCH_ONLY" ]; then case "$args" in *"--repo $(cat "$d/SEARCH_ONLY") "*) cat "$d/issues.json" ;; *) echo '[]' ;; esac; else cat "$d/issues.json"; fi; exit 0 ;;
   "issue list"*) cat "$d/issues.json"; exit 0 ;;
 esac
 ${fail ? 'echo "HTTP 422: Validation Failed" >&2; exit 1' : ""}
@@ -42,6 +44,7 @@ case "$args" in
   *"/sub_issues"*) cat "$d/subs_$n.json" 2>/dev/null || echo '[]' ;;
   *"/dependencies/blocking"*) cat "$d/blocking_$n.json" 2>/dev/null || echo '[]' ;;
   *"/parent"*) if [ -f "$d/parent_$n.json" ]; then cat "$d/parent_$n.json"; else echo "gh: No parent issue found (HTTP 404)" >&2; exit 1; fi ;;
+  *"api repos/"*"--jq .full_name"*) if [ -f "$d/CANONFAIL" ]; then echo "HTTP 502" >&2; exit 1; elif [ -f "$d/CANON" ]; then cat "$d/CANON"; else echo "$args" | sed -n 's|^api repos/\\([^ ]*\\) .*|\\1|p'; fi ;;
   *"--jq"*) cat "$d/body_$n.txt" 2>/dev/null || true ;;
   *) echo '[]' ;;
 esac
@@ -55,6 +58,7 @@ async function withGh(dir, fn) {
   process.env.PATH = `${dir}:${saved.PATH}`;
   process.env.FOREMAN_GITHUB_TOKEN = "test";
   dropIssueSnapshot("o/r");
+  dropCanonicalRepo();
   try {
     return await fn({ ...loadConfig(), name: "r", githubRepo: "o/r", repoPath: dir, baseBranch: "develop" });
   } finally {
@@ -101,6 +105,40 @@ test("correctorsOf: from the holder's side, blocked-by (this repo only), sub-iss
   });
   await withGh(fakeGh(ISSUES, {}, { fail: true }), async (cfg) => {
     await assert.rejects(() => correctorsOf(cfg, 10, quiet), /422/);
+  });
+});
+
+test("a transferred repo: the canonical name (any case) counts as this repo, another repo's rows are still dropped", async () => {
+  const api = "https://api.github.com/repos/";
+  const dir = fakeGh(ISSUES, {
+    CANON: "New/r\n",
+    "blocking_11.json": JSON.stringify([{ number: 10, state: "open", labels: [], repository_url: `${api}New/r` }, { number: 99, state: "open", labels: [], repository_url: `${api}x/other` }]),
+    "parent_12.json": JSON.stringify({ number: 10, repository_url: `${api}NEW/r` }),
+    "blockedby_10.json": JSON.stringify([{ number: 11, state: "open", labels: [], repository_url: `${api}New/r` }, { number: 98, state: "open", labels: [], repository_url: `${api}x/other` }]),
+    "subs_10.json": JSON.stringify([{ number: 12, repository_url: `${api}new/R` }, { number: 97, repository_url: `${api}x/other` }]),
+  });
+  await withGh(dir, async (cfg) => {
+    const r = await relationsOf(cfg, [11, 12], quiet);
+    assert.deepEqual(r.get(11).corrects, [10]);
+    assert.deepEqual(r.get(12).corrects, [10]);
+    assert.deepEqual(await correctorsOf(cfg, 10, quiet), [11, 12, 13]);
+  });
+});
+
+test("correctorsOf: the title search runs under the canonical name; the pre-transfer name answers empty", async () => {
+  const dir = fakeGh(ISSUES, { CANON: "New/r\n", SEARCH_ONLY: "New/r" });
+  await withGh(dir, async (cfg) => {
+    assert.deepEqual(await correctorsOf(cfg, 10, quiet), [13], "the closed, title-matched corrective is found");
+    assert.match(readFileSync(join(dir, "calls"), "utf8"), /issue list --repo New\/r /);
+  });
+});
+
+test("a failed canonical lookup throws, and the failure is not cached", async () => {
+  const dir = fakeGh(ISSUES, { CANONFAIL: "1", "blocking_11.json": JSON.stringify([{ number: 10, state: "open", labels: [], repository_url: "https://api.github.com/repos/z/q" }]) });
+  await withGh(dir, async (cfg) => {
+    await assert.rejects(() => relationsOf(cfg, [11], quiet), /502/);
+    unlinkSync(join(dir, "CANONFAIL"));
+    assert.equal(await canonicalRepo("o/r", dir), "o/r", "a later call asks again");
   });
 });
 
