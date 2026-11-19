@@ -1210,6 +1210,29 @@ async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[
 }
 
 /**
+ * The unsigned dark issues a merged release carried but does not verify: the open lifecycle issues its body lists
+ * outside `rel.issues`, unsigned by the gate's reading and dark by their Pre-Flight. Read from the PR, not the record, so
+ * a deploy interrupted by a Foreman that kept no such list is covered too (SLA-5216).
+ */
+async function mergedDark(repoConfig: RepoConfig, body: string, rel: ProdRelease, logger: Logger): Promise<Map<number, string>> {
+  try {
+    const listed = releaseIssues(body).filter((n) => n !== rel.pr && !rel.issues.includes(n));
+    const views: IssueSnapshot[] = [];
+    for (const n of listed) {
+      const v = await codeHost().viewIssue(repoConfig, n);
+      if (v?.state === "OPEN" && v.labels.includes(repoConfig.triggerLabel)) views.push({ number: n, title: "", labels: v.labels.map((name) => ({ name })) });
+    }
+    if (views.length === 0) return new Map();
+    const unsigned = await codeHost().unsignedIssues(views, new Set(views.map((v) => v.number)), repoConfig.lifecycleLabels,
+      codeHost().foremanAppliedOrHold(repoConfig, logger));
+    return unsigned.length === 0 ? new Map() : await codeHost().darkIssues(repoConfig, unsigned, logger);
+  } catch (err) {
+    logger.warn(`Release PR #${rel.pr}: could not read its dark issues: ${errText(err)}`);
+    return new Map();
+  }
+}
+
+/**
  * Each issue `pr` shipped dark is labelled shipped-dark (`github.shippedDarkLabel`) and told so once, so its card holds on its enablement rather
  * than asking for a release gate that has nothing left to release (SLA-5216). A failure is logged: the release stands.
  */
@@ -1327,8 +1350,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   }
 
   const t = iso(now());
-  const rel: ProdRelease = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: pending, phase: "deploying", attempts: 0, since: t,
-    ...(dark.size > 0 ? { dark: Object.fromEntries(dark) } : {}) };
+  const rel: ProdRelease = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: pending, phase: "deploying", attempts: 0, since: t };
   // Recorded before the SRE merges anything: a deploy whose "deploying" record could not be saved does not happen,
   // so a restart can never find a merge it has no record of (and deploy it again).
   if (!(await putRelease(rt, repoConfig, rel, logger))) {
@@ -1479,7 +1501,7 @@ export async function tryRelease(
           follow(next);
           rlog.info(`Release PR #${rel.pr} merged while its deploy was in flight; verifying it`);
           // The deploy stopped before it marked its dark issues; the merge it carried still shipped them (SLA-5216).
-          if (rel.dark) await markDark(repoConfig, rel.pr, next.mergeSha, new Map(Object.entries(rel.dark).map(([n, f]) => [Number(n), f])), rlog);
+          await markDark(repoConfig, rel.pr, next.mergeSha, await mergedDark(repoConfig, pr.body, rel, rlog), rlog);
         }
       } else if (await dropRelease(rt, repoConfig, rel.pr, rlog)) {
         follow(rel.pr);

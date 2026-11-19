@@ -932,10 +932,10 @@ test("the deploy is interrupted (Foreman restart): a release found merged is ver
 });
 
 test("an interrupted deploy that merged a dark issue marks it shipped dark when the next pass reads the merge (SLA-5216)", async () => {
-  // deploy() kept #7 off the record's issues but on its `dark`; it stopped before marking it.
+  // deploy() kept #7 off the record's issues and stopped before marking it; the record names no dark issue.
   world({ issues: [issue(7, "pr approved"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 5)] }, { prod: VERIFY(90) });
   setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
-  await seedRelease(rt, repo, { pr: 90, headSha: HEAD, issues: [8], dark: { 7: "X_ENABLED" }, phase: "deploying", attempts: 0, since: new Date().toISOString() });
+  await seedRelease(rt, repo, { pr: 90, headSha: HEAD, issues: [8], phase: "deploying", attempts: 0, since: new Date().toISOString() });
   assert.equal(await run(), true);
   assertClosedVerified(8);
   assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
@@ -943,6 +943,8 @@ test("an interrupted deploy that merged a dark issue marks it shipped dark when 
   const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
   assert.equal(said.length, 1, "one shipped-dark comment");
   assert.match(said[0].body, /Shipped dark in release PR #90[\s\S]*`X_ENABLED` off/);
+  await run(2);
+  assert.equal((gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->")).length, 1, "a later pass adds none");
 });
 
 // --- Adoption ------------------------------------------------------------------
@@ -1610,8 +1612,6 @@ test("signoff: an unsigned issue whose Pre-Flight names a dark flag ships switch
   const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
   assert.equal(said.length, 1, "one shipped-dark comment");
   assert.match(said[0].body, /Shipped dark in release PR #100[\s\S]*`X_ENABLED` off[\s\S]*never "nothing to release"/);
-  // Kept on the release record too, so a deploy interrupted after its merge still marks it (the recovery test above).
-  assert.deepEqual((await prodReleases())[100].dark, { 7: "X_ENABLED" });
 });
 
 test("signoff: a dark flag the shipped code does not name yet still holds the release", async (t) => {
