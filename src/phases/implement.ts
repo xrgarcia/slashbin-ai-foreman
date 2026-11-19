@@ -18,7 +18,7 @@ import { CycleEvent, activeRuns, itemOf, notifyOnce, prReport, releaseIfResolved
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
 import { HandoffNotSaved } from "../unstick.js";
-import { correctiveChainBroken } from "./corrective-chain.js";
+import { correctiveChainHold } from "./corrective-chain.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
@@ -560,7 +560,10 @@ export async function tryBatchImplementation(
     return null;
   }
   const verifyHolds = fieldTable(mergedRecords, "verifyHeld");
-  const verifying = devVerifyHolding(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
+  // A held verification the EM switched off after a broken corrective chain no longer holds the repo (switchedOff below).
+  const switchedOff = new Set<number>();
+  const holding = () => merged.filter((n) => !switchedOff.has(n));
+  let verifying = devVerifyHolding(holding(), verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).
@@ -568,12 +571,19 @@ export async function tryBatchImplementation(
   // a rework issue outside the batch starved while the verification waited on
   // it (console #1440 behind #1431, 2026-10-27).
   // A visual QA FAIL is capped at once (the EM decides), so it no longer holds the repo; its follow-up still goes first.
-  const followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
+  let followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   // The fix is the issue that CORRECTS the held one, by the code host's relation (blocked-by, sub-issue or the legacy
   // title: `Relation`, src/adapters.ts). Read only while a hold stands and no feature PR does.
   // A third corrective on one verification stops the chain: none builds, and the EM is asked to redesign or switch it off.
-  const chainStopped = !featurePr && followUpOf !== null
-    && await correctiveChainBroken(rt, repoConfig, followUpOf, verifyHolds[followUpOf], repoLogger);
+  // Switched off (a `Dark flag` in its Pre-Flight), it is released and the next holder, if any, is read the same way.
+  let chainStopped = false;
+  while (!featurePr && followUpOf !== null) {
+    const chain = await correctiveChainHold(rt, repoConfig, followUpOf, verifyHolds[followUpOf], repoLogger);
+    if (chain !== "released") { chainStopped = chain === "stopped"; break; }
+    switchedOff.add(followUpOf);
+    verifying = devVerifyHolding(holding(), verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
+    followUpOf = verifying ?? visualDecisionHolder(holding(), verifyHolds, config.backoff.verifyRetry.maxAttempts);
+  }
   const fixes = !featurePr && followUpOf !== null && !chainStopped
     ? await fixesForHold(rt, repoConfig, followUpOf, verifying, [...new Set([...actionableIssues, ...handOff])], repoLogger)
     : [];

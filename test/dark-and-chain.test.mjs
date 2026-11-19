@@ -3,6 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../dist/config.js";
@@ -12,7 +13,7 @@ import { dropIssueSnapshot } from "../dist/github/cache.js";
 import { dropCanonicalRepo } from "../dist/github/repo-identity.js";
 import { githubCodeHost } from "../dist/plugins/github.js";
 import { setCodeHost } from "../dist/plugins/registry.js";
-import { chainBroken, chainReason, correctiveChainBroken, CORRECTIVE_CHAIN_LIMIT } from "../dist/phases/corrective-chain.js";
+import { chainBroken, chainReason, correctiveChainHold, CORRECTIVE_CHAIN_LIMIT } from "../dist/phases/corrective-chain.js";
 import { EmHandoffs, UNSTICK_KINDS, EVENT_KINDS } from "../dist/unstick.js";
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {} };
@@ -64,14 +65,14 @@ esac
   return dir;
 }
 
-async function withGh(dir, fn) {
+async function withGh(dir, fn, repoPath = dir) {
   const saved = { PATH: process.env.PATH, T: process.env.FOREMAN_GITHUB_TOKEN };
   process.env.PATH = `${dir}:${saved.PATH}`;
   process.env.FOREMAN_GITHUB_TOKEN = "test";
   dropIssueSnapshot("o/r");
   dropCanonicalRepo();
   try {
-    return await fn({ ...loadConfig(), name: "r", githubRepo: "o/r", repoPath: dir, baseBranch: "develop" });
+    return await fn({ ...loadConfig(), name: "r", githubRepo: "o/r", repoPath, baseBranch: "develop" });
   } finally {
     process.env.PATH = saved.PATH;
     if (saved.T === undefined) delete process.env.FOREMAN_GITHUB_TOKEN; else process.env.FOREMAN_GITHUB_TOKEN = saved.T;
@@ -87,6 +88,21 @@ test("darkIssues: only issues whose Pre-Flight names a flag; an unreadable body 
   });
   assert.equal(lines.length, 1);
   assert.match(lines[0], /#9.*not treated as dark/);
+});
+
+test("darkIssues with a shipped head: dark only once that code names the flag; an unreadable tree is not dark", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "foreman-dark-git-"));
+  const g = (...a) => execFileSync("git", a, { cwd: repo, stdio: "pipe" });
+  g("init", "-q", "-b", "develop");
+  writeFileSync(join(repo, "flags.ts"), "export const on = process.env.X_ENABLED === '1';\n");
+  g("add", ".");
+  g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "flag");
+  g("remote", "add", "origin", repo);
+  const files = { "body_7.txt": "## Pre-Flight\n- Dark flag: X_ENABLED", "body_8.txt": "## Pre-Flight\n- Dark flag: Y_ENABLED" };
+  await withGh(fakeGh(files), async (cfg) => {
+    assert.deepEqual([...(await darkIssues(cfg, [7, 8], quiet, "develop"))], [[7, "X_ENABLED"]], "Y_ENABLED is not in the code yet");
+    assert.deepEqual([...(await darkIssues(cfg, [7], quiet, "no-such-branch"))], [], "an unreadable head is not dark");
+  }, repo);
 });
 
 // #10's PR #90 merged at 2026-11-18T01:00Z. #20 is a prerequisite filed before; #21..#23 are correctives filed after;
@@ -145,8 +161,8 @@ test("a third corrective on a held dev verification raises one corrective-chain 
   const h = harness();
   try {
     await withGh(fakeGh(chainFiles([21, 22, 23])), async (cfg) => {
-      assert.equal(await correctiveChainBroken(h.rt, cfg, 10, HOLD, h.logger), true);
-      assert.equal(await correctiveChainBroken(h.rt, cfg, 10, HOLD, h.logger), true, "still stopped on the next pass");
+      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "stopped");
+      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "stopped", "still stopped on the next pass");
     });
     const entries = [...h.docs.values()].flatMap((d) => Object.values(d.unstick ?? {}));
     assert.equal(entries.length, 1);
@@ -162,14 +178,27 @@ test("two correctives, no hold record, or an unreadable chain: the build goes on
   const h = harness();
   try {
     await withGh(fakeGh(chainFiles([21, 22])), async (cfg) => {
-      assert.equal(await correctiveChainBroken(h.rt, cfg, 10, HOLD, h.logger), false);
-      assert.equal(await correctiveChainBroken(h.rt, cfg, 10, undefined, h.logger), false);
+      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "build");
+      assert.equal(await correctiveChainHold(h.rt, cfg, 10, undefined, h.logger), "build");
     });
     await withGh(fakeGh(chainFiles([21, 22, 23]), { failBlockers: true }), async (cfg) => {
-      assert.equal(await correctiveChainBroken(h.rt, cfg, 10, HOLD, h.logger), false);
+      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "build");
     });
     assert.equal(h.docs.size, 0);
     assert.ok(h.lines.some((l) => /could not be counted/.test(l)));
+  } finally {
+    setCodeHost(null);
+  }
+});
+
+test("switched off: once the EM names a Dark flag in its Pre-Flight, the broken chain releases the holder and asks nothing", async () => {
+  const h = harness();
+  try {
+    await withGh(fakeGh({ ...chainFiles([21, 22, 23]), "body_10.txt": "## Pre-Flight\n- Dark flag: `X_ENABLED`" }), async (cfg) => {
+      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "released");
+    });
+    assert.equal(h.docs.size, 0, "no EM row once it is switched off");
+    assert.ok(h.lines.some((l) => /switched off .*no longer holds the repo/.test(l)));
   } finally {
     setCodeHost(null);
   }

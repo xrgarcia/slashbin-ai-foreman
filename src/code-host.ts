@@ -571,8 +571,11 @@ export interface CodeHost {
    * the merge), ascending. Throws when a link cannot be read.
    */
   correctivesOf(config: RepoConfig, holder: number, prNumber: number): Promise<number[]>;
-  /** Of `issues`, those whose Pre-Flight names `Dark flag: <ENV_NAME>`, with the flag. Unreadable is not dark. */
-  darkIssues(config: RepoConfig, issues: readonly number[], logger: Logger): Promise<Map<number, string>>;
+  /**
+   * Of `issues`, those whose Pre-Flight names `Dark flag: <ENV_NAME>`, with the flag; with `shipped` (a release head),
+   * only those whose flag that code names. Unreadable is not dark.
+   */
+  darkIssues(config: RepoConfig, issues: readonly number[], logger: Logger, shipped?: string): Promise<Map<number, string>>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;

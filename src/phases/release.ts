@@ -1181,11 +1181,11 @@ async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentCon
  * `unsigned` less the dark issues: an issue whose Pre-Flight names `Dark flag: <ENV_NAME>` ships with its flag off, so
  * an unsigned one never holds the release (#353: one unsigned feature held a service's release and seven signed issues).
  * It is not `release pending`, so this release neither verifies nor closes it; once signed, a later release carries
- * its turn-on (foreman#283).
+ * its turn-on (foreman#283). `shipped` is the head the release carries: a flag counts only once that code names it.
  */
-async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[], logger: Logger): Promise<number[]> {
+async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[], logger: Logger, shipped: string): Promise<number[]> {
   if (unsigned.length === 0) return unsigned;
-  const dark = await codeHost().darkIssues(repoConfig, unsigned, logger);
+  const dark = await codeHost().darkIssues(repoConfig, unsigned, logger, shipped);
   if (dark.size === 0) return unsigned;
   logger.info(`Release PR #${pr}: ${[...dark].map(([n, flag]) => `#${n} (\`${flag}\` off)`).join(", ")} unsigned but dark; it ships switched off and does not hold the release`);
   return unsigned.filter((n) => !dark.has(n));
@@ -1224,7 +1224,8 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   // it moves on to). Before the back-off wait, so the hold shows at once; it
   // clears itself on the pass after the last issue is signed.
   const unsigned = await withoutDark(repoConfig, open.number,
-    await codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger)), logger);
+    await codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger)), logger,
+    repoConfig.baseBranch);
   if (unsigned.length > 0) {
     try {
       await codeHost().syncSignoff(repoConfig, open.number, (await codeHost().viewReleasePr(repoConfig, open.number)).headSha, unsigned, logger);
@@ -1263,7 +1264,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
     logger.warn(`Release PR #${pr.number}: could not read what ${repoConfig.baseBranch} carries; not deploying`);
     return false;
   }
-  const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger) };
+  const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger, pr.headSha) };
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
     await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);

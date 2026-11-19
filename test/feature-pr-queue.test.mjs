@@ -58,7 +58,7 @@ test("an old skip on the open feature PR hands over to the gate", () => {
 // merge was still unverified, and a fix its verification asked for landed
 // behind work already built on top of it.
 test("a merge awaiting dev verification queues the next build, the same way", () => {
-  assert.match(block, /devVerifyHolding\(merged, verifyHolds/,
+  assert.match(block, /devVerifyHolding\(holding\(\), verifyHolds/,
     "the gate must read the verify holds from the merged issues' records, not a snapshot from before the cycle");
   assert.match(block, /lifecycleLabels\.prMerged/, "a merge awaiting verification is the `pr merged` label");
   assert.match(block, /roleFor\("verifier", config\) !== undefined && config\.buildWaitsForDevVerify/,
