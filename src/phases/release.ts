@@ -52,7 +52,7 @@ import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
 import { codeHost } from "../plugins/registry.js";
 import { releaseTagName } from "../config-schema/github.js";
-import type { ReleasePrView } from "../code-host.js";
+import type { IssueSnapshot, ReleasePrView } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
 import type { WorkItem } from "../adapters.js";
 import { recordRun, type SessionEnd } from "../session-run.js";
@@ -714,6 +714,7 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     // Only issues the Foreman's lifecycle owns (they carry the trigger label):
     // a `#N` in the body can be a PR or a passing mention.
     const issues: number[] = [];
+    const views: IssueSnapshot[] = [];
     try {
       for (const n of named) {
         const v = await codeHost().viewIssue(repoConfig, n);
@@ -721,11 +722,23 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
         if (v?.state === "CLOSED" && (verified[n] || noop[n])) continue;
         // A net-zero issue whose merge is not on production was closed with its own outcome: no release carries it.
         if (noop[n]) continue;
-        if (v?.labels.includes(repoConfig.triggerLabel)) issues.push(n);
+        if (!v?.labels.includes(repoConfig.triggerLabel)) continue;
+        issues.push(n);
+        views.push({ number: n, title: "", labels: v.labels.map((name) => ({ name })) });
       }
     } catch (err) {
       logger.debug(`Could not read release PR #${pr.number}'s issues: ${errText(err)}`);
       continue;
+    }
+    // An unsigned dark issue shipped switched off (withoutDark): this release neither verifies nor closes it, so it is
+    // not adopted either. Its turn-on is a later, signed release (#353). Dark by its Pre-Flight alone: a flag the code
+    // did not name yet never let the release past the sign-off gate, so it is no turn-on either.
+    // Unsigned by the sign-off gate's own reading, so a sign-off label the Foreman wrote itself is no sign-off here either.
+    const unsigned = views.length === 0 ? [] : await codeHost().unsignedIssues(views, new Set(issues), repoConfig.lifecycleLabels,
+      codeHost().foremanAppliedOrHold(repoConfig, logger));
+    if (unsigned.length > 0) {
+      const dark = await codeHost().darkIssues(repoConfig, unsigned, logger);
+      for (const n of dark.keys()) issues.splice(issues.indexOf(n), 1);
     }
     if (issues.length === 0) {
       rt.memory.adoptChecked.add(key);
@@ -1178,6 +1191,20 @@ async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentCon
 }
 
 /**
+ * `unsigned` less the dark issues: an issue whose Pre-Flight names `Dark flag: <ENV_NAME>` ships with its flag off, so
+ * an unsigned one never holds the release (#353: one unsigned feature held a service's release and seven signed issues).
+ * It is not `release pending`, so this release neither verifies nor closes it; once signed, a later release carries
+ * its turn-on (foreman#283). `shipped` is the head the release carries: a flag counts only once that code names it.
+ */
+async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[], logger: Logger, shipped: string): Promise<number[]> {
+  if (unsigned.length === 0) return unsigned;
+  const dark = await codeHost().darkIssues(repoConfig, unsigned, logger, shipped);
+  if (dark.size === 0) return unsigned;
+  logger.info(`Release PR #${pr}: ${[...dark].map(([n, flag]) => `#${n} (\`${flag}\` off)`).join(", ")} unsigned but dark; it ships switched off and does not hold the release`);
+  return unsigned.filter((n) => !dark.has(n));
+}
+
+/**
  * Deploy the open release PR: Tech Lead approval at its head, then the SRE's
  * deploy. Returns false when there is nothing to deploy this pass.
  */
@@ -1209,7 +1236,9 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   // while the release lists an issue without `ready for prod release` (or a label
   // it moves on to). Before the back-off wait, so the hold shows at once; it
   // clears itself on the pass after the last issue is signed.
-  const unsigned = await codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger));
+  const unsigned = await withoutDark(repoConfig, open.number,
+    await codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger)), logger,
+    repoConfig.baseBranch);
   if (unsigned.length > 0) {
     try {
       await codeHost().syncSignoff(repoConfig, open.number, (await codeHost().viewReleasePr(repoConfig, open.number)).headSha, unsigned, logger);
@@ -1243,11 +1272,12 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   // The body is a snapshot: an issue that merged to the base branch after it was written is in
   // this head all the same. Read what the head carries now, then the head again: if it moved,
   // the decision was about another commit, so decide again next pass.
-  const late = await codeHost().unsignedInHead(repoConfig, logger);
-  if (late === null) {
+  const head = await codeHost().unsignedInHead(repoConfig, logger);
+  if (head === null) {
     logger.warn(`Release PR #${pr.number}: could not read what ${repoConfig.baseBranch} carries; not deploying`);
     return false;
   }
+  const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger, pr.headSha) };
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
     await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);

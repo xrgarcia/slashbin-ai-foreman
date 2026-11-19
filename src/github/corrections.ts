@@ -101,3 +101,15 @@ export async function correctorsOf(config: RepoConfig, holder: number, logger: L
   const titled = found.filter((i) => titleCorrects(i.title).includes(holder)).map((i) => i.number);
   return [...new Set([...blockers, ...subs, ...titled])].filter((m) => m !== holder);
 }
+
+/**
+ * The correctives filed against `holder` since its PR `prNumber` merged: the issues of this repo that `holder` is
+ * "blocked by" and that were created after that merge, open or closed, ascending. A blocker filed before the merge
+ * is a prerequisite, not a corrective. Throws when either read fails: a count that is a guess is not a fact.
+ */
+export async function correctivesOf(config: RepoConfig, holder: number, prNumber: number): Promise<number[]> {
+  const mergedAt = Date.parse((await ghAsync(["api", `repos/${config.githubRepo}/pulls/${prNumber}`, "--jq", ".merged_at // \"\""], config.repoPath)).trim());
+  if (!Number.isFinite(mergedAt)) throw new Error(`PR #${prNumber} has no merge time`);
+  const after = (await blockersOf(config.githubRepo, holder, config.repoPath)).filter((b) => Date.parse(b.created_at ?? "") > mergedAt);
+  return (await keepOwn(after, config)).sort((a, b) => a - b);
+}

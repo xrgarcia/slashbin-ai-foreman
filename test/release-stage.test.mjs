@@ -16,6 +16,7 @@
 //   - it adopts merged releases it did not deploy, and the SRE sweep's holds.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -949,6 +950,28 @@ test("adopts a release a person merged: no Tech Lead, no deploy, a prod verify, 
   assert.equal(agentCalls().length, 1);
 });
 
+test("adoption leaves an unsigned dark issue open: it shipped switched off, so it is not verified or closed", async () => {
+  // #353: the release a person merged carried a dark issue; closing it would mark a switched-off feature done.
+  world({ issues: [issue(7, "pr approved"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 60)] }, { prod: VERIFY(90) });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  assert.equal(await run(), true);
+  assertClosedVerified(8);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
+});
+
+test("adoption reads sign-off as the gate does: a dark issue the Foreman signed itself is still unsigned, so it stays open", async () => {
+  // Before the sign-off gate, adoption labelled `ready for prod release` itself; that label is no EM sign-off.
+  world({
+    issues: [issue(7, "pr approved", "ready for prod release"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 60)],
+    comments: { 7: [{ body: "<!-- foreman:release-carried -->", by: "foreman-bot", at: "2026-10-01T00:00:00Z" }] },
+    events: { 7: [{ label: "ready for prod release", by: "foreman-bot" }] },
+  }, { prod: VERIFY(90) });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  assert.equal(await run(), true);
+  assertClosedVerified(8);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "the Foreman's own label signs nothing off");
+});
+
 test("adoption reads an existing Production Verification instead of running one", async () => {
   const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance** | PASS | ok |\n| **Grafana** | CLEAN | |\n| **Soak** | PENDING | later |";
   world({
@@ -1515,6 +1538,54 @@ test("signoff: the hold clears on its own once the EM signs the issue", async ()
   assert.equal(await run(3), true);
   assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"], "approved and deployed once signed");
   assert.deepEqual(statuses().map((s) => s.state), ["failure", "success"]);
+});
+
+// The repo the release ships, for the dark-flag tests: develop, whose one file names `code`.
+// A flag counts only once the shipped code names it, so the release PR's head is that commit.
+function shippedCode(code) {
+  const git = (...a) => execFileSync("git", a, { cwd: tmp, encoding: "utf8" }).trim();
+  rmSync(join(tmp, ".git"), { recursive: true, force: true });
+  git("init", "-q", "-b", "develop");
+  writeFileSync(join(tmp, "flag.txt"), `${code}\n`);
+  git("add", "flag.txt");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "code");
+  git("remote", "add", "origin", tmp);
+  const g = gh();
+  g.prs[100].headRefOid = git("rev-parse", "HEAD");
+  writeFileSync(GH_STATE, JSON.stringify(g));
+}
+const dropShippedCode = () => { rmSync(join(tmp, ".git"), { recursive: true, force: true }); rmSync(join(tmp, "flag.txt"), { force: true }); };
+
+test("signoff: an unsigned issue whose Pre-Flight names a dark flag ships switched off and does not hold the release", async (t) => {
+  // #353: a service's unsigned feature held its release for a day; dark, it would have shipped off.
+  t.after(dropShippedCode);
+  world(unsignedWorld(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  shippedCode("if (process.env.X_ENABLED) start();");
+  assert.equal(await run(), true);
+  assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);
+  assert.deepEqual(statuses().map((s) => s.state), ["success"]);
+  assert.equal(heldComments(100).length, 0);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "a dark issue is not verified or closed by the release");
+});
+
+test("signoff: a dark flag the shipped code does not name yet still holds the release", async (t) => {
+  // The line goes on the issue before the switch-off merges; until then the code would ship on.
+  t.after(dropShippedCode);
+  world(unsignedWorld(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  shippedCode("start();");
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0);
+  assert.deepEqual(statuses().map((s) => s.state), ["failure"]);
+});
+
+test("signoff: a dark flag outside the Pre-Flight still holds the release", async () => {
+  world(unsignedWorld(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  setBodies({ 7: "## Fix\nDark flag: X_ENABLED\n\n## Pre-Flight\n- Lane: foreman" });
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0);
+  assert.deepEqual(statuses().map((s) => s.state), ["failure"]);
 });
 
 test("signoff: a release whose every issue is signed is deployed, with a passing status", async () => {

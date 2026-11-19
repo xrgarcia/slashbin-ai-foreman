@@ -157,7 +157,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`, `corrective-chain`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -187,6 +187,12 @@ else escalated. It replaces the Paperclip decompose-stage assignment (EM#2124 ch
 issue's body mentions #N (§2). Its subject is that issue, once per issue and #N (`dedupeKey` #N), standing until the
 issue closes. The EM confirms it is the fix and adds the link (#N blocked by it, or it a sub-issue of #N), or rules it
 is not and writes nothing.
+`corrective-chain` fires when a held dev verification #N (the issue the build-first check would build fixes for)
+has a third corrective: a same-repo issue #N is blocked by, filed after #N's PR merged (`correctivesOf`,
+`src/github/corrections.ts`; `correctiveChainBroken`, `src/phases/corrective-chain.ts`). Its subject is #N, once
+(`dedupeKey` `chain`). From then the Foreman builds no corrective for #N; they queue behind it. The EM switches #N
+off (a `Dark flag`, so it stops holding the release) or redesigns the remaining work as one issue (#353:
+nine correctives in 24 hours held its release).
 `dependency-batch-loop` fires when the dependency sweep has filed the same batch (the same Dependabot PRs at the same head
 commits) 3 times in 24 hours. The sweep then **holds that batch**: it files nothing more for those PRs and raises this kind once,
 repo-level (issue 0). Each of those issues ended with no PR of its own (`landed`), so a Dependabot PR is almost certainly open
@@ -234,6 +240,12 @@ reset (or the upstream back-off window) has passed.
 - **The EM signs each listed issue.** While any listed issue lacks `ready for prod release`,
   the PR shows a failing EM sign-off status and the Tech Lead and SRE do nothing. The
   release waits on the EM, silently, until every carried issue is labelled.
+- **A dark issue never holds it.** An issue whose `## Pre-Flight` names `Dark flag: <ENV_NAME>`
+  (capitals, an env flag that is off unless set) ships switched off, so an unsigned one does not
+  fail the EM sign-off status (`darkIssues`, `src/github/dark-flag.ts`; `withoutDark`,
+  `src/phases/release.ts`). It is not `release pending`, so the release neither verifies nor
+  closes it; once signed, a later release carries it. Turning the flag on in production is a
+  separate, signed step. A Pre-Flight that cannot be read is not dark.
 - Then the Tech Lead approves, the SRE merges and deploys. **The Foreman never merges.**
 - Prod verification follows; a pass closes the issue and schedules a soak re-verify 30
   minutes later. A hold is `prodVerifyHeld` (§1).
