@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { STAGE_HANDOFF, DEFAULT_HANDOFF_LABELS, handoffComment, handoffNextLine } from "../dist/paperclip/handoff.js";
 import { STAGES } from "../dist/lifecycle.js";
 import { defaultLifecycleLabels } from "../dist/config.js";
+import { DEFAULT_GITHUB_CONVENTIONS } from "../dist/config-schema/github.js";
 
 const facts = { repo: "example/r", issueNumber: 7, seat: "Engineering Manager", pr: { number: 9 } };
 
@@ -20,7 +21,8 @@ test("every lifecycle stage has a handoff, and every placeholder fills", () => {
 });
 
 test("the label names quoted are the lifecycle's defaults", () => {
-  const d = defaultLifecycleLabels();
+  // shippedDark is the github block's `shippedDarkLabel`, not a lifecycle label (SLA-5216).
+  const d = { ...defaultLifecycleLabels(), shippedDark: DEFAULT_GITHUB_CONVENTIONS.shippedDarkLabel };
   for (const [k, v] of Object.entries(DEFAULT_HANDOFF_LABELS)) assert.equal(d[k], v, k);
 });
 

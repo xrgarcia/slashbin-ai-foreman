@@ -957,6 +957,11 @@ test("adoption leaves an unsigned dark issue open: it shipped switched off, so i
   assert.equal(await run(), true);
   assertClosedVerified(8);
   assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
+  // SLA-5216: a release first seen merged never passed deploy(); adoption records the dark issue all the same.
+  assert.ok(gh().issues[7].labels.includes("shipped dark"), "the adopted dark issue is labelled shipped dark");
+  const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
+  assert.equal(said.length, 1, "one shipped-dark comment");
+  assert.match(said[0].body, /Shipped dark in release PR #90[\s\S]*`X_ENABLED` off/);
 });
 
 // A dark issue adoption once labelled itself; `signer` applied `ready for prod release` afterwards.

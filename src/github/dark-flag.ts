@@ -18,7 +18,6 @@ import { commentOnIssue } from "./ci-gate.js";
 import { createLabel } from "./core-reads.js";
 import { ghAsync } from "./gh.js";
 import { hasCommentContaining } from "./pr-comments.js";
-import { SHIPPED_DARK_LABEL } from "../lifecycle.js";
 
 /** `Dark flag: NAME`, with optional list marker, bold and backticks. */
 const DARK_LINE = /^\s*(?:[-*]\s+)?\**dark flag:?\**:?\**\s*`?([A-Za-z0-9_]+)`?\s*(?:$|[\s.;,(—-])/i;
@@ -77,15 +76,15 @@ export async function darkIssues(config: RepoConfig, issues: readonly number[], 
 export const SHIPPED_DARK_MARK = "<!-- foreman:shipped-dark -->";
 
 /**
- * Record that `issue` shipped dark in release PR `pr`: the `shipped dark` label (created when the repo lacks it) and
+ * Record that `issue` shipped dark in release PR `pr`: the shipped-dark label (`github.shippedDarkLabel`) (created when the repo lacks it) and
  * one comment naming the flag and the step left. Throws when the label cannot be applied; a lost comment is retried
  * by whoever calls again, the marker keeps it to one.
  */
 export async function markShippedDark(config: RepoConfig, issue: number, flag: string, pr: number, mergeSha?: string): Promise<void> {
   try {
-    await createLabel(config, SHIPPED_DARK_LABEL, "5319e7");
+    await createLabel(config, config.github.shippedDarkLabel, "5319e7");
   } catch { /* exists already, or the add below says why */ }
-  await ghAsync(["issue", "edit", String(issue), "--repo", config.githubRepo, "--add-label", SHIPPED_DARK_LABEL], config.repoPath);
+  await ghAsync(["issue", "edit", String(issue), "--repo", config.githubRepo, "--add-label", config.github.shippedDarkLabel], config.repoPath);
   if (await hasCommentContaining(config, issue, SHIPPED_DARK_MARK)) return;
   await commentOnIssue(config, issue, [
     SHIPPED_DARK_MARK,

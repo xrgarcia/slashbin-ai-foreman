@@ -20,7 +20,6 @@ import { BatchIssueComposer, BatchIssueFiler, DependencyDiscovery, OpenBatchIssu
 import { DependencyBatchFilingPolicy } from "../dependency-batch/policy.js";
 import { dependencyBatchLoopAlert } from "../unstick.js";
 import { prNumberFromUrl } from "../pr-url.js";
-import { SHIPPED_DARK_LABEL } from "../lifecycle.js";
 
 export async function trySyncDrift(
   repoConfig: RepoConfig,
@@ -125,7 +124,7 @@ async function noteStall(rt: ForemanRuntime, repoConfig: RepoConfig, files: numb
   const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const waiting = open
     // A shipped-dark issue's code is released; what waits is its enablement, which its own comment names (SLA-5216).
-    .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel) && !codeHost().hasLabel(i, SHIPPED_DARK_LABEL))
+    .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel) && !codeHost().hasLabel(i, repoConfig.github.shippedDarkLabel))
     .map((i) => i.number);
   // An issue whose record cannot be read may already have been commented on: it is left alone this pass.
   const loaded = await rt.records.loadIssueRecords(repoConfig, open.map((i) => i.number));

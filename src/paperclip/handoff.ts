@@ -37,7 +37,7 @@ export interface StageHandoff {
  * defaults are the schema's (src/config.ts); the daemon passes the loaded ones.
  */
 export type HandoffLabels = Readonly<Record<
-  "prUnderReview" | "prMerged" | "prPendingActions" | "prApproved" | "readyForProd" | "releasePending" | "prodVerifyHeld", string>>;
+  "prUnderReview" | "prMerged" | "prPendingActions" | "prApproved" | "readyForProd" | "releasePending" | "prodVerifyHeld" | "shippedDark", string>>;
 
 export const DEFAULT_HANDOFF_LABELS: HandoffLabels = Object.freeze({
   prUnderReview: "pr under review",
@@ -47,6 +47,7 @@ export const DEFAULT_HANDOFF_LABELS: HandoffLabels = Object.freeze({
   readyForProd: "ready for prod release",
   releasePending: "release pending",
   prodVerifyHeld: "prod verification held",
+  shippedDark: "shipped dark",
 });
 
 /**
@@ -193,7 +194,7 @@ export const HANDOFF_VARIANTS = Object.freeze({
     act: true,
     todo: "{issue} shipped dark: its code is in production with its flag off and enablement unsigned. This is never \"nothing to release\": hold it on its enablement, naming the enablement step and its owner, then sign it when that step is ready.",
     next: "hold {issue} on its enablement — name the enablement step and its owner",
-    why: "a release carried {issue} switched off (`shipped dark`); turning it on is a separate, signed step",
+    why: "a release carried {issue} switched off (`{shippedDark}`); turning it on is a separate, signed step",
     done: "the enablement is signed (`{readyForProd}`) or the issue is held with a named owner",
   },
   verifyScheduled: {

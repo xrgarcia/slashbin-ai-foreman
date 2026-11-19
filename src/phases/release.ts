@@ -739,6 +739,9 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     if (unsigned.length > 0) {
       const dark = await codeHost().darkIssues(repoConfig, unsigned, logger);
       for (const n of dark.keys()) issues.splice(issues.indexOf(n), 1);
+      // Recorded here too: a release first seen merged never passed deploy(), so its dark issues hold on their
+      // enablement only if adoption marks them (SLA-5216).
+      await markDark(repoConfig, pr.number, pr.mergeSha ?? undefined, dark, logger);
     }
     if (issues.length === 0) {
       rt.memory.adoptChecked.add(key);
@@ -1207,7 +1210,7 @@ async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[
 }
 
 /**
- * Each issue `pr` shipped dark is labelled `shipped dark` and told so once, so its card holds on its enablement rather
+ * Each issue `pr` shipped dark is labelled shipped-dark (`github.shippedDarkLabel`) and told so once, so its card holds on its enablement rather
  * than asking for a release gate that has nothing left to release (SLA-5216). A failure is logged: the release stands.
  */
 async function markDark(repoConfig: RepoConfig, pr: number, mergeSha: string | undefined, dark: ReadonlyMap<number, string>, logger: Logger): Promise<void> {
