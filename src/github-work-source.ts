@@ -191,16 +191,17 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   }
 
   /**
-   * The issues an open release PR (into the production branch) names (#N in the body, the rule the receiver's sync
-   * used). The one read behind `inRelease`, shared by `cards` and `snapshot`: before, only `cards` read it, so the same
+   * The issues an open release PR (head the source branch, base the production branch) lists: the `- #N` lines Promote
+   * writes (`releaseIssues`, foreman#86), never a `#N` elsewhere in a body: a Dependabot PR into main quoting an upstream
+   * changelog (`ip-address#217`) once put an unapproved issue In Review. The one read behind `inRelease`, shared by `cards` and `snapshot`: before, only `cards` read it, so the same
    * pass placed an issue named by a release PR at `awaitingRelease` (cards) and `pendingVerification` (snapshot), and a
    * recorder fed both flipped it every pass (shipping_app#856, ~2000 rows). A failed read names none.
    */
   private async releaseIssues(repoConfig: RepoConfig, logger: Logger): Promise<Set<number>> {
     try {
       return new Set((await getOpenPrs(repoConfig.githubRepo, repoConfig.repoPath))
-        .filter((p) => p.baseRefName === repoConfig.productionBranch)
-        .flatMap((p) => [...String(p.body ?? "").matchAll(/#(\d+)\b/g)].map((m) => Number(m[1]))));
+        .filter((p) => p.baseRefName === repoConfig.productionBranch && p.headRefName === repoConfig.baseBranch)
+        .flatMap((p) => releaseIssues(String(p.body ?? ""))));
     } catch (err) {
       logger.debug(`cards: ${repoConfig.githubRepo} release PRs not read: ${err instanceof Error ? err.message : String(err)}`);
       return new Set();
@@ -210,8 +211,8 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
   /**
    * Every card the repo has, for an observer that owns them all: each open
    * issue with its stage (null: not approved) and title, `inRelease` read from
-   * the open PRs into the production branch that name it (#N in the body, the
-   * rule the receiver's sync used), a held issue's reason, and the issues
+   * the open release PRs (source branch into the production branch) that list it
+   * (`- #N` lines, `releaseIssues`), a held issue's reason, and the issues
    * closed since the last read (github/cards.ts).
    */
   async cards(repoConfig: RepoConfig, logger: Logger): Promise<SnapshotCard[]> {

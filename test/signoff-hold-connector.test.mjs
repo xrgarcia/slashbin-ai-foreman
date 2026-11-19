@@ -110,3 +110,13 @@ test("an issue that is not release pending is unaffected by a failing status", a
   assert.equal(cards.find((c) => c.item.issueNumber === 809).signoff, undefined);
   assert.notEqual(cards.find((c) => c.item.issueNumber === 809).stage, "awaitingSignoff");
 });
+
+test("only a real release PR puts an issue in the release: a Dependabot changelog #N into main does not", async () => {
+  const dependabot = { number: 131, url: "u", title: "Bump ip-address", headRefName: "dependabot/npm_and_yarn/ip-address-10", baseRefName: "main", headRefOid: "b".repeat(40),
+    body: "Release notes: ip-address#217 fixed. See <a href=\"https://x/217\">#217</a>\n- #217 is quoted in the changelog" };
+  const stage = async (prs) => { put({ issues: [issue(217, ["approved"])], prs }); return (await new GitHubIssueConnector().cards(config, logger)).find((c) => c.item.issueNumber === 217).stage; };
+  const before = await stage([dependabot]);
+  assert.notEqual(before, "awaitingRelease", "a non-release PR must not place #217");
+  assert.notEqual(await stage([{ ...dependabot, body: "- #217" }]), "awaitingRelease", "head is not the source branch");
+  assert.equal(await stage([{ ...releasePr, body: "Release\n\n- #217\n" }]), "awaitingRelease", "a real release PR does");
+});
