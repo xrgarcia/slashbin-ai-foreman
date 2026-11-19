@@ -931,6 +931,34 @@ test("the deploy is interrupted (Foreman restart): a release found merged is ver
   assertClosedVerified(5);
 });
 
+test("an interrupted deploy that merged a dark issue marks it shipped dark when the next pass reads the merge (SLA-5216)", async () => {
+  // deploy() kept #7 off the record's issues and stopped before marking it; the record names no dark issue.
+  world({ issues: [issue(7, "pr approved"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 5)] }, { prod: VERIFY(90) });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  await seedRelease(rt, repo, { pr: 90, headSha: HEAD, issues: [8], phase: "deploying", attempts: 0, since: new Date().toISOString() });
+  assert.equal(await run(), true);
+  assertClosedVerified(8);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
+  assert.ok(gh().issues[7].labels.includes("shipped dark"), "the recovered dark issue is labelled shipped dark");
+  const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
+  assert.equal(said.length, 1, "one shipped-dark comment");
+  assert.match(said[0].body, /Shipped dark in release PR #90[\s\S]*`X_ENABLED` off/);
+  await run(2);
+  assert.equal((gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->")).length, 1, "a later pass adds none");
+});
+
+test("recovery marks the dark issues the deploy recorded, even once the release body no longer lists them (SLA-5216)", async () => {
+  world({ issues: [issue(7, "pr approved"), issue(8, "pr approved")], prs: [mergedPr(90, "- #8", MERGE, 5)] }, { prod: VERIFY(90) });
+  await seedRelease(rt, repo, { pr: 90, headSha: HEAD, issues: [8], dark: { 7: "X_ENABLED" }, phase: "deploying", attempts: 0, since: new Date().toISOString() });
+  assert.equal(await run(), true);
+  assertClosedVerified(8);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
+  assert.ok(gh().issues[7].labels.includes("shipped dark"), "the recorded dark issue is labelled shipped dark");
+  const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
+  assert.equal(said.length, 1, "one shipped-dark comment");
+  assert.match(said[0].body, /Shipped dark in release PR #90[\s\S]*`X_ENABLED` off/);
+});
+
 // --- Adoption ------------------------------------------------------------------
 
 test("adopts a release a person merged: no Tech Lead, no deploy, a prod verify, tag, close", async () => {
@@ -957,6 +985,11 @@ test("adoption leaves an unsigned dark issue open: it shipped switched off, so i
   assert.equal(await run(), true);
   assertClosedVerified(8);
   assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
+  // SLA-5216: a release first seen merged never passed deploy(); adoption records the dark issue all the same.
+  assert.ok(gh().issues[7].labels.includes("shipped dark"), "the adopted dark issue is labelled shipped dark");
+  const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
+  assert.equal(said.length, 1, "one shipped-dark comment");
+  assert.match(said[0].body, /Shipped dark in release PR #90[\s\S]*`X_ENABLED` off/);
 });
 
 // A dark issue adoption once labelled itself; `signer` applied `ready for prod release` afterwards.
@@ -1181,6 +1214,12 @@ test("a promotion stall comments once on each issue waiting on EM verification, 
   assert.equal(stall.length, 1, "deduped across checks");
   assert.match(stall[0], /Waiting on EM verification/);
   assert.equal((await recordOf(rt, repo, 5)).promotionStallNoted, true);
+});
+
+test("a promotion stall skips an issue that shipped dark: what waits is its enablement, not a release (SLA-5216)", async () => {
+  world({ issues: [issue(5, "pr approved", "shipped dark")], compareFiles: 4 });
+  await promote(10_000);
+  assert.equal(commentsOn(5).filter((b) => b.includes("<!-- foreman:promotion-stall -->")).length, 0);
 });
 
 /** A logger that keeps every line, by level. */
@@ -1578,6 +1617,15 @@ test("signoff: an unsigned issue whose Pre-Flight names a dark flag ships switch
   assert.deepEqual(statuses().map((s) => s.state), ["success"]);
   assert.equal(heldComments(100).length, 0);
   assert.notEqual(gh().issues[7].state, "CLOSED", "a dark issue is not verified or closed by the release");
+  // SLA-5216: the status names the dark issue, and the issue records that it shipped dark, so nobody reads it as
+  // "nothing to release" and leaves it.
+  assert.match(statuses()[0].description, /shipped dark, unsigned: #7$/);
+  assert.ok(gh().issues[7].labels.includes("shipped dark"), "the dark issue is labelled shipped dark");
+  const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
+  assert.equal(said.length, 1, "one shipped-dark comment");
+  assert.match(said[0].body, /Shipped dark in release PR #100[\s\S]*`X_ENABLED` off[\s\S]*never "nothing to release"/);
+  // Kept on the release record too, so a deploy interrupted after its merge marks it from what it accepted.
+  assert.deepEqual((await prodReleases())[100].dark, { 7: "X_ENABLED" });
 });
 
 test("signoff: a dark flag the shipped code does not name yet still holds the release", async (t) => {

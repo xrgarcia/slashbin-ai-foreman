@@ -123,7 +123,8 @@ async function noteStall(rt: ForemanRuntime, repoConfig: RepoConfig, files: numb
   const { prApproved, readyForProd } = repoConfig.lifecycleLabels;
   const open = await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger);
   const waiting = open
-    .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel))
+    // A shipped-dark issue's code is released; what waits is its enablement, which its own comment names (SLA-5216).
+    .filter((i) => codeHost().hasLabel(i, prApproved) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel) && !codeHost().hasLabel(i, repoConfig.github.shippedDarkLabel))
     .map((i) => i.number);
   // An issue whose record cannot be read may already have been commented on: it is left alone this pass.
   const loaded = await rt.records.loadIssueRecords(repoConfig, open.map((i) => i.number));

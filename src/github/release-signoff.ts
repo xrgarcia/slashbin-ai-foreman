@@ -141,17 +141,18 @@ export class ReleaseSignoff {
    * the unsigned set changed since the last post, and comments once per set.
    * A failed write is logged and retried next pass; it never throws.
    */
-  async syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved: number[] = []): Promise<void> {
+  async syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved: number[] = [], dark: readonly number[] = []): Promise<void> {
     const held = unsigned.length + unresolved.length > 0;
     const key = `${config.githubRepo}#${pr}`;
-    const state = `${headSha}|${unsigned.join(",")}|${unresolved.join(",")}`;
+    const state = `${headSha}|${unsigned.join(",")}|${unresolved.join(",")}|${dark.join(",")}`;
     if (this.posted.get(key) === state) return;
     const ctx = config.github.signoffStatusContext;
-    const description = !held
-      ? "Every issue in this release is signed off by the EM"
+    // A dark issue rides unsigned (#353): the status names it, so "every issue signed" never hides one (SLA-5216).
+    const description = (!held
+      ? (dark.length > 0 ? `Every other issue signed off by the EM; shipped dark, unsigned: ${list([...dark])}` : "Every issue in this release is signed off by the EM")
       : (unsigned.length > 0
         ? `Awaiting EM sign-off (ready for prod release): ${list(unsigned)}`
-        : `Cannot read merged PR ${list(unresolved)}; sign-off unknown`).slice(0, 140);
+        : `Cannot read merged PR ${list(unresolved)}; sign-off unknown`)).slice(0, 140);
     try {
       await ghAsync([
         "api", "--method", "POST", `repos/${config.githubRepo}/statuses/${headSha}`,

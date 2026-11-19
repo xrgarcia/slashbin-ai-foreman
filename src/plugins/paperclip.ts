@@ -95,7 +95,7 @@ export class PaperclipPlugin implements ForemanPlugin {
       config.paperclip,
       mirrorSecrets(config.sessionEnv, config.paperclip.apiKey, config.paperclip.registryApiKey),
       logger,
-      config.lifecycleLabels,
+      { ...config.lifecycleLabels, shippedDark: config.github.shippedDarkLabel },
       // A card's block (reason, holder, stage, ruling) outlives a restart, in its repo's own record.
       createCardBlockStore(() => this.repos, this.stores.records, this.stores.legacy),
       config.paperclip.registryUrl

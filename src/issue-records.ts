@@ -69,6 +69,11 @@ export interface ProdRelease {
    * asked the Tech Lead or the SRE to deploy it.
    */
   adopted?: boolean;
+  /**
+   * The unsigned dark issues this release ships switched off (issue number to flag), as deploy() accepted them: an
+   * interrupted deploy's recovery marks these even when the PR body has since changed (SLA-5216).
+   */
+  dark?: Record<string, string>;
 }
 
 /**

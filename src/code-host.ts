@@ -576,6 +576,8 @@ export interface CodeHost {
    * only those whose flag that code names. Unreadable is not dark.
    */
   darkIssues(config: RepoConfig, issues: readonly number[], logger: Logger, shipped?: string): Promise<Map<number, string>>;
+  /** Label `issue` `shipped dark` and comment once: it rode release PR `pr` with `flag` off, enablement unsigned. */
+  markShippedDark(config: RepoConfig, issue: number, flag: string, pr: number, mergeSha?: string): Promise<void>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;
@@ -583,7 +585,7 @@ export interface CodeHost {
 
   // Release sign-off.
   foremanAppliedOrHold(config: RepoConfig, logger: Logger): (n: number) => Promise<boolean>;
-  syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved?: number[]): Promise<void>;
+  syncSignoff(config: RepoConfig, pr: number, headSha: string, unsigned: number[], logger: Logger, unresolved?: number[], dark?: readonly number[]): Promise<void>;
   unsignedInHead(config: RepoConfig, logger: Logger): Promise<{
     unsigned: number[];
     unresolved: number[];

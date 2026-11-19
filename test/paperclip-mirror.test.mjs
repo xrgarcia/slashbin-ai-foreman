@@ -1390,6 +1390,15 @@ test("handoff: an owned card at another seat's stage says the next action under 
   assert.equal(lines[2], "Next: Engineering Manager — run the release gate for example/r#7, then apply `ready for prod release`");
 });
 
+test("handoff: a shipped-dark card holds on its enablement, never the release gate (SLA-5216)", async () => {
+  const fake = fakePaperclip([]);
+  const { mirror } = mirrorOn(fake, { ...OWNED, ...SEATS });
+  const labels = ["approved", "pr approved", "shipped dark"];
+  const c = { item: { issueNumber: 7, repo: "example/r" }, title: "issue 7", url: URL7, state: "open", stage: "pendingVerification", labels };
+  await mirror.onEvent({ kind: "snapshot", states: allOpen, repo: "example/r", items: snap([{ number: 7, labels }]), cards: [c] }, logger());
+  assert.equal(fake.rows[0].description.split("\n")[2], "Next: Engineering Manager — hold example/r#7 on its enablement — name the enablement step and its owner");
+});
+
 test("a dev-verification wait stays in review, never Blocked; the same reason twice writes nothing (ops_portal#18)", async () => {
   const fake = fakePaperclip();
   const { mirror } = mirrorOn(fake);

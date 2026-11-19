@@ -20,6 +20,12 @@ export const githubConventionsSchema = z.object({
   // Sessions get it as FOREMAN_BLOCKED_LABEL. Must differ from every trigger
   // and lifecycle label.
   blockedLabel: name.default("blocked"),
+  // The label on an issue that rode a release dark: its code is in production,
+  // its flag off, its enablement unsigned (SLA-5216). Still `pr approved`, so
+  // its card asks the EM to hold it on its enablement, not to run the release
+  // gate, and the promotion-stall note skips it. Sessions get it as
+  // FOREMAN_SHIPPED_DARK_LABEL.
+  shippedDarkLabel: name.default("shipped dark"),
   // The order the implement session picks among several approved issues,
   // highest first. Each tier is the labels an issue must all carry; an issue
   // takes the first tier it matches. Sessions get it as FOREMAN_PRIORITY_LABELS

@@ -109,6 +109,7 @@ export function setLabelEnv(
   if (triggerLabel) env.FOREMAN_TRIGGER_LABEL = triggerLabel;
   if (lifecycleLabels) env.FOREMAN_LIFECYCLE_LABELS = JSON.stringify(lifecycleLabels);
   env.FOREMAN_BLOCKED_LABEL = github.blockedLabel;
+  env.FOREMAN_SHIPPED_DARK_LABEL = github.shippedDarkLabel;
   env.FOREMAN_PRIORITY_LABELS = JSON.stringify(github.priorityLabels);
 }
 

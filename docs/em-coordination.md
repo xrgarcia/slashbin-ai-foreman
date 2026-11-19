@@ -61,6 +61,8 @@ EM's: route it to the SRE, then release the hold.
 
 Variant: **`verifyScheduled`** (a `merged` card whose dev verification the SRE held until a time, or could not run) is a scheduled wait, not a failure: the comment reads "Dev verification scheduled — PR #N resumes <Central time>" and nothing is needed from the card; the Foreman retries then.
 
+Variant: **`shippedDark`** (a `pr approved` card labelled `shipped dark`: its code rode a release with its flag off, SLA-5216) is never "nothing to release". Hold it on its enablement: name the step (the flag on in production, and whatever must hold first) and its owner, then sign it when that step is ready. The promotion-stall note skips it.
+
 **The card follows GitHub on its own (EM#1150 feature 6).** Each pass, the Foreman's mirror
 places every card from GitHub: the column and the holder the stage calls for (a hand-off lost
 to a Paperclip outage is re-made next pass), a card for any lifecycle issue that has none,

@@ -14,6 +14,10 @@ import type { RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { gitResult } from "../git-exec.js";
 import { readIssueBody } from "./readiness.js";
+import { commentOnIssue } from "./ci-gate.js";
+import { createLabel } from "./core-reads.js";
+import { ghAsync } from "./gh.js";
+import { hasCommentContaining } from "./pr-comments.js";
 
 /** `Dark flag: NAME`, with optional list marker, bold and backticks. */
 const DARK_LINE = /^\s*(?:[-*]\s+)?\**dark flag:?\**:?\**\s*`?([A-Za-z0-9_]+)`?\s*(?:$|[\s.;,(—-])/i;
@@ -66,4 +70,28 @@ export async function darkIssues(config: RepoConfig, issues: readonly number[], 
     out.set(n, flag);
   }
   return out;
+}
+
+/** Marks the one shipped-dark comment on an issue. */
+export const SHIPPED_DARK_MARK = "<!-- foreman:shipped-dark -->";
+
+/**
+ * Record that `issue` shipped dark in release PR `pr`: the shipped-dark label (`github.shippedDarkLabel`) (created when the repo lacks it) and
+ * one comment naming the flag and the step left. Throws when the label cannot be applied; a lost comment is retried
+ * by whoever calls again, the marker keeps it to one.
+ */
+export async function markShippedDark(config: RepoConfig, issue: number, flag: string, pr: number, mergeSha?: string): Promise<void> {
+  try {
+    await createLabel(config, config.github.shippedDarkLabel, "5319e7");
+  } catch { /* exists already, or the add below says why */ }
+  await ghAsync(["issue", "edit", String(issue), "--repo", config.githubRepo, "--add-label", config.github.shippedDarkLabel], config.repoPath);
+  if (await hasCommentContaining(config, issue, SHIPPED_DARK_MARK)) return;
+  await commentOnIssue(config, issue, [
+    SHIPPED_DARK_MARK,
+    `**Shipped dark in release PR #${pr}${mergeSha ? ` (\`${mergeSha.slice(0, 7)}\`)` : ""}.** Its code is in production with \`${flag}\` off; ` +
+    "enablement is not yet signed, so this issue stays open.",
+    "",
+    `EM: this is never "nothing to release". Hold it on its enablement: name the enablement step (\`${flag}\` on in production, ` +
+    "and whatever must hold first) and its owner, then sign it when that step is ready.",
+  ].join("\n"));
 }
