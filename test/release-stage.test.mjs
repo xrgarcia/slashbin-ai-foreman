@@ -959,6 +959,19 @@ test("adoption leaves an unsigned dark issue open: it shipped switched off, so i
   assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
 });
 
+test("adoption reads sign-off as the gate does: a dark issue the Foreman signed itself is still unsigned, so it stays open", async () => {
+  // Before the sign-off gate, adoption labelled `ready for prod release` itself; that label is no EM sign-off.
+  world({
+    issues: [issue(7, "pr approved", "ready for prod release"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 60)],
+    comments: { 7: [{ body: "<!-- foreman:release-carried -->", by: "foreman-bot", at: "2026-10-01T00:00:00Z" }] },
+    events: { 7: [{ label: "ready for prod release", by: "foreman-bot" }] },
+  }, { prod: VERIFY(90) });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  assert.equal(await run(), true);
+  assertClosedVerified(8);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "the Foreman's own label signs nothing off");
+});
+
 test("adoption reads an existing Production Verification instead of running one", async () => {
   const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance** | PASS | ok |\n| **Grafana** | CLEAN | |\n| **Soak** | PENDING | later |";
   world({

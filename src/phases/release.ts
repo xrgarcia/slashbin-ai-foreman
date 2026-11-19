@@ -52,7 +52,7 @@ import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
 import { codeHost } from "../plugins/registry.js";
 import { releaseTagName } from "../config-schema/github.js";
-import type { ReleasePrView } from "../code-host.js";
+import type { IssueSnapshot, ReleasePrView } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
 import type { WorkItem } from "../adapters.js";
 import { recordRun, type SessionEnd } from "../session-run.js";
@@ -714,8 +714,7 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     // Only issues the Foreman's lifecycle owns (they carry the trigger label):
     // a `#N` in the body can be a PR or a passing mention.
     const issues: number[] = [];
-    const unsigned: number[] = [];
-    const L = repoConfig.lifecycleLabels;
+    const views: IssueSnapshot[] = [];
     try {
       for (const n of named) {
         const v = await codeHost().viewIssue(repoConfig, n);
@@ -725,7 +724,7 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
         if (noop[n]) continue;
         if (!v?.labels.includes(repoConfig.triggerLabel)) continue;
         issues.push(n);
-        if (![L.readyForProd, L.releasePending, L.prodVerifyHeld, L.readyToClose].some((l) => v.labels.includes(l))) unsigned.push(n);
+        views.push({ number: n, title: "", labels: v.labels.map((name) => ({ name })) });
       }
     } catch (err) {
       logger.debug(`Could not read release PR #${pr.number}'s issues: ${errText(err)}`);
@@ -734,6 +733,9 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     // An unsigned dark issue shipped switched off (withoutDark): this release neither verifies nor closes it, so it is
     // not adopted either. Its turn-on is a later, signed release (#353). Dark by its Pre-Flight alone: a flag the code
     // did not name yet never let the release past the sign-off gate, so it is no turn-on either.
+    // Unsigned by the sign-off gate's own reading, so a sign-off label the Foreman wrote itself is no sign-off here either.
+    const unsigned = views.length === 0 ? [] : await codeHost().unsignedIssues(views, new Set(issues), repoConfig.lifecycleLabels,
+      codeHost().foremanAppliedOrHold(repoConfig, logger));
     if (unsigned.length > 0) {
       const dark = await codeHost().darkIssues(repoConfig, unsigned, logger);
       for (const n of dark.keys()) issues.splice(issues.indexOf(n), 1);
