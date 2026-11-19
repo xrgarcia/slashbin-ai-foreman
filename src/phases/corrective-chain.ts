@@ -30,9 +30,12 @@ export function chainReason(holder: number, correctives: readonly number[]): str
 
 /** What a held verification's corrective chain does to the build: nothing, stopped, or the holder released. */
 export type ChainHold = "build" | "stopped" | "released";
+/** A chain's state and, when it stopped, the correctives that must not build. */
+export interface ChainVerdict { state: ChainHold; correctives: number[] }
 
 /**
- * What `holder`'s corrective chain does to the build. Under the limit: `build`, as before. At it: the EM is asked once
+ * What `holder`'s corrective chain does to the build. The caller asks it of every held merged issue, whatever its retry
+ * state: a verification whose attempts are spent no longer holds the repo, and its correctives must still not build. Under the limit: `build`, as before. At it: the EM is asked once
  * ("redesign or switch off") and the caller builds no corrective for it (`stopped`), until the EM switches it off by
  * naming a `Dark flag` in its Pre-Flight; then it no longer holds the repo at all (`released`), so the switch-off issue
  * and everything queued behind it build. Its release stays held until the code names that flag (darkIssues, shipped).
@@ -40,20 +43,21 @@ export type ChainHold = "build" | "stopped" | "released";
  */
 export async function correctiveChainHold(
   rt: ForemanRuntime, repoConfig: RepoConfig, holder: number, hold: VerifyHold | undefined, logger: Logger,
-): Promise<ChainHold> {
-  if (!hold) return "build";
+): Promise<ChainVerdict> {
+  const build: ChainVerdict = { state: "build", correctives: [] };
+  if (!hold) return build;
   let correctives: number[];
   try {
     correctives = await codeHost().correctivesOf(repoConfig, holder, hold.prNumber);
   } catch (err) {
     logger.warn(`#${holder}: its correctives could not be counted (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
-    return "build";
+    return build;
   }
-  if (!chainBroken(correctives)) return "build";
+  if (!chainBroken(correctives)) return build;
   const flag = (await codeHost().darkIssues(repoConfig, [holder], logger)).get(holder);
   if (flag) {
     logger.info(`#${holder}: switched off (\`${flag}\`) after ${correctives.length} correctives; its dev verification no longer holds the repo`);
-    return "released";
+    return { state: "released", correctives };
   }
   try {
     if (await rt.handoffs.raise(repoConfig, { kind: "corrective-chain", subject: holder, dedupeKey: "chain", reason: chainReason(holder, correctives) })) {
@@ -63,5 +67,5 @@ export async function correctiveChainHold(
     if (!(err instanceof HandoffNotSaved)) throw err;
     logger.warn(`#${holder}: could not record the corrective-chain question — asked again next pass`);
   }
-  return "stopped";
+  return { state: "stopped", correctives };
 }

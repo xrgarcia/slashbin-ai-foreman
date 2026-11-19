@@ -161,8 +161,8 @@ test("a third corrective on a held dev verification raises one corrective-chain 
   const h = harness();
   try {
     await withGh(fakeGh(chainFiles([21, 22, 23])), async (cfg) => {
-      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "stopped");
-      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "stopped", "still stopped on the next pass");
+      assert.equal((await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger)).state, "stopped");
+      assert.equal((await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger)).state, "stopped", "still stopped on the next pass");
     });
     const entries = [...h.docs.values()].flatMap((d) => Object.values(d.unstick ?? {}));
     assert.equal(entries.length, 1);
@@ -178,11 +178,11 @@ test("two correctives, no hold record, or an unreadable chain: the build goes on
   const h = harness();
   try {
     await withGh(fakeGh(chainFiles([21, 22])), async (cfg) => {
-      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "build");
-      assert.equal(await correctiveChainHold(h.rt, cfg, 10, undefined, h.logger), "build");
+      assert.equal((await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger)).state, "build");
+      assert.equal((await correctiveChainHold(h.rt, cfg, 10, undefined, h.logger)).state, "build");
     });
     await withGh(fakeGh(chainFiles([21, 22, 23]), { failBlockers: true }), async (cfg) => {
-      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "build");
+      assert.equal((await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger)).state, "build");
     });
     assert.equal(h.docs.size, 0);
     assert.ok(h.lines.some((l) => /could not be counted/.test(l)));
@@ -195,7 +195,7 @@ test("switched off: once the EM names a Dark flag in its Pre-Flight, the broken 
   const h = harness();
   try {
     await withGh(fakeGh({ ...chainFiles([21, 22, 23]), "body_10.txt": "## Pre-Flight\n- Dark flag: `X_ENABLED`" }), async (cfg) => {
-      assert.equal(await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger), "released");
+      assert.equal((await correctiveChainHold(h.rt, cfg, 10, HOLD, h.logger)).state, "released");
     });
     assert.equal(h.docs.size, 0, "no EM row once it is switched off");
     assert.ok(h.lines.some((l) => /switched off .*no longer holds the repo/.test(l)));

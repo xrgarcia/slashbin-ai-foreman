@@ -560,10 +560,23 @@ export async function tryBatchImplementation(
     return null;
   }
   const verifyHolds = fieldTable(mergedRecords, "verifyHeld");
-  // A held verification the EM switched off after a broken corrective chain no longer holds the repo (switchedOff below).
+  // A third corrective on one verification stops its chain: none of its correctives builds, and the EM is asked to
+  // redesign or switch it off. Asked of every held merged issue, whatever its retry state: a verification whose attempts
+  // are spent frees the repo (devVerifyHolding) but its correctives must still not build (#353, review of PR 354).
+  // Switched off (a `Dark flag` in its Pre-Flight), it is released: it no longer holds the repo, so the switch-off builds.
   const switchedOff = new Set<number>();
-  const holding = () => merged.filter((n) => !switchedOff.has(n));
-  let verifying = devVerifyHolding(holding(), verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
+  const stoppedHolders = new Set<number>();
+  const stoppedCorrectives = new Set<number>();
+  if (!featurePr) {
+    for (const n of merged) {
+      if (!verifyHolds[n]) continue;
+      const chain = await correctiveChainHold(rt, repoConfig, n, verifyHolds[n], repoLogger);
+      if (chain.state === "released") switchedOff.add(n);
+      if (chain.state === "stopped") { stoppedHolders.add(n); for (const c of chain.correctives) stoppedCorrectives.add(c); }
+    }
+  }
+  const holding = merged.filter((n) => !switchedOff.has(n));
+  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).
@@ -571,25 +584,23 @@ export async function tryBatchImplementation(
   // a rework issue outside the batch starved while the verification waited on
   // it (console #1440 behind #1431, 2026-10-27).
   // A visual QA FAIL is capped at once (the EM decides), so it no longer holds the repo; its follow-up still goes first.
-  let followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
+  const followUpOf = verifying ?? visualDecisionHolder(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   // The fix is the issue that CORRECTS the held one, by the code host's relation (blocked-by, sub-issue or the legacy
   // title: `Relation`, src/adapters.ts). Read only while a hold stands and no feature PR does.
-  // A third corrective on one verification stops the chain: none builds, and the EM is asked to redesign or switch it off.
-  // Switched off (a `Dark flag` in its Pre-Flight), it is released and the next holder, if any, is read the same way.
-  let chainStopped = false;
-  while (!featurePr && followUpOf !== null) {
-    const chain = await correctiveChainHold(rt, repoConfig, followUpOf, verifyHolds[followUpOf], repoLogger);
-    if (chain !== "released") { chainStopped = chain === "stopped"; break; }
-    switchedOff.add(followUpOf);
-    verifying = devVerifyHolding(holding(), verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
-    followUpOf = verifying ?? visualDecisionHolder(holding(), verifyHolds, config.backoff.verifyRetry.maxAttempts);
-  }
-  const fixes = !featurePr && followUpOf !== null && !chainStopped
-    ? await fixesForHold(rt, repoConfig, followUpOf, verifying, [...new Set([...actionableIssues, ...handOff])], repoLogger)
+  const fixes = !featurePr && followUpOf !== null && !stoppedHolders.has(followUpOf)
+    ? (await fixesForHold(rt, repoConfig, followUpOf, verifying, [...new Set([...actionableIssues, ...handOff])], repoLogger))
+      .filter((n) => !stoppedCorrectives.has(n))
     : [];
   if (fixes.length > 0) {
     actionableIssues.splice(0, actionableIssues.length, ...fixes);
     repoLogger.info(`Building ${fixes.map((n) => `#${n}`).join(", ")} now — the fix for #${followUpOf}, whose dev verification is waiting on it`);
+  }
+  // A stopped chain's corrective leaves the batch, and the batch is cut again from the rest: with a batch of one, the
+  // corrective at the head of the queue would otherwise starve everything behind it.
+  if (actionableIssues.some((n) => stoppedCorrectives.has(n))) {
+    repoLogger.info(`Not building ${actionableIssues.filter((n) => stoppedCorrectives.has(n)).map((n) => `#${n}`).join(", ")} — a corrective of a stopped chain (${[...stoppedHolders].map((n) => `#${n}`).join(", ")}); the EM redesigns or switches it off`);
+    const rest = await codeHost().discoveryBatch(repoConfig, handOff.filter((n) => !stoppedCorrectives.has(n)), repoLogger, config.buildBatchSize, (n) => labels.get(n) ?? []);
+    actionableIssues.splice(0, actionableIssues.length, ...rest);
   }
   const prHolder = featurePr ? `open Foreman PR #${featurePr.number}` : null;
   const verifyHolder = verifying !== null && fixes.length === 0 ? `#${verifying}'s dev verification` : null;
@@ -613,6 +624,9 @@ export async function tryBatchImplementation(
     if (failures > 0) rt.memory.failureCount.set(repoName, 0);
     return null;
   }
+
+  // Every candidate was a stopped chain's corrective: nothing to build.
+  if (actionableIssues.length === 0) return null;
 
   events?.push({ message: `Picked up ${actionableIssues.length} issue(s) on ${repoConfig.githubRepo}: ${actionableIssues.map(n => `#${n}`).join(", ")}`, level: "info" });
 

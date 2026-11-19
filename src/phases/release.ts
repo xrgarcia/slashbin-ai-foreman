@@ -714,6 +714,8 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
     // Only issues the Foreman's lifecycle owns (they carry the trigger label):
     // a `#N` in the body can be a PR or a passing mention.
     const issues: number[] = [];
+    const unsigned: number[] = [];
+    const L = repoConfig.lifecycleLabels;
     try {
       for (const n of named) {
         const v = await codeHost().viewIssue(repoConfig, n);
@@ -721,11 +723,20 @@ async function adoptMergedReleases(rt: ForemanRuntime, repoConfig: RepoConfig, r
         if (v?.state === "CLOSED" && (verified[n] || noop[n])) continue;
         // A net-zero issue whose merge is not on production was closed with its own outcome: no release carries it.
         if (noop[n]) continue;
-        if (v?.labels.includes(repoConfig.triggerLabel)) issues.push(n);
+        if (!v?.labels.includes(repoConfig.triggerLabel)) continue;
+        issues.push(n);
+        if (![L.readyForProd, L.releasePending, L.prodVerifyHeld, L.readyToClose].some((l) => v.labels.includes(l))) unsigned.push(n);
       }
     } catch (err) {
       logger.debug(`Could not read release PR #${pr.number}'s issues: ${errText(err)}`);
       continue;
+    }
+    // An unsigned dark issue shipped switched off (withoutDark): this release neither verifies nor closes it, so it is
+    // not adopted either. Its turn-on is a later, signed release (#353). Dark by its Pre-Flight alone: a flag the code
+    // did not name yet never let the release past the sign-off gate, so it is no turn-on either.
+    if (unsigned.length > 0) {
+      const dark = await codeHost().darkIssues(repoConfig, unsigned, logger);
+      for (const n of dark.keys()) issues.splice(issues.indexOf(n), 1);
     }
     if (issues.length === 0) {
       rt.memory.adoptChecked.add(key);

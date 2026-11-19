@@ -58,10 +58,21 @@ test("an old skip on the open feature PR hands over to the gate", () => {
 // merge was still unverified, and a fix its verification asked for landed
 // behind work already built on top of it.
 test("a merge awaiting dev verification queues the next build, the same way", () => {
-  assert.match(block, /devVerifyHolding\(holding\(\), verifyHolds/,
+  assert.match(block, /devVerifyHolding\(holding, verifyHolds/,
     "the gate must read the verify holds from the merged issues' records, not a snapshot from before the cycle");
   assert.match(block, /lifecycleLabels\.prMerged/, "a merge awaiting verification is the `pr merged` label");
   assert.match(block, /roleFor\("verifier", config\) !== undefined && config\.buildWaitsForDevVerify/,
     "no verifier means no verify stage, so nothing would ever free the queue");
   assert.match(block, /verifyHolder \? actionableIssues : \[\]/, "behind a verification, every candidate is queued");
+});
+
+// #353: the corrective-chain breaker is asked of every held merged issue before the
+// queue picks a holder, so a verification whose retries ran out, or one behind a
+// visual-QA hold, cannot slip past it and keep growing correctives.
+test("the corrective chain is checked for every held merge, whatever its retry state", () => {
+  const chainAt = src.indexOf("correctiveChainHold(rt, repoConfig, n, verifyHolds[n]");
+  assert.ok(chainAt > 0, "the chain check runs per held merged issue");
+  assert.ok(chainAt < src.indexOf("devVerifyHolding(holding, verifyHolds"), "before the retry-bounded holder is chosen");
+  assert.match(src, /!stoppedHolders\.has\(followUpOf\)/, "a stopped holder, dev or visual QA, gets no fix build");
+  assert.match(src, /\.filter\(\(n\) => !stoppedCorrectives\.has\(n\)\)/, "a stopped chain's correctives are not built");
 });

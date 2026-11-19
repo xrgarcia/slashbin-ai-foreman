@@ -950,6 +950,15 @@ test("adopts a release a person merged: no Tech Lead, no deploy, a prod verify, 
   assert.equal(agentCalls().length, 1);
 });
 
+test("adoption leaves an unsigned dark issue open: it shipped switched off, so it is not verified or closed", async () => {
+  // #353: the release a person merged carried a dark issue; closing it would mark a switched-off feature done.
+  world({ issues: [issue(7, "pr approved"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 60)] }, { prod: VERIFY(90) });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  assert.equal(await run(), true);
+  assertClosedVerified(8);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
+});
+
 test("adoption reads an existing Production Verification instead of running one", async () => {
   const pv = "## Production Verification\n\n| Check | Result | Details |\n|---|---|---|\n| **Acceptance** | PASS | ok |\n| **Grafana** | CLEAN | |\n| **Soak** | PENDING | later |";
   world({
