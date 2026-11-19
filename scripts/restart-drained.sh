@@ -37,7 +37,8 @@ fi
 # a timestamp cannot, since an old checkout built late looks fresh.
 built=$(node -e 'try{process.stdout.write(require("./dist/build-info.json").commit||"")}catch{}' 2>/dev/null)
 if [ "$built" != "$head" ]; then
-  echo "refused: dist/ was built from ${built:0:7}${built:+, not }${built:-an unknown commit, not }${head:0:7}; run npm ci && npm run build"; exit 1
+  short=${built:0:7}
+  echo "refused: dist/ was built from ${short:-an unknown commit}, not the checkout ${head:0:7}; run npm ci && npm run build"; exit 1
 fi
 if [ -L node_modules ] || ! node -e 'import("./dist/config.js")' >/dev/null 2>&1; then
   echo "refused: dist/ cannot load its dependencies (node_modules is a symlink or broken); run npm ci && npm run build"; exit 1
