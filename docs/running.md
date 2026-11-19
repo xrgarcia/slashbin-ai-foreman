@@ -37,7 +37,8 @@ The CLI itself: `node dist/cli.js [--config <path>] [--repo <name>] [--once]`, a
 `restart` go through `systemctl --user` (unit name `slashbin-foreman.service`, or
 `FOREMAN_SYSTEMD_UNIT`), and `scripts/restart-drained.sh` restarts it through the drain
 and exits 0 only once the new process logs `Daemon starting` (it waits up to 70 minutes,
-and refuses first if the checkout is not `origin/features`, `dist/` predates the checked-out
+and refuses first if the checkout is not `origin/features`, `dist/build-info.json` names a
+commit other than the checked-out
 commit, `node_modules` is a symlink, or `dist/config.js` cannot load).
 
 The daemon writes `.agent[-<repo>].pid` itself at startup, before it does any
