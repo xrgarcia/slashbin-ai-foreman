@@ -78,6 +78,8 @@ that the next pass would place: fix the issue.
 person's direct-mode session resumes it. EM input: none. Adding a human-lane repo to the Foreman means a `syncOnly`
 entry in `.ai-agent.json`, never an implement/review lane (`docs/skill-sync.md`).
 
+**An `approved-for-human` issue on a Foreman-built repo.** It is a person's, not the Foreman's. Its Paperclip card is held by the one configured `paperclip.humanUserId` (one person today), and the Foreman does not implement it. So one repo can carry both Foreman-built (`approved`) and human-built (`approved-for-human`) issues; the builder lane is per issue, not per repo. EM input: none.
+
 ## 2. Holds by code
 
 A dev-verification hold is planned by `verifyHoldPlan` (`src/phases/verify.ts`) into one of
