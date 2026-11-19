@@ -242,11 +242,11 @@ const mergedPr = (number, body, mergeSha, minutesAgo) =>
 
 let stateDir;
 /** A fresh world: GitHub, the agents' answers, the Foreman's state and the stage's memory. */
-function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, compareCommits, prodHead = MERGE }, ctl = {}) {
+function world({ issues = [], prs = [], comments = {}, refs = [], tagObjects = {}, compareFiles = 0, comparePaths, compareCommits, prodHead = MERGE, events = {} }, ctl = {}) {
   writeFileSync(GH_STATE, JSON.stringify({
     issues: Object.fromEntries(issues.map((i) => [i.number, i])),
     prs: Object.fromEntries(prs.map((p) => [p.number, p])),
-    comments, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}), ...(compareCommits ? { compareCommits } : {}),
+    comments, events, refs, tagObjects, compareFiles, prodHead, ...(comparePaths ? { comparePaths } : {}), ...(compareCommits ? { compareCommits } : {}),
   }));
   writeFileSync(CTL, JSON.stringify(ctl));
   writeFileSync(GH_LOG, "");
@@ -959,17 +959,28 @@ test("adoption leaves an unsigned dark issue open: it shipped switched off, so i
   assert.notEqual(gh().issues[7].state, "CLOSED", "the dark issue stays open");
 });
 
+// A dark issue adoption once labelled itself; `signer` applied `ready for prod release` afterwards.
+const foremanSignedDark = (signer) => world({
+  issues: [issue(7, "pr approved", "ready for prod release"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 60)],
+  comments: { 7: [{ body: "<!-- foreman:release-carried -->", by: "foreman-bot", at: "2026-10-01T00:00:00Z" }] },
+  events: { 7: [{ label: "ready for prod release", by: signer }] },
+}, { prod: VERIFY(90) });
+
 test("adoption reads sign-off as the gate does: a dark issue the Foreman signed itself is still unsigned, so it stays open", async () => {
   // Before the sign-off gate, adoption labelled `ready for prod release` itself; that label is no EM sign-off.
-  world({
-    issues: [issue(7, "pr approved", "ready for prod release"), issue(8, "pr approved")], prs: [mergedPr(90, "- #7\n- #8", MERGE, 60)],
-    comments: { 7: [{ body: "<!-- foreman:release-carried -->", by: "foreman-bot", at: "2026-10-01T00:00:00Z" }] },
-    events: { 7: [{ label: "ready for prod release", by: "foreman-bot" }] },
-  }, { prod: VERIFY(90) });
+  foremanSignedDark("foreman-bot");
   setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
   assert.equal(await run(), true);
   assertClosedVerified(8);
   assert.notEqual(gh().issues[7].state, "CLOSED", "the Foreman's own label signs nothing off");
+});
+
+test("adoption: the same dark issue, once someone else applied the sign-off label, is signed and closes with its release", async () => {
+  foremanSignedDark("someone-else");
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  assert.equal(await run(), true);
+  assertClosedVerified(7);
+  assertClosedVerified(8);
 });
 
 test("adoption reads an existing Production Verification instead of running one", async () => {
