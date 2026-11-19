@@ -300,7 +300,7 @@ test("pure: devVerifyHolding skips an escalated hold; pickVerifyTarget orders it
   const now = Date.now();
   const first = nextToolingHold(undefined, 11, "evidence-check-failed", now, LIMIT);
   assert.equal(first.escalates, false);
-  const past = nextToolingHold({ ...first.hold, firstHeldAt: ago(LIMIT) }, 11, "evidence-check-failed", now, LIMIT);
+  const past = nextToolingHold({ ...first.hold, firstHeldAt: new Date(now - LIMIT).toISOString() }, 11, "evidence-check-failed", now, LIMIT);
   assert.equal(past.escalates, true, "at the bound it escalates");
   assert.equal(nextToolingHold(past.hold, 11, "evidence-check-failed", now + HOUR, LIMIT).escalates, false, "once");
 });
