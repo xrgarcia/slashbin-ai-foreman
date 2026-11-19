@@ -33,8 +33,11 @@ if git fetch -q origin features 2>/dev/null; then
 else
   echo "refused: could not fetch origin features to confirm the checkout is current"; exit 1
 fi
-if [ ! -f dist/config.js ] || [ "$(stat -c %Y dist/config.js)" -lt "$(git log -1 --format=%ct HEAD)" ]; then
-  echo "refused: dist/ was built before the checked-out commit; run npm ci && npm run build"; exit 1
+# dist/build-info.json (scripts/stamp-build.mjs) names the commit dist/ was compiled from;
+# a timestamp cannot, since an old checkout built late looks fresh.
+built=$(node -e 'try{process.stdout.write(require("./dist/build-info.json").commit||"")}catch{}' 2>/dev/null)
+if [ "$built" != "$head" ]; then
+  echo "refused: dist/ was built from ${built:0:7}${built:+, not }${built:-an unknown commit, not }${head:0:7}; run npm ci && npm run build"; exit 1
 fi
 if [ -L node_modules ] || ! node -e 'import("./dist/config.js")' >/dev/null 2>&1; then
   echo "refused: dist/ cannot load its dependencies (node_modules is a symlink or broken); run npm ci && npm run build"; exit 1
