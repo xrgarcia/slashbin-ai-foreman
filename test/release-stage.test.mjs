@@ -1517,6 +1517,25 @@ test("signoff: the hold clears on its own once the EM signs the issue", async ()
   assert.deepEqual(statuses().map((s) => s.state), ["failure", "success"]);
 });
 
+test("signoff: an unsigned issue whose Pre-Flight names a dark flag ships switched off and does not hold the release", async () => {
+  // #353: a service's unsigned feature held its release for a day; dark, it would have shipped off.
+  world(unsignedWorld(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  setBodies({ 7: "## Pre-Flight\n- **Dark flag:** `X_ENABLED`" });
+  assert.equal(await run(), true);
+  assert.deepEqual(agentCalls().map((c) => c[0]), ["tech-lead", "sre"]);
+  assert.deepEqual(statuses().map((s) => s.state), ["success"]);
+  assert.equal(heldComments(100).length, 0);
+  assert.notEqual(gh().issues[7].state, "CLOSED", "a dark issue is not verified or closed by the release");
+});
+
+test("signoff: a dark flag outside the Pre-Flight still holds the release", async () => {
+  world(unsignedWorld(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
+  setBodies({ 7: "## Fix\nDark flag: X_ENABLED\n\n## Pre-Flight\n- Lane: foreman" });
+  assert.equal(await run(), false);
+  assert.equal(agentCalls().length, 0);
+  assert.deepEqual(statuses().map((s) => s.state), ["failure"]);
+});
+
 test("signoff: a release whose every issue is signed is deployed, with a passing status", async () => {
   world(pending(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
   assert.equal(await run(), true);

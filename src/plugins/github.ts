@@ -22,6 +22,7 @@ import * as reviewFreshness from "../github/review-freshness.js";
 import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
 import * as corrections from "../github/corrections.js";
+import * as darkFlag from "../github/dark-flag.js";
 import { ghAsync } from "../github/gh.js";
 import { probeToken } from "../github/token-probe.js";
 import { fleetState } from "../github-state.js";
@@ -136,6 +137,8 @@ export function githubCodeHost(
     readIssueState: readiness.readIssueState,
     relationsOf: corrections.relationsOf,
     correctorsOf: corrections.correctorsOf,
+    correctivesOf: corrections.correctivesOf,
+    darkIssues: darkFlag.darkIssues,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),

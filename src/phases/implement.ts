@@ -18,6 +18,7 @@ import { CycleEvent, activeRuns, itemOf, notifyOnce, prReport, releaseIfResolved
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
 import { HandoffNotSaved } from "../unstick.js";
+import { correctiveChainBroken } from "./corrective-chain.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
@@ -570,7 +571,10 @@ export async function tryBatchImplementation(
   const followUpOf = verifying ?? visualDecisionHolder(merged, verifyHolds, config.backoff.verifyRetry.maxAttempts);
   // The fix is the issue that CORRECTS the held one, by the code host's relation (blocked-by, sub-issue or the legacy
   // title: `Relation`, src/adapters.ts). Read only while a hold stands and no feature PR does.
-  const fixes = !featurePr && followUpOf !== null
+  // A third corrective on one verification stops the chain: none builds, and the EM is asked to redesign or switch it off.
+  const chainStopped = !featurePr && followUpOf !== null
+    && await correctiveChainBroken(rt, repoConfig, followUpOf, verifyHolds[followUpOf], repoLogger);
+  const fixes = !featurePr && followUpOf !== null && !chainStopped
     ? await fixesForHold(rt, repoConfig, followUpOf, verifying, [...new Set([...actionableIssues, ...handOff])], repoLogger)
     : [];
   if (fixes.length > 0) {

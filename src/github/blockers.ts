@@ -17,6 +17,8 @@ export interface Blocker {
   state: string;
   labels: { name: string }[];
   repository_url?: string;
+  /** ISO time the blocking issue was created. */
+  created_at?: string;
 }
 
 /** The lifecycle labels that mean the issue's PR has merged to the base branch, or gone further. */

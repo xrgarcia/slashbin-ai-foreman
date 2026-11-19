@@ -566,6 +566,13 @@ export interface CodeHost {
    * included. Throws when a link cannot be read: the caller treats that as unknown, never as "none".
    */
   correctorsOf(config: RepoConfig, holder: number, logger: Logger): Promise<number[]>;
+  /**
+   * The correctives filed against `holder` since its PR `prNumber` merged (the issues it is blocked by, created after
+   * the merge), ascending. Throws when a link cannot be read.
+   */
+  correctivesOf(config: RepoConfig, holder: number, prNumber: number): Promise<number[]>;
+  /** Of `issues`, those whose Pre-Flight names `Dark flag: <ENV_NAME>`, with the flag. Unreadable is not dark. */
+  darkIssues(config: RepoConfig, issues: readonly number[], logger: Logger): Promise<Map<number, string>>;
 
   // Release carry.
   adoptCarried(repoConfig: RepoConfig, authorized: ReadonlySet<number>, logger: Logger): Promise<ReleaseCarry>;
