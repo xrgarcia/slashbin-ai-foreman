@@ -21,6 +21,21 @@ UNIT=slashbin-foreman.service
 # worktree setup left node_modules a symlink to itself; dist/config.js could not find
 # zod, and the restart already draining would have come back crash-looping.
 cd "$(dirname "$0")/.."
+# Refuse a checkout or build behind what was merged. 2026-11-19 1:49 pm: the restart
+# after PR #359 merged reloaded the old code; this script never pulled, and "restarted"
+# read as deployed for 40 minutes. This repo ships from features (CLAUDE.md), so a
+# restart's job is to run origin/features.
+if git fetch -q origin features 2>/dev/null; then
+  head=$(git rev-parse HEAD); want=$(git rev-parse origin/features)
+  if [ "$head" != "$want" ]; then
+    echo "refused: the checkout is at ${head:0:7}, origin/features is ${want:0:7}; run git checkout --detach origin/features && npm ci && npm run build"; exit 1
+  fi
+else
+  echo "refused: could not fetch origin features to confirm the checkout is current"; exit 1
+fi
+if [ ! -f dist/config.js ] || [ "$(stat -c %Y dist/config.js)" -lt "$(git log -1 --format=%ct HEAD)" ]; then
+  echo "refused: dist/ was built before the checked-out commit; run npm ci && npm run build"; exit 1
+fi
 if [ -L node_modules ] || ! node -e 'import("./dist/config.js")' >/dev/null 2>&1; then
   echo "refused: dist/ cannot load its dependencies (node_modules is a symlink or broken); run npm ci && npm run build"; exit 1
 fi
