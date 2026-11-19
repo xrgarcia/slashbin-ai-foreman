@@ -1210,26 +1210,27 @@ async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[
 }
 
 /**
- * The unsigned dark issues a merged release carried but does not verify: the open lifecycle issues its body lists
- * outside `rel.issues`, unsigned by the gate's reading and dark by their Pre-Flight. Read from the PR, not the record, so
- * a deploy interrupted by a Foreman that kept no such list is covered too (SLA-5216).
+ * The unsigned dark issues a merged release carried but does not verify: those its deploy recorded (`rel.dark`), and
+ * the open lifecycle issues its body lists outside `rel.issues`, unsigned by the gate's reading and dark by their
+ * Pre-Flight, so a record written before `dark` existed is covered too (SLA-5216).
  */
 async function mergedDark(repoConfig: RepoConfig, body: string, rel: ProdRelease, logger: Logger): Promise<Map<number, string>> {
+  const recorded = new Map(Object.entries(rel.dark ?? {}).map(([n, flag]) => [Number(n), flag]));
   try {
-    const listed = releaseIssues(body).filter((n) => n !== rel.pr && !rel.issues.includes(n));
+    const listed = releaseIssues(body).filter((n) => n !== rel.pr && !rel.issues.includes(n) && !recorded.has(n));
     const views: IssueSnapshot[] = [];
     for (const n of listed) {
       const v = await codeHost().viewIssue(repoConfig, n);
       if (v?.state === "OPEN" && v.labels.includes(repoConfig.triggerLabel)) views.push({ number: n, title: "", labels: v.labels.map((name) => ({ name })) });
     }
-    if (views.length === 0) return new Map();
+    if (views.length === 0) return recorded;
     const unsigned = await codeHost().unsignedIssues(views, new Set(views.map((v) => v.number)), repoConfig.lifecycleLabels,
       codeHost().foremanAppliedOrHold(repoConfig, logger));
-    return unsigned.length === 0 ? new Map() : await codeHost().darkIssues(repoConfig, unsigned, logger);
+    if (unsigned.length > 0) for (const [n, flag] of await codeHost().darkIssues(repoConfig, unsigned, logger)) recorded.set(n, flag);
   } catch (err) {
-    logger.warn(`Release PR #${rel.pr}: could not read its dark issues: ${errText(err)}`);
-    return new Map();
+    logger.warn(`Release PR #${rel.pr}: could not read its body's dark issues: ${errText(err)}`);
   }
+  return recorded;
 }
 
 /**
@@ -1350,7 +1351,8 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   }
 
   const t = iso(now());
-  const rel: ProdRelease = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: pending, phase: "deploying", attempts: 0, since: t };
+  const rel: ProdRelease = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: pending, phase: "deploying", attempts: 0, since: t,
+    ...(dark.size > 0 ? { dark: Object.fromEntries(dark) } : {}) };
   // Recorded before the SRE merges anything: a deploy whose "deploying" record could not be saved does not happen,
   // so a restart can never find a merge it has no record of (and deploy it again).
   if (!(await putRelease(rt, repoConfig, rel, logger))) {
