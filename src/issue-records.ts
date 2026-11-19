@@ -69,6 +69,11 @@ export interface ProdRelease {
    * asked the Tech Lead or the SRE to deploy it.
    */
   adopted?: boolean;
+  /**
+   * The unsigned dark issues this release ships switched off, issue number to flag: kept on the `deploying` record so
+   * a deploy interrupted after its merge still marks them shipped dark when the next pass reads the merge (SLA-5216).
+   */
+  dark?: Record<string, string>;
 }
 
 /**

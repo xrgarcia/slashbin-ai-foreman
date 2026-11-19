@@ -1327,7 +1327,8 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   }
 
   const t = iso(now());
-  const rel: ProdRelease = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: pending, phase: "deploying", attempts: 0, since: t };
+  const rel: ProdRelease = { pr: pr.number, url: pr.url, headSha: pr.headSha, issues: pending, phase: "deploying", attempts: 0, since: t,
+    ...(dark.size > 0 ? { dark: Object.fromEntries(dark) } : {}) };
   // Recorded before the SRE merges anything: a deploy whose "deploying" record could not be saved does not happen,
   // so a restart can never find a merge it has no record of (and deploy it again).
   if (!(await putRelease(rt, repoConfig, rel, logger))) {
@@ -1477,6 +1478,8 @@ export async function tryRelease(
         if (await putRelease(rt, repoConfig, next, rlog)) {
           follow(next);
           rlog.info(`Release PR #${rel.pr} merged while its deploy was in flight; verifying it`);
+          // The deploy stopped before it marked its dark issues; the merge it carried still shipped them (SLA-5216).
+          if (rel.dark) await markDark(repoConfig, rel.pr, next.mergeSha, new Map(Object.entries(rel.dark).map(([n, f]) => [Number(n), f])), rlog);
         }
       } else if (await dropRelease(rt, repoConfig, rel.pr, rlog)) {
         follow(rel.pr);
