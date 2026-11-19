@@ -189,6 +189,13 @@ export const HANDOFF_VARIANTS = Object.freeze({
     why: "dev verification failed because the deploy to dev did (the reason is above)",
     done: "the merge is deployed to dev and the hold lifts (the card returns to its stage)",
   },
+  shippedDark: {
+    act: true,
+    todo: "{issue} shipped dark: its code is in production with its flag off and enablement unsigned. This is never \"nothing to release\": hold it on its enablement, naming the enablement step and its owner, then sign it when that step is ready.",
+    next: "hold {issue} on its enablement — name the enablement step and its owner",
+    why: "a release carried {issue} switched off (`shipped dark`); turning it on is a separate, signed step",
+    done: "the enablement is signed (`{readyForProd}`) or the issue is held with a named owner",
+  },
   verifyScheduled: {
     act: false,
     todo: "Nothing to do from this card: dev verification of {pr} is scheduled and resumes {resumeAt}.",

@@ -9,6 +9,7 @@
 
 import type { ItemState, SignoffHold, SnapshotCard, SnapshotItem, WorkItem } from "../adapters.js";
 import type { Logger } from "../logger.js";
+import { SHIPPED_DARK_LABEL } from "../lifecycle.js";
 import { assigneeFor, BACKLOG_STATUS, HOLD_PREFIX, isHoldComment, stageTarget } from "./board.js";
 import { handoffNextLine } from "./handoff.js";
 import { redactComment } from "./comments.js";
@@ -346,7 +347,9 @@ export class SnapshotSync {
     const [owner = "", name = ""] = c.item.repo.split("/");
     const line = c.state !== "open" ? `GitHub: closed ${c.state}` : `GitHub: open · ${c.stage ? `stage ${c.stage}` : "not approved"}`;
     const facts = c.state === "open" && c.stage && c.stage !== "done" ? this.notes.handoffFacts(id, c.stage, c.item, undefined, undefined, c.signoff) : null;
-    const next = facts && c.stage && c.stage !== "done" ? `\n${handoffNextLine(c.stage, facts, this.env.labels)}` : "";
+    // A shipped-dark issue waits on its enablement, not on a release gate (SLA-5216).
+    const variant = c.stage === "pendingVerification" && c.labels?.includes(SHIPPED_DARK_LABEL) ? "shippedDark" as const : undefined;
+    const next = facts && c.stage && c.stage !== "done" ? `\n${handoffNextLine(c.stage, facts, this.env.labels, variant)}` : "";
     const out = {
       title: fill(PAPERCLIP_OWNED_TITLE_FORMAT, { repo: c.item.repo, owner, name, N: String(c.item.issueNumber), title: c.title }),
       description: `${this.env.keyOf(c.item)}\n${line}${next}\n\n${c.url}`,

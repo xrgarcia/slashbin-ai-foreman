@@ -1183,6 +1183,12 @@ test("a promotion stall comments once on each issue waiting on EM verification, 
   assert.equal((await recordOf(rt, repo, 5)).promotionStallNoted, true);
 });
 
+test("a promotion stall skips an issue that shipped dark: what waits is its enablement, not a release (SLA-5216)", async () => {
+  world({ issues: [issue(5, "pr approved", "shipped dark")], compareFiles: 4 });
+  await promote(10_000);
+  assert.equal(commentsOn(5).filter((b) => b.includes("<!-- foreman:promotion-stall -->")).length, 0);
+});
+
 /** A logger that keeps every line, by level. */
 function captureLogger() {
   const lines = [];
@@ -1578,6 +1584,13 @@ test("signoff: an unsigned issue whose Pre-Flight names a dark flag ships switch
   assert.deepEqual(statuses().map((s) => s.state), ["success"]);
   assert.equal(heldComments(100).length, 0);
   assert.notEqual(gh().issues[7].state, "CLOSED", "a dark issue is not verified or closed by the release");
+  // SLA-5216: the status names the dark issue, and the issue records that it shipped dark, so nobody reads it as
+  // "nothing to release" and leaves it.
+  assert.match(statuses()[0].description, /shipped dark, unsigned: #7$/);
+  assert.ok(gh().issues[7].labels.includes("shipped dark"), "the dark issue is labelled shipped dark");
+  const said = (gh().comments[7] ?? []).filter((c) => c.body.includes("<!-- foreman:shipped-dark -->"));
+  assert.equal(said.length, 1, "one shipped-dark comment");
+  assert.match(said[0].body, /Shipped dark in release PR #100[\s\S]*`X_ENABLED` off[\s\S]*never "nothing to release"/);
 });
 
 test("signoff: a dark flag the shipped code does not name yet still holds the release", async (t) => {

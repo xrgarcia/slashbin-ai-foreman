@@ -58,3 +58,11 @@ test("verifyScheduled names the resume time in Central, not the next verify pass
   assert.match(text, /resumes Mon Nov 9, 10:59 am CT/);
   assert.doesNotMatch(text, /next verify pass|\{\w+\}/);
 });
+
+test("shippedDark: a dark issue's card holds on its enablement, never the release gate (SLA-5216)", () => {
+  const next = handoffNextLine("pendingVerification", facts, DEFAULT_HANDOFF_LABELS, "shippedDark");
+  assert.equal(next, "Next: Engineering Manager — hold example/r#7 on its enablement — name the enablement step and its owner");
+  const text = handoffComment("pendingVerification", facts, DEFAULT_HANDOFF_LABELS, "shippedDark");
+  assert.doesNotMatch(text, /release gate|\{\w+\}/);
+  assert.match(text, /never "nothing to release"/);
+});

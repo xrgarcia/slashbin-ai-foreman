@@ -156,3 +156,10 @@ export const RELEASE_STAGE = Object.freeze({
   merged: "done",
   closed: null,
 } as const satisfies Record<"open" | "merged" | "closed", StageOrDone | null>);
+
+/**
+ * The label on an issue that rode a release dark: its code is in production, its flag off, its turn-on unsigned
+ * (SLA-5216, 2026-11-19). Still `pr approved`, so without it the card read "run the release gate" and the stall
+ * note "waiting on EM verification", and the EM seat answered "nothing to release" and left the card in review.
+ */
+export const SHIPPED_DARK_LABEL = "shipped dark";

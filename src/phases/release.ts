@@ -1195,13 +1195,30 @@ async function soak(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentCon
  * an unsigned one never holds the release (#353: one unsigned feature held a service's release and seven signed issues).
  * It is not `release pending`, so this release neither verifies nor closes it; once signed, a later release carries
  * its turn-on (foreman#283). `shipped` is the head the release carries: a flag counts only once that code names it.
+ * `seen` collects the dark issues and their flags, for the sign-off status and the shipped-dark record.
  */
-async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[], logger: Logger, shipped: string): Promise<number[]> {
+async function withoutDark(repoConfig: RepoConfig, pr: number, unsigned: number[], logger: Logger, shipped: string, seen?: Map<number, string>): Promise<number[]> {
   if (unsigned.length === 0) return unsigned;
   const dark = await codeHost().darkIssues(repoConfig, unsigned, logger, shipped);
   if (dark.size === 0) return unsigned;
+  for (const [n, flag] of dark) seen?.set(n, flag);
   logger.info(`Release PR #${pr}: ${[...dark].map(([n, flag]) => `#${n} (\`${flag}\` off)`).join(", ")} unsigned but dark; it ships switched off and does not hold the release`);
   return unsigned.filter((n) => !dark.has(n));
+}
+
+/**
+ * Each issue `pr` shipped dark is labelled `shipped dark` and told so once, so its card holds on its enablement rather
+ * than asking for a release gate that has nothing left to release (SLA-5216). A failure is logged: the release stands.
+ */
+async function markDark(repoConfig: RepoConfig, pr: number, mergeSha: string | undefined, dark: ReadonlyMap<number, string>, logger: Logger): Promise<void> {
+  for (const [n, flag] of dark) {
+    try {
+      await codeHost().markShippedDark(repoConfig, n, flag, pr, mergeSha);
+      logger.info(`Release PR #${pr}: #${n} shipped dark (\`${flag}\` off); marked \`shipped dark\`, enablement unsigned`);
+    } catch (err) {
+      logger.warn(`Release PR #${pr}: could not mark #${n} shipped dark: ${errText(err)}`);
+    }
+  }
 }
 
 /**
@@ -1236,9 +1253,11 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   // while the release lists an issue without `ready for prod release` (or a label
   // it moves on to). Before the back-off wait, so the hold shows at once; it
   // clears itself on the pass after the last issue is signed.
+  // The dark issues this release ships switched off: named on the sign-off status, recorded on each once it merges.
+  const dark = new Map<number, string>();
   const unsigned = await withoutDark(repoConfig, open.number,
     await codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger)), logger,
-    repoConfig.baseBranch);
+    repoConfig.baseBranch, dark);
   if (unsigned.length > 0) {
     try {
       await codeHost().syncSignoff(repoConfig, open.number, (await codeHost().viewReleasePr(repoConfig, open.number)).headSha, unsigned, logger);
@@ -1277,7 +1296,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
     logger.warn(`Release PR #${pr.number}: could not read what ${repoConfig.baseBranch} carries; not deploying`);
     return false;
   }
-  const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger, pr.headSha) };
+  const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger, pr.headSha, dark) };
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
     await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);
@@ -1289,7 +1308,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
     logger.warn(`Could not re-read release PR #${pr.number}: ${errText(err)}`);
     return false;
   }
-  await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, [], logger);
+  await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, [], logger, [], [...dark.keys()]);
 
   const approvePath = transcript(repoConfig, `approve-pr${pr.number}`, cycleNumber);
   const approval = await asRun(repoConfig, (signal) =>
@@ -1372,6 +1391,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   // The PR is merged. If "merged" cannot be recorded the "deploying" record stands: the next pass reads the PR as
   // MERGED, moves it to merged and verifies it, so the release is neither deployed again nor skipped.
   if (!(await putRelease(rt, repoConfig, merged, logger))) return true;
+  await markDark(repoConfig, pr.number, mergeSha ?? undefined, dark, logger);
   await followRelease(rt, repoConfig, logger, true);
   await tagRelease(repoConfig, merged, logger);
   await putRelease(rt, repoConfig, merged, logger);
