@@ -11,8 +11,9 @@ import { roleFor } from "../plugins/registry.js";
 import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, isDeliveredVerdict, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
-import { fieldTable, type ToolingHold, type VerifyHold } from "../issue-records.js";
-import { clearCheckPass, recordCheckFailure, releasedByDefect, releasedIssues, syncCheckDefects, type CheckDefect } from "./check-defect.js";
+import { fieldTable, type VerifyHold } from "../issue-records.js";
+import { report as reportStall, resolve as resolveStall, type StallTable } from "../stall-clock.js";
+import { clearCheckPass, deferredCheck, recordCheckFailure, releasedByDefect, releasedIssues, resolveFreedStalls, syncCheckDefects, type CheckDefect } from "./check-defect.js";
 import { handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
@@ -219,55 +220,28 @@ export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wai
  * is built on top. A merge holds while the SRE has it: not yet verified, or
  * held and still retrying. It frees the repo once its attempts are spent (it
  * waits on a person) or it waits on a named time, so one stuck verification
- * never stalls every issue behind it. A tooling hold escalated past
- * `toolingHoldLimitMs` (`tooling[n].escalatedAt`) frees it too: one broken
- * checker must not stall the repo (slashbin-ai-foreman#350). So does a `filed` check-defect that lists the issue and
+ * never stalls every issue behind it. A `verify-deferred` stall that StallClock has escalated frees it too: one broken
+ * checker must not stall the repo (slashbin-ai-foreman#350, #376). So does a `filed` check-defect that lists the issue and
  * names the check it is held on (#366): its defect card blocks it; any other hold on it stands.
  */
 export function devVerifyHolding(
   merged: readonly number[],
   held: Readonly<Record<number, VerifyHold>>,
   maxAttempts: number,
-  tooling: Readonly<Record<number, ToolingHold>> = {},
+  stalls: StallTable = {},
   checkDefects: Readonly<Record<string, CheckDefect>> = {},
 ): number | null {
   const released = releasedIssues(checkDefects);
   for (const n of [...merged].sort((a, b) => a - b)) {
     const h = held[n];
     if (h && (h.attempts >= maxAttempts || h.retryAt)) continue;
-    if (tooling[n]?.escalatedAt) continue;
-    // A charged verification hold (h) stands: the defect frees only an issue held on the tooling row alone.
-    if (!h && releasedByDefect(released, n, tooling[n]?.reason)) continue;
+    const deferred = stalls[n]?.["verify-deferred"];
+    if (deferred?.state === "escalated") continue;
+    // A charged verification hold (h) stands: the defect frees only an issue held on the deferred check alone.
+    if (!h && releasedByDefect(released, n, deferredCheck(deferred))) continue;
     return n;
   }
   return null;
-}
-
-/**
- * The tooling hold a `defer` on `prNumber` leaves on an issue whose row was `prev`, and whether this defer escalates
- * it. Pure, exported for tests (slashbin-ai-foreman#350). `firstHeldAt` is kept while the same PR stays held (a slug
- * change keeps it); a different PR starts afresh. It escalates once, the first defer at or past `limitMs` from
- * `firstHeldAt`; an escalated row keeps its `escalatedAt`, so a repeat past the bound escalates nothing.
- */
-export function nextToolingHold(
-  prev: ToolingHold | undefined,
-  prNumber: number,
-  reason: string,
-  now: number,
-  limitMs: number,
-): { hold: ToolingHold; escalates: boolean } {
-  const same = prev !== undefined && prev.prNumber === prNumber && !Number.isNaN(Date.parse(prev.firstHeldAt));
-  const firstHeldAt = same ? prev.firstHeldAt : new Date(now).toISOString();
-  if (same && prev.escalatedAt) return { hold: { reason, prNumber, firstHeldAt, escalatedAt: prev.escalatedAt }, escalates: false };
-  const escalates = now - Date.parse(firstHeldAt) >= limitMs;
-  return { hold: { reason, prNumber, firstHeldAt, ...(escalates ? { escalatedAt: new Date(now).toISOString() } : {}) }, escalates };
-}
-
-/** The reason an escalated tooling hold's issue is blocked with: the slug, the PR and the age. Pure, exported for tests. */
-export function toolingHoldEscalation(hold: ToolingHold, now: number, limitMs: number): string {
-  return `dev verification of PR #${hold.prNumber} has been on a tooling hold (${hold.reason}) for ${formatWait(now - Date.parse(hold.firstHeldAt))}, ` +
-    `past the ${formatWait(limitMs)} bound — the verifier's checker could not run, so nothing was verified and no attempt is charged. ` +
-    `It no longer holds the repo's other builds; it is re-asked automatically and clears when the verifier returns a verdict`;
 }
 
 /**
@@ -320,8 +294,8 @@ export function evidenceLinks(summary: string, max = 8): string[] {
  * One PR per pass, oldest issue first. A PR is skipped while ANY of its issues
  * is held within its retry window or has spent its attempts: the SRE verifies
  * the PR, not the issue, so one held issue holds its PR. The Nth failed attempt
- * waits backoffDelay(N, retry) from when it was held. A PR whose issues are all on an escalated tooling hold
- * (`tooling[n].escalatedAt`) comes after every other PR: it is re-asked only when no other PR awaits verification,
+ * waits backoffDelay(N, retry) from when it was held. A PR whose issues all carry an escalated `verify-deferred` stall (or one a filed defect released)
+ * comes after every other PR: it is re-asked only when no other PR awaits verification,
  * so later merges are still verified (slashbin-ai-foreman#350).
  */
 export function pickVerifyTarget(
@@ -329,13 +303,18 @@ export function pickVerifyTarget(
   held: Readonly<Record<number, VerifyHold>>,
   now: number,
   retry: BackoffConfig["verifyRetry"] = DEFAULT_BACKOFF.verifyRetry,
-  tooling: Readonly<Record<number, ToolingHold>> = {},
+  stalls: StallTable = {},
 ): { prNumber: number; issueNumbers: number[] } | null {
   const byPr = new Map<number, number[]>();
   for (const r of [...refs].sort((a, b) => a.issueNumber - b.issueNumber)) {
     byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
   }
-  const escalated = (issueNumbers: readonly number[]): boolean => issueNumbers.every((n) => Boolean(tooling[n]?.escalatedAt));
+  // Known to defer on a check: escalated, or released by a filed defect (its stall resolved, the check kept in evidence).
+  // Either way it must not keep the front of the queue and starve a PR that has not deferred.
+  const escalated = (issueNumbers: readonly number[]): boolean => issueNumbers.every((n) => {
+    const s = stalls[n]?.["verify-deferred"];
+    return s?.state === "escalated" || (s?.state === "resolved" && (s.evidence ?? []).some((e) => e.startsWith("check ")));
+  });
   const ordered = [...byPr].filter(([, ns]) => !escalated(ns)).concat([...byPr].filter(([, ns]) => escalated(ns)));
   for (const [prNumber, issueNumbers] of ordered) {
     const waiting = issueNumbers.some((n) => {
@@ -429,8 +408,8 @@ export async function tryVerify(
   const waiting = awaiting.filter((n) => !loaded.unavailable.has(n));
   if (waiting.length < awaiting.length) vlog.warn(`Records unreadable, not verifying ${awaiting.filter((n) => loaded.unavailable.has(n)).map((n) => `#${n}`).join(", ")} this pass`);
   const held: Record<number, VerifyHold> = fieldTable(loaded, "verifyHeld");
-  // Tooling holds and their age (slashbin-ai-foreman#350): written on every defer, cleared by a verdict.
-  const tooling: Record<number, ToolingHold> = fieldTable(loaded, "toolingHeld");
+  // The stalls a deferral opens (StallClock, slashbin-ai-foreman#376): reported on every defer, resolved by a verdict.
+  const stalls: StallTable = fieldTable(loaded, "stalls");
   // What the store holds, so a save writes only what changed since the last one.
   const persisted: Record<number, VerifyHold> = { ...held };
   const persist = async (): Promise<void> => {
@@ -446,13 +425,6 @@ export async function tryVerify(
   if (stale.length > 0) {
     for (const n of stale) delete held[n];
     await persist();
-  }
-  const staleTooling = Object.keys(tooling).map(Number).filter((n) => !awaiting.includes(n));
-  if (staleTooling.length > 0) {
-    const kept = { ...tooling };
-    for (const n of staleTooling) delete kept[n];
-    const failed = new Set(await rt.records.saveFieldChanges(repoConfig, "toolingHeld", tooling, kept));
-    for (const n of staleTooling) if (!failed.has(n)) delete tooling[n];
   }
   if (waiting.length === 0) return false;
 
@@ -528,7 +500,7 @@ export async function tryVerify(
   }
   if (unmatched.length > 0) await persist();
 
-  const target = pickVerifyTarget(refs.filter((r) => !passedBySre.has(r.issueNumber)), held, Date.now(), verifyRetry, tooling);
+  const target = pickVerifyTarget(refs.filter((r) => !passedBySre.has(r.issueNumber)), held, Date.now(), verifyRetry, stalls);
   if (!target) return false;
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -536,11 +508,10 @@ export async function tryVerify(
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
-  // An escalated tooling hold is Blocked on the board (slashbin-ai-foreman#350): its re-ask is still a run (the metrics
-  // ledger records it), but its card stays where it is (`cardHeld`), since a session start would move it to in
-  // progress and clear the block before any verdict. Only a verdict releases it (`unblocked`, then the pass or wait
-  // moves it); a charge re-blocks it with its own reason.
-  const cardHeld = target.issueNumbers.filter((n) => tooling[n]?.escalatedAt && tooling[n].prNumber === target.prNumber);
+  // An escalated `verify-deferred` stall is Blocked on the board (the sweep's raise published it): its re-ask is still a
+  // run (the metrics ledger records it), but its card stays where it is (`cardHeld`), since a session start would move it
+  // to in progress and clear the block before any verdict. Only a verdict releases it (`unblocked` below).
+  const cardHeld = target.issueNumbers.filter((n) => stalls[n]?.["verify-deferred"]?.state === "escalated");
   const session: Omit<SessionEvent, "status" | "at"> = {
     phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE", runId: newRunId(),
     ...(cardHeld.length > 0 ? { cardHeld } : {}),
@@ -587,26 +558,19 @@ export async function tryVerify(
       await emit(rt, { kind: "session", session: { ...qaSession, status: r.kind === "verdict" && r.pass ? "finished" : "failed", outcome: isDeliveredVerdict(r) ? "completed" : "failed", workedItems: items, at: stamp() } }, null, vlog);
     }
 
-    // A verdict on this PR ends its issues' tooling holds (slashbin-ai-foreman#350): the row goes first, then an escalated
-    // one is unblocked. A charge verdict says nothing more (its own `blocked` stands); a launch error leaves the row.
-    const endToolingHolds = async (announce: boolean): Promise<void> => {
-      const rows = target.issueNumbers.filter((n) => tooling[n]);
-      if (rows.length === 0) return;
-      const kept = { ...tooling };
-      for (const n of rows) delete kept[n];
-      const failed = new Set(await rt.records.saveFieldChanges(repoConfig, "toolingHeld", tooling, kept));
-      for (const n of rows) {
-        if (failed.has(n)) continue;
-        const was = tooling[n];
-        delete tooling[n];
-        if (announce && was.escalatedAt) await emit(rt, { kind: "unblocked", item: itemOf(repoConfig, n), reason: "dev verification returned a verdict" }, repoConfig, vlog);
+    // A verdict on this PR ends the `verify-deferred` stall of each of its issues; a launch error leaves it standing.
+    const endStalls = async (): Promise<void> => {
+      for (const n of target.issueNumbers) {
+        await resolveStall(rt, repoConfig, n, "verify-deferred", new Date().toISOString())
+          .catch((err) => vlog.warn(`#${n}: its verify-deferred stall was not resolved (${String(err).split("\n")[0]})`));
+        if (cardHeld.includes(n)) await emit(rt, { kind: "unblocked", item: itemOf(repoConfig, n), reason: "dev verification returned a verdict" }, repoConfig, vlog);
       }
     };
 
     if (r.kind === "verdict" && r.pass) {
       rt.memory.verifyDefer.clear(repoName);
       await clearCheckPass(rt, repoConfig, target.prNumber).catch((err) => vlog.warn(`check-defect not cleared for PR #${target.prNumber} (${String(err).split("\n")[0]})`));
-      await endToolingHolds(true);
+      await endStalls();
       const kept = { ...held };
       for (const n of target.issueNumbers) {
         await advance(rt, itemOf(repoConfig, n), "verifyPassed", repoConfig, vlog);
@@ -631,52 +595,40 @@ export async function tryVerify(
       scheduled = { resumeAt: new Date(Date.now() + waitMs).toISOString(), waitReason: `the SRE could not run (${reason})` };
       ended = { status: "failed", outcome: "failed", detail: `deferred — the SRE could not run (${reason}); retry in ${wait}` };
       vlog.info(`Verify of PR #${target.prNumber} deferred: ${reason} — retry in ${wait}`);
-      // The hold's age, recorded on every defer so a restart keeps it (slashbin-ai-foreman#350). Past the bound it is
-      // escalated once: saved first, then blocked, so a failed save says nothing and the next defer tries again.
+      // Before the hold is charged or aged: a check that defers a second, different PR is the checker's defect (#366),
+      // and the deferral is a stall with its own start (StallClock, #376). Neither changes the verdict; a failure in
+      // either is logged and the defer goes on.
       const now = Date.now();
+      const at = new Date(now).toISOString();
+      const slug = repoConfig.githubRepo;
       for (const n of target.issueNumbers) {
-        // Before the hold is charged or aged: a check that defers a second, different PR is the checker's defect
-        // (#366). Never changes the verdict; a failure here is logged and the defer goes on as before.
+        let filed: CheckDefect | null = null;
         try {
-          await recordCheckFailure(rt, repoConfig, { repo: repoConfig.githubRepo, check: reason, issue: n, pr: target.prNumber, at: new Date(now).toISOString() });
+          ({ defect: filed } = await recordCheckFailure(rt, repoConfig, { repo: slug, check: reason, issue: n, pr: target.prNumber, at }));
         } catch (err) {
           vlog.warn(`#${n}: check-defect not recorded (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
         }
-      }
-      const next = { ...tooling };
-      const escalating: number[] = [];
-      for (const n of target.issueNumbers) {
-        const step = nextToolingHold(tooling[n], target.prNumber, reason, now, config.toolingHoldLimitMs);
-        next[n] = step.hold;
-        if (step.escalates) escalating.push(n);
-      }
-      const failed = new Set(await rt.records.saveFieldChanges(repoConfig, "toolingHeld", tooling, next));
-      const escalated = new Set<number>();
-      for (const n of target.issueNumbers) {
-        if (failed.has(n)) {
-          if (tooling[n]?.escalatedAt && tooling[n].prNumber === target.prNumber) escalated.add(n);
-          continue;
+        // Always reported, even under a defect already filed: the stall carries the check this issue waits on, which
+        // is what lets the filed defect free it (`devVerifyHolding`); a filed defect then resolves it at once.
+        try {
+          await reportStall(rt, repoConfig, {
+            issue: n, cause: "verify-deferred", eventAt: at, affected: target.issueNumbers.map((i) => `${slug}#${i}`),
+            resolver: "EM", nextAction: `fix the verifier's \`${reason}\` check, or file a defect against it`,
+            resumptionCondition: "the check passes on a retry, or its check-defect closes", evidence: `check ${reason}`,
+          });
+        } catch (err) {
+          vlog.warn(`#${n}: the verify-deferred stall was not recorded (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
         }
-        tooling[n] = next[n];
-        if (next[n].escalatedAt) escalated.add(n);
-      }
-      for (const n of escalating.filter((x) => !failed.has(x))) {
-        const blockedWhy = toolingHoldEscalation(next[n], now, config.toolingHoldLimitMs);
-        vlog.warn(`#${n}: ${blockedWhy}`);
-        events?.push({ message: `⏸️ ${repoConfig.githubRepo} #${n}: ${blockedWhy}`, level: "warn" });
-        await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: blockedWhy }, repoConfig, vlog);
+        if (filed?.state === "filed") await resolveFreedStalls(rt, repoConfig, filed, at, vlog);
       }
       const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
-      // An escalated hold is Blocked on the board; a re-ask that defers again does not move it back to waiting.
       for (const n of target.issueNumbers) {
-        if (escalated.has(n)) continue;
         await emit(rt, { kind: "verifyWaiting", item: itemOf(repoConfig, n), reason: why }, repoConfig, vlog);
       }
       return false;
     }
     rt.memory.verifyDefer.clear(repoName);
-    // A verdict (wait or charge) ends the tooling hold; only a wait announces it, a charge's own `blocked` stands.
-    if (r.kind === "verdict") await endToolingHolds(plan.kind === "wait");
+    if (r.kind === "verdict") await endStalls();
     const kept = { ...held };
     if (plan.kind === "wait") {
       for (const n of target.issueNumbers) {

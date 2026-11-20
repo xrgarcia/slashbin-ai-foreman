@@ -197,7 +197,7 @@ has a third corrective: a same-repo issue #N is blocked by, filed after #N's PR 
 (`dedupeKey` `chain`). From then the Foreman builds no corrective for #N; they queue behind it. The EM switches #N
 off (a `Dark flag`, so it stops holding the release) or redesigns the remaining work as one issue (#353:
 nine correctives in 24 hours held its release).
-`check-defect` fires when one tooling-hold check defers dev verification on two different PRs (dark behind `FOREMAN_CHECK_DEFECT`,
+`check-defect` fires when one verifier check defers dev verification on two different PRs (dark behind `FOREMAN_CHECK_DEFECT`,
 off unless set: off, it writes and raises nothing; slashbin-ai-foreman#366). Failed verdicts never count: they are findings about the
 change. Its subject is the lowest affected issue, `dedupeKey` the check id (`<owner/repo>:<slug>`) plus the sorted affected list, so a newly
 affected issue is a new question. The reason is JSON (`checkId`, `canonicalRepo`, `check`, `affected`, `firstFailure`), no timestamps.
@@ -284,7 +284,7 @@ reset (or the upstream back-off window) has passed.
 
 A card past its limit is the EM's. A card inside its limit is not: wait for the loop.
 
-## Stalls (`FOREMAN_STALL_CLOCK`, dark)
+## Stalls (`FOREMAN_STALL_CLOCK`, on in production)
 
 `src/stall-clock.ts` records when a stall began: one `IssueRecord.stalls[cause]` entry per issue and cause, with a
 `startedAt` written once (a retry, restart or relabel never resets it). The unstick scan calls `sweep` each pass; an
@@ -299,3 +299,9 @@ opens for each epic the EM lists as due (`afterClosedAt`, else `approvedAt`) on 
 number, and resolves when the epic is no longer in a scan's list. The repo record's `epicStalls` index names the epics
 with an open stall, so a restart resolves them without remembering the previous scan. A scan runs while an
 `epic-decompose` call is open only if that index is non-empty.
+
+Two phases report to it, and the old tooling-hold clock (`toolingHeld`) is gone. A deferred verifier check (`src/phases/verify.ts`) opens
+`verify-deferred`; an `escalated` one frees the repo for the next issue (the PR is still re-asked, uncharged), and a pass, a charged
+verdict or a filed `check-defect` resolves it. A stopped corrective chain (`src/phases/corrective-chain.ts`) opens
+`corrective-chain-stopped` beside its unchanged raise; the holder's `Dark flag` resolves it. The flag must be on wherever the daemon
+runs: with it unset nothing escalates, so a held repo would wait with no bound.

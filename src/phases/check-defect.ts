@@ -10,6 +10,7 @@ import type { Logger } from "../logger.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { codeHost } from "../plugins/registry.js";
 import { HandoffNotSaved } from "../unstick.js";
+import { resolve as resolveStall, unresolvedStalls, type StallRecord } from "../stall-clock.js";
 
 export type CheckDefectState = "suspected" | "filed" | "closed";
 export interface CheckDefect {
@@ -168,6 +169,7 @@ export async function syncCheckDefects(
   const table = repo?.checkDefects ?? {};
   for (const d of Object.values(table)) {
     if (d.state !== "filed") continue;
+    await resolveFreedStalls(rt, repoConfig, d, now, logger);
     let found: { repo: string; issue: number; closed: boolean } | null;
     try {
       found = await codeHost().checkDefectOf(repoConfig, d.affected.map((a) => a.issue), d.checkId);
@@ -201,6 +203,29 @@ async function endQuestions(rt: ForemanRuntime, repoConfig: RepoConfig, d: Check
     if (!ok) return false;
   }
   return true;
+}
+
+/** The check a `verify-deferred` stall waits on: the newest `check <slug>` in its evidence, whatever its state. Pure, exported for tests. */
+export function deferredCheck(stall: StallRecord | undefined): string | undefined {
+  const last = [...(stall?.evidence ?? [])].reverse().find((e) => e.startsWith("check "));
+  return last?.slice("check ".length);
+}
+
+/**
+ * A `filed` defect frees its listed issues from holding the repo, so their `verify-deferred` stalls end with it: the
+ * defect card owns the wait now. Each affected issue of this repo is resolved in the same pass; no stall, or one already
+ * resolved, writes nothing. A failure is logged and the pass goes on.
+ */
+export async function resolveFreedStalls(rt: ForemanRuntime, repoConfig: RepoConfig, d: CheckDefect, at: string, logger: Logger): Promise<void> {
+  for (const n of new Set(d.affected.filter((a) => a.repo === repoConfig.githubRepo).map((a) => a.issue))) {
+    try {
+      const rec = await rt.records.loadIssueRecord(repoConfig, n);
+      const standing = unresolvedStalls(rec?.stalls).find((s) => s.cause === "verify-deferred");
+      if (standing && deferredCheck(standing) === d.check) await resolveStall(rt, repoConfig, n, "verify-deferred", at);
+    } catch (err) {
+      logger.warn(`#${n}: its verify-deferred stall was not resolved (${String(err).split("\n")[0]})`);
+    }
+  }
 }
 
 /** The issues listed by each filed check, by check: built once per pass, so a membership test is O(1). */

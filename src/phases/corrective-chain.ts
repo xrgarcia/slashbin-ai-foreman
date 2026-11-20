@@ -12,6 +12,7 @@ import type { VerifyHold } from "../issue-records.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { codeHost } from "../plugins/registry.js";
 import { HandoffNotSaved } from "../unstick.js";
+import { report as reportStall, resolve as resolveStall } from "../stall-clock.js";
 
 /** The corrective count at which the Foreman stops building correctives for one held dev verification. */
 export const CORRECTIVE_CHAIN_LIMIT = 3;
@@ -27,6 +28,8 @@ export function chainReason(holder: number, correctives: readonly number[]): str
     `redesign or switch off. The Foreman builds no further corrective for #${holder}. Switch it off (a \`Dark flag\` that is off unless set) ` +
     `by naming it in #${holder}'s Pre-Flight, then rewrite the remaining work as one designed issue.`;
 }
+
+const firstLine = (err: unknown): string => (err instanceof Error ? err.message : String(err)).split("\n")[0]!;
 
 /** What a held verification's corrective chain does to the build: nothing, stopped, or the holder released. */
 export type ChainHold = "build" | "stopped" | "released";
@@ -50,14 +53,27 @@ export async function correctiveChainHold(
   try {
     correctives = await codeHost().correctivesOf(repoConfig, holder, hold.prNumber);
   } catch (err) {
-    logger.warn(`#${holder}: its correctives could not be counted (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
+    logger.warn(`#${holder}: its correctives could not be counted (${firstLine(err)})`);
     return build;
   }
   if (!chainBroken(correctives)) return build;
   const flag = (await codeHost().darkIssues(repoConfig, [holder], logger)).get(holder);
   if (flag) {
+    await resolveStall(rt, repoConfig, holder, "corrective-chain-stopped", new Date().toISOString())
+      .catch((err) => logger.warn(`#${holder}: its corrective-chain stall was not resolved (${firstLine(err)})`));
     logger.info(`#${holder}: switched off (\`${flag}\`) after ${correctives.length} correctives; its dev verification no longer holds the repo`);
     return { state: "released", correctives };
+  }
+  // The stop is a stall with its own start, reported before the unchanged raise; a failure here never stops the raise.
+  try {
+    await reportStall(rt, repoConfig, {
+      issue: holder, cause: "corrective-chain-stopped", eventAt: new Date().toISOString(), // the chain stops now, whatever the verification hold's age
+      affected: [`${repoConfig.githubRepo}#${holder}`], resolver: "EM",
+      nextAction: "redesign the work as one designed issue, or switch it off with a `Dark flag` named in its Pre-Flight",
+      resumptionCondition: "a `Dark flag` is named in the holder's Pre-Flight, which releases it", evidence: `correctives ${correctives.map((n) => `#${n}`).join(", ")}`,
+    });
+  } catch (err) {
+    logger.warn(`#${holder}: the corrective-chain stall was not recorded (${firstLine(err)})`);
   }
   try {
     if (await rt.handoffs.raise(repoConfig, { kind: "corrective-chain", subject: holder, dedupeKey: "chain", reason: chainReason(holder, correctives) })) {

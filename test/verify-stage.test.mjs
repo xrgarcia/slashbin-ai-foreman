@@ -108,7 +108,7 @@ test("devVerifyHolding: an unverified merge holds the next build until it passes
     "the first merge still with the SRE is the one named");
 });
 
-test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged hold reports blocked", async () => {
+test("verify: a wait and a deferred SRE run report verifyWaiting, a deferred run opens a stall, only a charged hold reports blocked", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/phases/verify.ts", import.meta.url), "utf8");
   const d = src.indexOf('if (plan.kind === "defer")');
@@ -117,10 +117,9 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, only a charged
   const charge = src.slice(src.indexOf("let attempts = 0;"));
   for (const [name, b] of [["defer", defer], ["wait", wait]]) assert.match(b, /kind: "verifyWaiting"/, name);
   assert.doesNotMatch(wait, /kind: "blocked"/);
-  // A tooling hold blocks only when it escalates past toolingHoldLimitMs (slashbin-ai-foreman#350), once, uncharged.
-  assert.equal(defer.match(/kind: "blocked"/g)?.length, 1, "the defer's one blocked is the escalation");
-  assert.match(defer, /for \(const n of escalating[^\n]*\) \{\n\s*const blockedWhy = toolingHoldEscalation\(/);
-  assert.match(defer, /kind: "blocked", item: itemOf\(repoConfig, n\), reason: blockedWhy/);
+  // A deferred check reports a StallClock stall; the stall's own raise owns the block, so the defer emits none.
+  assert.doesNotMatch(defer, /kind: "blocked"/);
+  assert.match(defer, /cause: "verify-deferred"/);
   assert.match(charge, /kind: "blocked"/);
 });
 
