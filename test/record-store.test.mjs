@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GitHubRecordStore, RECORD_MARKER, parseRecordBody, recordBody } from "../dist/github/record-store.js";
+import { GitHubRecordStore, RECORD_MARKER, parseRecordBody, recordBody, setRecordCachePath } from "../dist/github/record-store.js";
 import { InMemoryRecordStore } from "../dist/record-store.js";
 import { activeWorkSource } from "../dist/plugins/registry.js";
 import { startGitHubWorkSource } from "./agent-plugins.mjs";
@@ -377,7 +377,34 @@ test("a cache file written as another login is ignored", async () => {
   await s1.loadRecord(issue(7), cfg); s1.flush();
   const f = JSON.parse(readFileSync(path, "utf8")); f.self = "someone-else"; writeFileSync(path, JSON.stringify(f));
   const next = etagIo(board);
-  const s2 = new GitHubRecordStore(next.io, 0, path);
+  const warned = [];
+  const s2 = new GitHubRecordStore({ ...next.io, warn: (m) => warned.push(m) }, 0, path);
   await s2.loadRecord(issue(7), cfg);
   assert.equal(next.calls.filter((a) => a.includes("--paginate")).length, 1);
+  // An ignored cache costs a full read of every item: it must say so, not stay silent.
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /someone-else/);
+});
+
+// The daemon's order (2026-11-20): the Paperclip mirror loads a repo record ~0.7 s before codeHost.configureState
+// sets the path. The store read the file once, at that first load, found no path and never looked again: every
+// restart re-read all ~2,350 items in full and spent the hour's quota in under 90 s.
+test("a load before the cache path is set still revalidates once the path is set", async () => {
+  const board = new Map([["7", [{ id: 70, login: SELF, body: recordBody({ a: 1 }) }]], ["9", []]]);
+  const path = join(mkTmp("recache4"), "records.json");
+  const s1 = new GitHubRecordStore(etagIo(board).io, 0, path);
+  await s1.loadRecord(issue(7), cfg); s1.flush();
+  const next = etagIo(board);
+  const s2 = new GitHubRecordStore(next.io, 0); // no persistPath: the module-level path, as in production
+  try {
+    setRecordCachePath(null);
+    assert.equal((await s2.loadRecord(issue(9), cfg)).status, "absent"); // the mirror's early load
+    setRecordCachePath(path); // configureState
+    assert.deepEqual((await s2.loadRecord(issue(7), cfg)).record, { a: 1 });
+    const of7 = next.calls.filter((a) => a.some((x) => x.includes("issues/7/") || x.includes("comments/70")));
+    assert.equal(of7.length, 1);
+    assert.ok(of7[0].includes("-i"), "item 7 is revalidated, not read in full");
+  } finally {
+    setRecordCachePath(null);
+  }
 });
