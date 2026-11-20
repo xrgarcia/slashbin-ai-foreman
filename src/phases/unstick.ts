@@ -194,8 +194,10 @@ async function trackDueEpics(rt: ForemanRuntime, repoConfig: RepoConfig, config:
 
 /** A handoff the pass gave up on: the stall starts when the question first appeared. Issue 0 and `stalled` are never reported. */
 async function reportGiveUp(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, log: Logger, c: UnstickCandidate, entry: Pick<UnstickEntry, "since">): Promise<void> {
-  if (c.issue < 1 || c.kind === "stalled") return;
+  if (c.issue < 1 || c.kind === "stalled" || !stallClockEnabled()) return;
   try {
+    // Indexed first, so a restart or a closed issue never leaves a stall nobody can find.
+    await rt.records.updateRepoRecord(repoConfig, (d) => { d.handoffStalls = [...new Set([...(d.handoffStalls ?? []), c.issue])].sort((a, b) => a - b); });
     await reportStall(rt, repoConfig, {
       issue: c.issue, cause: "handoff-gave-up", eventAt: entry.since, affected: [`${repoConfig.githubRepo}#${c.issue}`],
       resolver: config.unstickEscalationOwner ?? "EM", nextAction: `take ${c.kind}: the EM handoff gave up`,
@@ -295,11 +297,27 @@ export async function tryUnstick(
       });
     }
 
-    // A handoff stall ends when no question stands on its issue any more (the hold cleared, or the issue closed).
-    for (const [n, r] of loaded.records) {
-      if (!unresolvedStalls(r.stalls).some((st) => st.cause === "handoff-gave-up")) continue;
-      if ((byIssue.get(n) ?? []).some((c) => c.kind !== "stalled")) continue;
+    // A handoff stall ends when no question stands on its issue any more (the hold cleared, or the issue closed) or the
+    // EM answered the standing one for good (`declined`). The index finds a closed issue's stall, which no list shows.
+    const indexed = new Set(repoRecord?.handoffStalls ?? []);
+    const stale = [...indexed].filter((n) => !loaded.records.has(n));
+    const extra = stale.length > 0 ? await rt.records.loadIssueRecords(repoConfig, new Set(stale)) : null;
+    const answered = (n: number, c: UnstickCandidate) => {
+      const e = (loaded.records.get(n)?.unstick ?? {})[unstickKey(c.issue, c.kind, c.tag)];
+      return e?.status === "declined" && e.reason === c.reason;
+    };
+    const stalled = new Set<number>(indexed);
+    for (const [n, r] of [...loaded.records, ...(extra?.records ?? [])]) {
+      if (!unresolvedStalls(r.stalls).some((st) => st.cause === "handoff-gave-up")) { stalled.delete(n); continue; }
+      stalled.add(n);
+      if ((byIssue.get(n) ?? []).some((c) => c.kind !== "stalled" && !answered(n, c))) continue;
       await resolveStall(rt, repoConfig, n, "handoff-gave-up", now);
+      stalled.delete(n);
+    }
+    // An index entry whose record could not be read stays: the next pass tries again.
+    for (const n of stale) if (extra?.unavailable.has(n)) stalled.add(n);
+    if (stalled.size !== indexed.size || [...stalled].some((n) => !indexed.has(n))) {
+      await rt.records.updateRepoRecord(repoConfig, (d) => { d.handoffStalls = stalled.size > 0 ? [...stalled].sort((a, b) => a - b) : undefined; });
     }
 
     let calls = 0;

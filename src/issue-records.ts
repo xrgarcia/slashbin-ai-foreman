@@ -343,10 +343,12 @@ export interface RepoRecord {
   checkDefects?: Record<string, CheckDefect>;
   /** Epics (numbers in `epicRepo`) holding an open `epic-unanswered` stall on the host's issue records: the durable index a restart reads, since the due list is only asked every 30 minutes. Written only by `src/phases/unstick.ts`. */
   epicStalls?: number[];
+  /** Issues holding an open `handoff-gave-up` stall: the durable index a restart reads, since a closed issue is no longer listed. Written only by `src/phases/unstick.ts`. */
+  handoffStalls?: number[];
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects", "epicStalls"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects", "epicStalls", "handoffStalls"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

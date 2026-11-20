@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { mkTmp } from "./tmp-dir.mjs";
 import { setStateDir } from "../dist/state-dir.js";
 import { tryUnstick, resetDecomposeThrottle, heldEpics } from "../dist/phases/unstick.js";
+import { dropIssueSnapshot } from "../dist/github/cache.js";
 import { ForemanRuntime } from "../dist/runtime.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
 import { memoryRecords, seed, recordOf, repoRecordOf } from "./issue-records.mjs";
@@ -15,7 +16,9 @@ const logger = { info() {}, warn() {}, error() {}, debug() {}, child() { return 
 process.env.EM_GITHUB_TOKEN ||= "test-token-not-real";
 process.env.FOREMAN_GITHUB_TOKEN ||= "test-token-not-real";
 const ghBin = mkTmp("stall-gh-");
-writeFileSync(join(ghBin, "gh"), `#!/bin/sh\necho '[{"number":7,"title":"t","labels":[]}]'\n`);
+const openFile = join(ghBin, "open.json");
+writeFileSync(openFile, '[{"number":7,"title":"t","labels":[]}]');
+writeFileSync(join(ghBin, "gh"), `#!/bin/sh\ncat ${JSON.stringify(openFile)}\n`);
 chmodSync(join(ghBin, "gh"), 0o755);
 process.env.PATH = `${ghBin}:${process.env.PATH}`;
 
@@ -43,7 +46,7 @@ console.log("[]");`);
     repo, em, get rt() { return rt; },
     restart() { rt = new ForemanRuntime(); resetDecomposeThrottle(); },
     setDue(d) { writeFileSync(join(em, "due.json"), JSON.stringify(d)); },
-    pass: async (i) => { await sleep(5); resetDecomposeThrottle(); return tryUnstick(rt, repo, config, logger, i, { comment: () => {} }); },
+    pass: async (i) => { dropIssueSnapshot("o/host"); await sleep(5); resetDecomposeThrottle(); return tryUnstick(rt, repo, config, logger, i, { comment: () => {} }); },
     stall: async (n, cause) => (await recordOf(rt, repo, n)).stalls?.[cause],
   };
 }
@@ -90,6 +93,39 @@ test("a give-up opens one handoff-gave-up stall that resolves when the hold clea
   await seed(w.rt, w.repo, 7, { verifyHeld: undefined });
   await w.pass(4);
   assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
+});
+
+async function giveUp(w) {
+  writeFileSync(openFile, '[{"number":7,"title":"t","labels":[]}]');
+  await seed(w.rt, w.repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "r", attempts: 3 } });
+  for (let i = 1; i <= 3; i++) await w.pass(i);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "open");
+}
+
+test("a give-up on an issue that then closes resolves, also after a restart", async () => {
+  const w = world();
+  await giveUp(w);
+  assert.deepEqual((await repoRecordOf(w.rt, w.repo)).handoffStalls, [7]);
+  writeFileSync(openFile, "[]");
+  w.restart();
+  await w.pass(4);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
+  assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls, undefined);
+});
+
+test("a terminal EM answer resolves the give-up while the hold remains", async () => {
+  const w = world();
+  await giveUp(w);
+  await w.rt.records.updateIssueRecord(w.repo, 7, (d) => { for (const e of Object.values(d.unstick ?? {})) e.status = "declined"; });
+  await w.pass(4);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
+});
+
+test("a give-up with the flag off writes no index", async () => {
+  const w = world({ flag: false });
+  await seed(w.rt, w.repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "r", attempts: 3 } });
+  for (let i = 1; i <= 3; i++) await w.pass(i);
+  assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls, undefined);
 });
 
 test("heldEpics reads the index and the asked-about epics, nothing else", () => {
