@@ -1384,7 +1384,8 @@ async function previewPrerequisites(repoConfig: RepoConfig, config: AgentConfig,
   try {
     const comments = await codeHost().commentsWithTimes(repoConfig, pr);
     if (comments.some((c) => c.body.startsWith(PREREQ_PREVIEW_HEADING) && c.body.includes(`sha=${sha}`))) return;
-    const r = await preview.call(roleFor("deployer", config), repoConfig, config, pr, sha, logger);
+    const deployer = roleFor("deployer", config);
+    const r = await asRun(repoConfig, (signal) => preview.call(deployer, repoConfig, config, pr, sha, logger, signal));
     if (r.kind !== "posted") logger.info(`Release PR #${pr}: no prerequisite preview at ${short(sha)} (${r.kind}: ${r.reason})`);
   } catch (err) {
     logger.warn(`Release PR #${pr}: prerequisite preview failed: ${errText(err)}`);
