@@ -34,6 +34,7 @@ test("the kinds are the EM contract, verbatim", () => {
     "epic-decompose",
     "corrective-chain",
     "check-defect",
+    "stalled",
   ]);
   assert.equal(EM_UNSTICK_MAX_DURATION_MS, 20 * 60_000);
   assert.equal(emUnstickMaxDurationMs("skip"), 20 * 60_000);

@@ -16,6 +16,7 @@ import { codeHost, codeHostRefusal, pluginCommand, reconfigurePlugins, startPlug
 import type { PluginContext } from "./plugins/contract.js";
 import { flushObservers, workSourceRefusal } from "./work-source.js";
 import { ForemanRuntime } from "./runtime.js";
+import { stallsReadout, unresolvedStalls, type StallRecord } from "./stall-clock.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,7 @@ Usage: slashbin-ai-agent [options]
        slashbin-ai-agent paperclip:doctor [--config <path>]
        slashbin-ai-agent metrics:report [--repo <name>] [--issue <n>] [--since <days>] [--json]
        slashbin-ai-agent metrics:runs --from <iso> --to <iso> --json
+       slashbin-ai-agent stalls --json [--records <file>]
        slashbin-ai-agent metrics:blocked --from <date> --to <date> [--now <iso>] [--db <path>] --json
 
 Options:
@@ -53,6 +55,7 @@ Commands:
                     (read-only; prints PASS/FAIL per check, exits non-zero on any FAIL)
   metrics:report    Time each work item spent per lifecycle stage, from the metrics log (docs/metrics.md)
   metrics:runs      Every agent run that ended in [from, to), with its outcome and worked cards, as JSON (docs/metrics.md)
+  stalls            Unresolved stalls on the open issues: escalation delay, count open past the bound, count undelivered (read-only, JSON)
   metrics:blocked   Each card's blocked hours per Central week, one interval per block, as JSON (docs/metrics.md)
 
 Multi-repo: configure repos[] in .ai-agent.json. Each repo entry has its own
@@ -98,6 +101,17 @@ async function main(rt: ForemanRuntime): Promise<void> {
   }
 
   const configPath = getArg(args, "--config");
+  const recordsFile = getArg(args, "--records");
+  if (args[0] === "stalls" && recordsFile !== undefined) {
+    // A test input: StallRecord[] replaces the work-source read. Read only, never written.
+    let input: StallRecord[];
+    try { input = JSON.parse(readFileSync(recordsFile, "utf-8")) as StallRecord[]; } catch (err) {
+      console.error(`stalls: cannot read ${recordsFile}: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(stallsReadout(input, Date.now())));
+    process.exit(0);
+  }
   const repoFilter = getArg(args, "--repo");
   const once = args.includes("--once");
 
@@ -152,10 +166,11 @@ async function main(rt: ForemanRuntime): Promise<void> {
 
   const logger = createLogger({
     format: config.logFormat,
-    level: config.logLevel,
+    // `stalls` prints one JSON document on stdout: nothing else may write there.
+    level: args[0] === "stalls" ? "error" : config.logLevel,
   });
 
-  logger.info(`slashbin-ai-agent v${getVersion()}`);
+  if (args[0] !== "stalls") logger.info(`slashbin-ai-agent v${getVersion()}`);
 
 
   // Plugins (EM#1150): every registered plugin this config enables is started
@@ -169,7 +184,9 @@ async function main(rt: ForemanRuntime): Promise<void> {
     },
   };
   await registerExternalPlugins(config, logger, dirname(findConfigFile(configPath) ?? resolve(".")));
-  await startPlugins(config, pluginCtx);
+  // `stalls` only reads: it starts the plugins that fill the work-source and code-host roles, never an
+  // observer (metrics retention, Paperclip lease recovery and publication write).
+  await startPlugins(config, pluginCtx, args[0] === "stalls" ? (p) => p.roles.includes("workSource") || p.roles.includes("codeHost") : undefined);
   // Every stage selects and records through the work source, and opens, reads and
   // merges through the code host; without either, refuse here rather than throw
   // mid-pass. 78 (EX_CONFIG): a restart cannot fix a config.
@@ -190,6 +207,17 @@ async function main(rt: ForemanRuntime): Promise<void> {
   }
   if (creds.unverified.length) {
     logger.warn(`Could not reach GitHub to check ${creds.unverified.join(", ")}; starting anyway.`);
+  }
+  if (args[0] === "stalls") {
+    // Records only: the unresolved stalls on the open issues the unstick scan loads, repo by repo.
+    const found: StallRecord[] = [];
+    for (const repo of config.repos) {
+      const issues = await codeHost().getOpenIssues(repo.githubRepo, repo.repoPath, logger);
+      const loaded = await rt.records.loadIssueRecords(repo, issues.map((i) => i.number));
+      for (const rec of loaded.records.values()) found.push(...unresolvedStalls(rec.stalls));
+    }
+    console.log(JSON.stringify(stallsReadout(found, Date.now())));
+    await exitAfterFlush(0);
   }
   const noShip = once ? null : shipConfigRefusal(config);
   if (noShip) {

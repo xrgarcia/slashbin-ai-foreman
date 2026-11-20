@@ -13,6 +13,7 @@ import type { RepoConfig } from "./config.js";
 import { canonicalJson } from "./record-store.js";
 import { activeWorkSource } from "./plugins/registry.js";
 import type { UnstickEntry } from "./unstick.js";
+import type { StallCause, StallRecord } from "./stall-clock.js";
 import type { SavedRelease } from "./release-tracker.js";
 import type { BatchHistory } from "./dependency-batch/ledger.js";
 import type { CheckDefect } from "./phases/check-defect.js";
@@ -221,6 +222,8 @@ export interface IssueRecord {
   releaseReadHeld?: ReleaseReadHold;
   /** The EM questions asked about this issue, by `unstickKey` (src/unstick.ts). */
   unstick?: Record<string, UnstickEntry>;
+  /** Stalls on this issue, one entry per cause, each with its own start (src/stall-clock.ts, slashbin-ai-foreman#364). */
+  stalls?: Partial<Record<StallCause, StallRecord>>;
   prodVerified?: ProdVerified;
   /** Closed as a net-zero issue whose merge never reached production: no release carries it (foreman#117). */
   noopClosed?: { pr: number; at: string };
@@ -243,7 +246,7 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "releaseReadHeld", "unstick", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "releaseReadHeld", "unstick", "stalls", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
 
 /** A repo's own record is addressed with this number; no issue or PR is 0. */
 const REPO_RECORD_NUMBER = 0;

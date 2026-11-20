@@ -283,3 +283,12 @@ reset (or the upstream back-off window) has passed.
 | unstick calls | 3, then the give-up comment to the owner |
 
 A card past its limit is the EM's. A card inside its limit is not: wait for the loop.
+
+## Stalls (`FOREMAN_STALL_CLOCK`, dark)
+
+`src/stall-clock.ts` records when a stall began: one `IssueRecord.stalls[cause]` entry per issue and cause, with a
+`startedAt` written once (a retry, restart or relabel never resets it). The unstick scan calls `sweep` each pass; an
+`open` stall at or past 5_400_000 ms (the two-hour target minus the 30-minute board scan) is raised once as the
+`stalled` kind (`dedupeKey` = cause) and becomes `escalated`. A raise that cannot be saved leaves it `open` with
+`undeliveredSince` set. With `FOREMAN_STALL_CLOCK` unset nothing is written or raised. `node dist/cli.js stalls --json`
+reads the unresolved stalls: each escalation delay, the count open past the bound, the count undelivered.
