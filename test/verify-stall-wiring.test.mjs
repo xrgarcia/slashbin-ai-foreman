@@ -300,3 +300,10 @@ test("a verdict on an escalated stall unblocks the card; a launch error does not
     } finally { done(); }
   }
 });
+
+test("a PR a filed defect released does not keep the front of the queue", () => {
+  const released = { 1: { "verify-deferred": { state: "resolved", evidence: ["check evidence-check-failed"] } } };
+  const refs = [{ issueNumber: 1, prNumber: 11 }, { issueNumber: 3, prNumber: 13 }];
+  assert.equal(pickVerifyTarget(refs, {}, Date.now(), undefined, released).prNumber, 13, "the PR that has not deferred goes first");
+  assert.equal(pickVerifyTarget(refs.slice(0, 1), {}, Date.now(), undefined, released).prNumber, 11, "and it is still asked when alone");
+});

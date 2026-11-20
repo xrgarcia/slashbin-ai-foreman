@@ -294,7 +294,7 @@ export function evidenceLinks(summary: string, max = 8): string[] {
  * One PR per pass, oldest issue first. A PR is skipped while ANY of its issues
  * is held within its retry window or has spent its attempts: the SRE verifies
  * the PR, not the issue, so one held issue holds its PR. The Nth failed attempt
- * waits backoffDelay(N, retry) from when it was held. A PR whose issues all carry an escalated `verify-deferred` stall
+ * waits backoffDelay(N, retry) from when it was held. A PR whose issues all carry an escalated `verify-deferred` stall (or one a filed defect released)
  * comes after every other PR: it is re-asked only when no other PR awaits verification,
  * so later merges are still verified (slashbin-ai-foreman#350).
  */
@@ -309,7 +309,12 @@ export function pickVerifyTarget(
   for (const r of [...refs].sort((a, b) => a.issueNumber - b.issueNumber)) {
     byPr.set(r.prNumber, [...(byPr.get(r.prNumber) ?? []), r.issueNumber]);
   }
-  const escalated = (issueNumbers: readonly number[]): boolean => issueNumbers.every((n) => stalls[n]?.["verify-deferred"]?.state === "escalated");
+  // Known to defer on a check: escalated, or released by a filed defect (its stall resolved, the check kept in evidence).
+  // Either way it must not keep the front of the queue and starve a PR that has not deferred.
+  const escalated = (issueNumbers: readonly number[]): boolean => issueNumbers.every((n) => {
+    const s = stalls[n]?.["verify-deferred"];
+    return s?.state === "escalated" || (s?.state === "resolved" && (s.evidence ?? []).some((e) => e.startsWith("check ")));
+  });
   const ordered = [...byPr].filter(([, ns]) => !escalated(ns)).concat([...byPr].filter(([, ns]) => escalated(ns)));
   for (const [prNumber, issueNumbers] of ordered) {
     const waiting = issueNumbers.some((n) => {
