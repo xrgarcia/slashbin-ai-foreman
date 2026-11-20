@@ -87,7 +87,7 @@ if (a[0] === "issue") {
 }
 if (a[0] === "pr") {
   if (a[1] === "list") {
-    if (st.mergedListFail && flag("--state") === "merged" && flag("--limit") === "100") fail("HTTP 502: Bad Gateway");
+    if (st.mergedListFail && flag("--state") === "merged" && flag("--limit") === "40") fail("HTTP 502: Bad Gateway");
     const want = flag("--state") === "merged" ? "MERGED" : flag("--state") === "all" ? null : "OPEN";
     let l = Object.values(st.prs).filter((p) => want === null || p.state === want);
     if (flag("--base")) l = l.filter((p) => p.baseRefName === flag("--base"));
