@@ -13,6 +13,7 @@ import type { Logger } from "./logger.js";
 import { DEFAULT_GITHUB_CONVENTIONS } from "./github/conventions.js";
 import { viewIssue } from "./github/release.js";
 import { isForemanOwnedHead } from "./foreman-branch.js";
+import { isApprovedUnbuilt } from "./lifecycle.js";
 import { laterStageLabels } from "./github/lifecycle-scan.js";
 import { blockerRef, blockersOf, unmetBlockers } from "./github/blockers.js";
 import { acceptanceVerdict } from "./github/acceptance-gate.js";
@@ -708,14 +709,11 @@ export class GitHubIssueConnector implements WorkSourceAdapter {
     const issues = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) => hasLabel(i, config.triggerLabel));
 
-    const lifecycleLabelValues = Object.values(config.lifecycleLabels);
-
     const actionable: number[] = [];
     const held: WaitingItem[] = [];
     for (const issue of issues) {
       const labels = issue.labels.map((l) => l.name);
-      if (labels.includes(config.github.blockedLabel)) continue;
-      if (lifecycleLabelValues.some((l) => labels.includes(l))) continue;
+      if (!isApprovedUnbuilt(config, labels)) continue;
       if (await this.waitsOnBlocker(config, issue.number, logger, held)) continue;
       actionable.push(issue.number);
     }
