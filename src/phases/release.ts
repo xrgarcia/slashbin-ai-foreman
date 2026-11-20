@@ -46,7 +46,7 @@ import type { PredeployStop, ProdRelease, ReleaseReadHold } from "../issue-recor
 import { fieldTable } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
-import { epicChildClosedAlert } from "../unstick.js";
+import { epicChildClosedAlert, type UnstickKind } from "../unstick.js";
 import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
@@ -510,6 +510,8 @@ async function stopRelease(
   predeploy?: { head: string; reason: string; recheckMs: number },
   /** Set during a re-check that ended in `owner-hold` only: the retry record stays (its clock restarts). Every other non-predeploy stop (Tech Lead refusal, merge-refused-repeatedly, merge-blocked-check) ends the timed retry. */
   keep?: PredeployStop,
+  /** Set when the EM seat's unstick must be told (the event carries it; a stop with none reaches the EM only by the board). */
+  stuck?: UnstickKind,
 ): Promise<{ recorded: boolean }> {
   let repeat = false;
   let recorded = true;
@@ -540,7 +542,7 @@ async function stopRelease(
     }
     if (repeat) continue;
     await comment(repoConfig, n, body, logger);
-    await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: `release stopped: ${reason}` }, repoConfig, logger);
+    await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: `release stopped: ${reason}`, ...(stuck ? { stuck } : {}) }, repoConfig, logger);
   }
   logger.warn(`${pr ? `Release PR #${pr}` : "Release"} stopped (${reason}); blocked ${issues.map((n) => `#${n}`).join(", ")}${repeat ? " (same stop as last time; not commented)" : ""}`);
   return { recorded };
@@ -831,13 +833,15 @@ export function releaseReadHoldReason(what: string, hold: ReleaseReadHold, now: 
 
 /**
  * Records the outcome of one release-stage read for `issues`. A failure (`error` set) starts or keeps each issue's
- * `releaseReadHeld`; past `toolingHoldLimitMs` the issues are blocked once through `stopRelease`. A success (`error`
- * null) clears the row, and lifts the block this escalation applied.
+ * `releaseReadHeld`; past `toolingHoldLimitMs` the issues are blocked once through `stopRelease`, and the EM seat's
+ * unstick is told (`dead-zone`: the stage has no path for it). A success (`error` null) clears the row and lifts the
+ * block this escalation applied, unless a person owns it (`blockedByPerson`). Resolves the issues whose block it lifted.
  */
 export async function noteReleaseRead(
   rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, issues: readonly number[], error: string | null, what: string, logger: Logger,
-): Promise<void> {
-  if (issues.length === 0) return;
+): Promise<number[]> {
+  const lifted: number[] = [];
+  if (issues.length === 0) return lifted;
   const loaded = await rt.records.loadIssueRecords(repoConfig, [...issues]);
   const held = fieldTable(loaded, "releaseReadHeld");
   const t = now();
@@ -848,11 +852,17 @@ export async function noteReleaseRead(
     const prev = held[n];
     if (error === null) {
       if (!prev) continue;
-      if (!(await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.releaseReadHeld; }))) continue;
       if (prev.escalatedAt) {
-        try { await codeHost().removeBlockedLabel(repoConfig, n); } catch (err) { logger.warn(`Could not unblock #${n}: ${errText(err)}`); }
-        logger.info(`#${n}: the release read works again; its read-failure block is lifted`);
+        let person = true;
+        try { person = await codeHost().blockedByPerson(repoConfig, n); } catch (err) { logger.warn(`Could not tell who blocked #${n}: ${errText(err)}`); }
+        if (!person) {
+          try { await codeHost().removeBlockedLabel(repoConfig, n); } catch (err) { logger.warn(`Could not unblock #${n}: ${errText(err)}`); continue; }
+          lifted.push(n);
+          await emit(rt, { kind: "unblocked", item: itemOf(repoConfig, n), reason: "the release stage's read works again" }, repoConfig, logger);
+          logger.info(`#${n}: the release read works again; its read-failure block is lifted`);
+        }
       }
+      await rt.records.updateIssueRecord(repoConfig, n, (d) => { delete d.releaseReadHeld; });
       continue;
     }
     const next = nextReleaseReadHold(prev, error, t, config.toolingHoldLimitMs);
@@ -861,16 +871,24 @@ export async function noteReleaseRead(
     }
     if (next.escalates) { escalating.push(n); reason = releaseReadHoldReason(what, next.hold, t, config.toolingHoldLimitMs); }
   }
-  if (escalating.length > 0) await stopRelease(rt, repoConfig, null, escalating, reason, undefined, logger);
+  if (escalating.length > 0) await stopRelease(rt, repoConfig, null, escalating, reason, undefined, logger, undefined, undefined, "dead-zone");
+  return lifted;
 }
 
 async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, releases: readonly ProdRelease[], logger: Logger): Promise<void> {
   await closeHeldNetZero(rt, repoConfig, config, releases, logger);
   const { releasePending } = repoConfig.lifecycleLabels;
   const tracked = new Set(releases.flatMap((r) => r.issues));
-  const orphans = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
-    .filter((i) => codeHost().hasLabel(i, releasePending) && !codeHost().hasLabel(i, repoConfig.github.blockedLabel) && !tracked.has(i.number))
-    .map((i) => i.number);
+  const pending = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
+    .filter((i) => codeHost().hasLabel(i, releasePending) && !tracked.has(i.number));
+  // An orphan this stage blocked for a failing read stays in the scan: the read is how it recovers. Any other blocked one is not read.
+  const blockedPending = pending.filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number);
+  const readBlocked = new Set<number>();
+  if (blockedPending.length > 0) {
+    const rec = fieldTable(await rt.records.loadIssueRecords(repoConfig, blockedPending), "releaseReadHeld");
+    for (const n of blockedPending) if (rec[n]?.escalatedAt) readBlocked.add(n);
+  }
+  const orphans = pending.filter((i) => !blockedPending.includes(i.number) || readBlocked.has(i.number)).map((i) => i.number);
   if (orphans.length === 0) return;
   if (await codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger)) return;
   const diff = await codeHost().countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
@@ -889,9 +907,11 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, config: 
     await noteReleaseRead(rt, repoConfig, config, ok, errText(err), "the orphan scan's", logger);
     return;
   }
-  await noteReleaseRead(rt, repoConfig, config, ok, null, "", logger);
-  for (const [n, w] of noop) await closeNetZero(rt, repoConfig, n, w, "prodVerified", logger);
-  const carried = ok.filter((n) => !noop.has(n));
+  const lifted = await noteReleaseRead(rt, repoConfig, config, ok, null, "", logger);
+  // A read-blocked orphan whose block was not lifted (a person owns it) is left alone.
+  const free = ok.filter((n) => !readBlocked.has(n) || lifted.includes(n));
+  for (const [n, w] of noop) if (free.includes(n)) await closeNetZero(rt, repoConfig, n, w, "prodVerified", logger);
+  const carried = free.filter((n) => !noop.has(n));
   if (carried.length === 0) return;
   const joined = await joinCarryingRelease(rt, repoConfig, releases, carried, logger);
   // Unreadable is not "no release carries them": they are not blocked on a record that could not be read.

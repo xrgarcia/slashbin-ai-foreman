@@ -52,15 +52,16 @@ test("the block reason names the error and since when", () => {
 async function harness() {
   resetRegistryForTests();
   const store = new InMemoryRecordStore();
-  const calls = { blocked: [], unblocked: [], comments: [] };
+  const calls = { blocked: [], unblocked: [], comments: [], events: [], person: false };
   registerWorkSource({
-    record: async () => true,
+    record: async (e) => { calls.events.push({ kind: e.kind, n: e.item?.issueNumber, stuck: e.stuck }); return true; },
     loadRecord: (k, rc) => store.loadRecord(k, rc),
     saveRecord: (k, r, rc) => store.saveRecord(k, r, rc),
   });
   setCodeHost({
     RELEASE_STOP_MARK: "<!-- release-stop -->",
     addBlockedLabel: async (_rc, n) => { calls.blocked.push(n); },
+    blockedByPerson: async () => calls.person,
     removeBlockedLabel: async (_rc, n) => { calls.unblocked.push(n); },
     commentOnIssue: async (_rc, n, body) => { calls.comments.push({ n, body }); },
   });
@@ -78,6 +79,7 @@ test("a failing read is recorded, held past the bound once, and cleared by a suc
     await seed(h.rt, REPO, 1, { releaseReadHeld: { error: "node cap", firstFailedAt: new Date(Date.now() - 3 * HOUR).toISOString() } });
     await noteReleaseRead(h.rt, REPO, CONFIG, [1, 2], "node cap", "the orphan scan's", logger);
     assert.deepEqual(h.calls.blocked, [1], "only the issue past the bound is blocked");
+    assert.deepEqual(h.calls.events.filter((e) => e.kind === "blocked"), [{ kind: "blocked", n: 1, stuck: "dead-zone" }], "the EM seat's unstick is told");
     assert.equal(h.calls.comments.length, 1);
     assert.match(h.calls.comments[0].body, /node cap/);
     assert.ok((await recordOf(h.rt, REPO, 1)).releaseReadHeld.escalatedAt);
@@ -90,5 +92,26 @@ test("a failing read is recorded, held past the bound once, and cleared by a suc
     assert.equal((await recordOf(h.rt, REPO, 1)).releaseReadHeld, undefined);
     assert.equal((await recordOf(h.rt, REPO, 2)).releaseReadHeld, undefined);
     assert.deepEqual(h.calls.unblocked, [1], "only the escalated block is lifted");
+  } finally { done(); }
+});
+
+test("a success never lifts a block a person owns, but still clears the row", async () => {
+  const h = await harness();
+  try {
+    h.calls.person = true;
+    await seed(h.rt, REPO, 1, { releaseReadHeld: { error: "e", firstFailedAt: at(3 * HOUR), escalatedAt: at(HOUR) } });
+    const lifted = await noteReleaseRead(h.rt, REPO, CONFIG, [1], null, "", logger);
+    assert.deepEqual(lifted, []);
+    assert.deepEqual(h.calls.unblocked, []);
+    assert.equal((await recordOf(h.rt, REPO, 1)).releaseReadHeld, undefined);
+  } finally { done(); }
+});
+
+test("a success resolves the issues whose block it lifted", async () => {
+  const h = await harness();
+  try {
+    await seed(h.rt, REPO, 1, { releaseReadHeld: { error: "e", firstFailedAt: at(3 * HOUR), escalatedAt: at(HOUR) } });
+    assert.deepEqual(await noteReleaseRead(h.rt, REPO, CONFIG, [1], null, "", logger), [1]);
+    assert.ok(h.calls.events.some((e) => e.kind === "unblocked" && e.n === 1));
   } finally { done(); }
 });
