@@ -11,7 +11,7 @@ import { setCodeHost } from "../dist/plugins/registry.js";
 import { dropIssueSnapshot } from "../dist/github/cache.js";
 import { dropCanonicalRepo } from "../dist/github/repo-identity.js";
 import { bodyNamesCheck } from "../dist/github/check-defect.js";
-import { recordCheckFailure, clearCheckPass, syncCheckDefects, defectReason, defectDedupeKey, releasedByDefect } from "../dist/phases/check-defect.js";
+import { recordCheckFailure, clearCheckPass, syncCheckDefects, defectReason, defectDedupeKey, releasedByDefect, releasedIssues } from "../dist/phases/check-defect.js";
 import { devVerifyHolding } from "../dist/phases/verify.js";
 import { EmHandoffs, HandoffNotSaved, UNSTICK_KINDS, EVENT_KINDS } from "../dist/unstick.js";
 
@@ -186,7 +186,8 @@ test("devVerifyHolding skips an issue a filed check lists and is held on; every 
   assert.equal(devVerifyHolding([10, 15], held, 3, { 10: tooling("codex-unavailable"), 15: tooling("codex-unavailable") }, filed), 15, "an unlisted issue still holds");
   assert.equal(devVerifyHolding([10], held, 3, { 10: tooling("registry-unavailable") }, filed), 10, "a different hold on a listed issue stands");
   assert.equal(devVerifyHolding([10], { 10: { attempts: 1, prNumber: 90, reason: "x", heldAt: AT } }, 3, {}, filed), 10, "a defer is never a pass: no tooling row, still holds");
-  assert.equal(releasedByDefect({ k: { ...filed["o/r:codex-unavailable"], state: "closed" } }, 10, "codex-unavailable"), false);
+  assert.equal(releasedByDefect(releasedIssues({ k: { ...filed["o/r:codex-unavailable"], state: "closed" } }), 10, "codex-unavailable"), false);
+  assert.equal(devVerifyHolding([10], { 10: { attempts: 1, prNumber: 90, reason: "x", heldAt: AT } }, 3, { 10: tooling("codex-unavailable") }, filed), 10, "a charged verification hold stands over the defect");
 });
 
 test("the defect is found by its checkId body line; closing sets closedAt; unreadable leaves it as it was", () => flag(true, async () => {
@@ -207,7 +208,7 @@ test("the defect is found by its checkId body line; closing sets closedAt; unrea
     t = await syncCheckDefects(h.rt, cfg, quiet, "2026-11-20T12:00:00.000Z");
     d = t["o/r:codex-unavailable"];
     assert.deepEqual([d.state, d.closedAt], ["closed", "2026-11-20T12:00:00.000Z"]);
-    assert.equal(releasedByDefect(t, 10, "codex-unavailable"), false, "closed: the issue is re-asked by the verify pass");
+    assert.equal(releasedByDefect(releasedIssues(t), 10, "codex-unavailable"), false, "closed: the issue is re-asked by the verify pass");
   });
 }));
 
@@ -222,3 +223,35 @@ test("reason and key are stable under affected order", () => {
   assert.equal(defectReason(d), defectReason({ ...d, affected: [...d.affected].reverse() }));
   assert.equal(defectDedupeKey(d.checkId, d.affected), defectDedupeKey(d.checkId, [...d.affected].reverse()));
 });
+
+test("a closed defect ends its generation's standing question; a new affected issue whose raise was not saved is retried", () => flag(true, async () => {
+  const h = harness();
+  const files = {
+    "blocked_by_10.json": JSON.stringify([{ number: 51, state: "closed", labels: [], repository_url: "https://api.github.com/repos/o/r" }]),
+    "body_51.txt": "checkId: o/r:codex-unavailable\n",
+  };
+  await withGh(fakeGh(files), async (cfg) => {
+    await fail(h.rt, cfg, 12, 90);
+    await fail(h.rt, cfg, 10, 91);
+    assert.equal(h.raised().length, 1);
+    const t = await syncCheckDefects(h.rt, cfg, quiet, "2026-11-20T12:00:00.000Z");
+    assert.equal(t["o/r:codex-unavailable"].state, "closed");
+    assert.equal(h.raised().length, 0, "no stale question left to deliver");
+  });
+}));
+
+test("a filed check whose extended-list raise is not saved goes back to suspected, then files on the next failure", () => flag(true, async () => {
+  const h = harness();
+  await withGh(fakeGh(), async (cfg) => {
+    await fail(h.rt, cfg, 12, 90);
+    await fail(h.rt, cfg, 10, 91);
+    const good = h.rt.records.updateIssueRecord;
+    h.rt.records.updateIssueRecord = async () => false;
+    const r = await fail(h.rt, cfg, 14, 92);
+    assert.equal(r.defect.state, "suspected");
+    h.rt.records.updateIssueRecord = good;
+    const again = await fail(h.rt, cfg, 14, 92);
+    assert.equal(again.filedNow, true);
+    assert.equal(h.raised().length, 2);
+  });
+}));

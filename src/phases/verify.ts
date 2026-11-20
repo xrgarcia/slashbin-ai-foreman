@@ -12,7 +12,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, isDeliveredVerdict, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { fieldTable, type ToolingHold, type VerifyHold } from "../issue-records.js";
-import { clearCheckPass, recordCheckFailure, releasedByDefect, type CheckDefect } from "./check-defect.js";
+import { clearCheckPass, recordCheckFailure, releasedByDefect, releasedIssues, syncCheckDefects, type CheckDefect } from "./check-defect.js";
 import { handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
@@ -231,11 +231,13 @@ export function devVerifyHolding(
   tooling: Readonly<Record<number, ToolingHold>> = {},
   checkDefects: Readonly<Record<string, CheckDefect>> = {},
 ): number | null {
+  const released = releasedIssues(checkDefects);
   for (const n of [...merged].sort((a, b) => a - b)) {
     const h = held[n];
     if (h && (h.attempts >= maxAttempts || h.retryAt)) continue;
     if (tooling[n]?.escalatedAt) continue;
-    if (releasedByDefect(checkDefects, n, tooling[n]?.reason)) continue;
+    // A charged verification hold (h) stands: the defect frees only an issue held on the tooling row alone.
+    if (!h && releasedByDefect(released, n, tooling[n]?.reason)) continue;
     return n;
   }
   return null;
@@ -407,6 +409,8 @@ export async function tryVerify(
   if (rt.memory.verifyDefer.waiting(repoName)) return false;
   const { verifyRetry, agentUnavailable } = config.backoff;
   const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
+  // Read a filed check-defect back on every verify pass (discovery and closure), whether or not any build is eligible (#366). Dark: nothing.
+  await syncCheckDefects(rt, repoConfig, vlog).catch((err) => vlog.warn(`check-defects not read (${String(err).split("\n")[0]})`));
 
   if (Date.now() >= (rt.memory.qaRerunDueAt.get(repoConfig.name) ?? 0) && (await qaApplies(repoConfig, config)) === true) {
     rt.memory.qaRerunDueAt.set(repoConfig.name, Date.now() + QA_RERUN_POLL_MS);

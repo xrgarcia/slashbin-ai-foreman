@@ -107,7 +107,18 @@ export async function recordCheckFailure(
       reason: defectReason(d),
     });
   } catch (err) {
-    if (err instanceof HandoffNotSaved) return { defect: d, filedNow: false };
+    if (err instanceof HandoffNotSaved) {
+      // The question about the new affected list is not saved: take the record back to suspected (no exemption until
+      // it is), so the next identical failure raises again.
+      if (d.state === "filed") {
+        await rt.records.updateRepoRecord(repoConfig, (draft) => {
+          const live = draft.checkDefects?.[checkId];
+          if (live?.state === "filed") draft.checkDefects = { ...draft.checkDefects, [checkId]: { ...live, state: "suspected", filedAt: null } };
+        });
+        return { defect: { ...d, state: "suspected", filedAt: null }, filedNow: false };
+      }
+      return { defect: d, filedNow: false };
+    }
     throw err;
   }
   if (d.state === "filed") return { defect: d, filedNow: false };
@@ -167,6 +178,9 @@ export async function syncCheckDefects(
     if (d.defect && (d.defect.repo !== found.repo || d.defect.issue !== found.issue) && !found.closed) continue;
     const defect = { repo: found.repo, issue: found.issue };
     const next: CheckDefect = { ...d, defect, ...(found.closed ? { state: "closed" as const, closedAt: now } : {}) };
+    // The defect is done: its generation's standing questions end with it, so none is delivered to the EM again
+    // without a fresh qualifying failure. Unsaved, the record stays filed and this runs again next pass.
+    if (found.closed && !(await endQuestions(rt, repoConfig, d))) continue;
     const ok = await rt.records.updateRepoRecord(repoConfig, (draft) => {
       if (draft.checkDefects?.[d.checkId]?.state === "filed") draft.checkDefects = { ...draft.checkDefects, [d.checkId]: next };
     });
@@ -175,10 +189,34 @@ export async function syncCheckDefects(
   return table;
 }
 
+async function endQuestions(rt: ForemanRuntime, repoConfig: RepoConfig, d: CheckDefect): Promise<boolean> {
+  const prefix = `${d.checkId}|`;
+  for (const n of [...new Set(d.affected.map((a) => a.issue))]) {
+    const ok = await rt.records.updateIssueRecord(repoConfig, n, (draft) => {
+      const table = draft.unstick;
+      if (!table) return;
+      for (const [key, e] of Object.entries(table)) if (e.kind === "check-defect" && (e.tag ?? "").startsWith(prefix)) delete table[key];
+    });
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/** The issues listed by each filed check, by check: built once per pass, so a membership test is O(1). */
+export function releasedIssues(checkDefects: Readonly<Record<string, CheckDefect>> | undefined): ReadonlyMap<string, ReadonlySet<number>> {
+  const out = new Map<string, Set<number>>();
+  for (const d of Object.values(checkDefects ?? {})) {
+    if (d.state !== "filed") continue;
+    const set = out.get(d.check) ?? out.set(d.check, new Set()).get(d.check)!;
+    for (const a of d.affected) set.add(a.issue);
+  }
+  return out;
+}
+
 /**
  * True when `issue` is listed by a `filed` check-defect whose check is the very one it is held on: its defect blocks
  * it, so it no longer holds the repo's next build. Any other hold on it stands. Pure, exported for tests.
  */
-export function releasedByDefect(checkDefects: Readonly<Record<string, CheckDefect>> | undefined, issue: number, heldOn: string | undefined): boolean {
-  return heldOn !== undefined && Object.values(checkDefects ?? {}).some((d) => d.state === "filed" && d.check === heldOn && d.affected.some((a) => a.issue === issue));
+export function releasedByDefect(released: ReadonlyMap<string, ReadonlySet<number>>, issue: number, heldOn: string | undefined): boolean {
+  return heldOn !== undefined && (released.get(heldOn)?.has(issue) ?? false);
 }
