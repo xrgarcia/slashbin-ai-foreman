@@ -50,6 +50,7 @@ export const UNSTICK_KINDS = [
   "unlinked-fix",
   "epic-decompose",
   "corrective-chain",
+  "stalled",
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
@@ -127,7 +128,7 @@ export const unstickKey = (issue: number, kind: UnstickKind, tag?: string): stri
 /** The kinds only an event can report: there is no persisted condition to read them from. */
 /** Immutable constant (not state): the kinds only an event can report. */
 export const EVENT_KINDS: ReadonlySet<UnstickKind> = new Set<UnstickKind>([
-  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop", "unlinked-fix", "epic-decompose", "corrective-chain",
+  "needs-ruling", "dead-zone", "revision-exhausted", "revision-stalemate", "verify-held", "unrelated-error", "epic-ready-to-close", "dependency-batch-loop", "unlinked-fix", "epic-decompose", "corrective-chain", "stalled",
 ]);
 
 /** The reason the release-gate call carries: stable, so one `pr approved` costs one call. */

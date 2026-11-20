@@ -32,6 +32,7 @@ import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-back
 import { backoffDelay } from "../backoff.js";
 import { EVENT_KINDS, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
+import { sweep as sweepStalls } from "../stall-clock.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
@@ -170,8 +171,13 @@ export async function tryUnstick(
     }
     const open = issues ? new Set(issues.map((i) => i.number)) : null;
     // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
-    const loaded = await rt.records.loadIssueRecords(repoConfig, open ?? []);
     await raiseDecompose(rt, repoConfig, config, unsticker, log);
+    // Stalls past their bound are raised once (`stalled`) before this pass reads the questions back. Dark: a no-op without FOREMAN_STALL_CLOCK.
+    if (issues) {
+      try { await sweepStalls(rt, repoConfig, new Date().toISOString(), issues.map((i) => i.number)); }
+      catch (err) { log.warn(`Stall sweep failed: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+    const loaded = await rt.records.loadIssueRecords(repoConfig, open ?? []);
     // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
     const repoRecord = await rt.records.loadRepoRecord(repoConfig);
     const candidates: UnstickCandidate[] = derivedCandidates({
