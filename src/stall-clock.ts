@@ -8,6 +8,8 @@
 
 import type { RepoConfig } from "./config.js";
 import type { ForemanRuntime } from "./runtime.js";
+import { emit } from "./work-source.js";
+import type { Logger } from "./logger.js";
 import { HandoffNotSaved, unstickKey, type UnstickEntry } from "./unstick.js";
 
 export type StallCause =
@@ -159,7 +161,7 @@ function dropEscalation(d: { unstick?: Record<string, UnstickEntry> }, issue: nu
  * as the `stalled` kind (dedupeKey = cause); once the raise resolves (new or already standing) it is `escalated`.
  * A raise that cannot be saved (HandoffNotSaved) sets `undeliveredSince` and leaves it `open` for the next scan.
  */
-export async function sweep(rt: ForemanRuntime, repoConfig: RepoConfig, now: string, openIssues: number[]): Promise<void> {
+export async function sweep(rt: ForemanRuntime, repoConfig: RepoConfig, now: string, openIssues: number[], logger?: Logger): Promise<void> {
   if (!stallClockEnabled()) return;
   const nowMs = Date.parse(now);
   if (Number.isNaN(nowMs)) return;
@@ -181,6 +183,10 @@ export async function sweep(rt: ForemanRuntime, repoConfig: RepoConfig, now: str
           ? { ...cur, state: "escalated", escalatedAt: now, undeliveredSince: null }
           : { ...cur, undeliveredSince: cur.undeliveredSince ?? now } };
       });
+      // The card shows Blocked from the raise that escalated it, once; a retry of the stalled work publishes nothing.
+      if (saved && stall.cause === "verify-deferred" && logger) {
+        await emit(rt, { kind: "blocked", item: { issueNumber: issue, repo: repoConfig.githubRepo }, reason: stallReason(stall) }, repoConfig, logger);
+      }
     }
   }
 }

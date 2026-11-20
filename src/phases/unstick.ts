@@ -260,7 +260,7 @@ export async function tryUnstick(
     // Stalls past their bound are raised once (`stalled`) before this pass reads the questions back. Dark: a no-op without FOREMAN_STALL_CLOCK.
     if (issues) {
       try {
-        await sweepStalls(rt, repoConfig, new Date().toISOString(), issues.map((i) => i.number));
+        await sweepStalls(rt, repoConfig, new Date().toISOString(), issues.map((i) => i.number), log);
         if (home && epics.length > 0) await sweepStalls(rt, home, new Date().toISOString(), epics);
       }
       catch (err) { log.warn(`Stall sweep failed: ${err instanceof Error ? err.message : String(err)}`); }

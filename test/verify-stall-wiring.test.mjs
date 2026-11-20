@@ -267,3 +267,19 @@ test("a chain's stall starts when it stops, not at the older verification hold",
     assert.ok(Date.now() - Date.parse(s.startedAt) < HOUR, "started now");
   } finally { done(); }
 });
+
+test("the sweep's raise is what blocks the card: once at escalation, never from a retry", async () => {
+  const { sweep } = await import("../dist/stall-clock.js");
+  const h = await harness();
+  try {
+    await seed(h.rt, REPO, 1, { stalls: escalated({ state: "open", escalatedAt: null, startedAt: ago(3 * HOUR) }) });
+    await sweep(h.rt, REPO, new Date().toISOString(), [1], logger);
+    assert.equal((await stallOf(h)).state, "escalated");
+    assert.equal(blocked(h).length, 1, "one blocked, from the raise");
+    assert.ok(h.raised.some((q) => q.kind === "stalled"));
+    await verify(h);
+    await verify(h);
+    await sweep(h.rt, REPO, new Date().toISOString(), [1], logger);
+    assert.equal(blocked(h).length, 1, "retries and later sweeps publish none");
+  } finally { done(); }
+});
