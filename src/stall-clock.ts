@@ -34,6 +34,8 @@ export interface StallRecord {
   /** When a sweep raise first threw HandoffNotSaved; cleared when a raise resolves. The state stays "open". */
   undeliveredSince: string | null;
   resolvedAt: string | null;
+  /** Which stall of this (issue, cause) this is, set from the second on: a recurrence's question must differ from the answered one's. */
+  episode?: number;
   lastNotifiedAt: string | null;
   /** Append-only links. */
   evidence: string[];
@@ -74,7 +76,8 @@ export const stallId = (repoConfig: RepoConfig, issue: number, cause: StallCause
 
 /** The reason the `stalled` call carries. No timestamp: one would change the dedupe key and re-ask the EM. */
 export function stallReason(r: StallRecord): string {
-  return JSON.stringify({ stall: r.id, cause: r.cause, affected: r.affected, resolver: r.resolver, nextAction: r.nextAction, resumptionCondition: r.resumptionCondition });
+  // `episode` only from the second stall of a cause on: the receiver never reopens an answered reason, so a recurrence must differ.
+  return JSON.stringify({ stall: r.id, cause: r.cause, affected: r.affected, resolver: r.resolver, nextAction: r.nextAction, resumptionCondition: r.resumptionCondition, ...(r.episode && r.episode > 1 ? { episode: r.episode } : {}) });
 }
 
 /** Working reads (sweep, report, the measurement read) see only unresolved stalls. Pure. */
@@ -118,6 +121,7 @@ export async function report(rt: ForemanRuntime, repoConfig: RepoConfig, r: Stal
       result = { record: next, created: false };
     } else {
       const next = openRecord(repoConfig, r, affected);
+      if (standing) next.episode = (standing.episode ?? 1) + 1;
       stalls[r.cause] = next;
       dropEscalation(d, r.issue, r.cause); // a recurrence is a new question, never the earlier stall's entry
       result = { record: next, created: true };

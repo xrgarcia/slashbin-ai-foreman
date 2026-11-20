@@ -176,6 +176,9 @@ test("a resolved stall drops its question, and a recurrence raises a fresh one",
   await report(rt, rc, input({ eventAt: at(t1) }));
   await sweep(rt, rc, at(t1 + STALL_ESCALATION_BOUND_MS), [7]);
   assert.equal(calls.length, 2);
+  assert.notEqual(calls[1].reason, calls[0].reason); // the receiver never reopens an answered reason
+  assert.equal(JSON.parse(calls[1].reason).episode, 2);
+  assert.equal("episode" in JSON.parse(calls[0].reason), false);
   const rec = await recordOf(rt, rc, 7);
   assert.equal(rec.stalls["verify-deferred"].state, "escalated");
   assert.equal(rec.unstick["7:stalled:verify-deferred"].status, "pending");
