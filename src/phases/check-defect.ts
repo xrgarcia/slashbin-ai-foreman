@@ -108,14 +108,15 @@ export async function recordCheckFailure(
     });
   } catch (err) {
     if (err instanceof HandoffNotSaved) {
-      // The question about the new affected list is not saved: take the record back to suspected (no exemption until
-      // it is), so the next identical failure raises again.
+      // The question about the added entry is not saved: take the entry back out (no exemption for it, the filed
+      // record's lifecycle untouched), so the next identical failure adds it again and raises again.
       if (d.state === "filed") {
+        const back = { ...d, affected: d.affected.filter((x) => !(x.repo === entry.repo && x.issue === entry.issue && x.pr === entry.pr)) };
         await rt.records.updateRepoRecord(repoConfig, (draft) => {
           const live = draft.checkDefects?.[checkId];
-          if (live?.state === "filed") draft.checkDefects = { ...draft.checkDefects, [checkId]: { ...live, state: "suspected", filedAt: null } };
+          if (live?.state === "filed") draft.checkDefects = { ...draft.checkDefects, [checkId]: { ...live, affected: live.affected.filter((x) => !(x.repo === entry.repo && x.issue === entry.issue && x.pr === entry.pr)) } };
         });
-        return { defect: { ...d, state: "suspected", filedAt: null }, filedNow: false };
+        return { defect: back, filedNow: false };
       }
       return { defect: d, filedNow: false };
     }

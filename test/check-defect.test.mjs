@@ -240,7 +240,7 @@ test("a closed defect ends its generation's standing question; a new affected is
   });
 }));
 
-test("a filed check whose extended-list raise is not saved goes back to suspected, then files on the next failure", () => flag(true, async () => {
+test("a filed check whose extended-list raise is not saved drops the added entry (still filed), then raises on the next failure", () => flag(true, async () => {
   const h = harness();
   await withGh(fakeGh(), async (cfg) => {
     await fail(h.rt, cfg, 12, 90);
@@ -248,10 +248,11 @@ test("a filed check whose extended-list raise is not saved goes back to suspecte
     const good = h.rt.records.updateIssueRecord;
     h.rt.records.updateIssueRecord = async () => false;
     const r = await fail(h.rt, cfg, 14, 92);
-    assert.equal(r.defect.state, "suspected");
+    assert.equal(r.defect.state, "filed");
+    assert.deepEqual(h.table()["o/r:codex-unavailable"].affected.map((a) => a.issue), [10, 12], "the unraised entry is not listed");
     h.rt.records.updateIssueRecord = good;
     const again = await fail(h.rt, cfg, 14, 92);
-    assert.equal(again.filedNow, true);
+    assert.deepEqual(h.table()["o/r:codex-unavailable"].affected.map((a) => a.issue), [10, 12, 14]);
     assert.equal(h.raised().length, 2);
   });
 }));

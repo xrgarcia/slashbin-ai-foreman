@@ -406,11 +406,11 @@ export async function tryVerify(
   if (!verifier) return false;
   if (isUpstreamBlocked("github")) return false;
   const repoName = repoConfig.name;
+  const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
+  // Read a filed check-defect back on every verify pass (discovery and closure), even while verification is backed off or no build is eligible (#366). Dark: nothing.
+  await syncCheckDefects(rt, repoConfig, vlog).catch((err) => vlog.warn(`check-defects not read (${String(err).split("\n")[0]})`));
   if (rt.memory.verifyDefer.waiting(repoName)) return false;
   const { verifyRetry, agentUnavailable } = config.backoff;
-  const vlog = logger.child({ cycle: cycleNumber, repo: repoName, phase: "verify" });
-  // Read a filed check-defect back on every verify pass (discovery and closure), whether or not any build is eligible (#366). Dark: nothing.
-  await syncCheckDefects(rt, repoConfig, vlog).catch((err) => vlog.warn(`check-defects not read (${String(err).split("\n")[0]})`));
 
   if (Date.now() >= (rt.memory.qaRerunDueAt.get(repoConfig.name) ?? 0) && (await qaApplies(repoConfig, config)) === true) {
     rt.memory.qaRerunDueAt.set(repoConfig.name, Date.now() + QA_RERUN_POLL_MS);
