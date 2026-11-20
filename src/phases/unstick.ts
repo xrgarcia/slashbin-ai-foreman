@@ -150,11 +150,18 @@ async function raiseDecompose(rt: ForemanRuntime, repoConfig: RepoConfig, config
   }
 }
 
+/**
+ * Where an epic's records live: the epic is an issue of `epicRepo`, so its stall is keyed under that repo and the
+ * epic's own number, never the host's (the host's numbers are another space). The same config otherwise.
+ */
+export const epicHome = (repoConfig: RepoConfig, config: AgentConfig): RepoConfig | null =>
+  config.epicRepo ? { ...repoConfig, githubRepo: config.epicRepo } : null;
+
 /** The epic a stored `epic-decompose` question is about: its tag starts with the epic number. */
 const tagEpic = (e: UnstickEntry): number => Number.parseInt(e.tag ?? "", 10);
 
 /**
- * The epics whose stall this repo's records may hold, read from durable state only: the index of epics with an open
+ * The epics whose stall the epic repo's records may hold, read from durable state only: the index of epics with an open
  * stall plus the epics the EM was ever asked about. Nothing here depends on the previous scan, so a restart loses none.
  */
 export function heldEpics(record: RepoRecord | null): number[] {
@@ -171,13 +178,14 @@ export function heldEpics(record: RepoRecord | null): number[] {
  */
 async function trackDueEpics(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, due: readonly DecomposeCandidate[], record: RepoRecord, log: Logger): Promise<void> {
   if (!stallClockEnabled() || !config.epicRepo) return;
+  const home = epicHome(repoConfig, config)!;
   const dueNow = new Set(due.map((d) => d.epic));
   const setIndex = (epics: Iterable<number>) => rt.records.updateRepoRecord(repoConfig, (d) => { d.epicStalls = [...new Set(epics)].sort((a, b) => a - b); });
   if (!(await setIndex([...(record.epicStalls ?? []), ...dueNow]))) { log.warn("Could not record the due epics' stall index; their stalls are not tracked this scan"); return; }
   for (const d of due) {
     const parses = (t?: string | null): t is string => typeof t === "string" && !Number.isNaN(Date.parse(t));
     try {
-      await reportStall(rt, repoConfig, {
+      await reportStall(rt, home, {
         issue: d.epic, cause: "epic-unanswered", eventAt: d.after && parses(d.afterClosedAt) ? d.afterClosedAt : d.approvedAt,
         affected: [`${config.epicRepo}#${d.epic}`], resolver: config.unstickEscalationOwner ?? "EM",
         nextAction: "break the epic down: file its next wave of child issues",
@@ -188,7 +196,7 @@ async function trackDueEpics(rt: ForemanRuntime, repoConfig: RepoConfig, config:
     }
   }
   const now = new Date().toISOString();
-  for (const epic of heldEpics(record)) if (!dueNow.has(epic)) await resolveStall(rt, repoConfig, epic, "epic-unanswered", now);
+  for (const epic of heldEpics(record)) if (!dueNow.has(epic)) await resolveStall(rt, home, epic, "epic-unanswered", now);
   await setIndex(dueNow);
 }
 
@@ -235,16 +243,32 @@ export async function tryUnstick(
     const open = issues ? new Set(issues.map((i) => i.number)) : null;
     // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
     await raiseDecompose(rt, repoConfig, config, unsticker, log);
-    // The epics' stalls live on the host's records under the epic's number, which is no open issue of the host.
+    // The epics' stalls live on the epic repo's own records, under the epic's number.
     const repoRecord = await rt.records.loadRepoRecord(repoConfig);
     const epics = heldEpics(repoRecord);
+    const home = epicHome(repoConfig, config);
     // Stalls past their bound are raised once (`stalled`) before this pass reads the questions back. Dark: a no-op without FOREMAN_STALL_CLOCK.
     if (issues) {
-      try { await sweepStalls(rt, repoConfig, new Date().toISOString(), [...new Set([...issues.map((i) => i.number), ...epics])]); }
+      try {
+        await sweepStalls(rt, repoConfig, new Date().toISOString(), issues.map((i) => i.number));
+        if (home && epics.length > 0) await sweepStalls(rt, home, new Date().toISOString(), epics);
+      }
       catch (err) { log.warn(`Stall sweep failed: ${err instanceof Error ? err.message : String(err)}`); }
     }
     // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
-    const loaded = await rt.records.loadIssueRecords(repoConfig, new Set([...(open ?? []), ...epics]));
+    const loaded = await rt.records.loadIssueRecords(repoConfig, new Set(open ?? []));
+    // The epics' own records: their `stalled` questions are delivered from here, to the epic's repo and number.
+    const epicLoaded = home && epics.length > 0 ? await rt.records.loadIssueRecords(home, new Set(epics)) : null;
+    const homeOf = new Map<UnstickCandidate, RepoConfig>();
+    const epicCandidates: UnstickCandidate[] = [];
+    for (const r of epicLoaded?.records.values() ?? []) {
+      for (const e of Object.values(r.unstick ?? {})) {
+        if (!EVENT_KINDS.has(e.kind)) continue;
+        const c: UnstickCandidate = { issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) };
+        epicCandidates.push(c);
+        homeOf.set(c, home!);
+      }
+    }
     const candidates: UnstickCandidate[] = derivedCandidates({
       verifyHeld: fieldTable(loaded, "verifyHeld"),
       skipped: fieldTable(loaded, "skipped"),
@@ -322,14 +346,15 @@ export async function tryUnstick(
 
     let calls = 0;
     const policy = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: config.backoff.handoff };
-    for (const c of candidates) {
+    for (const c of [...candidates, ...epicCandidates]) {
       const key = unstickKey(c.issue, c.kind, c.tag);
-      const entry = await entryOf(rt, repoConfig, c.issue, key);
+      const where = homeOf.get(c) ?? repoConfig;
+      const entry = await entryOf(rt, where, c.issue, key);
       if (!entry) continue;
       const step = nextStep(entry, c, Date.now(), policy);
       if (step === "wait") continue;
       if (step === "give-up") {
-        await giveUpHandoff(rt, repoConfig, config, log, c, key, entry, deps);
+        await giveUpHandoff(rt, where, config, log, c, key, entry, deps);
         continue;
       }
       // The EM's runner is paused by a refusal (this pass, an earlier one, another repo's): no call until it lifts.
@@ -338,7 +363,7 @@ export async function tryUnstick(
       activeRuns.set(ac, repoName);
       let outcome: UnstickOutcome;
       try {
-        outcome = await unsticker.unstick(repoConfig, config, c.issue, c.kind, c.reason, log, ac.signal,
+        outcome = await unsticker.unstick(where, config, c.issue, c.kind, c.reason, log, ac.signal,
           transcript(repoConfig, `${c.kind}-${c.issue}`, cycleNumber));
       } finally {
         activeRuns.delete(ac);
@@ -348,7 +373,7 @@ export async function tryUnstick(
       reportRunResult(EM_UPSTREAM, !!refused, refused?.detail, refused?.resetAtMs);
       log.info(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): ${outcome.kind}${outcome.detail ? ` — ${outcome.detail.slice(0, 200)}` : ""}`);
       let spent: UnstickEntry | undefined;
-      await mutate(rt, repoConfig, c.issue, (table) => {
+      await mutate(rt, where, c.issue, (table) => {
         const cur = table[key];
         // The reason changed while the call ran: it is a new question, answered next pass.
         if (!cur || cur.reason !== c.reason) return;
@@ -368,9 +393,9 @@ export async function tryUnstick(
       // `unstickEscalationOwner` there is nobody to mention: the entry stays
       // `failed` at the cap, as for a failed post, and the log says why.
       if (spent) {
-        await reportGiveUp(rt, repoConfig, config, log, c, spent);
+        await reportGiveUp(rt, where, config, log, c, spent);
         const owner = config.unstickEscalationOwner;
-        const markNoticed = () => mutate(rt, repoConfig, c.issue, (table) => {
+        const markNoticed = () => mutate(rt, where, c.issue, (table) => {
           const cur = table[key];
           if (cur && cur.reason === c.reason) table[key] = { ...cur, gaveUpAt: new Date().toISOString() };
         });
@@ -381,8 +406,8 @@ export async function tryUnstick(
           await markNoticed();
         } else {
           try {
-            await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, unstickGiveUpComment(owner, spent));
-            await mutate(rt, repoConfig, c.issue, (table) => {
+            await (deps.comment ?? codeHost().commentOnIssue)(where, c.issue, unstickGiveUpComment(owner, spent));
+            await mutate(rt, where, c.issue, (table) => {
               const cur = table[key];
               if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
             });

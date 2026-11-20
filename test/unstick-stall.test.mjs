@@ -47,6 +47,7 @@ console.log("[]");`);
     restart() { rt = new ForemanRuntime(); resetDecomposeThrottle(); },
     setDue(d) { writeFileSync(join(em, "due.json"), JSON.stringify(d)); },
     pass: async (i) => { dropIssueSnapshot("o/host"); await sleep(5); resetDecomposeThrottle(); return tryUnstick(rt, repo, config, logger, i, { comment: () => {} }); },
+    epicStall: async (n) => (await recordOf(rt, { ...repo, githubRepo: "o/epics" }, n)).stalls?.["epic-unanswered"],
     stall: async (n, cause) => (await recordOf(rt, repo, n)).stalls?.[cause],
   };
 }
@@ -54,23 +55,23 @@ console.log("[]");`);
 test("a due epic's stall starts at afterClosedAt, else approvedAt, and a repeat keeps it", async () => {
   const w = world({ due: [{ epic: 11, approvedAt: APPROVED, after: "o/svc#3", afterClosedAt: CLOSED }, { epic: 12, approvedAt: APPROVED }, { epic: 13, approvedAt: APPROVED, after: "o/svc#4", afterClosedAt: null }] });
   await w.pass(1);
-  assert.equal((await w.stall(11, "epic-unanswered")).startedAt, CLOSED);
-  assert.equal((await w.stall(12, "epic-unanswered")).startedAt, APPROVED);
-  assert.equal((await w.stall(13, "epic-unanswered")).startedAt, APPROVED, "a null afterClosedAt falls back to approvedAt");
-  assert.deepEqual((await w.stall(11, "epic-unanswered")).affected, ["o/epics#11"]);
+  assert.equal((await w.epicStall(11)).startedAt, CLOSED);
+  assert.equal((await w.epicStall(12)).startedAt, APPROVED);
+  assert.equal((await w.epicStall(13)).startedAt, APPROVED, "a null afterClosedAt falls back to approvedAt");
+  assert.deepEqual((await w.epicStall(11)).affected, ["o/epics#11"]);
   await w.pass(2);
-  assert.equal((await w.stall(11, "epic-unanswered")).startedAt, CLOSED);
+  assert.equal((await w.epicStall(11)).startedAt, CLOSED);
 });
 
 test("a restart between scans never leaves a stale epic stall open", async () => {
   const w = world({ due: [{ epic: 12, approvedAt: APPROVED }] });
   await w.pass(1);
-  assert.notEqual((await w.stall(12, "epic-unanswered")).state, "resolved"); // aged past the bound, the sweep may have escalated it
+  assert.notEqual((await w.epicStall(12)).state, "resolved"); // aged past the bound, the sweep may have escalated it
   assert.deepEqual((await repoRecordOf(w.rt, w.repo)).epicStalls, [12]);
   w.restart(); // the in-memory view of the prior scan is gone
   w.setDue([]);
   await w.pass(2);
-  assert.equal((await w.stall(12, "epic-unanswered")).state, "resolved");
+  assert.equal((await w.epicStall(12)).state, "resolved");
   assert.equal((await repoRecordOf(w.rt, w.repo)).epicStalls, undefined);
 });
 
@@ -78,9 +79,24 @@ test("flag off: nothing is written", async () => {
   const w = world({ flag: false, due: [{ epic: 12, approvedAt: APPROVED }] });
   await seed(w.rt, w.repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "r", attempts: 3 } });
   for (let i = 1; i <= 3; i++) await w.pass(i);
-  assert.equal(await w.stall(12, "epic-unanswered"), undefined);
+  assert.equal(await w.epicStall(12), undefined);
   assert.equal(await w.stall(7, "handoff-gave-up"), undefined);
   assert.equal((await repoRecordOf(w.rt, w.repo)).epicStalls, undefined);
+});
+
+test("an epic's stall lives under the epic's repo and number, survives a restart and escalates there", async () => {
+  const w = world({ due: [{ epic: 900, approvedAt: APPROVED }] });
+  await w.pass(1);
+  assert.equal((await recordOf(w.rt, w.repo, 900)).stalls, undefined, "nothing is written under the host's number 900");
+  assert.equal(w.epicStall ? (await w.epicStall(900)).id : "", "o/epics#900:epic-unanswered");
+  w.restart();
+  await w.pass(2);
+  const s = await w.epicStall(900);
+  assert.equal(s.startedAt, APPROVED);
+  assert.equal(s.state, "escalated", "aged past the bound, the sweep raised it from the durable index");
+  const q = Object.values((await recordOf(w.rt, { ...w.repo, githubRepo: "o/epics" }, 900)).unstick ?? {});
+  assert.deepEqual(q.map((e) => e.kind), ["stalled"]);
+  assert.equal((await recordOf(w.rt, w.repo, 900)).unstick, undefined);
 });
 
 test("a give-up opens one handoff-gave-up stall that resolves when the hold clears", async () => {
