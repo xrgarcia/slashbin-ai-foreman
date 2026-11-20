@@ -503,8 +503,13 @@ export async function tryVerify(
   const runAbort = new AbortController();
   activeRuns.set(runAbort, repoName);
   const items = target.issueNumbers.map((n) => itemOf(repoConfig, n));
+  // An escalated `verify-deferred` stall is Blocked on the board (the sweep's raise published it): its re-ask is still a
+  // run (the metrics ledger records it), but its card stays where it is (`cardHeld`), since a session start would move it
+  // to in progress and clear the block before any verdict. Only a verdict releases it (`unblocked` below).
+  const cardHeld = target.issueNumbers.filter((n) => stalls[n]?.["verify-deferred"]?.state === "escalated");
   const session: Omit<SessionEvent, "status" | "at"> = {
     phase: "verify", repo: repoConfig.githubRepo, pr: target.prNumber, items, reviewer: "SRE", runId: newRunId(),
+    ...(cardHeld.length > 0 ? { cardHeld } : {}),
   };
   let scheduled: { resumeAt: string; waitReason: string } | undefined;
   let ended: SessionEnd = { ...NO_RESULT, detail: "the verification ended without a result" };
@@ -553,6 +558,7 @@ export async function tryVerify(
       for (const n of target.issueNumbers) {
         await resolveStall(rt, repoConfig, n, "verify-deferred", new Date().toISOString())
           .catch((err) => vlog.warn(`#${n}: its verify-deferred stall was not resolved (${String(err).split("\n")[0]})`));
+        if (cardHeld.includes(n)) await emit(rt, { kind: "unblocked", item: itemOf(repoConfig, n), reason: "dev verification returned a verdict" }, repoConfig, vlog);
       }
     };
 

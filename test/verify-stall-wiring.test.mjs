@@ -59,6 +59,8 @@ async function harness() {
     id: "fake-sre", roles: ["verifier"], enabled: () => true, fills: (role) => role === "verifier",
     verifier: { verifyDev: async (_r, _c, pr) => { asked.push(pr); return h.verdict; } },
   });
+  h.sessions = []; // the session events observers saw
+  addObserver({ id: "session-tap", wantsSessionReports: () => true, async onEvent(e) { if (e.kind === "session") h.sessions.push(e.session); } });
   await startPlugins(CONFIG, { logger, configText: () => null });
   h.rt.handoffs.raise = async (_rc, q) => { h.raised.push(q); return true; };
   setCodeHost(new Proxy({}, { get: (_, k) => {
@@ -162,6 +164,9 @@ test("an escalated stall frees the repo, the next issue builds, and re-asks keep
     assert.deepEqual(h.asked, [11, 11], "still re-asked");
     assert.equal(blocked(h).length, 0, "blocking belongs to the stalled raise, never to a verify retry");
     assert.equal((await recordOf(h.rt, REPO, 1)).verifyHeld, undefined, "and uncharged");
+    await drainObservers();
+    const starts = h.sessions.filter((e) => e.status === "started");
+    assert.ok(starts.length >= 2 && starts.every((e) => e.cardHeld?.includes(1)), "a re-ask never places the Blocked card (cardHeld)");
   } finally { done(); }
 });
 
@@ -282,4 +287,16 @@ test("the sweep's raise is what blocks the card: once at escalation, never from 
     await sweep(h.rt, REPO, new Date().toISOString(), [1], logger);
     assert.equal(blocked(h).length, 1, "retries and later sweeps publish none");
   } finally { done(); }
+});
+
+test("a verdict on an escalated stall unblocks the card; a launch error does not", async () => {
+  for (const [verdict, unblocked] of [[PASS, 1], [{ kind: "error", error: "spawn failed" }, 0]]) {
+    const h = await harness();
+    try {
+      await seed(h.rt, REPO, 1, { stalls: escalated() });
+      h.verdict = verdict;
+      await verify(h);
+      assert.equal(h.log.filter((e) => e.kind === "unblocked" && e.n === 1).length, unblocked);
+    } finally { done(); }
+  }
 });
