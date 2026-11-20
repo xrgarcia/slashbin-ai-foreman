@@ -2,7 +2,7 @@
 // `closeHeldNetZero` and `blockOrphans` used to log "left alone this scan" and move on: a GitHub node-cap failure
 // hid for 16 hours. The first failure is now recorded on each affected issue (`releaseReadHeld`); past
 // `toolingHoldLimitMs` the issues are blocked once with the error and since when; a successful read clears it.
-// The decision is the pure `nextReleaseReadHold` (the pattern of verify.ts's `nextToolingHold`). No network.
+// The decision is the pure `nextReleaseReadHold`. No network.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerWorkSource } from "../dist/work-source.js";

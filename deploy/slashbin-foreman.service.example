@@ -37,6 +37,10 @@ Environment=HOME=/home/<user>
 # as never written and spend a review cycle rewriting it.
 Environment=AI_AGENT_EM_REPO_PATH=/path/to/slashbin-engineering-manager
 
+# Required: the stall clock is the only bound on a held verification (the tooling-hold clock is gone).
+# Unset, a repo held on a deferred check waits forever.
+Environment=FOREMAN_STALL_CLOCK=1
+
 # The daemon refuses to run without its own GitHub token (there is no fallback to
 # gh's login); supply it through your secret manager (the doppler wrapper above).
 #   Company-record shipping (EM#2104): the outer doppler run must also inject the receiver URL,

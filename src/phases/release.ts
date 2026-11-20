@@ -813,7 +813,7 @@ async function closeHeldNetZero(rt: ForemanRuntime, repoConfig: RepoConfig, conf
 
 /**
  * The release-read failure a scan leaves on an issue whose row was `prev`, and whether this failure escalates it. Pure,
- * exported for tests (the pattern of `nextToolingHold`). `firstFailedAt` is kept while the reads keep failing; it
+ * exported for tests (the outcome-returning pattern). `firstFailedAt` is kept while the reads keep failing; it
  * escalates once, the first failure at or past `limitMs` from it; an escalated row keeps its `escalatedAt`.
  */
 export function nextReleaseReadHold(

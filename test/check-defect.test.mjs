@@ -179,7 +179,7 @@ test("a passing verdict removes its PR from a suspected record; an emptied recor
 
 test("devVerifyHolding skips an issue a filed check lists and is held on; every other issue still holds", () => {
   const filed = { "o/r:codex-unavailable": { checkId: "o/r:codex-unavailable", check: "codex-unavailable", state: "filed", affected: [{ repo: "o/r", issue: 10, pr: 91 }, { repo: "o/r", issue: 12, pr: 90 }] } };
-  const tooling = (reason) => ({ prNumber: 90, reason, firstHeldAt: AT });
+  const tooling = (reason) => ({ "verify-deferred": { cause: "verify-deferred", state: "open", evidence: [`check ${reason}`] } });
   const held = {};
   assert.equal(devVerifyHolding([10, 12], held, 3, { 10: tooling("codex-unavailable"), 12: tooling("codex-unavailable") }), 10, "no defect: holds");
   assert.equal(devVerifyHolding([10, 12], held, 3, { 10: tooling("codex-unavailable"), 12: tooling("codex-unavailable") }, filed), null, "listed issues released");

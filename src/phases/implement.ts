@@ -613,7 +613,7 @@ export async function tryBatchImplementation(
     repoLogger.warn(`check-defects not read (${String(err).split("\n")[0]}); none free the repo this pass`);
     return {};
   });
-  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"), checkDefects);
+  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "stalls"), checkDefects);
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).

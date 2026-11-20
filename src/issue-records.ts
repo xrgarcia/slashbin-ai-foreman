@@ -173,21 +173,6 @@ export interface VerifyHold {
 }
 
 /**
- * A merged PR's dev verification the verifier keeps deferring (a `TOOLING_HOLDS` slug: the checker could not run),
- * written on every `defer` (slashbin-ai-foreman#350). Never charged: `verifyHeld` and its attempts are untouched.
- * Once it outlives `toolingHoldLimitMs` it is escalated, once, and stops holding the repo's next build.
- */
-export interface ToolingHold {
-  /** The newest tooling hold slug. */
-  reason: string;
-  prNumber: number;
-  /** ISO time of the first `defer` on this PR; kept while the same PR stays held, whatever the slug. */
-  firstHeldAt: string;
-  /** ISO time the hold passed its bound and was escalated (`blocked`); from then on it holds neither queue. */
-  escalatedAt?: string;
-}
-
-/**
  * A release-stage read (is this issue net-zero?) that failed on every scan, and since when. Cleared by the next read
  * that succeeds; past `toolingHoldLimitMs` it is escalated once (the issue is blocked with the error and the time).
  */
@@ -216,8 +201,6 @@ export interface IssueRecord {
   skipped?: SkippedIssue;
   held?: HeldIssue;
   verifyHeld?: VerifyHold;
-  /** A dev verification held by the verifier's own tooling, and since when (slashbin-ai-foreman#350). */
-  toolingHeld?: ToolingHold;
   /** The release stage's read about this issue has failed on every scan since this time. */
   releaseReadHeld?: ReleaseReadHold;
   /** The EM questions asked about this issue, by `unstickKey` (src/unstick.ts). */
@@ -246,7 +229,7 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "releaseReadHeld", "unstick", "stalls", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "releaseReadHeld", "unstick", "stalls", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
 
 /** A repo's own record is addressed with this number; no issue or PR is 0. */
 const REPO_RECORD_NUMBER = 0;

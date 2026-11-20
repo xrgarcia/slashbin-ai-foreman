@@ -41,6 +41,9 @@ export interface StallRecord {
   evidence: string[];
 }
 
+/** The stalls of several issues, by issue number (`fieldTable(records, "stalls")`). */
+export type StallTable = Readonly<Record<number, Partial<Record<StallCause, StallRecord>> | undefined>>;
+
 export interface StallReport {
   /** >= 1: the issue whose IssueRecord holds the stall (a release-level stall: its first affected issue). */
   issue: number;
