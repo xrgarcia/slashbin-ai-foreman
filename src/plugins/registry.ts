@@ -43,11 +43,11 @@ export function registeredPlugins(): readonly ForemanPlugin[] {
   return registered;
 }
 
-/** Start every registered plugin this config enables, in registration order. */
-export async function startPlugins(config: AgentConfig, ctx: PluginContext): Promise<readonly ForemanPlugin[]> {
+/** Start every registered plugin this config enables, in registration order; `only` narrows it (a read-only command). */
+export async function startPlugins(config: AgentConfig, ctx: PluginContext, only?: (p: ForemanPlugin) => boolean): Promise<readonly ForemanPlugin[]> {
   currentConfig = config;
   for (const p of registered) {
-    if (started.includes(p)) continue;
+    if (started.includes(p) || (only && !only(p))) continue;
     if (!p.enabled(config)) {
       const why = p.disabledReason?.(config);
       if (why) ctx.logger.info(why);

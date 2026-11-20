@@ -8,7 +8,7 @@
 
 import type { RepoConfig } from "./config.js";
 import type { ForemanRuntime } from "./runtime.js";
-import { HandoffNotSaved } from "./unstick.js";
+import { HandoffNotSaved, unstickKey, type UnstickEntry } from "./unstick.js";
 
 export type StallCause =
   | "verify-deferred" | "verify-handoff-failed" | "corrective-chain-stopped"
@@ -119,6 +119,7 @@ export async function report(rt: ForemanRuntime, repoConfig: RepoConfig, r: Stal
     } else {
       const next = openRecord(repoConfig, r, affected);
       stalls[r.cause] = next;
+      dropEscalation(d, r.issue, r.cause); // a recurrence is a new question, never the earlier stall's entry
       result = { record: next, created: true };
     }
     d.stalls = stalls;
@@ -134,7 +135,16 @@ export async function resolve(rt: ForemanRuntime, repoConfig: RepoConfig, issue:
     const standing = d.stalls?.[cause];
     if (!standing || standing.state === "resolved") return;
     d.stalls = { ...d.stalls, [cause]: { ...standing, state: "resolved", resolvedAt: at } };
+    dropEscalation(d, issue, cause); // a resolved stall's question is no longer deliverable
   });
+}
+
+/** Remove the `stalled` outbox entry of (issue, cause), so the next stall of that cause raises a fresh one. */
+function dropEscalation(d: { unstick?: Record<string, UnstickEntry> }, issue: number, cause: StallCause): void {
+  const key = unstickKey(issue, "stalled", cause);
+  if (!d.unstick || !(key in d.unstick)) return;
+  const { [key]: _gone, ...rest } = d.unstick;
+  d.unstick = rest;
 }
 
 /**

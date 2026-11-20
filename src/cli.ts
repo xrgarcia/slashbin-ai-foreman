@@ -166,10 +166,11 @@ async function main(rt: ForemanRuntime): Promise<void> {
 
   const logger = createLogger({
     format: config.logFormat,
-    level: config.logLevel,
+    // `stalls` prints one JSON document on stdout: nothing else may write there.
+    level: args[0] === "stalls" ? "error" : config.logLevel,
   });
 
-  logger.info(`slashbin-ai-agent v${getVersion()}`);
+  if (args[0] !== "stalls") logger.info(`slashbin-ai-agent v${getVersion()}`);
 
 
   // Plugins (EM#1150): every registered plugin this config enables is started
@@ -183,7 +184,9 @@ async function main(rt: ForemanRuntime): Promise<void> {
     },
   };
   await registerExternalPlugins(config, logger, dirname(findConfigFile(configPath) ?? resolve(".")));
-  await startPlugins(config, pluginCtx);
+  // `stalls` only reads: it starts the plugins that fill the work-source and code-host roles, never an
+  // observer (metrics retention, Paperclip lease recovery and publication write).
+  await startPlugins(config, pluginCtx, args[0] === "stalls" ? (p) => p.roles.includes("workSource") || p.roles.includes("codeHost") : undefined);
   // Every stage selects and records through the work source, and opens, reads and
   // merges through the code host; without either, refuse here rather than throw
   // mid-pass. 78 (EX_CONFIG): a restart cannot fix a config.

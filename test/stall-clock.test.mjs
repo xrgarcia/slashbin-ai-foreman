@@ -162,3 +162,21 @@ test("stalled is an unstick event kind", async () => {
   assert.ok(UNSTICK_KINDS.includes("stalled") && EVENT_KINDS.has("stalled"));
   assert.ok(stallReason);
 });
+
+test("a resolved stall drops its question, and a recurrence raises a fresh one", async () => {
+  const rt = fresh();
+  const calls = spy(rt);
+  await report(rt, rc, input());
+  await sweep(rt, rc, at(STALL_ESCALATION_BOUND_MS), [7]);
+  assert.equal(calls.length, 1);
+  assert.ok((await recordOf(rt, rc, 7)).unstick["7:stalled:verify-deferred"]);
+  await resolve(rt, rc, 7, "verify-deferred", at(STALL_ESCALATION_BOUND_MS + 1));
+  assert.equal((await recordOf(rt, rc, 7)).unstick?.["7:stalled:verify-deferred"], undefined);
+  const t1 = STALL_ESCALATION_BOUND_MS + 10_000;
+  await report(rt, rc, input({ eventAt: at(t1) }));
+  await sweep(rt, rc, at(t1 + STALL_ESCALATION_BOUND_MS), [7]);
+  assert.equal(calls.length, 2);
+  const rec = await recordOf(rt, rc, 7);
+  assert.equal(rec.stalls["verify-deferred"].state, "escalated");
+  assert.equal(rec.unstick["7:stalled:verify-deferred"].status, "pending");
+});
