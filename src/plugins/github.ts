@@ -1,6 +1,8 @@
 import type { CodeHost } from "../code-host.js";
 import type { AgentConfig } from "../config.js";
 import * as branch from "../github/branch.js";
+import { dirname, join } from "node:path";
+import { setRecordCachePath } from "../github/record-store.js";
 import * as cache from "../github/cache.js";
 import * as ciGate from "../github/ci-gate.js";
 import * as deadBlocker from "../github/dead-blocker.js";
@@ -53,6 +55,7 @@ export function githubCodeHost(
     configureState: ({ carryGate, driftGate, ...opts }) => {
       releaseCarry.configureCarryGate(carryGate ?? null);
       branch.configureDriftGate(driftGate ?? null);
+      if (opts.persistPath) setRecordCachePath(join(dirname(opts.persistPath), ".github-records.json"));
       fleetState.configure({ ...opts, runAsync: (args) => ghAsync(args, process.cwd()) });
     },
     setStateRepos: (repos) => fleetState.setRepos(repos),

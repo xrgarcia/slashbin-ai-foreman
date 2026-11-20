@@ -18,3 +18,4 @@ builder-mcp/
 .ai-agent.json.*
 company-record/
 .claude/worktrees/
+.github-records.json
