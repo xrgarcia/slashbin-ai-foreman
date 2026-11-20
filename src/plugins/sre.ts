@@ -6,7 +6,7 @@ import { readResultV1, waitUntilSlug, type RoleResult } from "../contract/result
 import { recordContractPath } from "../contract/usage.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { cliTail, parseReviewTrailerRecords, parseUnrelatedErrors, runAgentCli, type CliRun } from "./agent-cli.js";
-import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, UnrelatedErrors, Verifier, VerifyResult, PluginCatalogEntry } from "./contract.js";
+import type { Deployer, DeployResult, DeployTrailer, ForemanPlugin, UnrelatedErrors, Verifier, VerifyResult, PluginCatalogEntry, PreviewResult } from "./contract.js";
 
 /**
  * The SRE (`<srePath>/bin/sre.mjs`) as the verifier and deployer plugin
@@ -231,6 +231,33 @@ export async function deployViaSre(
 }
 
 /**
+ * The SRE's read-only production-prerequisites preview (`deploy --preview`) of a release PR that waits on
+ * sign-off. Enabled SRE-side only by SRE_PREREQ_PREVIEW=1. Exit 0 posted its comment; exit 3 could not run
+ * (retry, nothing posted); anything else, flag off included, is a refusal. It never merges, verifies or
+ * writes a ledger row, and its result is never merge evidence.
+ */
+export async function previewPrerequisitesViaSre(
+  repoConfig: RepoConfig,
+  agentConfig: AgentConfig,
+  prNumber: number,
+  sha: string,
+  logger: Logger,
+  abortSignal?: AbortSignal,
+): Promise<PreviewResult> {
+  const sre = agentConfig.srePath;
+  if (!sre) return { kind: "refused", reason: "srePath not configured" };
+  if (!process.env.SRE_GITHUB_KEY) return { kind: "refused", reason: "SRE_GITHUB_KEY not set" };
+  logger.info(`Asking the SRE for the production-prerequisites preview of release PR #${prNumber} on ${repoConfig.githubRepo} at ${sha.slice(0, 10)}`);
+  const r = await runAgentCli(sre, "bin/sre.mjs",
+    ["deploy", "--repo", repoConfig.githubRepo, "--pr", String(prNumber), "--sha", sha, "--preview"],
+    buildSreEnv(agentConfig, repoConfig), agentConfig, SRE_VERIFY_MAX_DURATION_MS, abortSignal);
+  if (r.timedOut) return { kind: "retry", reason: "SRE preview timed out" };
+  if (r.code === 0) return { kind: "posted" };
+  if (r.code === 3) return { kind: "retry", reason: `the SRE could not run the preview: ${cliTail(r)}` };
+  return { kind: "refused", reason: `exit ${r.code}: ${cliTail(r)}` };
+}
+
+/**
  * Verify a merged release PR in production (`sre.mjs verify --mode prod`), for
  * an issue whose prod verification held, or run its 30-minute soak (`--mode
  * soak`; the SRE's ledger records it, so its promotion-verify sweep skips a
@@ -273,7 +300,7 @@ export class SrePlugin implements ForemanPlugin {
     whenOff: "No dev or production verification and no deploy: a merged issue goes straight on, and when no promote stage is configured either, it is commented and closed. A release PR waits for a person to merge it.",
   };
   readonly verifier: Verifier = { verifyDev: verifyViaSre, verifyProd: verifyProdViaSre };
-  readonly deployer: Deployer = { deploy: deployViaSre };
+  readonly deployer: Deployer = { deploy: deployViaSre, previewPrerequisites: previewPrerequisitesViaSre };
   enabled(config: AgentConfig): boolean {
     return Boolean(config.srePath);
   }

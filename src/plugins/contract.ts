@@ -171,12 +171,23 @@ export type DeployResult =
   /** It could not run, a timeout or any other failure: nothing merged that the Foreman knows of; ask again later. */
   | { kind: "retry"; reason: string };
 
+/** What a prerequisite preview came back with. It is never merge evidence: nothing that approves, merges or verifies reads it. */
+export type PreviewResult =
+  /** The SRE computed it and posted its `## Production Prerequisites (preview)` comment. */
+  | { kind: "posted" }
+  /** Refused (flag off, PR not open, head moved): nothing was written, and the sign-off wait is unchanged. */
+  | { kind: "refused"; reason: string }
+  /** It could not run: nothing was posted; ask again next scan, no attempt charged. */
+  | { kind: "retry"; reason: string };
+
 export interface Deployer {
   /** Merge release PR `pr` at `sha`, wait for the deploy and verify production. Never tags, relabels or closes. */
   deploy(
     repo: RepoConfig, config: AgentConfig, pr: number, sha: string, logger: Logger,
     abortSignal?: AbortSignal, transcriptPath?: string,
   ): Promise<DeployResult>;
+  /** Optional: the read-only production-prerequisites preview of release PR `pr` at `sha`, run while it waits on sign-off. Never rejects. */
+  previewPrerequisites?(repo: RepoConfig, config: AgentConfig, pr: number, sha: string, logger: Logger, abortSignal?: AbortSignal): Promise<PreviewResult>;
 }
 
 export interface QaRunner {

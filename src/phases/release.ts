@@ -1370,6 +1370,27 @@ async function trackHold(rt: ForemanRuntime, repoConfig: RepoConfig, cause: keyo
  * Deploy the open release PR: Tech Lead approval at its head, then the SRE's
  * deploy. Returns false when there is nothing to deploy this pass.
  */
+const PREREQ_PREVIEW_HEADING = "## Production Prerequisites (preview)";
+
+/**
+ * While a release waits on sign-off, ask the SRE for its read-only production-prerequisites preview, once per
+ * head sha: "already previewed" is the PR's own preview comment carrying `sha=<head>`, so a restart forgets
+ * nothing. Never throws, never charges an attempt, and its result reaches nothing that approves, merges or
+ * verifies: a refused or unavailable preview only logs, and the sign-off sync that follows still runs.
+ */
+async function previewPrerequisites(repoConfig: RepoConfig, config: AgentConfig, pr: number, sha: string, logger: Logger): Promise<void> {
+  const preview = roleFor("deployer", config)?.previewPrerequisites;
+  if (!preview) return;
+  try {
+    const comments = await codeHost().commentsWithTimes(repoConfig, pr);
+    if (comments.some((c) => c.body.startsWith(PREREQ_PREVIEW_HEADING) && c.body.includes(`sha=${sha}`))) return;
+    const r = await preview.call(roleFor("deployer", config), repoConfig, config, pr, sha, logger);
+    if (r.kind !== "posted") logger.info(`Release PR #${pr}: no prerequisite preview at ${short(sha)} (${r.kind}: ${r.reason})`);
+  } catch (err) {
+    logger.warn(`Release PR #${pr}: prerequisite preview failed: ${errText(err)}`);
+  }
+}
+
 async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, logger: Logger, cycleNumber: number): Promise<boolean> {
   const open = await codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
   if (!open) return false;
@@ -1406,7 +1427,9 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   await trackHold(rt, repoConfig, "release-sign-off", unsigned, open.number, gate.loaded.records, logger);
   if (unsigned.length > 0) {
     try {
-      await codeHost().syncSignoff(repoConfig, open.number, (await codeHost().viewReleasePr(repoConfig, open.number)).headSha, unsigned, logger);
+      const headSha = (await codeHost().viewReleasePr(repoConfig, open.number)).headSha;
+      await previewPrerequisites(repoConfig, config, open.number, headSha, logger);
+      await codeHost().syncSignoff(repoConfig, open.number, headSha, unsigned, logger);
     } catch (err) {
       logger.warn(`Could not read release PR #${open.number}: ${errText(err)}`);
     }
@@ -1446,6 +1469,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger, pr.headSha, dark) };
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
     await trackHold(rt, repoConfig, "release-sign-off", late.unsigned, pr.number, gate.loaded.records, logger);
+    await previewPrerequisites(repoConfig, config, pr.number, pr.headSha, logger);
     await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);
     return false;

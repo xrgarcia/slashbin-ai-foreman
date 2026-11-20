@@ -140,6 +140,8 @@ chmodSync(join(bin, "gh"), 0o755);
 // run) and may act on GitHub the way the real one would.
 const agentScript = (name) => `import fs from "node:fs";
 const args = process.argv.slice(2);
+// The prerequisite preview is a flag-off SRE here (release-prereq-preview.test.mjs holds it): refused, unlogged, no queue read.
+if (args.includes("--preview")) { process.stdout.write("preview disabled. Nothing ran.\\n"); process.exit(1); }
 fs.appendFileSync(${JSON.stringify(AGENT_LOG)}, JSON.stringify([${JSON.stringify(name)}, ...args]) + "\\n");
 const ctl = JSON.parse(fs.readFileSync(${JSON.stringify(CTL)}, "utf8"));
 const kind = args[0] === "verify" ? args[args.indexOf("--mode") + 1] : args[0] === "deploy" ? "deploy" : "approve";
