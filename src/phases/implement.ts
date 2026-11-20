@@ -323,6 +323,36 @@ export async function deliverPendingHandoffs(rt: ForemanRuntime, repoConfig: Rep
   }
 }
 
+/**
+ * An `approved` issue (no lifecycle label) whose fix is a revision of an already-open Foreman PR that links it and whose
+ * current review verdict is CHANGES_REQUESTED is covered, so implement skips it, and it carries no `pr pending actions`,
+ * so revise never takes it: it sat forever (2026-11-20). Advance it to `changesRequested` (keeping
+ * `approved`) so the revise stage picks it up next cycle. An open PR with no verdict, a stale verdict or a merged PR is
+ * left as it was. Best effort: an unreadable verdict is asked again next pass.
+ */
+export async function reviseCoveredApproved(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  try {
+    const pr = await codeHost().findOpenFeaturePR(repoConfig);
+    if (!pr || pr.issueNumbers.length === 0) return;
+    const lifecycle = Object.values(repoConfig.lifecycleLabels);
+    const stranded = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
+      .filter((i) => pr.issueNumbers.includes(i.number)
+        && codeHost().hasLabel(i, repoConfig.triggerLabel)
+        && !codeHost().hasLabel(i, repoConfig.github.blockedLabel)
+        && !lifecycle.some((l) => codeHost().hasLabel(i, l)))
+      .map((i) => i.number);
+    if (stranded.length === 0) return;
+    const standing = await codeHost().readPrStanding(repoConfig, pr.number, repoConfig.reviewerLogin, logger);
+    if (!standing.requestsChanges) return;
+    for (const n of stranded) {
+      await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, logger);
+    }
+    logger.warn(`${repoConfig.githubRepo}: approved ${stranded.map((n) => `#${n}`).join(", ")} covered by open PR #${pr.number}, which has a current CHANGES_REQUESTED review — sent to revise`);
+  } catch (err) {
+    logger.debug(`Could not check approved issues for a revision: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function tryBatchImplementation(
   rt: ForemanRuntime,
   repoConfig: RepoConfig,
@@ -336,6 +366,7 @@ export async function tryBatchImplementation(
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
 
   await deliverPendingHandoffs(rt, repoConfig, config, repoLogger);
+  await reviseCoveredApproved(rt, repoConfig, repoLogger);
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
