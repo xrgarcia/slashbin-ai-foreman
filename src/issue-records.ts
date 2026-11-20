@@ -15,6 +15,7 @@ import { activeWorkSource } from "./plugins/registry.js";
 import type { UnstickEntry } from "./unstick.js";
 import type { SavedRelease } from "./release-tracker.js";
 import type { BatchHistory } from "./dependency-batch/ledger.js";
+import type { CheckDefect } from "./phases/check-defect.js";
 
 /**
  * A release the release stage is carrying (EM#578), keyed by release PR. Kept
@@ -335,10 +336,12 @@ export interface RepoRecord {
   cardBlocks?: Record<string, CardBlockRecord>;
   /** What became of each dependency batch, by batch key (PRs + head SHAs): the dependency sweep's durable memory (foreman#230). */
   dependencyBatches?: Record<string, BatchHistory>;
+  /** One check that deferred two different PRs, by `checkId` (`<owner/repo>:<slug>`). Written only by `src/phases/check-defect.ts`. */
+  checkDefects?: Record<string, CheckDefect>;
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

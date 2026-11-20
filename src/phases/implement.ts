@@ -19,6 +19,7 @@ import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
 import { HandoffNotSaved } from "../unstick.js";
 import { correctiveChainHold } from "./corrective-chain.js";
+import { syncCheckDefects, type CheckDefect } from "./check-defect.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
@@ -576,7 +577,12 @@ export async function tryBatchImplementation(
     }
   }
   const holding = merged.filter((n) => !switchedOff.has(n));
-  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
+  // A filed check-defect frees the issues it lists (#366); read back first so a closed defect stops counting. Dark: {} when off.
+  const checkDefects = await syncCheckDefects(rt, repoConfig, repoLogger).catch((err): Record<string, CheckDefect> => {
+    repoLogger.warn(`check-defects not read (${String(err).split("\n")[0]}); none free the repo this pass`);
+    return {};
+  });
+  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"), checkDefects);
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).
