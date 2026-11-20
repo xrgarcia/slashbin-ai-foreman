@@ -253,7 +253,7 @@ test("a later issue joining an already-filed defect keeps its check identity and
     }
     const rec = await recordOf(h.rt, REPO, 1);
     const filedDefects = { "o/r:evidence-check-failed": { checkId: "o/r:evidence-check-failed", canonicalRepo: "o/r", check: "evidence-check-failed", state: "filed", affected: [{ repo: "o/r", issue: 1, pr: 11 }] } };
-    assert.equal(devVerifyHolding([1], {}, 3, rec.stalls, filedDefects), null, "the filed defect frees it");
+    assert.equal(devVerifyHolding([1], {}, 3, { 1: rec.stalls }, filedDefects), null, "the filed defect frees it");
   } finally { delete process.env.FOREMAN_CHECK_DEFECT; done(); }
 });
 
