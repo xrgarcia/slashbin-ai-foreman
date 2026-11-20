@@ -1528,7 +1528,11 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
 
   rt.memory.releaseBackoff.clear(key);
   // The pre-deploy re-check passed: the hold goes before anything below acts on the issues (a blocked one is left alone).
-  if (recheck) await finishPredeployRecheck(rt, repoConfig, pr.number, stopped, logger);
+  if (recheck) {
+    await finishPredeployRecheck(rt, repoConfig, pr.number, stopped, logger);
+    // The labels are gone for good, so the blocked-label stall ends with them.
+    await trackHold(rt, repoConfig, "release-blocked-label", [], pr.number, gate.loaded.records, logger);
+  }
   const tr = r.trailer;
   let mergeSha = tr.mergeSha;
   if (!mergeSha) {

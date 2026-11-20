@@ -384,6 +384,34 @@ for (const flag of ["on", "off"]) {
     else assert.equal(done, undefined);
   });
 
+  test(`flag ${flag}: a Foreman predeploy-stop holds the release; a passing re-check resolves its stall, a repeat STOP keeps it`, async () => {
+    setFlag();
+    const STOP = { exit: 0, out: "SRE_DEPLOY pr=#100 merged=no merge_sha=none verify=none hold=predeploy-stop evidence=https://example.test/stop" };
+    const due = async () => {
+      const g = gh(); g.events = { 5: [{ label: "blocked", by: "foreman-bot" }], 6: [{ label: "blocked", by: "foreman-bot" }] }; writeFileSync(GH_STATE, JSON.stringify(g));
+      await rt.records.updatePrRecord(repo, 100, (d) => { d.predeployStop.at = new Date(Date.now() - DEFAULT_BACKOFF.predeployStopRecheckMs - 60_000).toISOString(); });
+      rt = withFreshMemory(rt);
+    };
+    world(pending(), { approve: [{ exit: 0 }, { exit: 0 }, { exit: 0 }], deploy: [STOP, STOP, DEPLOYED("pass")] });
+    assert.equal(await run(), true);
+    assert.equal(await run(2), false, "waiting on the recorded stop");
+    const s = await stallOf(5, "release-blocked-label");
+    if (!on) assert.equal(s, undefined);
+    else { assert.equal(s.state, "open"); assert.equal(s.episode, undefined); }
+    await due();
+    assert.equal(await run(3), true, "the re-check runs and the SRE stops again");
+    const kept = await stallOf(5, "release-blocked-label");
+    if (on) { assert.equal(kept.state, "open"); assert.equal(kept.startedAt, s.startedAt); assert.equal(kept.episode, undefined); }
+    else assert.equal(kept, undefined);
+    await due();
+    assert.equal(await run(4), true, "the re-check passes and the release merges");
+    assert.equal((await prRecordOf(rt, repo, 100)).predeployStop, undefined);
+    const done = await stallOf(5, "release-blocked-label");
+    if (on) { assert.equal(done.state, "resolved"); assert.ok(done.resolvedAt); } else assert.equal(done, undefined);
+    await run(5);
+    if (on) assert.equal((await stallOf(5, "release-blocked-label")).state, "resolved");
+  });
+
   test(`flag ${flag}: a stall that cannot be written leaves the hold and the sign-off status unchanged`, async () => {
     setFlag();
     world(unsignedWorld(), { approve: { exit: 0 }, deploy: DEPLOYED("pass") });
