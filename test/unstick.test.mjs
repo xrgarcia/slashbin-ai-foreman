@@ -116,13 +116,14 @@ test("unstickViaEm: unconfigured or tokenless is a failure, never a call", async
   }
 });
 
-test("buildEmEnv carries the EM token and no other agent's", () => {
+test("buildEmEnv carries the EM token and the read-pool keys, never the Foreman's", () => {
   process.env.EM_GITHUB_TOKEN = "em-token-not-real";
   process.env.FOREMAN_GITHUB_TOKEN = "fm-token-not-real";
   process.env.TECHLEAD_GITHUB_KEY = "tl-token-not-real";
   const env = buildEmEnv({ sessionEnv: [] });
   assert.equal(env.EM_GITHUB_TOKEN, "em-token-not-real");
-  assert.equal(env.TECHLEAD_GITHUB_KEY, undefined);
+  assert.equal(env.TECHLEAD_GITHUB_KEY, "tl-token-not-real"); // read-pool key, reads only
+  assert.equal(env.FOREMAN_GITHUB_TOKEN, undefined);
 });
 
 // The handoff watch (SLA-3693, 2026-11-05): the EM answered "invoked" to a
