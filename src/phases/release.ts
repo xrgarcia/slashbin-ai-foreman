@@ -42,7 +42,7 @@ import type { DeployTrailer, IssueAcceptance, VerifyResult } from "../plugins/co
 import { parseWaitUntil } from "../contract/result-v1.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { releaseIssues } from "../release-tracker.js";
-import type { PredeployStop, ProdRelease, ReleaseReadHold } from "../issue-records.js";
+import type { IssueRecord, PredeployStop, ProdRelease, ReleaseReadHold } from "../issue-records.js";
 import { fieldTable } from "../issue-records.js";
 import { BackoffTracker, backoffDelay, formatWait } from "../backoff.js";
 import { activeRuns, itemOf } from "./common.js";
@@ -51,6 +51,7 @@ import { verifyHoldPlan } from "./verify.js";
 import { followRelease } from "./promote.js";
 import { epicRefs, handoffSubject } from "../unstick.js";
 import { codeHost } from "../plugins/registry.js";
+import { report, resolve as resolveStall, stallClockEnabled, unresolvedStalls, type StallCause } from "../stall-clock.js";
 import { releaseTagName } from "../config-schema/github.js";
 import type { IssueSnapshot, ReleasePrView } from "../code-host.js";
 import type { ForemanRuntime } from "../runtime.js";
@@ -1334,6 +1335,37 @@ async function markDark(repoConfig: RepoConfig, pr: number, mergeSha: string | u
   }
 }
 
+/** What each release hold tells StallClock besides its issues: the one action that clears it and the clearing event. */
+const RELEASE_STALLS = {
+  "release-sign-off": { nextAction: "sign", resumptionCondition: "every issue the release lists is signed off by the EM, ships dark, or leaves the release" },
+  "release-blocked-label": { nextAction: "revert", resumptionCondition: "the blocked label is removed from every affected issue" },
+} as const satisfies Partial<Record<StallCause, { nextAction: string; resumptionCondition: string }>>;
+
+/**
+ * Tell StallClock whether the release is held for `cause` right now: `held` non-empty reports it, empty resolves it.
+ * StallClock owns the clock, so this only passes the facts and never decides about time; the release is one stall,
+ * stored on the issue already carrying the standing one, else the first held issue. `known` is the records the pass
+ * already read. A report that cannot be made is logged and changes nothing: the caller's hold stands either way.
+ */
+async function trackHold(rt: ForemanRuntime, repoConfig: RepoConfig, cause: keyof typeof RELEASE_STALLS, held: readonly number[], pr: number, known: ReadonlyMap<number, IssueRecord>, logger: Logger): Promise<void> {
+  if (!stallClockEnabled()) return;
+  try {
+    const at = new Date().toISOString();
+    const standing = [...known].filter(([, r]) => unresolvedStalls(r.stalls).some((s) => s.cause === cause)).map(([n]) => n);
+    if (held.length === 0) {
+      for (const n of standing) await resolveStall(rt, repoConfig, n, cause, at);
+      return;
+    }
+    const affected = [...held].sort((a, b) => a - b);
+    await report(rt, repoConfig, {
+      issue: standing[0] ?? affected[0]!, cause, eventAt: at, affected: affected.map((n) => `${repoConfig.githubRepo}#${n}`),
+      resolver: "EM", ...RELEASE_STALLS[cause], evidence: `https://github.com/${repoConfig.githubRepo}/pull/${pr}`,
+    });
+  } catch (err) {
+    logger.warn(`Release PR #${pr}: could not record the ${cause} hold with the stall clock: ${errText(err)}`);
+  }
+}
+
 /**
  * Deploy the open release PR: Tech Lead approval at its head, then the SRE's
  * deploy. Returns false when there is nothing to deploy this pass.
@@ -1371,6 +1403,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   const unsigned = await withoutDark(repoConfig, open.number,
     await codeHost().unsignedIssues(issues, listed, repoConfig.lifecycleLabels, codeHost().foremanAppliedOrHold(repoConfig, logger)), logger,
     repoConfig.baseBranch, dark);
+  await trackHold(rt, repoConfig, "release-sign-off", unsigned, open.number, gate.loaded.records, logger);
   if (unsigned.length > 0) {
     try {
       await codeHost().syncSignoff(repoConfig, open.number, (await codeHost().viewReleasePr(repoConfig, open.number)).headSha, unsigned, logger);
@@ -1387,6 +1420,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   // A `predeploy-stop` the Foreman recorded is asked about again once its interval has passed (the SRE's pre-deploy
   // check only reads); every other `blocked` is a person's, or a stop that needs one, and holds the release.
   const recheck = stopped.length > 0 ? await predeployRecheck(rt, repoConfig, config, open.number, own.predeployStop, stopped, logger) : null;
+  if (stopped.length === 0 || !recheck) await trackHold(rt, repoConfig, "release-blocked-label", stopped, open.number, gate.loaded.records, logger);
   if (stopped.length > 0 && !recheck) {
     logger.debug(`Release PR #${open.number}: ${stopped.map((n) => `#${n}`).join(", ")} blocked; not deploying`);
     return false;
@@ -1411,6 +1445,7 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
   }
   const late = { ...head, unsigned: await withoutDark(repoConfig, pr.number, head.unsigned, logger, pr.headSha, dark) };
   if (late.unsigned.length > 0 || late.unresolved.length > 0) {
+    await trackHold(rt, repoConfig, "release-sign-off", late.unsigned, pr.number, gate.loaded.records, logger);
     await codeHost().syncSignoff(repoConfig, pr.number, pr.headSha, late.unsigned, logger, late.unresolved);
     logger.info(`Release PR #${pr.number}: ${late.unsigned.map((n) => `#${n}`).join(", ")} merged but not signed off by the EM, ${late.unresolved.length} merged PR(s) unread; not deploying`);
     return false;
@@ -1493,7 +1528,11 @@ async function deploy(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentC
 
   rt.memory.releaseBackoff.clear(key);
   // The pre-deploy re-check passed: the hold goes before anything below acts on the issues (a blocked one is left alone).
-  if (recheck) await finishPredeployRecheck(rt, repoConfig, pr.number, stopped, logger);
+  if (recheck) {
+    await finishPredeployRecheck(rt, repoConfig, pr.number, stopped, logger);
+    // The labels are gone for good, so the blocked-label stall ends with them.
+    await trackHold(rt, repoConfig, "release-blocked-label", [], pr.number, gate.loaded.records, logger);
+  }
   const tr = r.trailer;
   let mergeSha = tr.mergeSha;
   if (!mergeSha) {
