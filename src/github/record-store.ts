@@ -132,19 +132,29 @@ export class GitHubRecordStore {
 
   private cachePath(): string | null { return this.persistPath ?? recordCachePath; }
 
-  /** Read the file once, for the login `self`; a file written as another login, or unreadable, counts as none. */
+  /**
+   * Read the file once, for the login `self`; a file written as another login, or unreadable, counts as none.
+   * Not before the path is known: the Paperclip mirror loads a repo record ~0.7 s before the daemon sets the path,
+   * and latching then left every restart of 2026-11-20 with an empty cache (~2,350 full reads each, quota gone).
+   */
   private loadDisk(self: string): void {
     if (this.diskLoaded) return;
-    this.diskLoaded = true;
     this.diskSelf = self;
     const path = this.cachePath();
-    if (!path || !existsSync(path)) return;
+    if (!path) return;
+    this.diskLoaded = true;
+    if (!existsSync(path)) return;
     try {
       const f = JSON.parse(readFileSync(path, "utf8")) as RecordCacheFile;
-      if (f.version !== 1 || f.self !== self) return;
-      for (const [id, e] of Object.entries(f.entries ?? {})) this.disk.set(id, e);
+      if (f.version !== 1 || f.self !== self) {
+        this.io.warn?.(`record cache ${path} ignored: written as ${f.self ?? "?"} v${f.version ?? "?"}, running as ${self} v1; every item is read in full`);
+        return;
+      }
+      for (const [id, e] of Object.entries(f.entries ?? {})) if (!this.disk.has(id)) this.disk.set(id, e);
       for (const [repo, n] of Object.entries(f.anchors ?? {})) if (!this.anchors.has(repo) && Number.isFinite(n)) this.anchors.set(repo, n);
-    } catch { /* a bad file is a cold start */ }
+    } catch (err) {
+      this.io.warn?.(`record cache ${path} unreadable (${err instanceof Error ? err.message : String(err)}); every item is read in full`);
+    }
   }
 
   private remember(id: string, entry: Entry, number: number | null): void {
