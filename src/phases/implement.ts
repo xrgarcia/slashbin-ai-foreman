@@ -6,6 +6,7 @@ import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { selectWork, heldWork, emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
+import { isApprovedUnbuilt } from "../lifecycle.js";
 import { implementApprovedIssues } from "./implement-workflow.js";
 import type { ImplementationResult } from "../session/protocol.js";
 import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
@@ -334,20 +335,19 @@ export async function reviseCoveredApproved(rt: ForemanRuntime, repoConfig: Repo
   try {
     const pr = await codeHost().findOpenFeaturePR(repoConfig);
     if (!pr || pr.issueNumbers.length === 0) return;
-    const lifecycle = Object.values(repoConfig.lifecycleLabels);
     const stranded = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
-      .filter((i) => pr.issueNumbers.includes(i.number)
-        && codeHost().hasLabel(i, repoConfig.triggerLabel)
-        && !codeHost().hasLabel(i, repoConfig.github.blockedLabel)
-        && !lifecycle.some((l) => codeHost().hasLabel(i, l)))
+      .filter((i) => pr.issueNumbers.includes(i.number) && isApprovedUnbuilt(repoConfig, i.labels.map((l) => l.name)))
       .map((i) => i.number);
     if (stranded.length === 0) return;
     const standing = await codeHost().readPrStanding(repoConfig, pr.number, repoConfig.reviewerLogin, logger);
     if (!standing.requestsChanges) return;
+    const sent: number[] = [];
     for (const n of stranded) {
-      await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, logger);
+      if (await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, logger)) sent.push(n);
     }
-    logger.warn(`${repoConfig.githubRepo}: approved ${stranded.map((n) => `#${n}`).join(", ")} covered by open PR #${pr.number}, which has a current CHANGES_REQUESTED review — sent to revise`);
+    if (sent.length > 0) logger.warn(`${repoConfig.githubRepo}: approved ${sent.map((n) => `#${n}`).join(", ")} covered by open PR #${pr.number}, which has a current CHANGES_REQUESTED review — sent to revise`);
+    const failed = stranded.filter((n) => !sent.includes(n));
+    if (failed.length > 0) logger.warn(`${repoConfig.githubRepo}: could not move ${failed.map((n) => `#${n}`).join(", ")} to revise — asked again next pass`);
   } catch (err) {
     logger.debug(`Could not check approved issues for a revision: ${err instanceof Error ? err.message : String(err)}`);
   }

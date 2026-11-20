@@ -66,3 +66,14 @@ test("no current CHANGES_REQUESTED, a lifecycle label, the blocked label, or an 
     }
   } finally { setCodeHost(null); }
 });
+
+test("a failed label write is not reported as sent to revise, and is asked again next pass", async () => {
+  const gh = join(dir, "gh");
+  const h = harness({ issues: [issue(34, cfg.triggerLabel)] });
+  try {
+    writeFileSync(gh, `#!/bin/sh\necho boom >&2\nexit 1\n`);
+    await reviseCoveredApproved(h.rt, cfg, h.logger);
+    assert.ok(!h.lines.some((l) => /sent to revise/.test(l)), h.lines.join("|"));
+    assert.ok(h.lines.some((l) => /could not move #34/.test(l)), h.lines.join("|"));
+  } finally { writeFileSync(gh, `#!/bin/sh\necho '{}'\n`); setCodeHost(null); }
+});
