@@ -232,6 +232,13 @@ export async function productionHead(config: RepoConfig): Promise<string> {
 }
 
 /**
+ * Merged PRs `netZeroOffProduction` reads. GitHub caps one query at 500,000 nodes, and selecting `commits` costs
+ * 100 commits x 100 authors per PR: 100 asked for 1,000,000 and 50 for 505,050, so every release scan threw and
+ * held two issues at release pending for 16 hours (2026-11-19).
+ */
+export const MERGED_PR_WINDOW = 40;
+
+/**
  * Of `issues`, those whose own merged PR changed nothing (an empty net diff) and whose merge commit is not on the
  * production branch (foreman#117: docs-site#547, a net-zero PR on `develop` that no release carries). Nothing
  * shipped for them, so a release at production's head does not carry them and has no verdict that is theirs. An
@@ -244,7 +251,7 @@ export async function netZeroOffProduction(config: RepoConfig, issues: number[],
   // Not the shared merged-PR scan: it turns a failed read into "no PRs found", which here would read as "not net-zero"
   // and let the issue join. This read throws, and the window is wide enough for a release's worth of merges.
   const listed = JSON.parse((await ghAsync(["pr", "list", "--repo", config.githubRepo, "--state", "merged", "--base", config.baseBranch,
-    "--json", "number,url,title,body,commits,mergedAt", "--limit", "100"], config.repoPath)) || "[]") as
+    "--json", "number,url,title,body,commits,mergedAt", "--limit", String(MERGED_PR_WINDOW)], config.repoPath)) || "[]") as
     { number: number; url: string; title?: string; body?: string; commits?: PrCommit[]; mergedAt?: string }[];
   const wanted = new Set(issues);
   const refs = new Map<number, { issueNumber: number; prNumber: number; prUrl: string }>();
