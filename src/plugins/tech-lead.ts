@@ -7,7 +7,7 @@ import { recordContractPath } from "../contract/usage.js";
 import { setContractReaderEnv } from "../handoff-contract.js";
 import { milestoneReader, withoutProgressLines, type ReviewMilestone } from "../review-progress.js";
 import { isTransientGhError } from "../github/gh.js";
-import { cliTail, lastLine, parseReviewTrailerRecords, runAgentCli } from "./agent-cli.js";
+import { cliTail, refusalReason, parseReviewTrailerRecords, runAgentCli } from "./agent-cli.js";
 import type { ForemanPlugin, PromotionApproval, Reviewer, ReviewFallback, PluginCatalogEntry } from "./contract.js";
 
 /**
@@ -190,8 +190,7 @@ export async function approvePromotionViaTechLead(
     buildTechLeadEnv(agentConfig, repoConfig), agentConfig, TECH_LEAD_APPROVE_MAX_DURATION_MS, abortSignal, transcriptPath);
   if (r.timedOut) return { kind: "retry", reason: "Tech Lead approval timed out" };
   if (r.code === 0) return { kind: "approved" };
-  const last = lastLine(r);
-  if (r.code === 4) return { kind: "refused", reason: last || "refused" };
+  if (r.code === 4) return { kind: "refused", reason: refusalReason(r) || "refused" };
   return { kind: "retry", reason: `exit ${r.code}: ${cliTail(r)}` };
 }
 

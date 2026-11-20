@@ -79,6 +79,22 @@ export const cliTail = (r: CliRun): string => (r.stderr || r.stdout).trim().slic
 export const lastLine = (r: CliRun): string => r.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || "";
 
 /**
+ * Why the Tech Lead refused: its `REFUSED: <why>` line. The last line it prints is the
+ * `TECHLEAD_APPROVAL ... verdict=REFUSE` trailer, which says nothing of why, so `lastLine`
+ * dropped the reason. Falls back to the last line that is not a trailer.
+ */
+export function refusalReason(r: CliRun): string {
+  for (const out of [r.stdout, r.stderr]) {
+    const rows = out.split("\n").map((l) => l.trim()).filter(Boolean);
+    const refused = rows.find((l) => l.startsWith("REFUSED:"));
+    if (refused) return refused.slice("REFUSED:".length).trim();
+    const plain = rows.filter((l) => !/^[A-Z_]+ pr=#\d+ /.test(l)).pop();
+    if (plain) return plain;
+  }
+  return "";
+}
+
+/**
  * Parse the structured review trailers the Tech Lead and the SRE print, one per PR:
  *   FOREMAN_REVIEW pr=#100 verdict=APPROVE merged=yes deploy=SUCCESS [hold=<slug>]
  */
