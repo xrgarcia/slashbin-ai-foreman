@@ -61,7 +61,7 @@ async function harness() {
   setCodeHost({
     RELEASE_STOP_MARK: "<!-- release-stop -->",
     addBlockedLabel: async (_rc, n) => { calls.blocked.push(n); },
-    blockedByPerson: async () => calls.person,
+    blockedByPerson: async () => { if (calls.lookupFails) throw new Error("boom"); return calls.person; },
     removeBlockedLabel: async (_rc, n) => { calls.unblocked.push(n); },
     commentOnIssue: async (_rc, n, body) => { calls.comments.push({ n, body }); },
   });
@@ -113,5 +113,19 @@ test("a success resolves the issues whose block it lifted", async () => {
     await seed(h.rt, REPO, 1, { releaseReadHeld: { error: "e", firstFailedAt: at(3 * HOUR), escalatedAt: at(HOUR) } });
     assert.deepEqual(await noteReleaseRead(h.rt, REPO, CONFIG, [1], null, "", logger), [1]);
     assert.ok(h.calls.events.some((e) => e.kind === "unblocked" && e.n === 1));
+  } finally { done(); }
+});
+
+test("an ownership lookup that fails keeps the marker, so the next healthy scan can still lift the block", async () => {
+  const h = await harness();
+  try {
+    await seed(h.rt, REPO, 1, { releaseReadHeld: { error: "e", firstFailedAt: at(3 * HOUR), escalatedAt: at(HOUR) } });
+    h.calls.lookupFails = true;
+    assert.deepEqual(await noteReleaseRead(h.rt, REPO, CONFIG, [1], null, "", logger), []);
+    assert.ok((await recordOf(h.rt, REPO, 1)).releaseReadHeld, "the marker stays");
+    assert.deepEqual(h.calls.unblocked, []);
+    h.calls.lookupFails = false;
+    assert.deepEqual(await noteReleaseRead(h.rt, REPO, CONFIG, [1], null, "", logger), [1]);
+    assert.equal((await recordOf(h.rt, REPO, 1)).releaseReadHeld, undefined);
   } finally { done(); }
 });

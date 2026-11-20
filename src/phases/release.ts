@@ -803,7 +803,8 @@ async function closeHeldNetZero(rt: ForemanRuntime, repoConfig: RepoConfig, conf
     const closed: number[] = [];
     for (const [n, w] of noop) if (await closeNetZero(rt, repoConfig, n, w, "prodReverified", logger)) closed.push(n);
     if (closed.length === 0) continue;
-    const rest = rel.issues.filter((n) => !closed.includes(n));
+    const closedSet = new Set(closed);
+    const rest = rel.issues.filter((n) => !closedSet.has(n));
     if (rest.length === 0) await dropRelease(rt, repoConfig, rel.pr, logger);
     else await putRelease(rt, repoConfig, { ...rel, issues: rest }, logger);
   }
@@ -853,8 +854,9 @@ export async function noteReleaseRead(
     if (error === null) {
       if (!prev) continue;
       if (prev.escalatedAt) {
-        let person = true;
-        try { person = await codeHost().blockedByPerson(repoConfig, n); } catch (err) { logger.warn(`Could not tell who blocked #${n}: ${errText(err)}`); }
+        let person: boolean;
+        // Ownership unknown: keep the marker so the next scan reads it again, never guess either way.
+        try { person = await codeHost().blockedByPerson(repoConfig, n); } catch (err) { logger.warn(`Could not tell who blocked #${n}: ${errText(err)}`); continue; }
         if (!person) {
           try { await codeHost().removeBlockedLabel(repoConfig, n); } catch (err) { logger.warn(`Could not unblock #${n}: ${errText(err)}`); continue; }
           lifted.push(n);
@@ -883,12 +885,13 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, config: 
     .filter((i) => codeHost().hasLabel(i, releasePending) && !tracked.has(i.number));
   // An orphan this stage blocked for a failing read stays in the scan: the read is how it recovers. Any other blocked one is not read.
   const blockedPending = pending.filter((i) => codeHost().hasLabel(i, repoConfig.github.blockedLabel)).map((i) => i.number);
+  const blockedSet = new Set(blockedPending);
   const readBlocked = new Set<number>();
   if (blockedPending.length > 0) {
     const rec = fieldTable(await rt.records.loadIssueRecords(repoConfig, blockedPending), "releaseReadHeld");
     for (const n of blockedPending) if (rec[n]?.escalatedAt) readBlocked.add(n);
   }
-  const orphans = pending.filter((i) => !blockedPending.includes(i.number) || readBlocked.has(i.number)).map((i) => i.number);
+  const orphans = pending.filter((i) => !blockedSet.has(i.number) || readBlocked.has(i.number)).map((i) => i.number);
   if (orphans.length === 0) return;
   if (await codeHost().findOpenPromotionPR(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger)) return;
   const diff = await codeHost().countBranchDiffFiles(repoConfig.githubRepo, repoConfig.productionBranch, repoConfig.baseBranch, repoConfig.repoPath, logger);
@@ -909,8 +912,10 @@ async function blockOrphans(rt: ForemanRuntime, repoConfig: RepoConfig, config: 
   }
   const lifted = await noteReleaseRead(rt, repoConfig, config, ok, null, "", logger);
   // A read-blocked orphan whose block was not lifted (a person owns it) is left alone.
-  const free = ok.filter((n) => !readBlocked.has(n) || lifted.includes(n));
-  for (const [n, w] of noop) if (free.includes(n)) await closeNetZero(rt, repoConfig, n, w, "prodVerified", logger);
+  const liftedSet = new Set(lifted);
+  const free = ok.filter((n) => !readBlocked.has(n) || liftedSet.has(n));
+  const freeSet = new Set(free);
+  for (const [n, w] of noop) if (freeSet.has(n)) await closeNetZero(rt, repoConfig, n, w, "prodVerified", logger);
   const carried = free.filter((n) => !noop.has(n));
   if (carried.length === 0) return;
   const joined = await joinCarryingRelease(rt, repoConfig, releases, carried, logger);
