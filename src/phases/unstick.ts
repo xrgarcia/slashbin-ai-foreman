@@ -376,7 +376,7 @@ export async function tryUnstick(
     }
     // A call that fails for the last time also gives up; indexing it ahead leaves at worst an entry with no stall,
     // which the next pass's clearing drops.
-    const mayGiveUp = (p: (typeof plan)[number]) => p.step === "give-up" || (p.step === "call" && p.entry.attempts + 1 >= UNSTICK_MAX_ATTEMPTS && p.entry.status !== "invoked");
+    const mayGiveUp = (p: (typeof plan)[number]) => p.step === "give-up" || (p.step === "call" && p.entry.attempts + 1 >= UNSTICK_MAX_ATTEMPTS);
     await widenHandoffIndex(rt, repoConfig, known, plan.filter((p) => p.where === repoConfig && mayGiveUp(p)).map((p) => p.c.issue));
     for (const { c, key, where, entry, step } of plan) {
       if (step === "wait") continue;

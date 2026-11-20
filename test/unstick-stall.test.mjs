@@ -189,6 +189,21 @@ test("a batch of give-ups widens the index in one write, not one per issue", asy
   for (const n of issues) assert.equal((await w.stall(n, "handoff-gave-up")).state, "open");
 });
 
+test("failed recalls of handed-off questions are indexed in one write too", async () => {
+  const w = world();
+  const issues = Array.from({ length: 40 }, (_, i) => i + 100);
+  writeFileSync(openFile, JSON.stringify(issues.map((number) => ({ number, title: "t", labels: [] }))));
+  for (const n of issues) await seed(w.rt, w.repo, n, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "r", attempts: 3 } });
+  await w.pass(1);
+  for (const n of issues) await w.rt.records.updateIssueRecord(w.repo, n, (d) => { for (const e of Object.values(d.unstick ?? {})) { e.status = "invoked"; e.attempts = 2; e.recalls = 0; e.lastCallAt = iso(Date.now() - 3_600_000); } });
+  let saves = 0;
+  const real = w.rt.records.updateRepoRecord.bind(w.rt.records);
+  w.rt.records.updateRepoRecord = (...args) => { saves++; return real(...args); };
+  await w.pass(2);
+  assert.ok(saves < 10, `repo-record writes (40 failed recalls): ${saves}`);
+  assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls?.length, 40);
+});
+
 test("heldEpics reads the index and the asked-about epics, nothing else", () => {
   assert.deepEqual(heldEpics(null), []);
   const unstick = { "0:epic-decompose:21-t": { issue: 0, kind: "epic-decompose", tag: "21-t" } };
