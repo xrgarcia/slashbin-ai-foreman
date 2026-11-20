@@ -118,7 +118,7 @@ test("verify: a wait and a deferred SRE run report verifyWaiting, a deferred run
   for (const [name, b] of [["defer", defer], ["wait", wait]]) assert.match(b, /kind: "verifyWaiting"/, name);
   assert.doesNotMatch(wait, /kind: "blocked"/);
   // A deferred check reports a StallClock stall; the stall's own raise owns the block, so the defer emits none.
-  assert.doesNotMatch(defer, /kind: "blocked"/);
+  assert.match(defer, /stalled\?\.state === "escalated"[\s\S]*kind: "blocked"/);
   assert.match(defer, /cause: "verify-deferred"/);
   assert.match(charge, /kind: "blocked"/);
 });

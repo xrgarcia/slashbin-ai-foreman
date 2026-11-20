@@ -132,7 +132,7 @@ test("a defer opens one stall with its owner fields; a repeat, a restart and a r
     assert.equal(later.startedAt, first.startedAt, "the clock is never re-stamped");
     assert.equal(Object.keys((await recordOf(h.rt, REPO, 1)).stalls).length, 1);
     assert.ok(h.log.some((e) => e.kind === "verifyWaiting" && e.n === 1), "the card waits on the SRE");
-    assert.ok(!h.log.some((e) => e.kind === "blocked"), "no direct blocked emit: the stall's raise owns it");
+    assert.ok(!h.log.some((e) => e.kind === "blocked"), "an open stall blocks nothing");
     assert.equal(await build(h), "queued", "an open stall still holds the repo");
   } finally { done(); }
 });
@@ -160,6 +160,7 @@ test("an escalated stall frees the repo, the next issue builds, and re-asks keep
     assert.equal(s.state, "escalated");
     assert.ok(s.escalatedAt, "kept");
     assert.deepEqual(h.asked, [11, 11], "still re-asked");
+    assert.ok(blocked(h).length >= 1, "an escalated stall keeps the card Blocked");
     assert.equal((await recordOf(h.rt, REPO, 1)).verifyHeld, undefined, "and uncharged");
   } finally { done(); }
 });
@@ -235,4 +236,34 @@ test("the documented default of toolingHoldLimitMs is the config's default", () 
   const section = doc.slice(doc.indexOf("### `toolingHoldLimitMs`"));
   assert.match(section, new RegExp(`Default: \`${parsed.toolingHoldLimitMs}\``));
   assert.match(section, /Env: `AI_AGENT_TOOLING_HOLD_LIMIT_MS`/);
+});
+
+test("a later issue joining an already-filed defect keeps its check identity and frees the repo", async () => {
+  process.env.FOREMAN_CHECK_DEFECT = "1";
+  const h = await harness();
+  try {
+    await h.rt.records.updateRepoRecord(REPO, (d) => { d.checkDefects = { "o/r:evidence-check-failed": {
+      checkId: "o/r:evidence-check-failed", canonicalRepo: "o/r", check: "evidence-check-failed", state: "filed", suspectedAt: ago(HOUR),
+      affected: [{ repo: "o/r", issue: 9, pr: 19 }, { repo: "o/r", issue: 8, pr: 18 }], defect: { number: 500, url: "" }, filedAt: ago(HOUR / 2), closedAt: null } }; });
+    for (let i = 0; i < 2; i++) {
+      await verify(h);
+      const s = await stallOf(h);
+      assert.equal(s.state, "resolved", "no unresolved matching stall");
+      assert.deepEqual(s.evidence, ["check evidence-check-failed"], "the check identity stays");
+    }
+    const rec = await recordOf(h.rt, REPO, 1);
+    const filedDefects = { "o/r:evidence-check-failed": { checkId: "o/r:evidence-check-failed", canonicalRepo: "o/r", check: "evidence-check-failed", state: "filed", affected: [{ repo: "o/r", issue: 1, pr: 11 }] } };
+    assert.equal(devVerifyHolding([1], {}, 3, rec.stalls, filedDefects), null, "the filed defect frees it");
+  } finally { delete process.env.FOREMAN_CHECK_DEFECT; done(); }
+});
+
+test("a chain's stall starts when it stops, not at the older verification hold", async () => {
+  const h = await harness();
+  try {
+    h.correctives = [21, 22, 23];
+    await seed(h.rt, REPO, 1, { verifyHeld: { heldAt: ago(3 * HOUR), prNumber: 11, reason: "dev-verify-failed", attempts: 1 } });
+    await build(h);
+    const s = await stallOf(h, 1, "corrective-chain-stopped");
+    assert.ok(Date.now() - Date.parse(s.startedAt) < HOUR, "started now");
+  } finally { done(); }
 });

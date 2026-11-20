@@ -12,7 +12,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, isDeliveredVerdict, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { fieldTable, type VerifyHold } from "../issue-records.js";
-import { report as reportStall, resolve as resolveStall, type StallTable } from "../stall-clock.js";
+import { report as reportStall, resolve as resolveStall, type StallTable, type StallRecord } from "../stall-clock.js";
 import { clearCheckPass, deferredCheck, recordCheckFailure, releasedByDefect, releasedIssues, resolveFreedStalls, syncCheckDefects, type CheckDefect } from "./check-defect.js";
 import { handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
@@ -592,24 +592,28 @@ export async function tryVerify(
       const slug = repoConfig.githubRepo;
       for (const n of target.issueNumbers) {
         let filed: CheckDefect | null = null;
-        let filedNow = false;
         try {
-          ({ defect: filed, filedNow } = await recordCheckFailure(rt, repoConfig, { repo: slug, check: reason, issue: n, pr: target.prNumber, at }));
+          ({ defect: filed } = await recordCheckFailure(rt, repoConfig, { repo: slug, check: reason, issue: n, pr: target.prNumber, at }));
         } catch (err) {
           vlog.warn(`#${n}: check-defect not recorded (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
         }
-        // Standing under a defect already filed, the stall is not opened again: the defect card owns the wait.
-        if (filed?.state === "filed" && !filedNow) continue;
+        // Always reported, even under a defect already filed: the stall carries the check this issue waits on, which
+        // is what lets the filed defect free it (`devVerifyHolding`); a filed defect then resolves it at once.
+        let stalled: StallRecord | undefined;
         try {
-          await reportStall(rt, repoConfig, {
+          ({ record: stalled } = await reportStall(rt, repoConfig, {
             issue: n, cause: "verify-deferred", eventAt: at, affected: target.issueNumbers.map((i) => `${slug}#${i}`),
             resolver: "EM", nextAction: `fix the verifier's \`${reason}\` check, or file a defect against it`,
             resumptionCondition: "the check passes on a retry, or its check-defect closes", evidence: `check ${reason}`,
-          });
+          }));
         } catch (err) {
           vlog.warn(`#${n}: the verify-deferred stall was not recorded (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
         }
         if (filed?.state === "filed") await resolveFreedStalls(rt, repoConfig, filed, at, vlog);
+        else if (stalled?.state === "escalated") {
+          // The card stays Blocked while the check stays down past its bound; verification is still owed, uncharged.
+          await emit(rt, { kind: "blocked", item: itemOf(repoConfig, n), reason: `dev verification of PR #${target.prNumber} is deferred by the verifier's \`${reason}\` check past its stall bound (${stalled.nextAction})` }, repoConfig, vlog);
+        }
       }
       const why = `waiting on the SRE: it could not run (${reason}) — dev verification of PR #${target.prNumber} retries automatically in ${wait}`;
       for (const n of target.issueNumbers) {

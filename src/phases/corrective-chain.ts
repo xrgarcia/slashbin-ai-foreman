@@ -67,7 +67,7 @@ export async function correctiveChainHold(
   // The stop is a stall with its own start, reported before the unchanged raise; a failure here never stops the raise.
   try {
     await reportStall(rt, repoConfig, {
-      issue: holder, cause: "corrective-chain-stopped", eventAt: Number.isNaN(Date.parse(hold.heldAt)) ? new Date().toISOString() : hold.heldAt,
+      issue: holder, cause: "corrective-chain-stopped", eventAt: new Date().toISOString(), // the chain stops now, whatever the verification hold's age
       affected: [`${repoConfig.githubRepo}#${holder}`], resolver: "EM",
       nextAction: "redesign the work as one designed issue, or switch it off with a `Dark flag` named in its Pre-Flight",
       resumptionCondition: "a `Dark flag` is named in the holder's Pre-Flight, which releases it", evidence: `correctives ${correctives.map((n) => `#${n}`).join(", ")}`,
