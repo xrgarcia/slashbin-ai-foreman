@@ -185,6 +185,19 @@ export interface ToolingHold {
   escalatedAt?: string;
 }
 
+/**
+ * A release-stage read (is this issue net-zero?) that failed on every scan, and since when. Cleared by the next read
+ * that succeeds; past `toolingHoldLimitMs` it is escalated once (the issue is blocked with the error and the time).
+ */
+export interface ReleaseReadHold {
+  /** The newest error text. */
+  error: string;
+  /** ISO time of the first failed read; kept while the reads keep failing. */
+  firstFailedAt: string;
+  /** ISO time the failure passed its bound and was escalated; a repeat past the bound escalates nothing. */
+  escalatedAt?: string;
+}
+
 /** A passed prod verification: the evidence the promote stage's 0-diff path may close on. */
 export interface ProdVerified {
   pr: number;
@@ -203,6 +216,8 @@ export interface IssueRecord {
   verifyHeld?: VerifyHold;
   /** A dev verification held by the verifier's own tooling, and since when (slashbin-ai-foreman#350). */
   toolingHeld?: ToolingHold;
+  /** The release stage's read about this issue has failed on every scan since this time. */
+  releaseReadHeld?: ReleaseReadHold;
   /** The EM questions asked about this issue, by `unstickKey` (src/unstick.ts). */
   unstick?: Record<string, UnstickEntry>;
   prodVerified?: ProdVerified;
@@ -227,7 +242,7 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "unstick", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "releaseReadHeld", "unstick", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
 
 /** A repo's own record is addressed with this number; no issue or PR is 0. */
 const REPO_RECORD_NUMBER = 0;
