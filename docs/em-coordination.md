@@ -161,7 +161,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`, `corrective-chain`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`, `corrective-chain`, `stalled`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -274,3 +274,12 @@ reset (or the upstream back-off window) has passed.
 | unstick calls | 3, then the give-up comment to the owner |
 
 A card past its limit is the EM's. A card inside its limit is not: wait for the loop.
+
+## Stalls (`FOREMAN_STALL_CLOCK`, dark)
+
+`src/stall-clock.ts` records when a stall began: one `IssueRecord.stalls[cause]` entry per issue and cause, with a
+`startedAt` written once (a retry, restart or relabel never resets it). The unstick scan calls `sweep` each pass; an
+`open` stall at or past 5_400_000 ms (the two-hour target minus the 30-minute board scan) is raised once as the
+`stalled` kind (`dedupeKey` = cause) and becomes `escalated`. A raise that cannot be saved leaves it `open` with
+`undeliveredSince` set. With `FOREMAN_STALL_CLOCK` unset nothing is written or raised. `node dist/cli.js stalls --json`
+reads the unresolved stalls: each escalation delay, the count open past the bound, the count undelivered.
