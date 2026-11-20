@@ -200,12 +200,22 @@ async function trackDueEpics(rt: ForemanRuntime, repoConfig: RepoConfig, config:
   await setIndex(dueNow);
 }
 
+/**
+ * The handoff-stall index, widened once for a batch of give-ups before any is reported: one write however many, so the
+ * cost is linear in the batch. A restart or a closed issue never leaves a stall nobody can find. Dark without the flag.
+ */
+async function widenHandoffIndex(rt: ForemanRuntime, repoConfig: RepoConfig, known: Set<number>, issues: Iterable<number>): Promise<void> {
+  if (!stallClockEnabled()) return;
+  const fresh = [...new Set(issues)].filter((n) => n >= 1 && !known.has(n));
+  if (fresh.length === 0) return;
+  if (await rt.records.updateRepoRecord(repoConfig, (d) => { d.handoffStalls = [...new Set([...(d.handoffStalls ?? []), ...fresh])].sort((a, b) => a - b); })) for (const n of fresh) known.add(n);
+}
+
 /** A handoff the pass gave up on: the stall starts when the question first appeared. Issue 0 and `stalled` are never reported. */
-async function reportGiveUp(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, log: Logger, c: UnstickCandidate, entry: Pick<UnstickEntry, "since">): Promise<void> {
+async function reportGiveUp(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, log: Logger, c: UnstickCandidate, entry: Pick<UnstickEntry, "since">, known: Set<number>): Promise<void> {
   if (c.issue < 1 || c.kind === "stalled" || !stallClockEnabled()) return;
   try {
-    // Indexed first, so a restart or a closed issue never leaves a stall nobody can find.
-    await rt.records.updateRepoRecord(repoConfig, (d) => { d.handoffStalls = [...new Set([...(d.handoffStalls ?? []), c.issue])].sort((a, b) => a - b); });
+    await widenHandoffIndex(rt, repoConfig, known, [c.issue]);
     await reportStall(rt, repoConfig, {
       issue: c.issue, cause: "handoff-gave-up", eventAt: entry.since, affected: [`${repoConfig.githubRepo}#${c.issue}`],
       resolver: config.unstickEscalationOwner ?? "EM", nextAction: `take ${c.kind}: the EM handoff gave up`,
@@ -322,39 +332,56 @@ export async function tryUnstick(
     }
 
     // A handoff stall ends when no question stands on its issue any more (the hold cleared, or the issue closed) or the
-    // EM answered the standing one for good (`declined`). The index finds a closed issue's stall, which no list shows.
-    const indexed = new Set(repoRecord?.handoffStalls ?? []);
-    const stale = [...indexed].filter((n) => !loaded.records.has(n));
-    const extra = stale.length > 0 ? await rt.records.loadIssueRecords(repoConfig, new Set(stale)) : null;
-    const answered = (n: number, c: UnstickCandidate) => {
-      const e = (loaded.records.get(n)?.unstick ?? {})[unstickKey(c.issue, c.kind, c.tag)];
-      return e?.status === "declined" && e.reason === c.reason;
-    };
-    const stalled = new Set<number>(indexed);
-    for (const [n, r] of [...loaded.records, ...(extra?.records ?? [])]) {
-      if (!unresolvedStalls(r.stalls).some((st) => st.cause === "handoff-gave-up")) { stalled.delete(n); continue; }
-      stalled.add(n);
-      if ((byIssue.get(n) ?? []).some((c) => c.kind !== "stalled" && !answered(n, c))) continue;
-      await resolveStall(rt, repoConfig, n, "handoff-gave-up", now);
-      stalled.delete(n);
-    }
-    // An index entry whose record could not be read stays: the next pass tries again.
-    for (const n of stale) if (extra?.unavailable.has(n)) stalled.add(n);
-    if (stalled.size !== indexed.size || [...stalled].some((n) => !indexed.has(n))) {
-      await rt.records.updateRepoRecord(repoConfig, (d) => { d.handoffStalls = stalled.size > 0 ? [...stalled].sort((a, b) => a - b) : undefined; });
+    // EM answered the standing one for good: it declined, or it escalated after the Foreman's own give-up notice (the
+    // notice stamps `gaveUpAt`; a later call is the EM's). The index finds a closed issue's stall, which no list shows.
+    // Dark without the flag: nothing is resolved and the index is left exactly as it stands.
+    const known = new Set<number>(repoRecord?.handoffStalls ?? []);
+    if (stallClockEnabled()) {
+      const indexed = new Set(known);
+      const stale = [...indexed].filter((n) => !loaded.records.has(n));
+      const extra = stale.length > 0 ? await rt.records.loadIssueRecords(repoConfig, new Set(stale)) : null;
+      const answered = (n: number, c: UnstickCandidate) => {
+        const e = (loaded.records.get(n)?.unstick ?? {})[unstickKey(c.issue, c.kind, c.tag)];
+        if (!e || e.reason !== c.reason) return false;
+        if (e.status === "declined" || e.status === "escalated") return !e.gaveUpAt || (!!e.lastCallAt && Date.parse(e.lastCallAt) > Date.parse(e.gaveUpAt));
+        return false;
+      };
+      const stalled = new Set<number>(indexed);
+      for (const [n, r] of [...loaded.records, ...(extra?.records ?? [])]) {
+        if (!unresolvedStalls(r.stalls).some((st) => st.cause === "handoff-gave-up")) { stalled.delete(n); continue; }
+        stalled.add(n);
+        if ((byIssue.get(n) ?? []).some((c) => c.kind !== "stalled" && !answered(n, c))) continue;
+        await resolveStall(rt, repoConfig, n, "handoff-gave-up", now);
+        stalled.delete(n);
+      }
+      // An index entry whose record could not be read stays: the next pass tries again.
+      for (const n of stale) if (extra?.unavailable.has(n)) stalled.add(n);
+      if (stalled.size !== indexed.size || [...stalled].some((n) => !indexed.has(n))) {
+        if (await rt.records.updateRepoRecord(repoConfig, (d) => { d.handoffStalls = stalled.size > 0 ? [...stalled].sort((a, b) => a - b) : undefined; })) {
+          known.clear();
+          for (const n of stalled) known.add(n);
+        }
+      }
     }
 
     let calls = 0;
     const policy = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: config.backoff.handoff };
+    // Each step is read first, so the give-ups are indexed in one write before any is reported.
+    const plan: Array<{ c: UnstickCandidate; key: string; where: RepoConfig; entry: UnstickEntry; step: ReturnType<typeof nextStep> }> = [];
     for (const c of [...candidates, ...epicCandidates]) {
       const key = unstickKey(c.issue, c.kind, c.tag);
       const where = homeOf.get(c) ?? repoConfig;
       const entry = await entryOf(rt, where, c.issue, key);
-      if (!entry) continue;
-      const step = nextStep(entry, c, Date.now(), policy);
+      if (entry) plan.push({ c, key, where, entry, step: nextStep(entry, c, Date.now(), policy) });
+    }
+    // A call that fails for the last time also gives up; indexing it ahead leaves at worst an entry with no stall,
+    // which the next pass's clearing drops.
+    const mayGiveUp = (p: (typeof plan)[number]) => p.step === "give-up" || (p.step === "call" && p.entry.attempts + 1 >= UNSTICK_MAX_ATTEMPTS && p.entry.status !== "invoked");
+    await widenHandoffIndex(rt, repoConfig, known, plan.filter((p) => p.where === repoConfig && mayGiveUp(p)).map((p) => p.c.issue));
+    for (const { c, key, where, entry, step } of plan) {
       if (step === "wait") continue;
       if (step === "give-up") {
-        await giveUpHandoff(rt, where, config, log, c, key, entry, deps);
+        await giveUpHandoff(rt, where, config, log, c, key, entry, deps, known);
         continue;
       }
       // The EM's runner is paused by a refusal (this pass, an earlier one, another repo's): no call until it lifts.
@@ -393,7 +420,7 @@ export async function tryUnstick(
       // `unstickEscalationOwner` there is nobody to mention: the entry stays
       // `failed` at the cap, as for a failed post, and the log says why.
       if (spent) {
-        await reportGiveUp(rt, where, config, log, c, spent);
+        await reportGiveUp(rt, where, config, log, c, spent, known);
         const owner = config.unstickEscalationOwner;
         const markNoticed = () => mutate(rt, where, c.issue, (table) => {
           const cur = table[key];
@@ -409,7 +436,7 @@ export async function tryUnstick(
             await (deps.comment ?? codeHost().commentOnIssue)(where, c.issue, unstickGiveUpComment(owner, spent));
             await mutate(rt, where, c.issue, (table) => {
               const cur = table[key];
-              if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated" };
+              if (cur && cur.reason === c.reason) table[key] = { ...cur, status: "escalated", gaveUpAt: new Date().toISOString() };
             });
             log.warn(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): EM unreachable after ${UNSTICK_MAX_ATTEMPTS} calls — escalated to @${owner}`);
           } catch (err) {
@@ -433,9 +460,9 @@ export async function tryUnstick(
  */
 async function giveUpHandoff(
   rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, log: Logger,
-  c: UnstickCandidate, key: string, entry: UnstickEntry, deps: { comment?: CodeHost["commentOnIssue"] },
+  c: UnstickCandidate, key: string, entry: UnstickEntry, deps: { comment?: CodeHost["commentOnIssue"] }, known: Set<number>,
 ): Promise<void> {
-  await reportGiveUp(rt, repoConfig, config, log, c, entry);
+  await reportGiveUp(rt, repoConfig, config, log, c, entry, known);
   const owner = config.unstickEscalationOwner;
   const what = `EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): handed off ${entry.attempts} times since ${entry.since} and still stuck`;
   const mark = (fields: Partial<UnstickEntry>) => mutate(rt, repoConfig, c.issue, (table) => {
@@ -449,7 +476,7 @@ async function giveUpHandoff(
   }
   try {
     await (deps.comment ?? codeHost().commentOnIssue)(repoConfig, c.issue, handoffGiveUpComment(owner, entry));
-    await mark({ status: "escalated" });
+    await mark({ status: "escalated", gaveUpAt: new Date().toISOString() });
     log.warn(`${what} — escalated to @${owner}`);
   } catch (err) {
     // Not marked: the next pass tries the comment again.

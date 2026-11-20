@@ -132,7 +132,7 @@ test("a give-up on an issue that then closes resolves, also after a restart", as
 test("a terminal EM answer resolves the give-up while the hold remains", async () => {
   const w = world();
   await giveUp(w);
-  await w.rt.records.updateIssueRecord(w.repo, 7, (d) => { for (const e of Object.values(d.unstick ?? {})) e.status = "declined"; });
+  await w.rt.records.updateIssueRecord(w.repo, 7, (d) => { for (const e of Object.values(d.unstick ?? {})) { e.status = "declined"; e.lastCallAt = iso(Date.now() + 60_000); } });
   await w.pass(4);
   assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
 });
@@ -142,6 +142,51 @@ test("a give-up with the flag off writes no index", async () => {
   await seed(w.rt, w.repo, 7, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "r", attempts: 3 } });
   for (let i = 1; i <= 3; i++) await w.pass(i);
   assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls, undefined);
+});
+
+test("flag off: a closed issue's open stall and its index are left alone, and resolve once tracking is back", async () => {
+  const w = world();
+  await giveUp(w);
+  writeFileSync(openFile, "[]");
+  delete process.env.FOREMAN_STALL_CLOCK;
+  w.restart();
+  await w.pass(4);
+  assert.deepEqual((await repoRecordOf(w.rt, w.repo)).handoffStalls, [7]);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "open");
+  process.env.FOREMAN_STALL_CLOCK = "1";
+  w.restart();
+  await w.pass(5);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
+});
+
+test("an escalation after the Foreman's own give-up notice is the EM's answer; the notice itself is not", async () => {
+  const w = world();
+  await giveUp(w);
+  const entry = async () => Object.values((await recordOf(w.rt, w.repo, 7)).unstick ?? {}).find((e) => e.status === "escalated");
+  const local = await entry();
+  assert.equal(local.status, "escalated");
+  assert.ok(local.gaveUpAt, "the local notice stamps gaveUpAt");
+  await w.pass(4);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "open", "the local notice alone resolves nothing");
+  await w.rt.records.updateIssueRecord(w.repo, 7, (d) => { for (const e of Object.values(d.unstick ?? {})) e.lastCallAt = iso(Date.now() + 60_000); });
+  await w.pass(5);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
+});
+
+test("a batch of give-ups widens the index in one write, not one per issue", async () => {
+  const w = world();
+  const issues = Array.from({ length: 40 }, (_, i) => i + 100);
+  writeFileSync(openFile, JSON.stringify(issues.map((number) => ({ number, title: "t", labels: [] }))));
+  for (const n of issues) await seed(w.rt, w.repo, n, { verifyHeld: { heldAt: "t", prNumber: 5, reason: "r", attempts: 3 } });
+  await w.pass(1);
+  await w.pass(2);
+  let saves = 0;
+  const real = w.rt.records.updateRepoRecord.bind(w.rt.records);
+  w.rt.records.updateRepoRecord = (...args) => { saves++; return real(...args); };
+  await w.pass(3);
+  assert.ok(saves < 10, `repo-record writes in the giving-up pass (40 issues): ${saves}`);
+  assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls.length, 40);
+  for (const n of issues) assert.equal((await w.stall(n, "handoff-gave-up")).state, "open");
 });
 
 test("heldEpics reads the index and the asked-about epics, nothing else", () => {
