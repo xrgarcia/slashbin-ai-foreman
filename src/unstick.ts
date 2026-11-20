@@ -453,9 +453,10 @@ export function epicChildClosedAlert(githubRepo: string, issue: number, epic: nu
 /**
  * An epic the EM reports due for breakdown: open, `approved`, and either no child or at a feature boundary (every filed
  * child closed, the plan still listing unfiled features). `approvedAt` is its last `labeled approved` event; `after` is
- * the last-filed child (`owner/repo#N`) at a boundary, absent when the epic has no child.
+ * the last-filed child (`owner/repo#N`) at a boundary, absent when the epic has no child; `afterClosedAt` is when that
+ * child closed (the moment the epic became due, the start of its stall clock).
  */
-export interface DecomposeCandidate { epic: number; approvedAt: string; after?: string; requeue?: number }
+export interface DecomposeCandidate { epic: number; approvedAt: string; after?: string; afterClosedAt?: string; requeue?: number }
 
 /**
  * The question's identity: one per approval, at a boundary one per last-filed child, and one per time the EM

@@ -292,3 +292,10 @@ A card past its limit is the EM's. A card inside its limit is not: wait for the 
 `stalled` kind (`dedupeKey` = cause) and becomes `escalated`. A raise that cannot be saved leaves it `open` with
 `undeliveredSince` set. With `FOREMAN_STALL_CLOCK` unset nothing is written or raised. `node dist/cli.js stalls --json`
 reads the unresolved stalls: each escalation delay, the count open past the bound, the count undelivered.
+
+The unstick pass reports two causes. `handoff-gave-up` opens when a handoff gives up (the spent-question path or the
+handoff watch), started at the question's `since`, and resolves when no question stands on the issue. `epic-unanswered`
+opens for each epic the EM lists as due (`afterClosedAt`, else `approvedAt`) on the host repo's record under the epic's
+number, and resolves when the epic is no longer in a scan's list. The repo record's `epicStalls` index names the epics
+with an open stall, so a restart resolves them without remembering the previous scan. A scan runs while an
+`epic-decompose` call is open only if that index is non-empty.

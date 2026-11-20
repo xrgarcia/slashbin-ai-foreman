@@ -341,10 +341,12 @@ export interface RepoRecord {
   dependencyBatches?: Record<string, BatchHistory>;
   /** One check that deferred two different PRs, by `checkId` (`<owner/repo>:<slug>`). Written only by `src/phases/check-defect.ts`. */
   checkDefects?: Record<string, CheckDefect>;
+  /** Epics (numbers in `epicRepo`) holding an open `epic-unanswered` stall on the host's issue records: the durable index a restart reads, since the due list is only asked every 30 minutes. Written only by `src/phases/unstick.ts`. */
+  epicStalls?: number[];
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects", "epicStalls"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

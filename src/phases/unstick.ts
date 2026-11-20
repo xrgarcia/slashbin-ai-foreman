@@ -27,12 +27,12 @@ import type { AgentConfig, RepoConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { roleFor } from "../plugins/registry.js";
 import type { UnstickOutcome, Unsticker } from "../plugins/contract.js";
-import { fieldTable } from "../issue-records.js";
+import { fieldTable, type RepoRecord } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
-import { sweep as sweepStalls } from "../stall-clock.js";
+import { report as reportStall, resolve as resolveStall, sweep as sweepStalls, unresolvedStalls, stallClockEnabled } from "../stall-clock.js";
 import { isDeployFailureHold } from "./verify.js";
 import { codeHost } from "../plugins/registry.js";
 import type { CodeHost } from "../code-host.js";
@@ -133,15 +133,76 @@ async function raiseDecompose(rt: ForemanRuntime, repoConfig: RepoConfig, config
     const record = await rt.records.loadRepoRecord(repoConfig);
     if (record === null) return;
     const table = record?.unstick ?? {};
-    // One at a time: while a call is open, nothing is asked and no scan is paid for.
-    if (decomposeInFlight(table)) return;
+    // One at a time: while a call is open, nothing is asked. No scan is paid for either, unless a due epic's stall is
+    // open: its clearing event is the epic leaving the list, which only a scan can see.
+    const inFlight = decomposeInFlight(table);
+    const tracking = stallClockEnabled() && (record.epicStalls?.length ?? 0) > 0;
+    if (inFlight && !tracking) return;
     lastDecomposeCheck = Date.now();
     const due = await unsticker.epicDecompose(config, log);
     if (!due) return;
+    await trackDueEpics(rt, repoConfig, config, due, record, log);
+    if (inFlight) return;
     const alert = nextDecompose([...due].sort((x, y) => x.approvedAt.localeCompare(y.approvedAt)), table, label);
     if (alert && await rt.handoffs.raise(repoConfig, alert)) log.info(`Asking the EM to break down ${label} #${alert.dedupeKey.split("-")[0]} (approved, no child)`);
   } catch (err) {
     log.warn(`Could not check for approved epics with no child: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** The epic a stored `epic-decompose` question is about: its tag starts with the epic number. */
+const tagEpic = (e: UnstickEntry): number => Number.parseInt(e.tag ?? "", 10);
+
+/**
+ * The epics whose stall this repo's records may hold, read from durable state only: the index of epics with an open
+ * stall plus the epics the EM was ever asked about. Nothing here depends on the previous scan, so a restart loses none.
+ */
+export function heldEpics(record: RepoRecord | null): number[] {
+  const tagged = Object.values(record?.unstick ?? {}).filter((e) => e.kind === "epic-decompose").map(tagEpic);
+  return [...new Set([...(record?.epicStalls ?? []), ...tagged])].filter((n) => Number.isInteger(n) && n >= 1);
+}
+
+/**
+ * One `epic-unanswered` stall per due epic, started when its prerequisite closed (`afterClosedAt`) or, with no child,
+ * when it was approved. A held epic absent from this scan's list is resolved, however the process got here: the
+ * durable index and the asked-about epics say which to look at. The index is widened before any report and narrowed
+ * only after the resolves, so an interrupted scan leaves a superset, never a stall nobody can find. Dark behind
+ * FOREMAN_STALL_CLOCK; a failure is logged and never stops the pass.
+ */
+async function trackDueEpics(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, due: readonly DecomposeCandidate[], record: RepoRecord, log: Logger): Promise<void> {
+  if (!stallClockEnabled() || !config.epicRepo) return;
+  const dueNow = new Set(due.map((d) => d.epic));
+  const setIndex = (epics: Iterable<number>) => rt.records.updateRepoRecord(repoConfig, (d) => { d.epicStalls = [...new Set(epics)].sort((a, b) => a - b); });
+  if (!(await setIndex([...(record.epicStalls ?? []), ...dueNow]))) { log.warn("Could not record the due epics' stall index; their stalls are not tracked this scan"); return; }
+  for (const d of due) {
+    const parses = (t?: string | null): t is string => typeof t === "string" && !Number.isNaN(Date.parse(t));
+    try {
+      await reportStall(rt, repoConfig, {
+        issue: d.epic, cause: "epic-unanswered", eventAt: d.after && parses(d.afterClosedAt) ? d.afterClosedAt : d.approvedAt,
+        affected: [`${config.epicRepo}#${d.epic}`], resolver: config.unstickEscalationOwner ?? "EM",
+        nextAction: "break the epic down: file its next wave of child issues",
+        resumptionCondition: "a child of the epic is filed, or the epic leaves the due list",
+      });
+    } catch (err) {
+      log.warn(`Could not report the stall of due epic #${d.epic}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const now = new Date().toISOString();
+  for (const epic of heldEpics(record)) if (!dueNow.has(epic)) await resolveStall(rt, repoConfig, epic, "epic-unanswered", now);
+  await setIndex(dueNow);
+}
+
+/** A handoff the pass gave up on: the stall starts when the question first appeared. Issue 0 and `stalled` are never reported. */
+async function reportGiveUp(rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, log: Logger, c: UnstickCandidate, entry: Pick<UnstickEntry, "since">): Promise<void> {
+  if (c.issue < 1 || c.kind === "stalled") return;
+  try {
+    await reportStall(rt, repoConfig, {
+      issue: c.issue, cause: "handoff-gave-up", eventAt: entry.since, affected: [`${repoConfig.githubRepo}#${c.issue}`],
+      resolver: config.unstickEscalationOwner ?? "EM", nextAction: `take ${c.kind}: the EM handoff gave up`,
+      resumptionCondition: `the ${c.kind} question stops standing on the issue`, evidence: c.reason.slice(0, 200),
+    });
+  } catch (err) {
+    log.warn(`Could not report the handoff stall on #${c.issue}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -172,14 +233,16 @@ export async function tryUnstick(
     const open = issues ? new Set(issues.map((i) => i.number)) : null;
     // An issue whose record cannot be read is not an issue with nothing stuck: it is left alone this pass.
     await raiseDecompose(rt, repoConfig, config, unsticker, log);
+    // The epics' stalls live on the host's records under the epic's number, which is no open issue of the host.
+    const repoRecord = await rt.records.loadRepoRecord(repoConfig);
+    const epics = heldEpics(repoRecord);
     // Stalls past their bound are raised once (`stalled`) before this pass reads the questions back. Dark: a no-op without FOREMAN_STALL_CLOCK.
     if (issues) {
-      try { await sweepStalls(rt, repoConfig, new Date().toISOString(), issues.map((i) => i.number)); }
+      try { await sweepStalls(rt, repoConfig, new Date().toISOString(), [...new Set([...issues.map((i) => i.number), ...epics])]); }
       catch (err) { log.warn(`Stall sweep failed: ${err instanceof Error ? err.message : String(err)}`); }
     }
-    const loaded = await rt.records.loadIssueRecords(repoConfig, open ?? []);
     // The repo's own record holds the questions about no issue; unreadable, none of them is touched this pass.
-    const repoRecord = await rt.records.loadRepoRecord(repoConfig);
+    const loaded = await rt.records.loadIssueRecords(repoConfig, new Set([...(open ?? []), ...epics]));
     const candidates: UnstickCandidate[] = derivedCandidates({
       verifyHeld: fieldTable(loaded, "verifyHeld"),
       skipped: fieldTable(loaded, "skipped"),
@@ -232,6 +295,13 @@ export async function tryUnstick(
       });
     }
 
+    // A handoff stall ends when no question stands on its issue any more (the hold cleared, or the issue closed).
+    for (const [n, r] of loaded.records) {
+      if (!unresolvedStalls(r.stalls).some((st) => st.cause === "handoff-gave-up")) continue;
+      if ((byIssue.get(n) ?? []).some((c) => c.kind !== "stalled")) continue;
+      await resolveStall(rt, repoConfig, n, "handoff-gave-up", now);
+    }
+
     let calls = 0;
     const policy = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: config.backoff.handoff };
     for (const c of candidates) {
@@ -280,6 +350,7 @@ export async function tryUnstick(
       // `unstickEscalationOwner` there is nobody to mention: the entry stays
       // `failed` at the cap, as for a failed post, and the log says why.
       if (spent) {
+        await reportGiveUp(rt, repoConfig, config, log, c, spent);
         const owner = config.unstickEscalationOwner;
         const markNoticed = () => mutate(rt, repoConfig, c.issue, (table) => {
           const cur = table[key];
@@ -321,6 +392,7 @@ async function giveUpHandoff(
   rt: ForemanRuntime, repoConfig: RepoConfig, config: AgentConfig, log: Logger,
   c: UnstickCandidate, key: string, entry: UnstickEntry, deps: { comment?: CodeHost["commentOnIssue"] },
 ): Promise<void> {
+  await reportGiveUp(rt, repoConfig, config, log, c, entry);
   const owner = config.unstickEscalationOwner;
   const what = `EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): handed off ${entry.attempts} times since ${entry.since} and still stuck`;
   const mark = (fields: Partial<UnstickEntry>) => mutate(rt, repoConfig, c.issue, (table) => {
