@@ -12,6 +12,7 @@ import type { VerifyResult } from "../plugins/contract.js";
 import { applyQaGate, isDeliveredVerdict, postMergeQaNeeded, postMergeQaState, qaApplies, qaBeforeMergeApplies, realQaDeps } from "../qa-report.js";
 import { isUpstreamBlocked } from "../upstream-backoff.js";
 import { fieldTable, type ToolingHold, type VerifyHold } from "../issue-records.js";
+import { clearCheckPass, recordCheckFailure, releasedByDefect, type CheckDefect } from "./check-defect.js";
 import { handoffSubject } from "../unstick.js";
 import { BackoffTracker, DEFAULT_BACKOFF, backoffDelay, formatWait, type BackoffConfig } from "../backoff.js";
 import { CycleEvent, activeRuns, baseAdvancedSince, issueEditedSince, itemOf, releaseIfResolved } from "./common.js";
@@ -220,18 +221,21 @@ export function verifyHoldPlan(reason: string): { kind: "defer" } | { kind: "wai
  * waits on a person) or it waits on a named time, so one stuck verification
  * never stalls every issue behind it. A tooling hold escalated past
  * `toolingHoldLimitMs` (`tooling[n].escalatedAt`) frees it too: one broken
- * checker must not stall the repo (slashbin-ai-foreman#350).
+ * checker must not stall the repo (slashbin-ai-foreman#350). So does a `filed` check-defect that lists the issue and
+ * names the check it is held on (#366): its defect card blocks it; any other hold on it stands.
  */
 export function devVerifyHolding(
   merged: readonly number[],
   held: Readonly<Record<number, VerifyHold>>,
   maxAttempts: number,
   tooling: Readonly<Record<number, ToolingHold>> = {},
+  checkDefects: Readonly<Record<string, CheckDefect>> = {},
 ): number | null {
   for (const n of [...merged].sort((a, b) => a - b)) {
     const h = held[n];
     if (h && (h.attempts >= maxAttempts || h.retryAt)) continue;
     if (tooling[n]?.escalatedAt) continue;
+    if (releasedByDefect(checkDefects, n, tooling[n]?.reason)) continue;
     return n;
   }
   return null;
@@ -597,6 +601,7 @@ export async function tryVerify(
 
     if (r.kind === "verdict" && r.pass) {
       rt.memory.verifyDefer.clear(repoName);
+      await clearCheckPass(rt, repoConfig, target.prNumber).catch((err) => vlog.warn(`check-defect not cleared for PR #${target.prNumber} (${String(err).split("\n")[0]})`));
       await endToolingHolds(true);
       const kept = { ...held };
       for (const n of target.issueNumbers) {
@@ -625,6 +630,15 @@ export async function tryVerify(
       // The hold's age, recorded on every defer so a restart keeps it (slashbin-ai-foreman#350). Past the bound it is
       // escalated once: saved first, then blocked, so a failed save says nothing and the next defer tries again.
       const now = Date.now();
+      for (const n of target.issueNumbers) {
+        // Before the hold is charged or aged: a check that defers a second, different PR is the checker's defect
+        // (#366). Never changes the verdict; a failure here is logged and the defer goes on as before.
+        try {
+          await recordCheckFailure(rt, repoConfig, { repo: repoConfig.githubRepo, check: reason, issue: n, pr: target.prNumber, at: new Date(now).toISOString() });
+        } catch (err) {
+          vlog.warn(`#${n}: check-defect not recorded (${(err instanceof Error ? err.message : String(err)).split("\n")[0]})`);
+        }
+      }
       const next = { ...tooling };
       const escalating: number[] = [];
       for (const n of target.issueNumbers) {

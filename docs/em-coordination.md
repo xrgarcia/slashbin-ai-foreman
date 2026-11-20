@@ -161,7 +161,7 @@ blocker fixed, then nothing — the next poll picks it up.
 The `unstick` stage asks the EM plugin (`src/plugins/em.ts`, which runs `bin/em.mjs unstick`) about each stuck item, by kind (`UNSTICK_KINDS`,
 `src/unstick.ts`): `skip`, `divergence`, `verify-held`, `verify-exhausted`, `verify-no-pr`,
 `revision-exhausted`, `revision-stalemate`, `needs-ruling`, `dead-zone`, `deploy-failed`,
-`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`, `corrective-chain`. Verify holds become candidates only after their attempts are spent,
+`release-gate`, `rework-decision`, `unrelated-error`, `epic-ready-to-close`, `dependency-batch-loop`, `unlinked-fix`, `epic-decompose`, `corrective-chain`, `check-defect`. Verify holds become candidates only after their attempts are spent,
 except `rework-decision`: the first visual QA FAIL, or the first charged verification failure that returned a
 verdict, is called in the same cycle, with the PR, the files it touched, the verdict and the evidence links in
 the reason. It is one call per failure (a retry that fails the same way keeps the first evidence); a charged
@@ -197,6 +197,15 @@ has a third corrective: a same-repo issue #N is blocked by, filed after #N's PR 
 (`dedupeKey` `chain`). From then the Foreman builds no corrective for #N; they queue behind it. The EM switches #N
 off (a `Dark flag`, so it stops holding the release) or redesigns the remaining work as one issue (#353:
 nine correctives in 24 hours held its release).
+`check-defect` fires when one tooling-hold check defers dev verification on two different PRs (dark behind `FOREMAN_CHECK_DEFECT`,
+off unless set: off, it writes and raises nothing; slashbin-ai-foreman#366). Failed verdicts never count: they are findings about the
+change. Its subject is the lowest affected issue, `dedupeKey` the check id (`<owner/repo>:<slug>`) plus the sorted affected list, so a newly
+affected issue is a new question. The reason is JSON (`checkId`, `canonicalRepo`, `check`, `affected`, `firstFailure`), no timestamps.
+The EM looks for an open issue on that repo whose body carries `checkId: <checkId>`: found, it adds blocked-by links from each affected
+issue, idempotently; absent, it files one defect and links them. The Foreman files and links nothing: a later verify pass reads the
+defect back (a blocker of an affected issue whose body names the check id). While the check is `filed`, an issue it lists and is held on no
+longer holds the repo's next build; its defect blocks it. Closing the defect records `closedAt`, and the existing verify pass re-asks any
+issue still held. A defer is never turned into a pass.
 `dependency-batch-loop` fires when the dependency sweep has filed the same batch (the same Dependabot PRs at the same head
 commits) 3 times in 24 hours. The sweep then **holds that batch**: it files nothing more for those PRs and raises this kind once,
 repo-level (issue 0). Each of those issues ended with no PR of its own (`landed`), so a Dependabot PR is almost certainly open

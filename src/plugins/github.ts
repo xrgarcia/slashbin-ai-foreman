@@ -23,6 +23,8 @@ import * as skipHold from "../github/skip-hold.js";
 import * as coreReads from "../github/core-reads.js";
 import * as corrections from "../github/corrections.js";
 import * as darkFlag from "../github/dark-flag.js";
+import * as checkDefects from "../github/check-defect.js";
+import { canonicalRepo } from "../github/repo-identity.js";
 import { ghAsync } from "../github/gh.js";
 import { probeToken } from "../github/token-probe.js";
 import { fleetState } from "../github-state.js";
@@ -140,6 +142,8 @@ export function githubCodeHost(
     correctivesOf: corrections.correctivesOf,
     darkIssues: darkFlag.darkIssues,
     markShippedDark: darkFlag.markShippedDark,
+    canonicalRepoOf: (config) => canonicalRepo(config.githubRepo, config.repoPath),
+    checkDefectOf: checkDefects.checkDefectOf,
     adoptCarried: releaseCarry.adoptCarried,
     noteCarried: releaseCarry.noteCarried,
     foremanAppliedOrHold: (config, logger) => signoff.foremanAppliedOrHold(config, logger),
