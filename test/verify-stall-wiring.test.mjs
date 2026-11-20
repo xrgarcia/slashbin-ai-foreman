@@ -160,7 +160,7 @@ test("an escalated stall frees the repo, the next issue builds, and re-asks keep
     assert.equal(s.state, "escalated");
     assert.ok(s.escalatedAt, "kept");
     assert.deepEqual(h.asked, [11, 11], "still re-asked");
-    assert.ok(blocked(h).length >= 1, "an escalated stall keeps the card Blocked");
+    assert.equal(blocked(h).length, 0, "blocking belongs to the stalled raise, never to a verify retry");
     assert.equal((await recordOf(h.rt, REPO, 1)).verifyHeld, undefined, "and uncharged");
   } finally { done(); }
 });
