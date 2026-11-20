@@ -12,8 +12,16 @@
 
 import type { ItemRecord, RecordKey, RecordLoad } from "../adapters.js";
 import type { RepoConfig } from "../config.js";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { canonicalJson, isItemRecord, recordId } from "../record-store.js";
 import { formatGhError } from "./cache.js";
+
+/**
+ * Where the store keeps its read cache between restarts (set by the daemon). 2026-11-20: every restart re-read each
+ * item's comments (~2,300 REST calls, 77% of an hour's core spend), and two restarts in 13 minutes took ~2,100 in 3.
+ */
+let recordCachePath: string | null = null;
+export function setRecordCachePath(path: string | null): void { recordCachePath = path; }
 
 /**
  * The issue a repo's own record lives on (EM#1244 f4): a repo has no item to hold a comment, so the store keeps
@@ -60,7 +68,31 @@ export function parseRecordBody(body: string): ItemRecord | undefined {
  * What the store knows of one item: the comment holding its record (null: none), and the record as
  * canonical JSON (null: none). Text, not an object, so no caller can mutate the comparison baseline.
  */
-interface Entry { readonly commentId: number | null; readonly json: string | null }
+interface Entry { readonly commentId: number | null; readonly json: string | null; readonly etag?: string }
+
+/** The on-disk form: the Foreman login the entries were read as, each item's entry, and the anchors found. */
+interface RecordCacheFile { version: 1; self: string; entries: Record<string, Entry & { number: number | null }>; anchors: Record<string, number> }
+
+/** A `gh api -i` answer split into status, headers (lower-cased names) and body. */
+function parseInclude(out: string): { status: number; headers: Map<string, string>; body: string } {
+  const cut = /\r?\n\r?\n/.exec(out);
+  const head = cut ? out.slice(0, cut.index) : out;
+  const body = cut ? out.slice(cut.index + cut[0].length) : "";
+  const lines = head.split(/\r?\n/);
+  const status = Number(/^HTTP\/\S+ (\d{3})/.exec(lines[0] ?? "")?.[1] ?? 0);
+  const headers = new Map<string, string>();
+  for (const l of lines.slice(1)) { const i = l.indexOf(":"); if (i > 0) headers.set(l.slice(0, i).toLowerCase(), l.slice(i + 1).trim()); }
+  return { status, headers, body };
+}
+
+/** `gh api` exits 1 on a 304: its status line is on stdout, "HTTP 304" on stderr. */
+function isNotModified(err: unknown): boolean {
+  const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string } | null;
+  const out = typeof e?.stdout === "string" ? e.stdout : e?.stdout?.toString() ?? "";
+  if (/^HTTP\/\S+ 304\b/.test(out)) return true;
+  const errText = typeof e?.stderr === "string" ? e.stderr : e?.stderr?.toString() ?? "";
+  return /\bHTTP 304\b/.test(`${errText}\n${e?.message ?? ""}`);
+}
 
 interface CommentRow { id: number; login?: string; body: string }
 
@@ -89,7 +121,83 @@ export class GitHubRecordStore {
    */
   private searchGate: Promise<void> = Promise.resolve();
 
-  constructor(private readonly io: RecordStoreIo, private readonly searchSpacingMs = SEARCH_SPACING_MS) {}
+  /** What the last run learned: replayed after a restart and revalidated with If-None-Match (a 304 is free). */
+  private disk = new Map<string, Entry & { number: number | null }>();
+  private diskLoaded = false;
+  private dirty = false;
+  private flushTimer: NodeJS.Timeout | null = null;
+  private diskSelf = "";
+
+  constructor(private readonly io: RecordStoreIo, private readonly searchSpacingMs = SEARCH_SPACING_MS, private readonly persistPath: string | null = null) {}
+
+  private cachePath(): string | null { return this.persistPath ?? recordCachePath; }
+
+  /** Read the file once, for the login `self`; a file written as another login, or unreadable, counts as none. */
+  private loadDisk(self: string): void {
+    if (this.diskLoaded) return;
+    this.diskLoaded = true;
+    this.diskSelf = self;
+    const path = this.cachePath();
+    if (!path || !existsSync(path)) return;
+    try {
+      const f = JSON.parse(readFileSync(path, "utf8")) as RecordCacheFile;
+      if (f.version !== 1 || f.self !== self) return;
+      for (const [id, e] of Object.entries(f.entries ?? {})) this.disk.set(id, e);
+      for (const [repo, n] of Object.entries(f.anchors ?? {})) if (!this.anchors.has(repo) && Number.isFinite(n)) this.anchors.set(repo, n);
+    } catch { /* a bad file is a cold start */ }
+  }
+
+  private remember(id: string, entry: Entry, number: number | null): void {
+    if (!this.cachePath()) return;
+    this.disk.set(id, { ...entry, number });
+    this.dirty = true;
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => { this.flushTimer = null; this.flush(); }, 5_000);
+    this.flushTimer.unref();
+  }
+
+  /** Write the cache file now (atomic rename); a failure only costs the next restart its reads. */
+  flush(): void {
+    const path = this.cachePath();
+    if (!path || !this.dirty || !this.diskSelf) return;
+    this.dirty = false;
+    try {
+      const anchors: Record<string, number> = {};
+      for (const [repo, n] of this.anchors) if (n !== null) anchors[repo] = n;
+      const file: RecordCacheFile = { version: 1, self: this.diskSelf, entries: Object.fromEntries(this.disk), anchors };
+      writeFileSync(`${path}.tmp`, JSON.stringify(file));
+      renameSync(`${path}.tmp`, path);
+    } catch { this.dirty = true; }
+  }
+
+  /**
+   * A cached entry re-proved with one conditional request: unchanged is a 304 (free), changed is the new body.
+   * Undefined means "could not tell, read the item the full way".
+   */
+  private async revalidate(key: RecordKey, prior: Entry & { number: number | null }, self: string, cwd: string): Promise<Entry | undefined> {
+    const inm = prior.etag ? ["-H", `If-None-Match: ${prior.etag}`] : [];
+    try {
+      if (prior.commentId !== null) {
+        const out = String(await this.io.run(["api", "-i", ...inm, `repos/${key.repo}/issues/comments/${prior.commentId}`], cwd));
+        const r = parseInclude(out);
+        if (r.status !== 200) return undefined;
+        const row = JSON.parse(r.body) as { id: number; body: string; user?: { login?: string } };
+        if (row.user?.login?.toLowerCase() !== self || !row.body.startsWith(RECORD_MARKER)) return undefined;
+        const record = parseRecordBody(row.body);
+        if (!record) return undefined;
+        return { commentId: row.id, json: canonicalJson(record), etag: r.headers.get("etag") };
+      }
+      if (prior.number === null) return undefined;
+      const out = String(await this.io.run(["api", "-i", ...inm, `repos/${key.repo}/issues/${prior.number}/comments?per_page=100`], cwd));
+      const r = parseInclude(out);
+      if (r.status !== 200 || /rel="next"/.test(r.headers.get("link") ?? "")) return undefined;
+      const rows = JSON.parse(r.body) as Array<{ body: string; user?: { login?: string } }>;
+      if (rows.some((c) => c.user?.login?.toLowerCase() === self && c.body.startsWith(RECORD_MARKER))) return undefined;
+      return { commentId: null, json: null, etag: r.headers.get("etag") };
+    } catch (err) {
+      return isNotModified(err) && prior.etag ? { commentId: prior.commentId, json: prior.json, etag: prior.etag } : undefined;
+    }
+  }
 
   private paced<T>(call: () => T | Promise<T>): Promise<T> {
     const turn = this.searchGate.then(call);
@@ -141,6 +249,7 @@ export class GitHubRecordStore {
         : await this.edit(key.repo, entry.commentId, body, cwd);
       if (!Number.isFinite(commentId)) return false;
       this.cache.set(recordId(key), { commentId, json });
+      this.remember(recordId(key), { commentId, json }, number);
       return true;
     } catch (err) {
       // A swallowed reason hid a renamed repo for six hours (2026-11-18): every hand-off failed as "could not be saved".
@@ -163,12 +272,18 @@ export class GitHubRecordStore {
     if (cached) return cached;
     const self = (await this.io.login(cwd))?.toLowerCase();
     if (!self) throw new Error("the Foreman's login could not be resolved");
+    this.loadDisk(self);
     const number = key.kind === "repo" ? await this.anchorFor(key.repo, cwd, false) : key.number;
     // A repo whose anchor issue does not exist yet holds no record.
     if (number === null) {
       const none: Entry = { commentId: null, json: null };
       this.cache.set(id, none);
       return none;
+    }
+    const prior = this.disk.get(id);
+    if (prior && prior.number === number) {
+      const fresh = await this.revalidate(key, prior, self, cwd);
+      if (fresh) { this.cache.set(id, fresh); this.remember(id, fresh, number); return fresh; }
     }
     const out = await this.io.run(["api", "--paginate", `repos/${key.repo}/issues/${number}/comments?per_page=100`, "--jq", COMMENT_FILTER], cwd);
     const mine = out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as CommentRow)
@@ -182,6 +297,7 @@ export class GitHubRecordStore {
       entry = { commentId: comment.id, json: canonicalJson(record) };
     }
     this.cache.set(id, entry);
+    this.remember(id, entry, number);
     return entry;
   }
 

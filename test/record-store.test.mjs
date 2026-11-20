@@ -304,3 +304,80 @@ test("a hung read of one item does not hold up another item's load", async () =>
   hang();
   assert.deepEqual(await stuck, { status: "absent" });
 });
+
+// A restart must not re-read every item: the cache file plus If-None-Match turns each read into a free 304.
+function etagIo(board) {
+  const calls = [];
+  const etagOf = (c) => `W/"${c.id}-${c.body.length}"`;
+  const io = {
+    login: () => SELF,
+    run(args) {
+      calls.push(args);
+      const url = args.find((a) => a.startsWith("repos/")) ?? "";
+      const inm = args.find((a) => a.startsWith("If-None-Match: "))?.slice(15);
+      const e = url.match(/issues\/comments\/(\d+)$/);
+      if (e && args.includes("-i")) {
+        const c = [...board.values()].flat().find((x) => x.id === Number(e[1]));
+        if (inm === etagOf(c)) { const err = new Error("gh: HTTP 304"); err.stdout = "HTTP/2.0 304 Not Modified\n\n"; throw err; }
+        return `HTTP/2.0 200 OK\nEtag: ${etagOf(c)}\n\n${JSON.stringify({ id: c.id, body: c.body, user: { login: c.login } })}`;
+      }
+      const l = url.match(/issues\/(\d+)\/comments\?per_page=100$/);
+      if (l && args.includes("-i")) {
+        const rows = board.get(l[1]) ?? [];
+        const tag = `W/"list-${l[1]}-${rows.length}"`;
+        if (inm === tag) { const err = new Error("gh: HTTP 304"); err.stdout = "HTTP/2.0 304 Not Modified\n\n"; throw err; }
+        return `HTTP/2.0 200 OK\nEtag: ${tag}\n\n${JSON.stringify(rows.map((c) => ({ id: c.id, body: c.body, user: { login: c.login } })))}`;
+      }
+      if (l && args.includes("--paginate")) {
+        return (board.get(l[1]) ?? []).filter((c) => c.body.startsWith(RECORD_MARKER)).map((c) => JSON.stringify(c)).join("\n");
+      }
+      throw new Error(`unexpected gh ${args.join(" ")}`);
+    },
+  };
+  return { io, calls };
+}
+
+test("a restart revalidates cached records with conditional reads and trusts a 304", async () => {
+  const board = new Map([["7", [{ id: 70, login: SELF, body: recordBody({ a: 1 }) }]]]);
+  const path = join(mkTmp("recache"), "records.json");
+  const first = etagIo(board);
+  const s1 = new GitHubRecordStore(first.io, 0, path);
+  assert.equal((await s1.loadRecord(issue(7), cfg)).status, "found");
+  assert.equal((await s1.loadRecord(issue(8), cfg)).status, "absent");
+  s1.flush();
+  // Restart 1: no etag yet, so a 200 (one call each, as before) which records the etags.
+  const second = etagIo(board);
+  const s2 = new GitHubRecordStore(second.io, 0, path);
+  assert.deepEqual((await s2.loadRecord(issue(7), cfg)).record, { a: 1 });
+  assert.equal((await s2.loadRecord(issue(8), cfg)).status, "absent");
+  assert.equal(second.calls.filter((a) => a.includes("--paginate")).length, 0);
+  s2.flush();
+  // Restart 2: every read is a 304.
+  const third = etagIo(board);
+  const s3 = new GitHubRecordStore(third.io, 0, path);
+  assert.deepEqual((await s3.loadRecord(issue(7), cfg)).record, { a: 1 });
+  assert.equal((await s3.loadRecord(issue(8), cfg)).status, "absent");
+  assert.ok(third.calls.every((a) => a.some((x) => x.startsWith("If-None-Match: "))));
+});
+
+test("a record edited while the Foreman was down is read fresh after a restart", async () => {
+  const board = new Map([["7", [{ id: 70, login: SELF, body: recordBody({ a: 1 }) }]]]);
+  const path = join(mkTmp("recache2"), "records.json");
+  const s1 = new GitHubRecordStore(etagIo(board).io, 0, path);
+  await s1.loadRecord(issue(7), cfg); s1.flush();
+  board.get("7")[0].body = recordBody({ a: 2, longer: true });
+  const s2 = new GitHubRecordStore(etagIo(board).io, 0, path);
+  assert.deepEqual((await s2.loadRecord(issue(7), cfg)).record, { a: 2, longer: true });
+});
+
+test("a cache file written as another login is ignored", async () => {
+  const board = new Map([["7", [{ id: 70, login: SELF, body: recordBody({ a: 1 }) }]]]);
+  const path = join(mkTmp("recache3"), "records.json");
+  const s1 = new GitHubRecordStore(etagIo(board).io, 0, path);
+  await s1.loadRecord(issue(7), cfg); s1.flush();
+  const f = JSON.parse(readFileSync(path, "utf8")); f.self = "someone-else"; writeFileSync(path, JSON.stringify(f));
+  const next = etagIo(board);
+  const s2 = new GitHubRecordStore(next.io, 0, path);
+  await s2.loadRecord(issue(7), cfg);
+  assert.equal(next.calls.filter((a) => a.includes("--paginate")).length, 1);
+});
