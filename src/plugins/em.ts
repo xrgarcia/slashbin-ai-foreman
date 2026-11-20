@@ -20,7 +20,10 @@ import type { ForemanPlugin, Unsticker, UnstickOutcome, PluginCatalogEntry } fro
  */
 export function buildEmEnv(agentConfig: AgentConfig): Record<string, string> {
   const env = pickEnv([...SESSION_ENV_ESSENTIALS, ...(agentConfig.sessionEnv ?? [])]);
-  pickEnv(["EM_GITHUB_TOKEN"], env);
+  // The Tech Lead's and SRE's keys are for READ-ONLY GitHub traffic: the REST quota is per account and
+  // the EM's read scripts pick the account with the most left (EM scripts/lib/gh-read-pool.mjs).
+  // The EM never writes as them and strips them from its own agent session.
+  pickEnv(["EM_GITHUB_TOKEN", "TECHLEAD_GITHUB_KEY", "SRE_GITHUB_KEY"], env);
   return env;
 }
 

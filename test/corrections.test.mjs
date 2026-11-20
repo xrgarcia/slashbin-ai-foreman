@@ -125,6 +125,21 @@ test("a transferred repo: the canonical name (any case) counts as this repo, ano
   });
 });
 
+test("a transferred repo: a check-defect's checkId link survives the rename (found under the canonical name, other repos' rows dropped)", async () => {
+  const api = "https://api.github.com/repos/";
+  const dir = fakeGh(ISSUES, {
+    CANON: "New/r\n",
+    "blockedby_10.json": JSON.stringify([{ number: 98, state: "open", labels: [], repository_url: `${api}x/other` }, { number: 14, state: "closed", labels: [], repository_url: `${api}NEW/r` }]),
+    "body_98.txt": "checkId: New/r:codex-unavailable",
+    "body_14.txt": "defect\ncheckId: New/r:codex-unavailable\n",
+  });
+  await withGh(dir, async (cfg) => {
+    assert.deepEqual(await githubCodeHost().checkDefectOf(cfg, [10], "New/r:codex-unavailable"), { repo: "New/r", issue: 14, closed: true });
+    assert.equal(await githubCodeHost().checkDefectOf(cfg, [10], "o/r:codex-unavailable"), null, "the pre-rename id is not this defect");
+    assert.equal(await githubCodeHost().canonicalRepoOf(cfg), "New/r");
+  });
+});
+
 test("correctorsOf: the title search runs under the canonical name; the pre-transfer name answers empty", async () => {
   const dir = fakeGh(ISSUES, { CANON: "New/r\n", SEARCH_ONLY: "New/r" });
   await withGh(dir, async (cfg) => {

@@ -6,6 +6,7 @@ import type { Logger } from "../logger.js";
 import { closedPrVersion, dropIssueSnapshot, findOpenForemanPrs, formatGhError, getOpenIssues, ghKeyed, hasLabel, type IssueSnapshot } from "./cache.js";
 import { extractImplementedIssues, type PrCommit } from "./discovery.js";
 import { ghAsync } from "./gh.js";
+import { isApprovedUnbuilt } from "../lifecycle.js";
 import { getReferencedIssuesFromOpenPR } from "./pr.js";
 
 /**
@@ -163,14 +164,13 @@ export async function findStuckMergedIssues(
 ): Promise<StuckMergedIssue[]> {
   try {
     const { prUnderReview, prPendingActions } = config.lifecycleLabels;
-    const lifecycle = Object.values(config.lifecycleLabels);
     const issues = (await getOpenIssues(config.githubRepo, config.repoPath, logger))
       .filter((i) =>
         hasLabel(i, prUnderReview) || hasLabel(i, prPendingActions) ||
         // Trigger label only, no lifecycle label: implement skips it as covered
         // once its PR merged, and before slashbin-ai-foreman#73 nothing else
         // looked at it — the third door into the same dead zone.
-        (hasLabel(i, config.triggerLabel) && !hasLabel(i, config.github.blockedLabel) && !lifecycle.some((l) => hasLabel(i, l))));
+        isApprovedUnbuilt(config, i.labels.map((l) => l.name)));
     // Any stage past review means the issue already moved on: `pr merged`
     // belongs to the verify stage, which owns its retries, and the rest are
     // later still. Listing only three of them let a released issue that still

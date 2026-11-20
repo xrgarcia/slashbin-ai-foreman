@@ -16,6 +16,7 @@ import type { UnstickEntry } from "./unstick.js";
 import type { StallCause, StallRecord } from "./stall-clock.js";
 import type { SavedRelease } from "./release-tracker.js";
 import type { BatchHistory } from "./dependency-batch/ledger.js";
+import type { CheckDefect } from "./phases/check-defect.js";
 
 /**
  * A release the release stage is carrying (EM#578), keyed by release PR. Kept
@@ -186,6 +187,19 @@ export interface ToolingHold {
   escalatedAt?: string;
 }
 
+/**
+ * A release-stage read (is this issue net-zero?) that failed on every scan, and since when. Cleared by the next read
+ * that succeeds; past `toolingHoldLimitMs` it is escalated once (the issue is blocked with the error and the time).
+ */
+export interface ReleaseReadHold {
+  /** The newest error text. */
+  error: string;
+  /** ISO time of the first failed read; kept while the reads keep failing. */
+  firstFailedAt: string;
+  /** ISO time the failure passed its bound and was escalated; a repeat past the bound escalates nothing. */
+  escalatedAt?: string;
+}
+
 /** A passed prod verification: the evidence the promote stage's 0-diff path may close on. */
 export interface ProdVerified {
   pr: number;
@@ -204,6 +218,8 @@ export interface IssueRecord {
   verifyHeld?: VerifyHold;
   /** A dev verification held by the verifier's own tooling, and since when (slashbin-ai-foreman#350). */
   toolingHeld?: ToolingHold;
+  /** The release stage's read about this issue has failed on every scan since this time. */
+  releaseReadHeld?: ReleaseReadHold;
   /** The EM questions asked about this issue, by `unstickKey` (src/unstick.ts). */
   unstick?: Record<string, UnstickEntry>;
   /** Stalls on this issue, one entry per cause, each with its own start (src/stall-clock.ts, slashbin-ai-foreman#364). */
@@ -230,7 +246,7 @@ export interface IssueRecords {
   readonly unavailable: ReadonlySet<number>;
 }
 
-const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "unstick", "stalls", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
+const FIELDS: readonly IssueField[] = ["failed", "skipped", "held", "verifyHeld", "toolingHeld", "releaseReadHeld", "unstick", "stalls", "prodVerified", "noopClosed", "promotionStallNoted", "divergenceTold"];
 
 /** A repo's own record is addressed with this number; no issue or PR is 0. */
 const REPO_RECORD_NUMBER = 0;
@@ -323,10 +339,12 @@ export interface RepoRecord {
   cardBlocks?: Record<string, CardBlockRecord>;
   /** What became of each dependency batch, by batch key (PRs + head SHAs): the dependency sweep's durable memory (foreman#230). */
   dependencyBatches?: Record<string, BatchHistory>;
+  /** One check that deferred two different PRs, by `checkId` (`<owner/repo>:<slug>`). Written only by `src/phases/check-defect.ts`. */
+  checkDefects?: Record<string, CheckDefect>;
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

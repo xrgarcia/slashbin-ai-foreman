@@ -16,6 +16,7 @@
 // from these tables (`npm run docs:lifecycle`), so the doc is what runs.
 
 import type { PriorState, WorkState } from "./adapters.js";
+import type { RepoConfig } from "./config.js";
 
 /** Where a work item can be, in the order an item meets them. */
 export const STAGES = [
@@ -156,3 +157,14 @@ export const RELEASE_STAGE = Object.freeze({
   merged: "done",
   closed: null,
 } as const satisfies Record<"open" | "merged" | "closed", StageOrDone | null>);
+
+/**
+ * The one definition of an issue that is authorized but not yet in the lifecycle: it carries the trigger label, is not
+ * held by the blocked label, and carries none of the lifecycle labels. Implement's eligibility, the dead-zone scan and
+ * the covered-issue revise check each add their own PR, review and dependency tests on top of it.
+ */
+export function isApprovedUnbuilt(config: RepoConfig, labelNames: readonly string[]): boolean {
+  return labelNames.includes(config.triggerLabel)
+    && !labelNames.includes(config.github.blockedLabel)
+    && !Object.values(config.lifecycleLabels).some((l) => labelNames.includes(l));
+}

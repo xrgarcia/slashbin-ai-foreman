@@ -6,6 +6,7 @@ import { roleFor } from "../plugins/registry.js";
 import type { Logger } from "../logger.js";
 import type { SessionEvent, SessionReport } from "../adapters.js";
 import { selectWork, heldWork, emit, advance, wantsSessionReports, workSourceFor } from "../work-source.js";
+import { isApprovedUnbuilt } from "../lifecycle.js";
 import { implementApprovedIssues } from "./implement-workflow.js";
 import type { ImplementationResult } from "../session/protocol.js";
 import { isUpstreamBlocked, tryAcquire, reportRunResult } from "../upstream-backoff.js";
@@ -19,6 +20,7 @@ import { codeHost } from "../plugins/registry.js";
 import type { CodeHost, SkipGate } from "../code-host.js";
 import { HandoffNotSaved } from "../unstick.js";
 import { correctiveChainHold } from "./corrective-chain.js";
+import { syncCheckDefects, type CheckDefect } from "./check-defect.js";
 import type { ForemanRuntime } from "../runtime.js";
 import { foremanBranchName } from "../foreman-branch.js";
 import { resolveLandedDependencyBatch } from "../dependency-batch/resolve.js";
@@ -322,6 +324,35 @@ export async function deliverPendingHandoffs(rt: ForemanRuntime, repoConfig: Rep
   }
 }
 
+/**
+ * An `approved` issue (no lifecycle label) whose fix is a revision of an already-open Foreman PR that links it and whose
+ * current review verdict is CHANGES_REQUESTED is covered, so implement skips it, and it carries no `pr pending actions`,
+ * so revise never takes it: it sat forever (2026-11-20). Advance it to `changesRequested` (keeping
+ * `approved`) so the revise stage picks it up next cycle. An open PR with no verdict, a stale verdict or a merged PR is
+ * left as it was. Best effort: an unreadable verdict is asked again next pass.
+ */
+export async function reviseCoveredApproved(rt: ForemanRuntime, repoConfig: RepoConfig, logger: Logger): Promise<void> {
+  try {
+    const pr = await codeHost().findOpenFeaturePR(repoConfig);
+    if (!pr || pr.issueNumbers.length === 0) return;
+    const stranded = (await codeHost().getOpenIssues(repoConfig.githubRepo, repoConfig.repoPath, logger))
+      .filter((i) => pr.issueNumbers.includes(i.number) && isApprovedUnbuilt(repoConfig, i.labels.map((l) => l.name)))
+      .map((i) => i.number);
+    if (stranded.length === 0) return;
+    const standing = await codeHost().readPrStanding(repoConfig, pr.number, repoConfig.reviewerLogin, logger);
+    if (!standing.requestsChanges) return;
+    const sent: number[] = [];
+    for (const n of stranded) {
+      if (await advance(rt, itemOf(repoConfig, n), "changesRequested", repoConfig, logger)) sent.push(n);
+    }
+    if (sent.length > 0) logger.warn(`${repoConfig.githubRepo}: approved ${sent.map((n) => `#${n}`).join(", ")} covered by open PR #${pr.number}, which has a current CHANGES_REQUESTED review — sent to revise`);
+    const failed = stranded.filter((n) => !sent.includes(n));
+    if (failed.length > 0) logger.warn(`${repoConfig.githubRepo}: could not move ${failed.map((n) => `#${n}`).join(", ")} to revise — asked again next pass`);
+  } catch (err) {
+    logger.debug(`Could not check approved issues for a revision: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function tryBatchImplementation(
   rt: ForemanRuntime,
   repoConfig: RepoConfig,
@@ -335,6 +366,7 @@ export async function tryBatchImplementation(
   const repoLogger = logger.child({ cycle: cycleNumber, repo: repoName, phase: "implement" });
 
   await deliverPendingHandoffs(rt, repoConfig, config, repoLogger);
+  await reviseCoveredApproved(rt, repoConfig, repoLogger);
 
   // Claude is backing off (or its one half-open probe is already out): no
   // per-repo events — the back-off module has already said so, once.
@@ -576,7 +608,12 @@ export async function tryBatchImplementation(
     }
   }
   const holding = merged.filter((n) => !switchedOff.has(n));
-  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"));
+  // A filed check-defect frees the issues it lists (#366); read back first so a closed defect stops counting. Dark: {} when off.
+  const checkDefects = await syncCheckDefects(rt, repoConfig, repoLogger).catch((err): Record<string, CheckDefect> => {
+    repoLogger.warn(`check-defects not read (${String(err).split("\n")[0]}); none free the repo this pass`);
+    return {};
+  });
+  const verifying = devVerifyHolding(holding, verifyHolds, config.backoff.verifyRetry.maxAttempts, fieldTable(mergedRecords, "toolingHeld"), checkDefects);
   // The fix a failed verification asks for corrects it (linked to it).
   // Queued behind that verification, it waited out every retry, each bound to
   // fail without it (console#1340 behind #1338, 32 min, 2026-10-20).

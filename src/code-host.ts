@@ -576,6 +576,13 @@ export interface CodeHost {
    * only those whose flag that code names. Unreadable is not dark.
    */
   darkIssues(config: RepoConfig, issues: readonly number[], logger: Logger, shipped?: string): Promise<Map<number, string>>;
+  /** The canonical `owner/name` of the repo (a transferred repo answers its current name). Throws when it cannot be read. */
+  canonicalRepoOf(config: RepoConfig): Promise<string>;
+  /**
+   * The defect issue whose body carries `checkId: <checkId>` among the issues `affected` is blocked by (own repo only),
+   * with whether it is closed; null when none. Throws when a link or a body cannot be read: unreadable is not absent.
+   */
+  checkDefectOf(config: RepoConfig, affected: readonly number[], checkId: string): Promise<{ repo: string; issue: number; closed: boolean } | null>;
   /** Label `issue` `shipped dark` and comment once: it rode release PR `pr` with `flag` off, enablement unsigned. */
   markShippedDark(config: RepoConfig, issue: number, flag: string, pr: number, mergeSha?: string): Promise<void>;
 
