@@ -30,7 +30,7 @@ import type { UnstickOutcome, Unsticker } from "../plugins/contract.js";
 import { fieldTable, type RepoRecord } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, noticeHandled, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { report as reportStall, resolve as resolveStall, sweep as sweepStalls, unresolvedStalls, stallClockEnabled } from "../stall-clock.js";
 import { isDeployFailureHold } from "./verify.js";
@@ -47,17 +47,19 @@ function transcript(repoConfig: RepoConfig, what: string, cycleNumber: number): 
  * Apply `fn` to the persisted questions about `issue` (its record's table; issue 0: the repo's own) and save them.
  * Resolves false when the record could not be read or saved, in which case nothing changed.
  */
-async function mutate(rt: ForemanRuntime, repoConfig: RepoConfig, issue: number, fn: (table: Record<string, UnstickEntry>) => void): Promise<boolean> {
+async function mutate(rt: ForemanRuntime, repoConfig: RepoConfig, issue: number, fn: (table: Record<string, UnstickEntry>, receipts: Record<string, string>) => void): Promise<boolean> {
   if (issue <= 0) {
     return rt.records.updateRepoRecord(repoConfig, (d) => {
       const table = { ...(d.unstick ?? {}) };
-      fn(table);
+      const receipts = { ...(d.receipts ?? {}) };
+      fn(table, receipts);
       d.unstick = table;
+      if (Object.keys(receipts).length) d.receipts = receipts;
     });
   }
   return rt.records.updateIssueRecord(repoConfig, issue, (d) => {
     const table = { ...(d.unstick ?? {}) };
-    fn(table);
+    fn(table, {});
     d.unstick = table;
   });
 }
@@ -308,7 +310,7 @@ export async function tryUnstick(
     // Event-kind entries are candidates for as long as they stand.
     const standingQuestions = [...loaded.records.values()].flatMap((r) => Object.values(r.unstick ?? {})).concat(Object.values(repoRecord?.unstick ?? {}));
     for (const e of standingQuestions) {
-      if (EVENT_KINDS.has(e.kind)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
+      if (EVENT_KINDS.has(e.kind) && !noticeHandled(e)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
     }
 
     const live = new Set(candidates.map((c) => unstickKey(c.issue, c.kind, c.tag)));
@@ -322,7 +324,12 @@ export async function tryUnstick(
     for (const n of issuesInPlay) {
       if (n === 0 ? repoRecord === null : loaded.unavailable.has(n)) continue;
       const mine = byIssue.get(n) ?? [];
-      await mutate(rt, repoConfig, n, (table) => {
+      await mutate(rt, repoConfig, n, (table, receipts) => {
+        // A notice already taken is a receipt, not a standing question: this is also the one-time move of the entries
+        // stored before receipts existed (EM#2501).
+        for (const [key, e] of Object.entries(table)) {
+          if (noticeHandled(e)) { receipts[key] ||= e.lastCallAt ?? now; delete table[key]; }
+        }
         for (const [key, e] of Object.entries(table)) if (!EVENT_KINDS.has(e.kind) && !live.has(key)) delete table[key];
         for (const c of mine) {
           const key = unstickKey(c.issue, c.kind, c.tag);
@@ -400,11 +407,17 @@ export async function tryUnstick(
       reportRunResult(EM_UPSTREAM, !!refused, refused?.detail, refused?.resetAtMs);
       log.info(`EM unstick ${repoConfig.githubRepo}#${c.issue} (${c.kind}): ${outcome.kind}${outcome.detail ? ` — ${outcome.detail.slice(0, 200)}` : ""}`);
       let spent: UnstickEntry | undefined;
-      await mutate(rt, where, c.issue, (table) => {
+      await mutate(rt, where, c.issue, (table, receipts) => {
         const cur = table[key];
         // The reason changed while the call ran: it is a new question, answered next pass.
         if (!cur || cur.reason !== c.reason) return;
         table[key] = applyOutcome(cur, outcome, Date.now(), config.backoff.upstream);
+        // A notice the EM took leaves a receipt and no entry (EM#2501).
+        if (noticeHandled(table[key]!)) {
+          receipts[key] = table[key]!.lastCallAt ?? new Date().toISOString();
+          delete table[key];
+          return;
+        }
         // The first burst just ran out: the one give-up notice. A re-arm call after it never says so again.
         if (outcome.kind === "failed" && table[key]!.attempts === UNSTICK_MAX_ATTEMPTS && !table[key]!.gaveUpAt) spent = table[key];
       });

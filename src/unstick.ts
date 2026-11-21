@@ -55,6 +55,46 @@ export const UNSTICK_KINDS = [
 ] as const;
 export type UnstickKind = (typeof UNSTICK_KINDS)[number];
 
+/**
+ * How a kind's question ends, declared once per kind (EM#2501):
+ *  - `notice`: tells the EM something. One call delivers it; the answer leaves a receipt on the repo record and the
+ *    entry is deleted, so it is never asked again and never holds a place in the table.
+ *  - `handoff`: hands the EM a question whose answer arrives by another route (a grant). One call asks it; the
+ *    entry stands until the reason changes or the condition ends.
+ *  - `blocker`: a hold that stays until it is resolved; asked on the back-off and given up on by `nextStep`.
+ */
+export type UnstickLifecycle = "notice" | "handoff" | "blocker";
+
+/** Every kind's lifecycle. Exhaustive by type: a new kind does not compile until it names one. */
+export const UNSTICK_LIFECYCLES: Readonly<Record<UnstickKind, UnstickLifecycle>> = {
+  skip: "blocker",
+  divergence: "blocker",
+  "verify-held": "blocker",
+  "verify-exhausted": "blocker",
+  "verify-no-pr": "blocker",
+  "revision-exhausted": "blocker",
+  "revision-stalemate": "blocker",
+  "needs-ruling": "blocker",
+  "dead-zone": "blocker",
+  "deploy-failed": "blocker",
+  "release-gate": "handoff",
+  "rework-decision": "blocker",
+  "unrelated-error": "notice",
+  "epic-ready-to-close": "notice",
+  "dependency-batch-loop": "blocker",
+  "unlinked-fix": "blocker",
+  "epic-decompose": "blocker",
+  "corrective-chain": "blocker",
+  "check-defect": "blocker",
+  stalled: "blocker",
+};
+
+export const lifecycleOf = (kind: UnstickKind): UnstickLifecycle => UNSTICK_LIFECYCLES[kind];
+
+/** A repo-level notice the EM has taken (invoked), refused as already answered (declined) or escalated: its entry becomes a receipt. */
+export const noticeHandled = (e: { kind: UnstickKind; status: UnstickStatus; issue: number }): boolean =>
+  e.issue <= 0 && lifecycleOf(e.kind) === "notice" && (e.status === "invoked" || e.status === "declined" || e.status === "escalated");
+
 /** The kinds the Foreman sends that the receiver does not list. Pure: the whole of the contract check. */
 export function missingKinds(published: readonly string[], ours: readonly string[] = UNSTICK_KINDS): string[] {
   const have = new Set(published);
@@ -531,11 +571,12 @@ export class EmHandoffs {
     let added = 0;
     for (const [subject, group] of bySubject) {
       let fresh = 0;
-      const change = (d: { unstick?: Record<string, UnstickEntry> }): void => {
+      const change = (d: { unstick?: Record<string, UnstickEntry>; receipts?: Record<string, string> }): void => {
         const table = { ...(d.unstick ?? {}) };
         fresh = 0;
         for (const a of group) {
           const key = unstickKey(subject, a.kind, a.dedupeKey || undefined);
+          if (subject <= 0 && lifecycleOf(a.kind) === "notice" && d.receipts?.[key]) continue; // delivered once: a receipt stands
           const standing = table[key];
           if (standing && a.dedupeKey) continue; // named question: kept as it is
           const next = openEntry(standing, { issue: subject, kind: a.kind, reason: a.reason, ...(a.dedupeKey ? { tag: a.dedupeKey } : {}) }, now);
