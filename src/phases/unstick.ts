@@ -30,7 +30,7 @@ import type { UnstickOutcome, Unsticker } from "../plugins/contract.js";
 import { fieldTable, type RepoRecord } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, noticeHandled, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, noticeHandled, noticeTaken, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { report as reportStall, resolve as resolveStall, sweep as sweepStalls, unresolvedStalls, stallClockEnabled } from "../stall-clock.js";
 import { isDeployFailureHold } from "./verify.js";
@@ -310,7 +310,7 @@ export async function tryUnstick(
     // Event-kind entries are candidates for as long as they stand.
     const standingQuestions = [...loaded.records.values()].flatMap((r) => Object.values(r.unstick ?? {})).concat(Object.values(repoRecord?.unstick ?? {}));
     for (const e of standingQuestions) {
-      if (EVENT_KINDS.has(e.kind) && !noticeHandled(e)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
+      if (EVENT_KINDS.has(e.kind) && !noticeTaken(e)) candidates.push({ issue: e.issue, kind: e.kind, reason: e.reason, ...(e.tag ? { tag: e.tag } : {}) });
     }
 
     const live = new Set(candidates.map((c) => unstickKey(c.issue, c.kind, c.tag)));
@@ -328,7 +328,7 @@ export async function tryUnstick(
         // A notice already taken is a receipt, not a standing question: this is also the one-time move of the entries
         // stored before receipts existed (EM#2501).
         for (const [key, e] of Object.entries(table)) {
-          if (noticeHandled(e)) { receipts[key] ||= e.lastCallAt ?? now; delete table[key]; }
+          if (noticeTaken(e)) { receipts[key] ||= e.lastCallAt ?? now; delete table[key]; }
         }
         for (const [key, e] of Object.entries(table)) if (!EVENT_KINDS.has(e.kind) && !live.has(key)) delete table[key];
         for (const c of mine) {

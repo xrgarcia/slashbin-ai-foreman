@@ -75,6 +75,10 @@ test("handled notices stored before receipts existed become receipts in one pass
   const pend = unstickKey(0, "unrelated-error", "c");
   const blocker = unstickKey(0, "epic-decompose", "d");
   const loop = unstickKey(0, "dependency-batch-loop", "e");
+  const escU = unstickKey(0, "unrelated-error", "f");
+  const escE = unstickKey(0, "epic-ready-to-close", "g");
+  const failed = unstickKey(0, "unrelated-error", "h");
+  const refused = unstickKey(0, "epic-ready-to-close", "i");
   await rt.records.updateRepoRecord(repo, (d) => {
     d.unstick = {
       [inv]: entry(0, "unrelated-error", "invoked", { tag: "a", recalls: 0 }),
@@ -82,6 +86,10 @@ test("handled notices stored before receipts existed become receipts in one pass
       [pend]: entry(0, "unrelated-error", "pending", { tag: "c", attempts: 0, lastCallAt: undefined }),
       [blocker]: entry(0, "epic-decompose", "invoked", { tag: "d", recalls: 0 }),
       [loop]: entry(0, "dependency-batch-loop", "declined", { tag: "e" }),
+      [escU]: entry(0, "unrelated-error", "escalated", { tag: "f", reason: "why f", detail: "diag f" }),
+      [escE]: entry(0, "epic-ready-to-close", "escalated", { tag: "g", reason: "why g", detail: "diag g" }),
+      [failed]: entry(0, "unrelated-error", "failed", { tag: "h" }),
+      [refused]: entry(0, "epic-ready-to-close", "refused", { tag: "i" }),
     };
   });
   await tryUnstick(rt, repo, config, logger, 1, {});
@@ -93,6 +101,15 @@ test("handled notices stored before receipts existed become receipts in one pass
   assert.ok(rec.unstick[pend], "undelivered notice kept");
   assert.equal(rec.unstick[blocker].status, "invoked", "blocker kind keeps its entry");
   assert.ok(rec.unstick[loop], "blocker kind keeps its entry");
+  // A stored escalation is a control for the escalation chain: it keeps its payload and is never receipted by the move (#384).
+  for (const [k, t] of [[escU, "f"], [escE, "g"]]) {
+    assert.equal(rec.unstick[k]?.status, "escalated", `stored escalation ${t} kept`);
+    assert.equal(rec.unstick[k].reason, `why ${t}`);
+    assert.equal(rec.unstick[k].detail, `diag ${t}`);
+  }
+  assert.ok(rec.unstick[failed], "failed notice kept");
+  assert.ok(rec.unstick[refused], "refused notice kept");
+  for (const k of [escU, escE, failed, refused]) assert.equal(rec.receipts[k], undefined, `${k} not receipted`);
   // The move is once: a second pass changes nothing.
   const before = JSON.stringify(rec.receipts);
   await tryUnstick(rt, repo, config, logger, 2, {});

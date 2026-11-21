@@ -91,9 +91,15 @@ export const UNSTICK_LIFECYCLES: Readonly<Record<UnstickKind, UnstickLifecycle>>
 
 export const lifecycleOf = (kind: UnstickKind): UnstickLifecycle => UNSTICK_LIFECYCLES[kind];
 
-/** A repo-level notice the EM has taken (invoked), refused as already answered (declined) or escalated: its entry becomes a receipt. */
-export const noticeHandled = (e: { kind: UnstickKind; status: UnstickStatus; issue: number }): boolean =>
-  e.issue <= 0 && lifecycleOf(e.kind) === "notice" && (e.status === "invoked" || e.status === "declined" || e.status === "escalated");
+type NoticeLike = { kind: UnstickKind; status: UnstickStatus; issue: number };
+const isNotice = (e: NoticeLike): boolean => e.issue <= 0 && lifecycleOf(e.kind) === "notice";
+
+/** A stored repo-level notice the EM took (invoked) or refused as already answered (declined): the one-time move to
+ *  receipts takes only these. A stored escalated entry keeps its reason and details for the operator's escalation chain (EM#2501, #384). */
+export const noticeTaken = (e: NoticeLike): boolean => isNotice(e) && (e.status === "invoked" || e.status === "declined");
+
+/** An outcome the EM just returned for a notice that ends it: taken, declined or escalated. Its entry becomes a receipt. */
+export const noticeHandled = (e: NoticeLike): boolean => noticeTaken(e) || (isNotice(e) && e.status === "escalated");
 
 /** The kinds the Foreman sends that the receiver does not list. Pure: the whole of the contract check. */
 export function missingKinds(published: readonly string[], ours: readonly string[] = UNSTICK_KINDS): string[] {
