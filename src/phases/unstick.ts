@@ -15,7 +15,8 @@
 //    `backoff.upstream` window, longer each refusal in a row). The refusal also
 //    pauses the EM's runner daemon-wide (upstream "EM"): no other question, in
 //    this repo or another, is put to it until the limit lifts.
-//  - invoked: a handoff, not a resolution. While the question still stands it
+//  - invoked: for a `handoff` kind (the release gate) the answer is delivered: never asked again, never given up on,
+//    never a stall until the reason changes. For a blocker kind it is a handoff, not a resolution. While the question still stands it
 //    is called again after `backoff.handoff` (2 h, then 4 h, ...), up to
 //    `maxRecalls`; then the escalation owner is told, once.
 //  - escalated / declined: final until the reason changes. A decline on a
@@ -30,7 +31,7 @@ import type { UnstickOutcome, Unsticker } from "../plugins/contract.js";
 import { fieldTable, type RepoRecord } from "../issue-records.js";
 import { isUpstreamBlocked, reportRunResult, tryAcquire } from "../upstream-backoff.js";
 import { backoffDelay } from "../backoff.js";
-import { EVENT_KINDS, noticeHandled, noticeTaken, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
+import { EVENT_KINDS, lifecycleOf, noticeHandled, noticeTaken, nextDecompose, decomposeInFlight, releaseGateCandidateReason, UNSTICK_MAX_ATTEMPTS, SPENT_QUESTION_REARM, handoffGiveUpComment, unstickGiveUpComment, derivedCandidates, nextStep, openEntry, unstickKey, type DecomposeCandidate, type UnstickCandidate, type UnstickEntry } from "../unstick.js";
 import { activeRuns } from "./common.js";
 import { report as reportStall, resolve as resolveStall, sweep as sweepStalls, unresolvedStalls, stallClockEnabled } from "../stall-clock.js";
 import { isDeployFailureHold } from "./verify.js";
@@ -350,6 +351,9 @@ export async function tryUnstick(
       const answered = (n: number, c: UnstickCandidate) => {
         const e = (loaded.records.get(n)?.unstick ?? {})[unstickKey(c.issue, c.kind, c.tag)];
         if (!e || e.reason !== c.reason) return false;
+        // A delivered handoff is not a stall (#385): the give-up stalls the old watch opened on a release gate resolve.
+        // The old watch gave up on a delivered gate only after recalling it, so an `escalated` entry with recalls was a delivery.
+        if (lifecycleOf(c.kind) === "handoff" && (e.status === "invoked" || (e.status === "escalated" && (e.recalls ?? 0) > 0))) return true;
         if (e.status === "declined" || e.status === "escalated") return !e.gaveUpAt || (!!e.lastCallAt && Date.parse(e.lastCallAt) > Date.parse(e.gaveUpAt));
         return false;
       };

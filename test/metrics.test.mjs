@@ -243,8 +243,13 @@ test("gateWaitReason: grant, failed run, silent seat, failed gate, unknown", () 
   assert.equal(w(entry({ reason: `x${g(false)}`, status: "invoked" })), "grant", "no grant wins over the run's status");
   assert.equal(w(entry({ reason: `x${g(true)}`, status: "failed" })), "seat-failed");
   assert.equal(w(entry({ status: "refused" })), "seat-failed");
-  assert.equal(w(entry({ status: "invoked", recalls: 1 })), "seat-silent");
-  assert.equal(w(entry({ status: "invoked", gaveUpAt: "2026-11-13T11:00:00Z" })), "seat-silent");
+  // The seat took the gate and died: no re-ask exists, so the clock since the take is what keeps the card visible
+  // (#385). Stale recalls and a give-up from the old watch change nothing: the same entry reads the same.
+  assert.equal(w(entry({ status: "invoked", lastCallAt: "2026-11-13T09:00:00Z" })), "seat-silent");
+  assert.equal(w(entry({ status: "invoked", lastCallAt: "2026-11-13T09:00:00Z", recalls: 3, gaveUpAt: "2026-11-13T10:00:00Z" })), "seat-silent");
+  assert.equal(w(entry({ status: "invoked", since: "2026-11-13T09:00:00Z" })), "seat-silent", "no lastCallAt: the question's age");
+  assert.equal(w(entry({ status: "invoked", lastCallAt: "2026-11-13T09:00:00Z", reason: `x${g(false)}` })), "grant", "a missing grant still wins");
+  assert.notEqual(w(entry({ status: "invoked", lastCallAt: "2026-11-13T09:00:00Z" })), "gate-failed", "a dead seat is never read as a failed gate");
   assert.equal(w(entry({ status: "pending", since: "2026-11-13T09:00:00Z" })), "seat-silent");
   assert.equal(w(entry({ status: "invoked" })), "gate-failed");
   assert.equal(w(entry({ status: "escalated" })), "gate-failed");

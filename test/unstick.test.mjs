@@ -133,8 +133,9 @@ const H = { maxAttempts: UNSTICK_MAX_ATTEMPTS, handoff: { baseMs: 1_000, capMs: 
 const gate = { issue: 5, kind: "release-gate", reason: "at pr approved" };
 const at = (ms) => new Date(ms).toISOString();
 
-test("nextStep: an invoked handoff that never moved is called again on a growing window, then given up", () => {
+test("nextStep: an invoked blocker handoff that never moved is called again on a growing window, then given up", () => {
   const t0 = 1_000_000;
+  const gate = { issue: 5, kind: "deploy-failed", reason: "at pr approved" };
   let e = { ...gate, status: "pending", attempts: 0, since: at(t0) };
   assert.equal(nextStep(e, gate, t0, H), "call");
   e = applyOutcome(e, { kind: "invoked", detail: "handed to the PO" }, t0, DEFAULT_BACKOFF.upstream);
@@ -150,6 +151,19 @@ test("nextStep: an invoked handoff that never moved is called again on a growing
   assert.equal(nextStep(e, gate, t0 + 3_000 + 4_000, H), "give-up", "recalls spent: tell the owner");
   assert.equal(nextStep({ ...e, gaveUpAt: at(t0) }, gate, t0 + 1e9, H), "wait", "given up once, never again");
   assert.equal(nextStep(e, { ...gate, reason: "new" }, t0, H), "call", "a changed reason is a new question");
+});
+
+// #385: the release gate is a handoff, delivered once per reason.
+test("nextStep: a release gate the EM took is never asked again, never given up on; a new reason is one new call", () => {
+  const t0 = 1_000_000;
+  let e = { ...gate, status: "pending", attempts: 0, since: at(t0) };
+  assert.equal(nextStep(e, gate, t0, H), "call");
+  e = applyOutcome(e, { kind: "invoked", detail: "taken" }, t0, DEFAULT_BACKOFF.upstream);
+  for (const later of [1, 1_000, 1e6, 1e12]) assert.equal(nextStep(e, gate, t0 + later, H), "wait", `+${later} ms`);
+  assert.equal(nextStep({ ...e, recalls: 3, gaveUpAt: at(t0) }, gate, 1e12, H), "wait", "an entry the old watch gave up on stays quiet");
+  assert.equal(nextStep(e, { ...gate, reason: "at pr approved [labels: deliver-to-prod, pr approved]" }, t0 + 1, H), "call", "a new label or grant state is a new call");
+  const failed = { ...gate, status: "failed", attempts: 1, since: at(t0) };
+  assert.equal(nextStep(failed, gate, t0 + 1, H), "call", "a failed handoff keeps its capped retry");
 });
 
 test("nextStep: maxRecalls 0 keeps the old rule (an answer is final)", () => {
