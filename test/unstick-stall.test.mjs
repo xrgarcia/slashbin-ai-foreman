@@ -231,3 +231,17 @@ test("a release gate taken by the EM is never given up on, and a handoff-gave-up
   for (let i = 2; i <= 5; i++) assert.equal(await w.pass(i), 0);
   assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved", "and no new stall opens");
 });
+
+test("a legacy escalated release gate (recalled, then given up on) resolves its stall on deploy; a never-delivered one keeps it", async () => {
+  const w = world();
+  writeFileSync(openFile, '[{"number":7,"title":"t","labels":[{"name":"pr approved"}]}]');
+  const reason = releaseGateReason(["pr approved"], "[]");
+  const old = iso(Date.now() - 48 * 3_600_000);
+  const gaveUp = iso(Date.now() - 24 * 3_600_000);
+  await seed(w.rt, w.repo, 7, { unstick: { "7:release-gate": { issue: 7, kind: "release-gate", reason, status: "escalated", attempts: 4, recalls: 3, since: old, lastCallAt: old, gaveUpAt: gaveUp } } });
+  await reportStall(w.rt, w.repo, { issue: 7, cause: "handoff-gave-up", eventAt: gaveUp, affected: ["o/host#7"], resolver: "owner-login", nextAction: "take release-gate", resumptionCondition: "x", evidence: "e" });
+  await w.rt.records.updateRepoRecord(w.repo, (d) => { d.handoffStalls = [7]; });
+  assert.equal(await w.pass(1), 0, "no EM call on the unchanged reason");
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved");
+  assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls, undefined, "the index clears");
+});

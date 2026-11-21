@@ -352,7 +352,8 @@ export async function tryUnstick(
         const e = (loaded.records.get(n)?.unstick ?? {})[unstickKey(c.issue, c.kind, c.tag)];
         if (!e || e.reason !== c.reason) return false;
         // A delivered handoff is not a stall (#385): the give-up stalls the old watch opened on a release gate resolve.
-        if (e.status === "invoked" && lifecycleOf(c.kind) === "handoff") return true;
+        // The old watch gave up on a delivered gate only after recalling it, so an `escalated` entry with recalls was a delivery.
+        if (lifecycleOf(c.kind) === "handoff" && (e.status === "invoked" || (e.status === "escalated" && (e.recalls ?? 0) > 0))) return true;
         if (e.status === "declined" || e.status === "escalated") return !e.gaveUpAt || (!!e.lastCallAt && Date.parse(e.lastCallAt) > Date.parse(e.gaveUpAt));
         return false;
       };
