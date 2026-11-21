@@ -163,7 +163,7 @@ Reconcile → Review → Verify → Promote → Release → Revise → Implement
     epic-ready-to-close, unlinked-fix, epic-decompose (`UNSTICK_KINDS`, `src/unstick.ts`; `divergence` is also listed but retired, never raised, since there is no shared
     branch to diverge). A hold with
     retries left is not called for. Outcomes
-    are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked` (a handoff: while the question stands it is called again after `backoff.handoff`, 10 minutes doubling, up to 3 recalls, then the escalation owner is told once), 2
+    are kept in the issue's record (the repo's, for issue 0), keyed `<issue>:<kind>`: exit 0 `invoked` (a `release-gate` is delivered once per reason: never asked again, never given up on, never a stall; any other kind is a handoff: while the question stands it is called again after `backoff.handoff`, 10 minutes doubling, up to 3 recalls, then the escalation owner is told once), 2
     `escalated` (no retry until the reason changes), 3 `declined`, `refused` (the EM's runner was out of tokens or rate-limited: no attempt spent, called again when the limit lifts, and the EM is not called for anything else until then), anything else
     `failed` (retried to 3 attempts, then re-armed on a 1 h to 24 h back-off, one call each; an exit 3 `unknown kind` rejection is `failed`, not `declined`). The Foreman never clears a block on exit 0 and
     never writes Paperclip; the EM releases the hold on GitHub and the unblock checks

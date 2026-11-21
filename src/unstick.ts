@@ -208,10 +208,12 @@ export function releaseGateCandidateReason(labels: readonly string[], grantState
  *
  *  - `grant`: the EM reported no production grant. A missing grant wins over everything: the gate cannot pass.
  *  - `seat-failed`: the EM call failed or was refused (a limit): the gate never ran.
- *  - `seat-silent`: the EM took it (exit 0) and, after the Foreman asked again, the issue never moved: the seat that
- *    took it may have stopped. Also an entry still `pending`, once it has stood past `silentAfterMs`.
- *  - `gate-failed`: the EM ran the gate and did not sign: it escalated (exit 2), declined (exit 3), or took it once and
- *    has not yet been re-asked (the hold comment is the usual outcome of a gate that fails).
+ *  - `seat-silent`: the EM took it (exit 0) and the issue has not moved for `silentAfterMs` since: the seat that took
+ *    it may have stopped. The Foreman never asks a taken gate again (a `handoff` is delivered once, EM#2501), so this
+ *    is a read of the clock, not of recalls or a give-up: the card stays visible, owned by the EM seat that took it,
+ *    for as long as the reason stands. Also an entry still `pending`, once it has stood past `silentAfterMs`.
+ *  - `gate-failed`: the EM ran the gate and did not sign: it escalated (exit 2), declined (exit 3), or took it within
+ *    the last `silentAfterMs` (the hold comment is the usual outcome of a gate that fails).
  *  - `other`: no entry, or a state none of those names.
  *
  * `awaitingSignoff` has no release-gate entry (the issue left `pr approved`): it is `gate-failed` when the issue is
@@ -220,7 +222,7 @@ export function releaseGateCandidateReason(labels: readonly string[], grantState
 export function gateWaitReason(
   stage: "pendingVerification" | "awaitingSignoff",
   issue: number,
-  entry: Pick<UnstickEntry, "reason" | "status" | "recalls" | "gaveUpAt" | "since"> | undefined,
+  entry: Pick<UnstickEntry, "reason" | "status" | "lastCallAt" | "since"> | undefined,
   unsigned: ReadonlySet<number> | undefined,
   nowMs: number,
   silentAfterMs = 60 * 60_000,
@@ -238,7 +240,7 @@ export function gateWaitReason(
     case "refused": return "seat-failed";
     case "escalated":
     case "declined": return "gate-failed";
-    case "invoked": return (entry.recalls ?? 0) > 0 || entry.gaveUpAt ? "seat-silent" : "gate-failed";
+    case "invoked": return nowMs - Date.parse(entry.lastCallAt ?? entry.since) >= silentAfterMs ? "seat-silent" : "gate-failed";
     case "pending": return nowMs - Date.parse(entry.since) >= silentAfterMs ? "seat-silent" : "other";
     default: return "other";
   }
@@ -337,11 +339,12 @@ const NO_HANDOFF_WATCH: UnstickPolicy["handoff"] = Object.freeze({ baseMs: 0, ca
  * What the unstick stage does with a standing question this pass. Pure apart from `now` (epoch ms).
  *
  *  - `call`: ask the agent (again), including a question whose calls were all spent, one call at a time on the `SPENT_QUESTION_REARM` back-off.
- *  - `give-up`: a handoff was made `maxRecalls + 1` times and the issue never
- *    moved; tell the escalation owner, once.
+ *  - `give-up`: a blocker handoff was made `maxRecalls + 1` times and the issue never
+ *    moved; tell the escalation owner, once. A `handoff` kind (`lifecycleOf`) is never given up on.
  *  - `wait`: nothing to do yet.
  *
- * An `invoked` answer on an issue is a handoff, not a resolution (a repo-level entry, issue 0, has no issue to watch
+ * An `invoked` answer on a `handoff` kind is delivered: it is `wait` until the reason changes (EM#2501, #385). An
+ * `invoked` answer on an issue for a blocker kind is a handoff, not a resolution (a repo-level entry, issue 0, has no issue to watch
  * and is terminal once taken): the seat that took it can
  * die (out of tokens, crashed) and leave the issue where it was. While the
  * question still stands, it is called again after `handoff` window n since the
@@ -359,7 +362,7 @@ export function nextStep(entry: UnstickEntry | undefined, c: UnstickCandidate, n
       const h = policy.handoff;
       // The watch re-asks when an ISSUE is still stuck after a handoff. A repo-level entry (issue 0) is an event with no
       // issue to watch: once the EM took it, it is delivered and terminal.
-      if (entry.issue <= 0 || h.maxRecalls <= 0 || entry.gaveUpAt || !entry.lastCallAt) return "wait";
+      if (entry.issue <= 0 || lifecycleOf(entry.kind) === "handoff" || h.maxRecalls <= 0 || entry.gaveUpAt || !entry.lastCallAt) return "wait";
       const recalls = entry.recalls ?? 0;
       if (now < Date.parse(entry.lastCallAt) + backoffDelay(recalls + 1, h)) return "wait";
       return recalls < h.maxRecalls ? "call" : "give-up";

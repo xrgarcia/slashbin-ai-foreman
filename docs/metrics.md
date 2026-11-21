@@ -41,9 +41,9 @@ duplicate rows. The first snapshot after enabling records each open item at its 
 moment as the time, so its earlier history is not known.
 
 **Hold reasons.** `detail.reason` is one of `grant` (the EM reported no production grant), `gate-failed` (the EM ran the
-gate and did not sign: it escalated or declined, or took it once and has not been re-asked), `seat-failed` (the EM call
-failed or was refused, so the gate never ran), `seat-silent` (the EM took it, was asked again, and the issue never
-moved; or a call still pending after an hour), `other` (no release-gate entry yet, or none of those). The Foreman derives
+gate and did not sign: it escalated or declined, or took it within the last hour), `seat-failed` (the EM call
+failed or was refused, so the gate never ran), `seat-silent` (the EM took it and the issue has not moved for an hour; the Foreman never asks a taken
+release gate again, so the card stays on this reason, owned by the EM seat that took it, until the reason changes; or a call still pending after an hour), `other` (no release-gate entry yet, or none of those). The Foreman derives
 it each pass from the issue's `release-gate` unstick entry (its `[grant: {...}]` answer from `em.mjs grant-state`, and
 how the last EM call ended; `gateWaitReason`, `src/unstick.ts`) and carries it on the snapshot item. It does not read the
 EM seat's Paperclip card: the unstick entry is the Foreman's own record of the seat run. At `awaitingSignoff` it is

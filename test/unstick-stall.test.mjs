@@ -9,6 +9,8 @@ import { tryUnstick, resetDecomposeThrottle, heldEpics } from "../dist/phases/un
 import { dropIssueSnapshot } from "../dist/github/cache.js";
 import { ForemanRuntime } from "../dist/runtime.js";
 import { startAgentPlugins } from "./agent-plugins.mjs";
+import { releaseGateReason } from "../dist/unstick.js";
+import { report as reportStall } from "../dist/stall-clock.js";
 import { memoryRecords, seed, recordOf, repoRecordOf } from "./issue-records.mjs";
 
 await startAgentPlugins();
@@ -208,4 +210,24 @@ test("heldEpics reads the index and the asked-about epics, nothing else", () => 
   assert.deepEqual(heldEpics(null), []);
   const unstick = { "0:epic-decompose:21-t": { issue: 0, kind: "epic-decompose", tag: "21-t" } };
   assert.deepEqual(heldEpics({ epicStalls: [12, 21], unstick }).sort(), [12, 21]);
+});
+
+// #385: a release-gate the EM took is delivered, not a stall. The give-up stalls the old watch opened are closed on deploy.
+test("a release gate taken by the EM is never given up on, and a handoff-gave-up stall open at deploy resolves", async () => {
+  const w = world();
+  writeFileSync(openFile, '[{"number":7,"title":"t","labels":[{"name":"pr approved"}]}]');
+  const reason = releaseGateReason(["pr approved"], "[]");
+  const old = iso(Date.now() - 48 * 3_600_000);
+  // What the old build left: the gate taken, recalled to its cap, given up on, one open stall.
+  await seed(w.rt, w.repo, 7, { unstick: { "7:release-gate": { issue: 7, kind: "release-gate", reason, status: "invoked", attempts: 4, recalls: 3, since: old, lastCallAt: old, gaveUpAt: old } } });
+  await reportStall(w.rt, w.repo, { issue: 7, cause: "handoff-gave-up", eventAt: old, affected: ["o/host#7"], resolver: "owner-login", nextAction: "take release-gate: the EM handoff gave up", resumptionCondition: "x", evidence: "e" });
+  await w.rt.records.updateRepoRecord(w.repo, (d) => { d.handoffStalls = [7]; });
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "open");
+  assert.equal(await w.pass(1), 0, "no EM call on the unchanged reason");
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved", "the delivered handoff is not a stall");
+  assert.equal((await repoRecordOf(w.rt, w.repo)).handoffStalls, undefined);
+  const e = (await recordOf(w.rt, w.repo, 7)).unstick["7:release-gate"];
+  assert.equal(e.status, "invoked", "the entry stands, so the card keeps its wait reason");
+  for (let i = 2; i <= 5; i++) assert.equal(await w.pass(i), 0);
+  assert.equal((await w.stall(7, "handoff-gave-up")).state, "resolved", "and no new stall opens");
 });
