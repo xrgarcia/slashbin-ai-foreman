@@ -328,10 +328,12 @@ export interface RepoRecord {
   epicStalls?: number[];
   /** Issues holding an open `handoff-gave-up` stall: the durable index a restart reads, since a closed issue is no longer listed. Written only by `src/phases/unstick.ts`. */
   handoffStalls?: number[];
+  /** Notices the EM has taken, by unstick key, with the ISO time it did: a notice is delivered once, and a receipt keeps it from being raised again (EM#2501). Written only by `src/phases/unstick.ts`. */
+  receipts?: Record<string, string>;
 }
 
 export type RepoField = keyof RepoRecord;
-const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects", "epicStalls", "handoffStalls"];
+const REPO_FIELDS: readonly RepoField[] = ["unstick", "divergenceRuled", "cardBlocks", "dependencyBatches", "checkDefects", "epicStalls", "handoffStalls", "receipts"];
 
 /** What `actionableIssues` sorts a set of issues into. */
 export interface Actionable {

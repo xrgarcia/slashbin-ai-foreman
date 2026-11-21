@@ -85,7 +85,10 @@ test("two PRs with the same signature plus one distinct: exactly two EM calls, n
   assert.match(made[1][made[1].indexOf("--reason") + 1], /first seen on o\/ue PR #6 \(dev\).*redis timeout.*Evidence: https:\/\/github\.com\/o\/ue\/pull\/6#issuecomment-1/);
 
   // Nothing holds the release, and a later PR seeing either error again calls no one.
-  assert.equal(Object.keys((await repoRecordOf(rt, repo)).unstick ?? {}).length, 2, "the two distinct signatures sit in the repo's record");
+  // EM#2501: a notice the EM took is a receipt, not a standing entry.
+  const after = await repoRecordOf(rt, repo);
+  assert.equal(Object.keys(after.unstick ?? {}).length, 0, "no entry stands for a delivered notice");
+  assert.equal(Object.keys(after.receipts ?? {}).length, 2, "the two distinct signatures hold a receipt in the repo's record");
   assert.deepEqual((await recordOf(rt, repo, 5)).verifyHeld, undefined, "no issue's record holds anything");
   assert.equal(await rt.handoffs.settleHandoffs(repo, "o/ue#7", { seen: { errors: [stripe("3333"), "worker: redis timeout"], evidence: [] }, seenOn: "o/ue PR #7 (dev)" }), 0);
   assert.equal(await tryUnstick(rt, repo, config, logger, 2, {}), 0);
